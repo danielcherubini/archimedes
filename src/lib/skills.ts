@@ -12,6 +12,53 @@ import type { AgentDefinitionDto, McpServerInfo, SkillInfo } from "./tauri";
 const MENTION_RE = /\$([a-z0-9]+(?:-[a-z0-9]+)*)/g;
 
 /**
+ * Can a `$` Mention token carry this resource name? The token grammar is
+ * `[a-z0-9]+(?:-[a-z0-9]+)*` (see `MENTION_RE`) and expansion resolves a token
+ * by EXACT match on `name.toLowerCase()` — so a name outside that grammar, AFTER
+ * that case-FOLD, is UNNAMEABLE from the composer: typing `$has space` (or
+ * `$a_b`, `$a.b`, `$café`, `$a--b`) expands NOTHING, silently. "After the fold"
+ * is load-bearing, not a hedge: the fold maps some names INTO the grammar (see
+ * the U+212A note at the bottom), so this predicate is the JS reader's answer,
+ * and the ASCII-strict Rust one is deliberately stricter. Anything that OFFERS
+ * a `$name` route to a user or a model must check this first, or it promises a
+ * dead end.
+ *
+ * WHERE it is applied for SKILLS, precisely: `read_skill`'s model-hidden
+ * refusal (Rust) and this dialog's tooltip (`SkillsDialog.tsx`) — and NOT the
+ * composer's `$` picker, whose rows are the FULL skill catalog with only a name
+ * -substring filter (`ChatStream.tsx`), deliberately: the Client's skill
+ * catalog must stay total or the flag would delete the user's own route
+ * (ADR 0036). So the `$` picker CAN offer a name whose token expands nothing —
+ * the tools and the picker are allowed to disagree HERE, and only here. The
+ * pickers that DO filter are the `@` / `#` catalogs, built Rust-side by
+ * `commands::agents::list_agent_definitions_for_space` and
+ * `agent::mcp::config::server_infos`, where an unmentionable offer is always a
+ * dead token.
+ *
+ * The anchor is a FULL-string test (`^…$` over the whole name), NOT a search:
+ * `a--b` contains a valid token but is not one.
+ *
+ * Deliberately a SEPARATE literal from `MENTION_RE` even though it encodes the
+ * same grammar: `MENTION_RE` is `/g` and module-level, so `MENTION_RE.test(...)`
+ * would leak `lastIndex` across calls (the hazard its own doc warns about) —
+ * and an anchored scan is a different question from a search. Keep the two
+ * grammars in step.
+ *
+ * MATCHED PAIR: the Rust side is `crate::skills::is_mentionable_name`
+ * (`src-tauri/src/skills.rs`) — the predicate the `@` / `#` picker catalogs
+ * filter on and the one `read_skill`'s model-hidden refusal branches on. Both
+ * sides carry
+ * tests over the same name set (`scout` / `fast-recon` / mixed case IN;
+ * `has space`, `a_b`, `a.b`, `café`, `a--b`, `-lead`, `trail-` OUT); change
+ * one, the other moves with it. (The Rust side is ASCII-strict, so a name
+ * carrying U+212A is rejected there yet matches here — the accepted,
+ * tag-safe divergence documented on both.)
+ */
+export function isMentionableSkillName(name: string): boolean {
+  return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name.toLowerCase());
+}
+
+/**
  * The `$`-only ORACLE for `expandMentions` — retained deliberately, NOT dead
  * code. It has NO production caller (the composer expands via
  * `expandMentions`) and exists solely to pin the `$` path's output

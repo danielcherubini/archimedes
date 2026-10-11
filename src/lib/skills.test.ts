@@ -5,6 +5,7 @@ import {
   dirPartOfOutsideQuery,
   expandMentions,
   expandSkillMentions,
+  isMentionableSkillName,
   isOutsideSpaceQuery,
   splitMentionBlocks,
   splitSkillBlocks,
@@ -34,6 +35,7 @@ function makeSkill(overrides: Partial<SkillInfo> = {}): SkillInfo {
     dir: "/s/.agents/skills/debug",
     scope: "space",
     body: "Step 1. Step 2.",
+    disableModelInvocation: false,
     ...overrides,
   };
 }
@@ -342,6 +344,46 @@ describe("expandMentions (dollar regressions — byte-identical to the old funct
         expandSkillMentions(text, [debug]),
       );
     }
+    // ADR 0036: the oracle also covers a MODEL-HIDDEN row in the catalog. The
+    // `$` Mention is a hidden skill's ONLY route in, so the two `$` engines
+    // must still agree byte-for-byte when the matched skill carries the flag.
+    const hidden = makeSkill({
+      name: "omega",
+      path: "/s/.agents/skills/omega/SKILL.md",
+      dir: "/s/.agents/skills/omega",
+      body: "O",
+      disableModelInvocation: true,
+    });
+    for (const text of ["fix $omega", "x $debug and $omega", "$OMEGA"]) {
+      expect(expandMentions(text, skillOnly([debug, hidden]))).toBe(
+        expandSkillMentions(text, [debug, hidden]),
+      );
+    }
+    // And the hidden row really DID expand — otherwise the loop above would
+    // pass vacuously on two verbatim strings.
+    expect(expandMentions("fix $omega", skillOnly([debug, hidden]))).toContain(
+      '<skill name="omega"',
+    );
+  });
+
+  it("expands_a_model_hidden_skill_byte_identically_to_a_model_visible_one", () => {
+    // A GUARD, not a feature test. `expandMentions` never reads
+    // `disableModelInvocation`, and it must never start: the flag hides a
+    // skill from the AGENT (Rust, ADR 0036), while `$name` is the USER's
+    // sanctioned route to it (ADR 0031). If a later "make the flag consistent
+    // everywhere" change wires it in here, this reddens instead of silently
+    // removing the only route to a hidden skill.
+    const visible = makeSkill();
+    const hidden = makeSkill({ disableModelInvocation: true });
+    const text = "fix $debug and $debug again";
+    const visibleOut = expandMentions(text, skillOnly([visible]));
+    const hiddenOut = expandMentions(text, skillOnly([hidden]));
+    expect(hiddenOut).toBe(visibleOut);
+    expect(hiddenOut).toContain("<skill name=");
+    // The legacy engine agrees (it never saw the field either).
+    expect(expandSkillMentions(text, [hidden])).toBe(
+      expandSkillMentions(text, [visible]),
+    );
   });
 });
 
@@ -1790,5 +1832,48 @@ describe("splitMentionBlocks — the three real block literals still round-trip 
     ]) {
       expect(splitMentionBlocks(text)).toEqual({ text, blocks: [] });
     }
+  });
+});
+
+describe("isMentionableSkillName — can a `$` token ever carry this name?", () => {
+  // The TS half of the MATCHED PAIR whose Rust half is
+  // `crate::skills::is_mentionable_name` (`src-tauri/src/skills.rs`): both test
+  // a name against the `$` token grammar `[a-z0-9]+(?:-[a-z0-9]+)*` up to case,
+  // and any UI that OFFERS a `$name` route must filter on it — a name outside
+  // the grammar expands NOTHING, so the offer is a silent dead end (ADR 0031).
+  // Change one predicate, the other moves with it; the name sets below are the
+  // same on both sides.
+  it("accepts exactly the token grammar, case-insensitively", () => {
+    for (const name of ["scout", "fast-recon", "MIXED", "Mixed-Case", "a", "0", "a1-b2-c3"]) {
+      expect(isMentionableSkillName(name)).toBe(true);
+    }
+  });
+
+  it("rejects every name no token can spell", () => {
+    for (const name of [
+      "", // the grammar needs ≥1 segment
+      "has space", // tag-SAFE (discovery keeps it) but unnameable
+      "a_b",
+      "a.b",
+      "a/b",
+      "café", // a non-ASCII letter no `[a-z0-9]` can hold
+      "a--b", // every `-` must be followed by a token char
+      "-lead",
+      "trail-",
+      'x" onload="y',
+      "a\nb",
+    ]) {
+      expect(isMentionableSkillName(name)).toBe(false);
+    }
+  });
+
+  it("agrees with expansion: a name it rejects is never expandable", () => {
+    // The predicate is only honest if the grammar it encodes is the grammar
+    // `expandMentions` actually uses: a rejected name yields NO block from its
+    // own `$`-token, while an accepted one does.
+    const spaced = makeSkill({ name: "has space" });
+    const ok = makeSkill({ name: "fast-recon" });
+    expect(expandSkillMentions("go $has space", [spaced])).toBe("go $has space");
+    expect(expandSkillMentions("go $fast-recon", [ok])).not.toBe("go $fast-recon");
   });
 });

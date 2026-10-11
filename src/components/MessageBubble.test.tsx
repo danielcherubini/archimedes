@@ -20,6 +20,7 @@ function makeSkill(overrides: Partial<SkillInfo> = {}): SkillInfo {
     dir: "/s/.agents/skills/debug",
     scope: "space",
     body: "Step 1. Step 2.",
+    disableModelInvocation: false,
     ...overrides,
   };
 }

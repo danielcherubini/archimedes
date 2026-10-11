@@ -499,3 +499,337 @@ async fn list_skills_command_is_a_thin_wrapper() {
         "None must return user-level skills only: {none_rows:?}"
     );
 }
+
+// ── Model-hidden skills (ADR 0036) ───────────────────────────────────────
+//
+// `disable-model-invocation: true` in a `SKILL.md`'s frontmatter makes the
+// Skill MODEL-HIDDEN: invisible to the Agent, fully available to the user.
+// These tests pin the PARSING and the CARRYING only — discovery stays TOTAL
+// (it is the Client's source and the `$` Mention's source), so nothing here
+// may filter.
+
+/// A minimal `SKILL.md` named `name` whose frontmatter carries `extra`
+/// (one or more whole lines, inserted verbatim after `description:`).
+fn skill_md(name: &str, extra: &str) -> String {
+    format!("---\nname: {name}\ndescription: D\n{extra}\n---\nBody.\n")
+}
+
+#[test]
+fn frontmatter_flag_hides_a_skill() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_skill(
+        root,
+        "hidden",
+        &skill_md("hidden", "disable-model-invocation: true"),
+    );
+    let rows = discover_in_roots(&[(root.to_path_buf(), SkillScope::User)]);
+    assert_eq!(rows.len(), 1);
+    assert!(
+        rows[0].disable_model_invocation,
+        "the core boolean `true` must hide: {:?}",
+        rows[0]
+    );
+    assert!(!rows[0].model_visible());
+
+    // The same file WITHOUT the key is model-visible.
+    let plain = tempfile::tempdir().unwrap();
+    let plain_root = plain.path();
+    write_skill(plain_root, "alpha", &skill_md("alpha", "license: MIT"));
+    let rows = discover_in_roots(&[(plain_root.to_path_buf(), SkillScope::User)]);
+    assert_eq!(rows.len(), 1);
+    assert!(!rows[0].disable_model_invocation);
+    assert!(rows[0].model_visible());
+}
+
+#[test]
+fn frontmatter_flag_matches_pi_yaml_bool_resolution() {
+    // The truth table is whatever pi's YAML parser produces: pi parses the
+    // frontmatter with its `yaml` dependency and tests
+    // `frontmatter["disable-model-invocation"] === true`
+    // (`dist/core/skills.js`). We mirror that resolution instead of inventing
+    // a friendlier truth table, because the same `SKILL.md` must not be
+    // model-hidden for one harness and advertised for the other (ADR 0036).
+    //
+    // HIDES — the YAML 1.2 CORE-SCHEMA booleans `true` / `True` / `TRUE`
+    //   (all three spellings: 1.2 dropped YAML 1.1's `yes`/`no`, and
+    //   `yaml` implements the core schema), plus any of those followed by a
+    //   comment — a `#` preceded by whitespace (space OR tab) ends the plain
+    //   scalar, so the comment never reaches the comparison.
+    // MODEL-VISIBLE — everything the parser does NOT read as the boolean
+    //   `true`: `yes` / `on` (plain strings in the core schema), `1` (a
+    //   number), `"true"` / `'true'` (quoted ⇒ strings), `true#x` (no space
+    //   before the `#`, so ONE plain scalar and therefore a string), an empty
+    //   value (`null`), and a `>` / `|` block scalar, which folds to the
+    //   string `"true\n"`.
+    //
+    // Every row below was checked against pi's own `yaml@2.9.0` before being
+    // pinned here — INCLUDING the Unicode-whitespace rows (each is the string
+    // `true…`, never the boolean, to `yaml`).
+    //
+    // The trailing-whitespace rows are the direction that matters: a YAML
+    // plain scalar is separated by SPACE and TAB ONLY, so `true` followed by
+    // U+00A0 / U+3000 / VT / FF / NEL is NOT the boolean `true` and pi KEEPS
+    // the Skill model-visible. A reader that trims UNICODE whitespace (Rust's
+    // bare `trim()`) reads those as `true` and HIDES them — a fail-CLOSED
+    // divergence on the same file, so they are pinned as MODEL_VISIBLE here.
+    const HIDES: &[&str] = &[
+        "true",
+        "True",
+        "TRUE",
+        "true # keep this out of the agent's way",
+        "true\t# a tab before the comment still ends the scalar",
+        "TRUE # the uppercase spelling, with a comment",
+        // ASCII space / tab are the ONLY characters YAML separates a plain
+        // scalar on, so the comment still ends the scalar here.
+        "true ",
+        "true\t",
+    ];
+    const MODEL_VISIBLE: &[&str] = &[
+        "yes",
+        "on",
+        "1",
+        "\"true\"",
+        "'true'",
+        "true#no-space-before-the-hash",
+        ">\n  true",
+        "|\n  true",
+        " ",
+        // NOT YAML whitespace ⇒ part of the plain scalar ⇒ a STRING to pi, so
+        // pi advertises these and the desktop must too (trimming them would
+        // hide a skill pi shows — ADR 0036's "mirror pi, do not invent a
+        // truth table").
+        "true\u{A0}",       // U+00A0 NO-BREAK SPACE
+        "\u{A0}true",       // the same, leading
+        "true\u{3000}",     // U+3000 IDEOGRAPHIC SPACE
+        "true\u{B}",        // U+000B VERTICAL TAB
+        "true\u{C}",        // U+000C FORM FEED
+        "true\u{85}",       // U+0085 NEXT LINE
+        "true\u{A0}# note", // an NBSP before a `#` does NOT open a comment
+    ];
+
+    for (value, expect_hidden) in HIDES
+        .iter()
+        .map(|v| (*v, true))
+        .chain(MODEL_VISIBLE.iter().map(|v| (*v, false)))
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_skill(
+            root,
+            "alpha",
+            &skill_md("alpha", &format!("disable-model-invocation: {value}")),
+        );
+        let rows = discover_in_roots(&[(root.to_path_buf(), SkillScope::User)]);
+        assert_eq!(rows.len(), 1, "case {value:?}");
+        if expect_hidden {
+            assert!(
+                rows[0].disable_model_invocation,
+                "case {value:?} must HIDE: {:?}",
+                rows[0]
+            );
+            assert!(!rows[0].model_visible(), "case {value:?}");
+        } else {
+            assert!(
+                !rows[0].disable_model_invocation,
+                "case {value:?} must NOT hide: {:?}",
+                rows[0]
+            );
+            assert!(rows[0].model_visible(), "case {value:?}");
+        }
+    }
+}
+
+#[test]
+fn frontmatter_shapes_the_tolerant_reader_does_not_model_stay_visible() {
+    // ADR 0036's documented residual gap, pinned in the FAIL-OPEN direction.
+    // Each shape below resolves to the BOOLEAN `true` in pi — checked against
+    // pi's own `yaml@2.9.0` — so pi HIDES the skill, while the tolerant
+    // reader does not model the shape at all and leaves it model-VISIBLE.
+    // Accepted deliberately (the reader exists to avoid a YAML dependency),
+    // and pinned here so the divergence is a documented one rather than a
+    // silent surprise if the reader is ever "helpfully" extended.
+    for shape in [
+        // A value folded onto the next line (a plain multi-line scalar).
+        "disable-model-invocation:\n  true",
+        // A space before the colon: no `disable-model-invocation:` prefix.
+        "disable-model-invocation : true",
+        // A quoted key.
+        "\"disable-model-invocation\": true",
+        // The explicit-key form.
+        "? disable-model-invocation\n: true",
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_skill(root, "alpha", &skill_md("alpha", shape));
+        let rows = discover_in_roots(&[(root.to_path_buf(), SkillScope::User)]);
+        assert_eq!(rows.len(), 1, "shape {shape:?}");
+        assert!(
+            !rows[0].disable_model_invocation,
+            "shape {shape:?} is the boolean `true` to pi (would HIDE) and must \
+             stay model-visible here: {:?}",
+            rows[0]
+        );
+        assert!(rows[0].model_visible(), "shape {shape:?}");
+    }
+}
+
+#[test]
+fn glued_colon_flag_shape_hides_where_pi_drops_the_whole_file() {
+    // ADR 0036: a GLUED `disable-model-invocation:true` — NO space after the
+    // colon — is the one key shape that does NOT fail open, because YAML
+    // itself refuses to parse it: pi's `yaml@2.9.0` throws `MISSING_CHAR`, so
+    // the frontmatter parse fails and pi skips the WHOLE `SKILL.md` — the file
+    // contributes no skill to pi at all. Our `strip_prefix(
+    // "disable-model-invocation:")` matches the glued key, reads the value and
+    // HIDES the Skill.
+    //
+    // So this is an EXISTENCE divergence — the two readers disagree about
+    // whether the file is a skill at all, like the duplicate-key case below —
+    // and NOT a fail-open one. It therefore must NEVER join
+    // `frontmatter_shapes_the_tolerant_reader_does_not_model_stay_visible`,
+    // whose rows are all shapes pi HIDES and the desktop advertises. (And note
+    // it is a DIFFERENT shape from the space-BEFORE-the-colon row in that
+    // list: `disable-model-invocation : true` has no `disable-model-invocation:`
+    // prefix at all, so it is read as no key and stays visible.)
+    //
+    // Pinned because the direction here is a prefix match: tightening it to
+    // `"disable-model-invocation: "` (with the space) would silently make this
+    // file model-VISIBLE while pi has no skill from it at all. Hence BOTH
+    // assertions — the file is still discovered, and it is model-HIDDEN.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_skill(
+        root,
+        "alpha",
+        &skill_md("alpha", "disable-model-invocation:true"),
+    );
+    let rows = discover_in_roots(&[(root.to_path_buf(), SkillScope::User)]);
+    assert_eq!(
+        rows.len(),
+        1,
+        "the glued form is our prefix match, so the file is still read: {rows:?}"
+    );
+    assert!(
+        rows[0].disable_model_invocation,
+        "the glued form HIDES here (pi drops the file on `MISSING_CHAR`): {:?}",
+        rows[0]
+    );
+    assert!(!rows[0].model_visible());
+}
+
+#[test]
+fn duplicate_flag_key_first_occurrence_wins_in_both_directions() {
+    // ADR 0036: a DUPLICATE `disable-model-invocation` key is the clearest case
+    // of the two readers genuinely diverging. pi's `yaml@2.9.0` throws `DUPLICATE_KEY`
+    // for BOTH orders (checked against pi's own parser), `parseFrontmatter`
+    // therefore throws, and `loadSkillFromFile` returns `skill: null` — pi
+    // skips the WHOLE `SKILL.md`, so the file contributes no skill to pi at
+    // all. The tolerant reader is forgiving: `parse_skill_file` only reads a
+    // key while its slot is still empty (`if disable.is_none()`), so the
+    // FIRST occurrence wins and the skill is kept. These two rows pin which
+    // occurrence wins, in both directions, so the ADR bullet cannot silently
+    // re-drift: `true`-then-`false` is model-HIDDEN and `false`-then-`true`
+    // is model-VISIBLE.
+    //
+    // Only the second row is a model-facing DISAGREEMENT. Where the first
+    // occurrence is `true` the OUTCOME coincides with pi's anyway: pi
+    // publishes no skill from the file at all, and a model-hidden skill is
+    // equally invisible to the model. Where the first occurrence is `false`
+    // the desktop ADVERTISES a skill pi refuses to parse.
+    for (extra, expect_hidden) in [
+        // First occurrence `true` → hidden (the outcome pi reaches too, by
+        // dropping the file entirely).
+        (
+            "disable-model-invocation: true\ndisable-model-invocation: false",
+            true,
+        ),
+        // First occurrence `false` → visible: the genuinely divergent order.
+        (
+            "disable-model-invocation: false\ndisable-model-invocation: true",
+            false,
+        ),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_skill(root, "alpha", &skill_md("alpha", extra));
+        let rows = discover_in_roots(&[(root.to_path_buf(), SkillScope::User)]);
+        assert_eq!(
+            rows.len(),
+            1,
+            "a duplicate key must not drop the file: {rows:?}"
+        );
+        assert_eq!(
+            rows[0].disable_model_invocation, expect_hidden,
+            "the FIRST occurrence of the duplicate key must win ({extra:?}): {:?}",
+            rows[0]
+        );
+        assert_eq!(rows[0].model_visible(), !expect_hidden, "{extra:?}");
+    }
+}
+
+#[test]
+fn frontmatter_flag_is_ignored_when_indented() {
+    // Indented lines belong to the previous key's block value, so the key
+    // folded INTO a `description: >` block is prose, not a top-level key.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_skill(
+        root,
+        "alpha",
+        "---\nname: alpha\ndescription: >\n  a folded line\n  disable-model-invocation: true\n---\nBody.\n",
+    );
+    let rows = discover_in_roots(&[(root.to_path_buf(), SkillScope::User)]);
+    assert_eq!(rows.len(), 1);
+    assert!(
+        !rows[0].disable_model_invocation,
+        "an indented key is part of the block value: {:?}",
+        rows[0]
+    );
+    assert_eq!(
+        rows[0].description,
+        "a folded line disable-model-invocation: true"
+    );
+}
+
+#[test]
+fn discovery_still_returns_model_hidden_skills() {
+    // The TOTAL-DISCOVERY invariant: `discover_in_roots` is the Client's
+    // source (the Skills dialog) AND the `$` Mention's source, so it must
+    // never filter. This test is what stops a later change from filtering
+    // at the wrong seam (ADR 0036's rejected "filter in discover_skills").
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_skill(root, "alpha", &skill_md("alpha", "license: MIT"));
+    write_skill(
+        root,
+        "hidden",
+        &skill_md("hidden", "disable-model-invocation: true"),
+    );
+    let rows = discover_in_roots(&[(root.to_path_buf(), SkillScope::User)]);
+    assert_eq!(rows.len(), 2, "discovery must stay unfiltered: {rows:?}");
+    assert!(find_row(&rows, "hidden").disable_model_invocation);
+    assert!(find_row(&rows, "alpha").model_visible());
+}
+
+#[test]
+fn skill_info_serializes_the_model_hidden_key() {
+    // camelCase over IPC (the TS `SkillInfo` gains `disableModelInvocation`).
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_skill(
+        root,
+        "hidden",
+        &skill_md("hidden", "disable-model-invocation: true"),
+    );
+    let rows = discover_in_roots(&[(root.to_path_buf(), SkillScope::User)]);
+    let json = serde_json::to_value(&rows[0]).unwrap();
+    assert_eq!(
+        json.get("disableModelInvocation"),
+        Some(&serde_json::json!(true))
+    );
+    assert!(
+        json.get("disable_model_invocation").is_none(),
+        "must not leak the snake_case name over IPC: {json}"
+    );
+}

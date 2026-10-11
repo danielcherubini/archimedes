@@ -3541,6 +3541,7 @@ describe("ChatStream", () => {
             dir: `/s/${name}`,
             scope: "space",
             body: "B",
+            disableModelInvocation: false,
           })),
         );
       } else if (kind === "agents") {
@@ -3593,6 +3594,7 @@ describe("ChatStream", () => {
           dir: "/s/debug",
           scope: "space",
           body: "B",
+          disableModelInvocation: false,
         },
       ]);
       // A DEFERRED listing: the in-flight state ADR 0033 calls out (an empty
@@ -3826,6 +3828,7 @@ describe("ChatStream", () => {
           dir: `/s/${name}`,
           scope: "space",
           body: "B",
+          disableModelInvocation: false,
         })),
       );
       render(<ChatStream />);
@@ -3921,6 +3924,7 @@ describe("ChatStream", () => {
           dir: "/s/ab-alpha",
           scope: "space",
           body: "B",
+          disableModelInvocation: false,
         },
         {
           name: "ab-beta",
@@ -3929,6 +3933,7 @@ describe("ChatStream", () => {
           dir: "/s/ab-beta",
           scope: "space",
           body: "B",
+          disableModelInvocation: false,
         },
         {
           name: "ac-gamma",
@@ -3937,6 +3942,7 @@ describe("ChatStream", () => {
           dir: "/s/ac-gamma",
           scope: "space",
           body: "B",
+          disableModelInvocation: false,
         },
       ]);
       render(<ChatStream />);
@@ -5441,6 +5447,7 @@ describe("ChatStream — out-of-Space Directory completion (ADR 0035)", () => {
         dir: `/s/.agents/skills/${name}`,
         scope: "space" as const,
         body: "B",
+        disableModelInvocation: false,
       });
       vi.mocked(listSkills).mockResolvedValue([
         skill(DISCRIMINATING_NAME),

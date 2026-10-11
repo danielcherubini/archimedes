@@ -502,6 +502,11 @@ export interface SkillInfo {
   scope: "space" | "user";
   /** The SKILL.md content minus the frontmatter (the injected block's BODY). */
   body: string;
+  /** Frontmatter `disable-model-invocation: true` — the Agent is not OFFERED
+   *  this skill: the live skill tools drop it (sooner than the session's frozen
+   *  `<skills>` prompt section does — ADR 0036), and a `$name` Mention reaches
+   *  it WHENEVER the mention grammar can carry the name (`isMentionableSkillName`). */
+  disableModelInvocation: boolean;
 }
 
 /** One `?` file-completion listing (camelCase over IPC — the Rust `FileListDto`). */

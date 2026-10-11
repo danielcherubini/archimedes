@@ -54,6 +54,21 @@ fn write_skill(root: &Path, name: &str, body: &str) -> PathBuf {
     dir
 }
 
+/// A `<name>/SKILL.md` skill whose frontmatter ALSO carries
+/// `disable-model-invocation: true` — i.e. a MODEL-HIDDEN skill (ADR 0036).
+/// `write_skill`'s frontmatter is fixed and cannot express the flag, so this
+/// is the second shape of the same fixture.
+fn write_hidden_skill(root: &Path, name: &str, body: &str) -> PathBuf {
+    let dir = root.join(name);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndisable-model-invocation: true\n---\n{body}\n"),
+    )
+    .unwrap();
+    dir
+}
+
 #[cfg(unix)]
 fn symlink(target: &Path, link: &Path) {
     std::os::unix::fs::symlink(target, link).unwrap();
@@ -266,6 +281,63 @@ async fn list_skills_prints_only_the_allowlisted_roots() {
     .await;
     let text = text_of(&both);
     assert!(text.contains("shown") && text.contains("hidden"), "{text}");
+}
+
+/// ADR 0036's new refusal, held to ADR 0029's disclosure rule: refusing a
+/// model-hidden skill names ONLY what the model sent. The skill's directory is
+/// the one thing the model does NOT have, so printing it would turn the refusal
+/// into a path oracle for a name the model guessed.
+#[tokio::test]
+async fn a_model_hidden_skill_discloses_no_path() {
+    let cwd = Tmp::new("hidden-cwd");
+    // The root's OWN name is the honey (`HONEYROOT` appears in no path the
+    // model legitimately supplies). The full-path assertions below cannot see a
+    // leak of the bare BASENAME — a basename is not a substring of nothing, it
+    // is the TAIL of `root_str`, and `!text.contains(&root_str)` stays TRUE for
+    // a basename-only leak. This token is what reddens that shape.
+    let root = Tmp::new("HONEYROOT-hidden-root");
+    let dir = write_hidden_skill(root.path(), "omega", "HIDDEN-BODY");
+    // A bundled file, so the refusal can be reached WITH a `path` argument —
+    // the branch that would otherwise disclose the skill dir.
+    fs::write(dir.join("ref.md"), "HIDDEN-BUNDLED").unwrap();
+
+    let dir_str = dir.to_string_lossy().into_owned();
+    let root_str = root.path().to_string_lossy().into_owned();
+    let c = ctx(cwd.path(), &[root.path()]);
+    for params in [
+        json!({ "name": "omega" }),
+        json!({ "name": "omega", "path": "ref.md" }),
+    ] {
+        let r = execute_tool(&c, "read_skill", &params).await;
+        assert!(
+            r.is_error,
+            "{params:?}: a model-hidden skill must be refused"
+        );
+        let text = text_of(&r);
+        // Nothing was read.
+        assert!(
+            !text.contains("HIDDEN-BODY") && !text.contains("HIDDEN-BUNDLED"),
+            "{params:?}: leaked the hidden skill's bytes: {text}"
+        );
+        // No path — not even the shape of one — and specifically neither the
+        // skill's dir nor its root.
+        assert!(
+            !text.contains('/'),
+            "{params:?}: the refusal must name no path: {text}"
+        );
+        assert!(
+            !text.contains(&dir_str) && !text.contains(&root_str),
+            "{params:?}: disclosed the skill's location: {text}"
+        );
+        // The honey: a leak of the root's BASENAME alone (no separators, so
+        // invisible to the checks above) still trips this.
+        assert!(
+            !text.contains("HONEYROOT"),
+            "{params:?}: disclosed even the skill root's directory name: {text}"
+        );
+        // It still names the ONE route that works, and nothing else.
+        assert!(text.contains("$omega"), "{params:?}: {text}");
+    }
 }
 
 // ── ADR 0030: the same attacks against a MULTI-ROOT boundary ───────────────

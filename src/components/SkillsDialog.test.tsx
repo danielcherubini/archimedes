@@ -15,6 +15,7 @@ function skill(overrides: Partial<SkillInfo> = {}): SkillInfo {
     dir: "/p/.agents/skills/alpha",
     scope: "space",
     body: "B",
+    disableModelInvocation: false,
     ...overrides,
   };
 }
@@ -83,6 +84,131 @@ describe("SkillsDialog", () => {
     } finally {
       window.removeEventListener("archimedes:insert-skill", listener);
     }
+  });
+
+  it("marks_a_model_hidden_skill_as_manual_only_but_still_inserts_the_mention", async () => {
+    // ADR 0036: a model-hidden skill stays in this dialog (discovery is
+    // total) and is MARKED so the user learns the flag took effect — and the
+    // row keeps its behavior, because clicking it is the SANCTIONED route to
+    // a hidden skill (it inserts `$name `, which `expandMentions` expands on
+    // send, ADR 0031).
+    const events: CustomEvent[] = [];
+    const listener = (e: Event) => {
+      events.push(e as CustomEvent);
+    };
+    window.addEventListener("archimedes:insert-skill", listener);
+    const onClose = vi.fn();
+    try {
+      render(
+        <SkillsDialog
+          skills={[skill({ name: "Omega", disableModelInvocation: true, body: "B" })]}
+          onClose={onClose}
+        />,
+      );
+      // The marker (terse, like the `global` scope cue in the same slot — the
+      // glossary bans *hidden* / *disabled* in prose).
+      const marker = await screen.findByText("manual only");
+      expect(marker).toBeTruthy();
+      // The `global` cue is a SCOPE marker and is untouched by the flag: this
+      // row is space-scoped, so it shows `manual only` and NOT `global`.
+      expect(screen.queryByText("global")).toBeNull();
+      // The row is still clickable and still inserts the LOWERCASED token.
+      fireEvent.click(screen.getByText("Omega"));
+      const dispatched = events.find(
+        (e) => e.type === "archimedes:insert-skill",
+      );
+      expect(dispatched).toBeDefined();
+      expect(dispatched!.detail).toBe("$omega ");
+      expect(onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener("archimedes:insert-skill", listener);
+    }
+  });
+
+  it("the_manual_only_tooltip_promises_no_\$mention_a_name_cannot_carry", async () => {
+    // ADR 0031: a `$` token is `[a-z0-9]+(-[a-z0-9]+)*`, while discovery only
+    // screens a name for tag-safety — so `has space` IS a discovered skill yet
+    // `$has space` expands NOTHING. The tooltip must not promise that route
+    // (the twin of `read_skill`'s refusal, which branches on the same rule).
+    //
+    // BOTH timing halves are asserted because they belong to DIFFERENT
+    // surfaces and only one of them is deferred: the `<skills>` PROMPT SECTION
+    // is what a session already running keeps (persisted at seq 0, replayed
+    // verbatim on resume — ADR 0017/0036), so THAT is the half "new sessions"
+    // governs; `read_skill` re-discovers on EVERY call, so the refusal is LIVE
+    // and the current session loses the skill immediately. MUTATION-CHECKED:
+    // drop either clause from `manualOnlyTooltip` and this test reddens.
+    render(
+      <SkillsDialog
+        skills={[skill({ name: "has space", disableModelInvocation: true })]}
+        onClose={() => {}}
+      />,
+    );
+    const marker = await screen.findByText("manual only");
+    expect(marker.getAttribute("title")).not.toMatch(/\$/);
+    // Still honest about WHAT happened, and still actionable.
+    expect(marker.getAttribute("title")).toContain("new sessions");
+    expect(marker.getAttribute("title")).toMatch(/read_skill refuses it now/i);
+    expect(marker.getAttribute("title")).toMatch(/can't be typed/i);
+  });
+
+  it("the_manual_only_tooltip_offers_the_\$mention_and_says_the_refusal_is_live", async () => {
+    // A mentionable name keeps the token offer (lowercased — the insert does the
+    // same), and BOTH shapes say the two different timings: the PROMPT SECTION
+    // changes for NEW sessions only (a running/resumed session keeps the
+    // listing it was born with — ADR 0017), while the `read_skill` refusal is
+    // live because the tool re-discovers per call (ADR 0036).
+    render(
+      <SkillsDialog
+        skills={[skill({ name: "Omega", disableModelInvocation: true })]}
+        onClose={() => {}}
+      />,
+    );
+    const marker = await screen.findByText("manual only");
+    expect(marker.getAttribute("title")).toBe(
+      "Hidden from the Agent — the prompt listing updates on new sessions; " +
+        "read_skill refuses it now. Send it yourself with $omega",
+    );
+  });
+
+  it("a_model_visible_skill_carries_no_manual_only_marker", async () => {
+    // The default (`disableModelInvocation: false`) renders no marker.
+    const visible = render(
+      <SkillsDialog
+        skills={[skill({ name: "alpha", scope: "user" })]}
+        onClose={() => {}}
+      />,
+    );
+    await screen.findByText("alpha");
+    expect(screen.queryByText("manual only")).toBeNull();
+    // The scope cue still renders for a user-scope visible row.
+    expect(screen.getByText("global")).toBeTruthy();
+    visible.unmount();
+
+    // And a row that genuinely LACKS the field over IPC renders none either
+    // (`undefined` → falsy, the conservative default). `skill()` cannot express
+    // that — it fills `disableModelInvocation: false` — so this payload is
+    // built WITHOUT the key. `SkillInfo` declares the field REQUIRED because
+    // the Rust DTO always fills it, so the omission is asserted on the object
+    // and cast once at the prop, rather than widening the shared type to
+    // optional to make a test compile.
+    const legacyRow: Omit<SkillInfo, "disableModelInvocation"> = {
+      name: "legacy",
+      description: "Legacy skill",
+      path: "/p/.agents/skills/legacy/SKILL.md",
+      dir: "/p/.agents/skills/legacy",
+      scope: "user",
+      body: "B",
+    };
+    expect("disableModelInvocation" in legacyRow).toBe(false);
+    render(
+      <SkillsDialog
+        skills={[legacyRow as SkillInfo]}
+        onClose={() => {}}
+      />,
+    );
+    await screen.findByText("legacy");
+    expect(screen.queryByText("manual only")).toBeNull();
   });
 
   it("renders_the_empty_state", async () => {
