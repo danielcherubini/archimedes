@@ -143,9 +143,14 @@ main agent. `SubagentSessionManager::respond_interactive_request` /
 `respond_permission` resolve them from the driver's shared `pending_bridge`
 / `pending_sudo` / `pending_permissions` maps (keyed
 `"{session_id}/{request_id}"`, `:confirm` / `:password` suffixes for the
-sudo sub-prompts); awaiting the answer is bounded (330 s
-`DEFAULT_INTERACTIVE_TIMEOUT`; a session close / teardown cancels the
-waiter).
+sudo sub-prompts); awaiting the answer carries **no deadline** — it ends
+when the PERSON answers or the session close / teardown cancels the waiter
+(a timer that expires on a human wait is not a timeout, it is a lost
+answer: the caps this used to carry — 330 s interactive, 300 s `ask` /
+permission — resolved as a cancel, which the UI showed as
+"User cancelled the question." and the permission gate mapped to a silent
+DENY). Only the `sudo` RUN that follows is time-bounded, by the caller's
+`timeoutMs`.
 
 ## Presentation
 
@@ -162,8 +167,9 @@ activity preview resolves only from each card's own `rawOutput.details`.
 
 **The "always mounted" invariant (load-bearing):** a subagent's interactive
 requests (`ask` / permission / sudo `confirm` / `password`) MUST be rendered
-by a mounted React component, or they hang until the 330 s interactive cap
-(or the dispatch's `settle_timeout`). `SubagentDetailHost` (always mounted
+by a mounted React component — there is NO prompt deadline left to expire,
+so an unrendered request waits on an answer that can never arrive and the
+dispatch runs to the `settle_timeout`. `SubagentDetailHost` (always mounted
 at the `App` root) renders every subagent's `SubagentTranscript` exactly
 once — the selected one in the visible modal, the rest hidden (the `hidden`
 attribute keeps the component mounted) — so an unrendered request can never
