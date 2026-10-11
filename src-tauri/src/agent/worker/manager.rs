@@ -239,6 +239,11 @@ struct SubagentDrive {
     /// router uses it for the UI delivery, the flag for the
     /// subagent-specific handling).
     parent_session_id: String,
+    /// The DISPATCH id (the `SubagentDispatchWire`'s `id` — what the
+    /// requesting Worker's `IpcDispatcher` cancel watcher names in its
+    /// `SubagentCancel` frame; the `drives` map is keyed by the CHILD
+    /// session id, so the frame's id is matched through this field).
+    dispatch_id: String,
     settle_tx: watch::Sender<bool>,
     cancel_tx: watch::Sender<bool>,
     capture: Arc<SubagentCapture>,
@@ -493,21 +498,7 @@ impl WorkerManager {
     /// the `SubagentCancel` flow: `send_abort` + the drive task's
     /// `cancel` flag → the `Cancelled` outcome + the reap).
     pub fn cancel_subagent(&self, session_id: &str) {
-        let (cancel_tx, handle) = {
-            let drives = self.state.drives.lock().unwrap_or_else(|p| p.into_inner());
-            let Some(drive) = drives.get(session_id) else {
-                return; // the dispatch is gone.
-            };
-            (drive.cancel_tx.clone(), drive.handle.clone())
-        };
-        // The `send_abort` (the child's turn token cancels — the
-        // session stays alive until the reap).
-        if let Some(handle) = handle {
-            let _ = handle.send_abort();
-        }
-        // The drive task's `cancel` flag (the `Cancelled` outcome —
-        // the UNCONDITIONAL teardown reaps the child).
-        let _ = cancel_tx.send(true);
+        cancel_subagent_by_child_id(&self.state, session_id);
     }
 
     // ── Test support (the registry view) ────────────────────────────
@@ -533,6 +524,19 @@ impl WorkerManager {
     pub fn test_session_count(&self) -> usize {
         self.state
             .workers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .len()
+    }
+
+    /// The in-flight SUBAGENT view (how many `drives` entries exist — a
+    /// subagent Worker is NOT in `workers`, so `test_session_count` never
+    /// sees it: the count here is the leak check for a dispatch that was
+    /// cancelled / settled but never torn down). NOT `#[cfg(test)]`-gated
+    /// (see `test_session_count`).
+    pub fn test_drive_count(&self) -> usize {
+        self.state
+            .drives
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .len()
@@ -682,6 +686,16 @@ fn start_pump(
                         None,
                     );
                 }
+                // (b2) The parent's turn abort (the `IpcDispatcher`'s
+                // cancel watcher): the frame names the DISPATCH id, so the
+                // drive is found by it. This frame used to fall through to
+                // the permissive `_` arm and vanish — a Stop then did NOT
+                // stop the subagent (it ran its whole turn, mutating files
+                // the user had just asked to leave alone) and its Worker
+                // process stayed alive until the 30-minute settle bound.
+                WorkerInboundEvent::SubagentCancel { id } => {
+                    cancel_subagent_by_dispatch_id(&state, &id);
+                }
                 // (c) Crash detection: an UNEXPECTED `Exited` (no
                 // `detach` / `reap_all` / drive-task teardown in
                 // flight) fires `on_crash` exactly once (the
@@ -718,6 +732,37 @@ fn feed_capture(state: &ManagerState, session_id: &str, f: impl Fn(&SubagentCapt
     };
     if f(&drive.capture) {
         let _ = drive.settle_tx.send(true);
+    }
+}
+
+/// Fire one in-flight dispatch's cancel (the `SubagentCancel` flow's two
+/// actions): the child's `send_abort` (its turn token cancels — the
+/// session stays alive until the reap) + the drive task's `cancel` flag
+/// (the `Cancelled` outcome — the UNCONDITIONAL teardown reaps the child).
+fn cancel_drive(drive: &SubagentDrive) {
+    if let Some(handle) = &drive.handle {
+        let _ = handle.send_abort();
+    }
+    let _ = drive.cancel_tx.send(true);
+}
+
+/// Cancel by the CHILD session id (the in-process `dispatch_native`'s
+/// `SubagentCancel` targets the pre-minted id). A gone drive is a NO-OP
+/// (the dispatch already settled — the cancel is idempotent).
+fn cancel_subagent_by_child_id(state: &ManagerState, child_id: &str) {
+    let drives = state.drives.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(drive) = drives.get(child_id) {
+        cancel_drive(drive);
+    }
+}
+
+/// Cancel by the DISPATCH id (the Worker's `IpcDispatcher` cancel watcher
+/// — the `SubagentCancel { id }` frame carries the dispatch id, NOT a
+/// session id). A dispatch that already settled is a NO-OP.
+fn cancel_subagent_by_dispatch_id(state: &ManagerState, dispatch_id: &str) {
+    let drives = state.drives.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(drive) = drives.values().find(|d| d.dispatch_id == dispatch_id) {
+        cancel_drive(drive);
     }
 }
 
@@ -935,6 +980,7 @@ fn dispatch_subagent(
             child_id.clone(),
             SubagentDrive {
                 parent_session_id: parent_session_id.clone(),
+                dispatch_id: wire.id.clone(),
                 settle_tx: settle_tx.clone(),
                 cancel_tx: cancel_tx.clone(),
                 capture: capture.clone(),
@@ -1790,9 +1836,79 @@ mod tests {
             other => panic!("expected `Failed {{ timed out }}`, got {other:?}"),
         }
         // The subagent is torn down (the UNCONDITIONAL teardown — the
-        // `drives` entry is removed).
+        // `drives` entry is removed; the parent's Worker is untouched).
         tokio::time::sleep(Duration::from_millis(500)).await;
-        assert_eq!(manager.test_session_count(), 1);
+        assert_eq!(
+            manager.test_drive_count(),
+            0,
+            "the timed-out subagent is torn down"
+        );
+        assert_eq!(manager.test_session_count(), 1, "the parent survives");
+    }
+
+    /// A parent's `SubagentCancel` frame (the `IpcDispatcher`'s
+    /// cancel watcher — a parent turn abort) reaches the DRIVE it names:
+    /// the child is `send_abort`ed, the outcome is the `Cancelled` one,
+    /// and the child Worker is REAPED. Pre-fix the pump's `match` had no
+    /// arm for the frame at all — it was dropped — so the drive raced on
+    /// to the `settle_timeout`: a Stop did not stop the subagent (it kept
+    /// working after the user asked it to), and its Worker process
+    /// lingered until the 30-minute bound.
+    #[tokio::test]
+    async fn a_parent_subagent_cancel_frame_cancels_and_reaps_the_child() {
+        // A bound far longer than the test: ONLY the cancel may end this
+        // dispatch (a `TimedOut` outcome is the bug's signature).
+        let (manager, _crashes, events, _sinks) = make_manager(Some(Duration::from_secs(30)));
+        manager
+            .attach("c1", &test_env("c1", None))
+            .await
+            .expect("the parent attach completes");
+        let handle = manager
+            .handle_for("c1")
+            .expect("the parent handle is reachable");
+        // The parent dispatches a SLOW subagent (the fixture's `sub1`
+        // dispatch id — the `__cancel__` frame names the same id).
+        handle
+            .send_prompt("__slow_subagent__", &[])
+            .expect("the dispatch prompt encodes");
+        // The child is in flight (its `drives` entry has arrived).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while manager.test_drive_count() < 1 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            manager.test_drive_count(),
+            1,
+            "the subagent dispatch is in flight"
+        );
+        // The parent aborts the turn (the fixture's `__cancel__` emits the
+        // `SubagentCancel { id: "sub1" }` frame).
+        handle
+            .send_prompt("__cancel__", &[])
+            .expect("the cancel prompt encodes");
+
+        let got = wait_for_event(&events, "c1", |e| {
+            matches!(e, WorkerInboundEvent::SinkFrame { event, .. } if event == "subagent-result-ack")
+        })
+        .await;
+        let outcome = subagent_result_outcome(&events, "c1")
+            .unwrap_or_else(|| panic!("the cancel must resolve the dispatch: {got:?}"));
+        match outcome {
+            SubagentOutcome::Failed { error } => assert_eq!(
+                error, "cancelled",
+                "the cancel outcome — `timed out` means the frame was dropped"
+            ),
+            other => panic!("expected `Failed {{ cancelled }}`, got {other:?}"),
+        }
+        // The UNCONDITIONAL teardown reaps the child (the `drives` entry
+        // is gone — no Worker left behind).
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            manager.test_drive_count(),
+            0,
+            "the cancelled subagent is torn down (no Worker left behind)"
+        );
+        assert_eq!(manager.test_session_count(), 1, "the parent survives");
     }
 
     /// The `subagent-session-started` + `subagent-closed` UI lifecycle

@@ -84,10 +84,12 @@ impl SessionManager {
             | WorkerInboundEvent::WorkerError { .. }
             | WorkerInboundEvent::SubagentDispatch(_)
             | WorkerInboundEvent::SubagentCancel { .. } => {
-                // The `WorkerManager`'s pump handles the `SubagentDispatch` (the
-                // Supervisor-side `dispatch_subagent` flow); the `Ready` / `WorkerError`
-                // / `SubagentCancel` frames are bookkeeping (the `SubagentCancel` →
-                // `cancel_subagent` is Task 5). Ignored here.
+                // The `WorkerManager`'s pump owns these: the `SubagentDispatch`
+                // (the Supervisor-side `dispatch_subagent` flow) and the
+                // `SubagentCancel` (a parent turn abort → `cancel_drive` — the
+                // frame arrives on the PARENT's pump, which holds the `drives`
+                // map). The `Ready` / `WorkerError` frames are bookkeeping.
+                // Nothing UI-facing to do here.
             }
         }
     }

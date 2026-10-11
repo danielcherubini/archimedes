@@ -87,6 +87,10 @@ wiremock = "0.6"
 # fixtures are written into a temp dir — pointing them at a real `HOME`
 # would be racy).
 tempfile = "3"
+# `test-util` (dev-only): the paused clock the prompt tests advance well past
+# any deadline they must NOT carry — a question waits for the person, never
+# for a timer.
+tokio = { version = "1", features = ["test-util"] }
 
 # `libc` is needed on ALL unix platforms: `RealSudoRunner`'s
 # `#[cfg(unix)]` `setpgid`/`kill` (process-group kill) code compiles on

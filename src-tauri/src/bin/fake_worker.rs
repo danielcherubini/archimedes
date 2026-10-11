@@ -37,6 +37,9 @@
 //!   empties-out-after-the-guard-minus case).
 //! - a `prompt` whose text is `"__cancel__"`: a `SubagentCancel` frame
 //!   (the `SubagentCancel` routing test).
+//! - a `prompt` whose text is `"__stderr__"`: a line on STDERR and NO
+//!   stdout frame (the stderr-drain test — the Supervisor must forward it
+//!   to the debug log, then the turn settles).
 //! - a `subagent-result` line: a `subagent-result-ack` `SinkFrame`
 //!   (the `SubagentResult` round-trip observation point — the
 //!   `outcome` rides verbatim).
@@ -521,6 +524,18 @@ fn main() {
                         &mut stdout,
                         &Outbound::SubagentCancel {
                             id: "sub1".to_string(),
+                        },
+                    );
+                }
+                // The stderr-drain test input: a diagnostic on STDERR
+                // (what a real Worker does for `bad inbound line`), then a
+                // quiet settle — the ONLY observation is the log line.
+                "__stderr__" => {
+                    eprintln!("fake worker: a diagnostic on stderr");
+                    emit(
+                        &mut stdout,
+                        &Outbound::Event {
+                            event: RpcEvent::agent_settled,
                         },
                     );
                 }
