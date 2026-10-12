@@ -127,3 +127,29 @@ notification is not a D-Bus message with a sender's name to lose. **Open action 
 upstream has NOT been notified.** Nothing has been filed against
 `tauri-plugin-notification` for its `desktop.rs:424-431` as of this fold, so the
 workaround here is local and the defect stands for every other app on the plugin.
+
+**Update (2026-10-12): the action item is discharged — reported.** The root cause, a
+~20-line repro that talks to `notify_rust` directly with no Tauri in it, and two
+candidate fixes are posted at
+<https://github.com/tauri-apps/plugins-workspace/issues/1562#issuecomment-6132361541>.
+That issue — "notification disappear almost immediately", open since 2024-07-18 with a
+`status: upstream` label — IS this defect, and its label rests on a libnotify bug
+report, which the repro rules out:
+the server accepts the alert and returns an id in both arms, and the only difference
+is whether the sender's bus name survives (measured on the standalone repro: name
+lost 13.5 ms after `Notify` when the handle is dropped, versus 6.014 s — process exit
+— when it is retained; the 22–25 ms above is the app-level `Notify`→destroyed
+interval, the same event seen from further out). GNOME documents the rule in its own
+source — `FdoNotificationDaemonSource` watches the sender with
+`Gio.DBus.session.watch_name(…)` and `_onNameVanished()` does `if (this.app)
+this.destroy();`, its comment naming the `notify-send` exemption outright, which is
+why every control test of this bug passes. Worth noting for whoever reads this in the
+future: the plugin's own tracked path already gets this right, sending on a
+connection it keeps alive "since some servers, like dunst, send the signals of a
+notification only to the connection that sent it" (`desktop.rs:549-551`) — the bug is
+that the untracked path never got the memo.
+
+Nothing in this app changes based on upstream's answer. The retained store is not a
+temporary workaround to be removed when a fix lands: it is what makes the alert's
+lifetime ours to decide, and a plugin that later retains its own handles would make
+ours redundant, not wrong.
