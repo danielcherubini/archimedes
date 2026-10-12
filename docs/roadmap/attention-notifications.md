@@ -72,7 +72,7 @@ alert the user hears about).
 
 The Rust side checks the main window's focus at expiry. **Focused → the alert is
 dropped silently and never retried** (a one-shot; no hold-until-blur). Unfocused →
-one notification, once.
+one notification, once. Recorded as **ADR 0038**.
 
 ### The two traps this design exists to avoid
 
@@ -130,7 +130,7 @@ for no observable gain on a 15-second window).
   never fires.
 
 Rust does not read the settings and does not know what a Session is: it is handed
-the delay and the text.
+the delay and the text. Recorded as **ADR 0039**.
 
 ### Renderer
 
