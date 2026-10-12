@@ -223,6 +223,13 @@ export interface PermissionRequestPayload {
 /**
  * One question of the ask schema (the `ask` tool's `params.questions` entry,
  * mirrored structurally — the ask package owns the concrete type).
+ *
+ * The Rust `ask` flow normalizes every payload it emits to THIS shape (a bare
+ * string option becomes `{ label }`, and a question with no `id` gets a unique
+ * positional one), so a LIVE request satisfies it. A `tool-call` row persisted
+ * BEFORE that normalization landed replays the model's raw arguments instead —
+ * `id` absent, `options` bare strings — so readers stay defensive (`?? ""`)
+ * rather than trusting the declaration for stored history.
  */
 export interface AskQuestionDto {
   id: string;
@@ -482,6 +489,10 @@ export interface AppSettings {
   sessionNamingModel: string | null;
   /** The thinking level for the title request, honoured only when the chosen model advertises it; `null` = no reasoning effort on the request. JSON-only — there is no Settings row for it. */
   sessionNamingReasoning: string | null;
+  /** Attention alerts (ADR 0038/0039): master switch for the OS notification raised when a session has been paused on you longer than `attentionAlertDelaySecs`. ON by default, so a pre-feature `settings.json` reads as enabled. */
+  attentionAlertsEnabled: boolean;
+  /** Seconds between an attention trigger and the alert (default 15). Read at arm time: changing it does not re-time a countdown already running. */
+  attentionAlertDelaySecs: number;
 }
 
 /** The effective catalog's model (the Default-model select + provider discovery status). */
@@ -785,6 +796,30 @@ export async function listCompletionEntries(
   return invoke<CompletionDirDto>("list_completion_entries", {
     query: query ?? null,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Attention alerts (ADR 0038/0039 — the countdown lives in Rust)
+// ---------------------------------------------------------------------------
+
+/** Arm the Supervisor's attention countdown (ADR 0039: Rust owns the clock).
+ * One armed alert at a time — arming REPLACES the pending countdown. */
+export async function attentionArm(
+  delaySecs: number,
+  title: string,
+  body: string,
+): Promise<void> {
+  // The arg key `delaySecs` maps to the Rust `delay_secs` parameter, and the
+  // delay is passed through EXACTLY (`0` = fire immediately) — no client-side
+  // defaulting here: Rust owns the clock and the ceiling. The wire contract is
+  // pinned in `src/lib/tauri.test.ts`, the only place a typo can be caught.
+  await invoke("attention_arm", { delaySecs, title, body });
+}
+
+/** Disarm the attention countdown. Idempotent; called for EVERY disarm reason. */
+export async function attentionDisarm(): Promise<void> {
+  // No payload: the Rust command takes only its `State<Arc<AttentionTimer>>`.
+  await invoke("attention_disarm");
 }
 
 // ---------------------------------------------------------------------------

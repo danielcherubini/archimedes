@@ -41,6 +41,8 @@ const FULL_SETTINGS: AppSettings = {
   sessionNamingEnabled: true,
   sessionNamingModel: null,
   sessionNamingReasoning: null,
+  attentionAlertsEnabled: true,
+  attentionAlertDelaySecs: 15,
 };
 
 describe("useSettings store", () => {

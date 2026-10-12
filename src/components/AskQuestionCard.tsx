@@ -243,10 +243,22 @@ export default function AskQuestionCard({
       </div>
 
       <div className="space-y-4 p-3">
-        {questions.map((question) => {
+        {questions.map((question, questionIndex) => {
           const d = draft(question.id);
           return (
-            <div key={question.id}>
+            // Keyed by POSITION, never by `question.id`. The Rust `ask` flow
+            // now NORMALIZES its payload before emitting it (a question with
+            // no `id` gets a unique positional one), so a live ask always
+            // arrives with usable ids — but this stays position-keyed on
+            // purpose: a session recorded BEFORE that fix replays from SQLite
+            // with no `id` at all (`key={undefined}` is React's "unique `key`
+            // prop" warning), and a live 5-question ask once arrived exactly
+            // like that. Position is also the identity this component already
+            // uses for its drafts (`drafts[question.id]` aside, the selections
+            // and notes are option INDEXES), and the list is neither reordered
+            // nor spliced for the life of a pending request — so an index key
+            // is stable here.
+            <div key={questionIndex}>
               <p className="text-ui-base text-interaction-ask-foreground">
                 {question.question}
               </p>
@@ -260,7 +272,15 @@ export default function AskQuestionCard({
                   const selected = d.selected.includes(index);
                   const recommended = question.recommended === index;
                   return (
-                    <div key={option.label}>
+                    // Keyed by POSITION (see the question key above). The
+                    // `label` is the wrong key twice over regardless of the
+                    // normalization: two options of the SAME question may share
+                    // a label, which no `question.id` prefix can rescue
+                    // (`${question.id}:${option.label}` scopes a key across
+                    // questions, never within one); and a row persisted BEFORE
+                    // the fix still replays options as bare STRINGS, which makes
+                    // `option.label` — and therefore the key — `undefined`.
+                    <div key={index}>
                       <button
                         type="button"
                         disabled={busy}
@@ -387,7 +407,7 @@ export default function AskQuestionCard({
         <div className="mt-3 rounded-md bg-surface p-2">
           <p className="text-ui-xs font-medium text-foreground-subtle">Review</p>
           <ul className="mt-1 space-y-0.5">
-            {questions.map((question) => {
+            {questions.map((question, questionIndex) => {
               const d = draft(question.id);
               const parts: string[] = [];
               for (const index of d.selected) {
@@ -401,7 +421,10 @@ export default function AskQuestionCard({
                 );
               }
               return (
-                <li key={question.id} className="text-ui-sm text-foreground-subtle">
+                <li
+                  key={questionIndex}
+                  className="text-ui-sm text-foreground-subtle"
+                >
                   {question.question}:{" "}
                   {parts.length > 0 ? parts.join(", ") : "—"}
                 </li>

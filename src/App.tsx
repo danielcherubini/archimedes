@@ -31,8 +31,16 @@ import SidePane from "./components/SidePane";
 import WindowControls from "./components/WindowControls";
 import SubagentDetailHost from "./components/SubagentDetailHost";
 import SettingsPage from "./components/settings/SettingsPage";
+import { useAttentionAlert } from "./hooks/useAttentionAlert";
 
 function App() {
+  // Attention alerts (ADR 0038/0039): arm the OS notification when a Session
+  // has been paused on the user, disarm on the evidence or on their input.
+  // VIEW-INDEPENDENT like the listeners below — mounted with the app, not with
+  // the workspace, so a pause still alerts while the Settings page is open (the
+  // workspace unmounts there).
+  useAttentionAlert();
+
   // Register the Tauri event listeners once; dispatch into the stores.
   // `listen()` is async, so cleanup must await the pending registrations
   // before unlistening: React StrictMode re-runs the effect in dev, and a

@@ -26,6 +26,21 @@ file rather than naming a version. Do not float it: a newer rustc adds lints,
 and a lint CI hits that a local toolchain cannot see reddens `main`
 unreproducible.
 
+`@tauri-apps/cli` is pinned to the exact `tauri` version in
+`src-tauri/Cargo.lock` for the same reason: the CLI *is* the bundler that writes
+the AppImage/deb/dmg/NSIS artifacts, so a Rust-side Tauri bump must move it in
+the same commit. A floated CLI changes shipped output — desktop entries, bundle
+metadata — that no local build reproduces.
+
+The reason is live, not historical: an older CLI exports the now-deprecated
+`STATIC_VCRUNTIME` — the 2.11.4 the floated `^2` resolved to here before the
+pin still does, 2.12.2 no longer does — and a newer `tauri-build` turns that
+into a `cargo:warning=` (`tauri-build` 2.7.2, `src/lib.rs:939-941`). The skew
+is easy to miss either way, because cargo replays a build script's stored
+warnings from before the fix — a rebuild can print a warning the current
+version pair no longer produces, so check the two versions rather than
+trusting the warning.
+
 The `pi-archimedes` monorepo (the agent-side extension suite, a separate repo)
 is validated with `pnpm test` + `pnpm -r exec -- tsc --noEmit` from its root.
 

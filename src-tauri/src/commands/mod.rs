@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod attention;
 pub mod clipboard;
 pub mod files;
 pub mod history;

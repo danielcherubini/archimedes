@@ -65,6 +65,8 @@ function settingsFixture(overrides: Partial<AppSettings> = {}): AppSettings {
     sessionNamingEnabled: true,
     sessionNamingModel: null,
     sessionNamingReasoning: null,
+    attentionAlertsEnabled: true,
+    attentionAlertDelaySecs: 15,
     ...overrides,
   };
 }
@@ -152,6 +154,8 @@ describe("loadAndApplySettings", () => {
       sessionNamingEnabled: true,
       sessionNamingModel: null,
       sessionNamingReasoning: null,
+      attentionAlertsEnabled: true,
+      attentionAlertDelaySecs: 15,
     });
     stubMatchMedia(true); // OS is dark → "system" resolves to zai-dark
     const settings = await loadAndApplySettings();

@@ -108,6 +108,7 @@ fn build_app(dirs: TestDirs) -> TestApp {
             archimedes_lib::commands::sessions::cancel_session,
             archimedes_lib::commands::sessions::get_stalled_info,
             archimedes_lib::commands::spaces::set_space_trusted,
+            archimedes_lib::commands::attention::attention_disarm,
         ])
         .setup(move |app| {
             setup_dirs_with_factory(
@@ -842,4 +843,42 @@ async fn a_subagent_transcript_persists_as_a_hidden_ephemeral_row() {
         !native.is_empty(),
         "the child's transcript rows are persisted (the `native_messages` FK held)"
     );
+}
+
+/// The `attention_disarm` registration check (Task 6's one deliberate
+/// deviation from the plan, which said not to add command tests here): the
+/// wiring no unit test can see — that the command name resolves and that
+/// `setup_dirs_with_factory` manages the `Arc<AttentionTimer>` the command
+/// takes as state. A typo'd name, a missing `generate_handler!` entry HERE, or
+/// a missing `app.manage(...)` all surface as an `Err` payload
+/// (`command attention_disarm not found` / `managed state ... not found`)
+/// instead of a silent no-op at runtime in the app.
+///
+/// Deliberately `disarm` and NEVER `attention_arm`: arming would start a real
+/// countdown that could show a real OS notification on the developer's
+/// desktop. `disarm` with nothing armed is the idempotent no-op, so it is safe
+/// to send for real.
+///
+/// Scope of the claim: this harness declares its OWN `generate_handler!` list,
+/// so it proves the command + the managed state are wired, NOT that the real
+/// `lib.rs` handler list lists both commands (that is `lib.rs:237-238`, read
+/// directly) and not that the JS wrapper spells the name the same
+/// (`src/lib/tauri.test.ts` pins `attention_arm` / `attention_disarm`).
+#[tokio::test]
+async fn attention_disarm_resolves_through_the_real_ipc_surface() {
+    let dirs = TestDirs::new();
+    let app = build_app(dirs);
+    // The managed state the command needs, put there by the SAME
+    // `setup_dirs_with_factory` the app runs (not a test-local `manage`).
+    assert!(
+        app.handle
+            .try_state::<Arc<archimedes_lib::attention::AttentionTimer>>()
+            .is_some(),
+        "the Supervisor manages the `AttentionTimer`"
+    );
+    // The Ok arm (an unregistered command or an unmanaged state is the Err arm,
+    // which `invoke_ok` fails on with the payload in the message). `Ok(())`
+    // serialises to `null`.
+    let payload = invoke_ok(&app.webview, "attention_disarm", json!({})).await;
+    assert_eq!(payload, Value::Null, "`attention_disarm` returns `Ok(())`");
 }

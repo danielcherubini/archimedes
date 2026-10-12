@@ -116,6 +116,16 @@ function PolicyRow({
   );
 }
 
+/**
+ * The delay options the attention-alert select offers, in SECONDS (the wire
+ * unit — the `s` suffix is UI-only). 15 is the backend default
+ * (`default_attention_delay_secs`); the others bracket it. Deliberately NOT a
+ * union type: a hand-edited `settings.json` is a real producer and there is no
+ * clamping layer, so a value outside this list is a value the UI must still
+ * display (see the `SelectValue` children below).
+ */
+const ATTENTION_DELAYS: number[] = [5, 15, 30, 60];
+
 /** The General section: trust default / default model / thinking level / session naming / tools. */
 export default function GeneralSection({
   settings,
@@ -342,6 +352,61 @@ export default function GeneralSection({
               onSave({ sessionNamingModel: value === "" ? null : value })
             }
           />
+        }
+      />
+      {/* The attention alerts (ADR 0038/0039): the OS notification raised when
+          a session has been paused on you — a run that finished, or a gate
+          awaiting an answer — for longer than the delay below. The copy states
+          the two suppressions, because they are the feature: nothing fires
+          while you are in the window, and any keystroke, click or scroll
+          cancels a pending alert. Per-trigger toggles are deliberately absent
+          (one switch, app-wide). */}
+      <SettingsRow
+        label="Notify when the app is waiting on you"
+        description="An OS notification when a session has been waiting on you — finished, or needing an answer — for longer than the delay below. Nothing is sent while this window is focused, and typing, clicking or scrolling here cancels a pending notification."
+        control={
+          <Switch
+            checked={settings.attentionAlertsEnabled}
+            aria-label="Notify when the app is waiting on you"
+            onCheckedChange={(checked) =>
+              onSave({ attentionAlertsEnabled: checked })
+            }
+          />
+        }
+      />
+      <SettingsRow
+        label="Delay before notifying"
+        description="How long a session must be waiting on you before the notification goes out. The delay is read when a countdown starts, so changing it does not re-time one already running."
+        control={
+          <Select
+            value={`${settings.attentionAlertDelaySecs}s`}
+            onValueChange={(value) =>
+              onSave({
+                attentionAlertDelaySecs: Number(value.replace("s", "")),
+              })
+            }
+          >
+            <SelectTrigger aria-label="Delay before notifying" className="w-48">
+              <SelectValue>
+                {/* A hand-edited `settings.json` can hold a delay outside this
+                    list (there is no clamping layer on purpose), and Radix
+                    renders the PLACEHOLDER for a value with no matching item —
+                    an empty control would misrepresent what is saved. Name the
+                    stored value instead, exactly as `PolicyRow` does for a
+                    `sandboxed` shell off Linux. The value is untouched. */}
+                {ATTENTION_DELAYS.includes(settings.attentionAlertDelaySecs)
+                  ? undefined
+                  : `${settings.attentionAlertDelaySecs}s`}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {ATTENTION_DELAYS.map((secs) => (
+                <SelectItem key={secs} value={`${secs}s`}>
+                  {`${secs}s`}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         }
       />
       {/* The enabled-tools list (the harness-level tool filter — `[]` = all

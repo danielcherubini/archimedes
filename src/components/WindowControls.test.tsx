@@ -26,6 +26,19 @@ describe("WindowControls", () => {
     expect(screen.getByTitle("Close")).toBeTruthy();
   });
 
+  it("wraps EVERY control in the [data-window-control] container (the attention-alert exemption)", () => {
+    render(<WindowControls />);
+    const shells = document.querySelectorAll("[data-window-control]");
+    expect(shells.length).toBe(1);
+    for (const title of ["Minimize", "Maximize / Restore", "Close"]) {
+      const control = screen.getByTitle(title);
+      // The ancestor, not the buttons themselves: the activity handler asks
+      // `event.target.closest("[data-window-control]")`, so a click on the
+      // icon (the real target) resolves to the container.
+      expect(control.closest("[data-window-control]")).toBe(shells[0]);
+    }
+  });
+
   it("calls window.minimize() on the minimize button", () => {
     render(<WindowControls />);
     fireEvent.click(screen.getByTitle("Minimize"));

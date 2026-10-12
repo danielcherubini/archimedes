@@ -13,7 +13,12 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { invoke } from "@tauri-apps/api/core";
-import { listCompletionEntries, listSpaceFiles } from "./tauri";
+import {
+  attentionArm,
+  attentionDisarm,
+  listCompletionEntries,
+  listSpaceFiles,
+} from "./tauri";
 
 const mockedInvoke = vi.mocked(invoke);
 
@@ -109,5 +114,49 @@ describe("listCompletionEntries (the out-of-Space `?` IPC boundary, ADR 0035)", 
     };
     mockedInvoke.mockResolvedValue(payload);
     await expect(listCompletionEntries("~/.config/")).resolves.toEqual(payload);
+  });
+});
+
+describe("attention arm/disarm (the ADR 0039 IPC boundary)", () => {
+  beforeEach(() => {
+    mockedInvoke.mockReset();
+  });
+
+  it("invokes `attention_arm` with the `delaySecs`/`title`/`body` argument keys", async () => {
+    mockedInvoke.mockResolvedValue(undefined);
+    await attentionArm(15, "Archimedes", "b");
+    // Same trap as `list_space_files` above: Tauri maps the camelCase arg KEY
+    // to the snake_case Rust parameter (`delaySecs` here → `delay_secs` in
+    // `commands::attention::attention_arm`), and a typo in the command NAME or
+    // in any KEY is a runtime-only failure the hook tests cannot see.
+    expect(mockedInvoke).toHaveBeenCalledWith("attention_arm", {
+      delaySecs: 15,
+      title: "Archimedes",
+      body: "b",
+    });
+  });
+
+  it("passes a `0` delay through as `delaySecs: 0` (meaning 'fire immediately', not 'never')", async () => {
+    // Rust's `countdown(0)` is `Duration::ZERO` — the deadline is REAL and
+    // `min`-capped, never defaulted — so a falsy-guarded wrapper (`delaySecs ||
+    // undefined`) would turn the shortest possible alert into no alert.
+    mockedInvoke.mockResolvedValue(undefined);
+    await attentionArm(0, "Archimedes", "b");
+    expect(mockedInvoke).toHaveBeenCalledWith("attention_arm", {
+      delaySecs: 0,
+      title: "Archimedes",
+      body: "b",
+    });
+  });
+
+  it("invokes `attention_disarm` with NO payload (the exact no-args form)", async () => {
+    mockedInvoke.mockResolvedValue(undefined);
+    await attentionDisarm();
+    // Pinned to the ZERO-arg call on purpose: `attention_disarm` takes only
+    // `State<Arc<AttentionTimer>>` on the Rust side, so there is no expected
+    // args object — `{}` would be a different call to `invoke` and this is the
+    // one place that drift could be caught.
+    expect(mockedInvoke).toHaveBeenCalledWith("attention_disarm");
+    expect(mockedInvoke).toHaveBeenCalledTimes(1);
   });
 });

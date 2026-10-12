@@ -88,6 +88,14 @@ fn default_true() -> bool {
     true
 }
 
+/// The serde missing-field default for `attention_alert_delay_secs`: 15 s —
+/// half of pi-archimedes' 30 s terminal default, affordable here because the
+/// desktop also gates the alert on window focus (ADR 0038). SECONDS, not
+/// millis: the value crosses the IPC boundary as `delaySecs`.
+fn default_attention_delay_secs() -> u64 {
+    15
+}
+
 /// The persisted app settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -190,6 +198,22 @@ pub struct Settings {
     /// there is no settings row for it.
     #[serde(default)]
     pub session_naming_reasoning: Option<String>,
+    /// Attention alerts (ADR 0038/0039): the master switch for the OS
+    /// notification raised when a session has been paused on the user
+    /// (finished, or waiting on a gate) for longer than
+    /// `attention_alert_delay_secs`. `#[serde(default = "default_true")]` — the
+    /// feature ships ON, so a pre-feature file reads as enabled (the
+    /// `session_naming_enabled` pattern, not the `#[serde(default)]`-false one).
+    #[serde(default = "default_true")]
+    pub attention_alerts_enabled: bool,
+    /// The delay between an attention trigger and the alert, in SECONDS.
+    /// `#[serde(default = "default_attention_delay_secs")]` = 15 — half of
+    /// pi-archimedes' 30 s terminal default, affordable here because the desktop
+    /// also gates on window focus. There is no clamping LAYER on purpose: the
+    /// Settings select is the only producer, and the only bound is the
+    /// sanity ceiling in `commands::attention`.
+    #[serde(default = "default_attention_delay_secs")]
+    pub attention_alert_delay_secs: u64,
 }
 
 impl Default for Settings {
@@ -213,6 +237,8 @@ impl Default for Settings {
             session_naming_enabled: true,
             session_naming_model: None,
             session_naming_reasoning: None,
+            attention_alerts_enabled: true,
+            attention_alert_delay_secs: default_attention_delay_secs(),
         }
     }
 }
@@ -631,6 +657,53 @@ mod tests {
     }
 
     #[test]
+    fn attention_alert_defaults_survive_a_pre_feature_file() {
+        // Attention alerts (ADR 0038/0039): the master switch ships ON and the
+        // delay defaults to 15 s, so a `settings.json` written before this
+        // feature existed reads as "alerts on, 15 s" with no migration (the
+        // `session_naming_enabled` pattern for the bool — `#[serde(default =
+        // "default_true")]`, NOT the `#[serde(default)]`-false one).
+        let pre_feature: Settings = serde_json::from_str("{}").unwrap();
+        assert!(pre_feature.attention_alerts_enabled);
+        assert_eq!(pre_feature.attention_alert_delay_secs, 15);
+        assert!(Settings::default().attention_alerts_enabled);
+        assert_eq!(Settings::default().attention_alert_delay_secs, 15);
+        // A first-run file (no file at all) is WRITTEN with both keys present.
+        let fresh = tempfile::tempdir().unwrap();
+        let defaults = load_settings(fresh.path());
+        assert!(defaults.attention_alerts_enabled);
+        assert_eq!(defaults.attention_alert_delay_secs, 15);
+        let written = fs::read_to_string(fresh.path().join("settings.json")).unwrap();
+        for key in ["\"attentionAlertsEnabled\"", "\"attentionAlertDelaySecs\""] {
+            assert!(written.contains(key), "missing {key} in {written}");
+        }
+        // Both explicit values round-trip through the real file in camelCase
+        // (`write_settings` → `load_settings`): an OFF switch and a non-default
+        // delay must survive verbatim, with no clamping or normalizing.
+        let settings = Settings {
+            attention_alerts_enabled: false,
+            attention_alert_delay_secs: 60,
+            ..Settings::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        write_settings(dir.path(), &settings).unwrap();
+        let raw = fs::read_to_string(dir.path().join("settings.json")).unwrap();
+        assert!(raw.contains("\"attentionAlertDelaySecs\": 60"), "got {raw}");
+        let back = load_settings(dir.path());
+        assert!(!back.attention_alerts_enabled);
+        assert_eq!(back.attention_alert_delay_secs, 60);
+        assert_eq!(back, settings);
+        // A hand-edited value outside the Settings select's four options is
+        // read VERBATIM — there is no clamping layer here by design (the only
+        // bound is the sanity ceiling in `commands::attention`).
+        let hand_edited: Settings = serde_json::from_str(
+            r#"{ "attentionAlertsEnabled": true, "attentionAlertDelaySecs": 90 }"#,
+        )
+        .unwrap();
+        assert_eq!(hand_edited.attention_alert_delay_secs, 90);
+    }
+
+    #[test]
     fn spinner_style_defaults_to_none_and_round_trips() {
         // A pre-feature file (no `spinnerStyle`) parses to `None` (the
         // frontend falls back to the `typing` default); an explicit choice
@@ -897,6 +970,8 @@ mod tests {
             session_naming_enabled: false,
             session_naming_model: Some("tama/m-1:xhigh".to_string()),
             session_naming_reasoning: Some("minimal".to_string()),
+            attention_alerts_enabled: false,
+            attention_alert_delay_secs: 60,
             mcp_mentions_enabled: true,
             file_policy: FilePolicy {
                 reads: AccessPolicy::Sandboxed,
@@ -923,6 +998,8 @@ mod tests {
             "\"sessionNamingEnabled\"",
             "\"sessionNamingModel\"",
             "\"sessionNamingReasoning\"",
+            "\"attentionAlertsEnabled\"",
+            "\"attentionAlertDelaySecs\"",
         ] {
             assert!(json.contains(key), "missing {key} in {json}");
         }

@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod agents;
+pub mod attention;
 pub mod commands;
 pub mod config;
 pub mod skills;
@@ -129,7 +130,88 @@ pub fn setup_dirs_with_factory<R: tauri::Runtime>(
     // internally), so it is shared directly without an outer lock.
     app.manage(manager);
     app.manage(db);
+    // The attention countdown (ADR 0038/0039): the renderer decides WHEN and
+    // WHAT, Rust only counts down — a backgrounded webview is throttled
+    // (tauri-apps/tauri#5250) and a hidden window is this feature's whole
+    // customer, so the clock cannot live in the renderer. Both external facts
+    // are boxed seams (the timer stays testable with no window and no OS
+    // notification, and this fn stays generic over `R`).
+    //
+    // The focus probe FAILS OPEN for firing: a missing window or an
+    // `is_focused()` error yields `false` = "not focused" → the alert fires. A
+    // window that cannot report its focus is certainly not the window the user
+    // is reading.
+    //
+    // The raw answer is reduced by [`focus_probe_trace`], which exists so the
+    // three cases are DISTINGUISHABLE in the debug log: under GNOME/Wayland
+    // "no window labelled main", "`is_focused()` refused" and "it answered
+    // `true`" all produce the same silence today, and only one of them is the
+    // probe working as designed. The ruling is unchanged — the log is the only
+    // addition.
+    let focus_handle = app.handle().clone();
+    let focus: crate::attention::FocusProbe = std::sync::Arc::new(move || {
+        let raw = focus_handle
+            .get_webview_window("main")
+            .map(|w| w.is_focused().map_err(|e| e.to_string()));
+        let (focused, line) = focus_probe_trace(raw);
+        debuglog::log(&line);
+        focused
+    });
+    // The text is composed by the renderer and passed through verbatim; a
+    // delivery failure (no notification server on this desktop session) is
+    // silently swallowed — the alert is a courtesy, never an error to surface.
+    // That promise is to the USER and stands unchanged; what changes is that the
+    // `ARCHIMEDES_DEBUG` log now hears the `Display` of the failure instead of
+    // nothing, which is the difference between "we tried and the OS said no" and
+    // "we never tried".
+    //
+    // Which transport runs is the seam's own business (`attention::delivery`):
+    // the session-bus desktops send it themselves because the connection that
+    // sent an alert is what keeps it on screen there, and macOS/Windows go
+    // through the plugin.
+    let deliver = attention::delivery::production(app.handle());
+    app.manage(std::sync::Arc::new(attention::AttentionTimer::new(
+        focus, deliver,
+    )));
     Ok(())
+}
+
+/// The focus probe's raw answer, reduced to `(the boolean the countdown sees,
+/// the line for the debug log)`.
+///
+/// PURE (no window, no `AppHandle`) so the fail-open mapping and its wording are
+/// testable — the same `append_to` shape `agent/debuglog.rs` uses to keep a
+/// global-state side effect out of the logic. `None` = no `WebviewWindow`
+/// labelled `"main"` was resolvable from the countdown's thread; `Err(msg)` =
+/// `is_focused()` refused, with its `Display`.
+///
+/// Both answer "not focused" — the fail-open rule this fn inherits verbatim —
+/// and BOTH say which one they were, because under GNOME/Wayland the two are the
+/// difference between "the probe lied about a real window" and "there was no
+/// window to ask", and only the first is a focus problem.
+fn focus_probe_trace(window: Option<Result<bool, String>>) -> (bool, String) {
+    match window {
+        // Named BY LABEL: a window that is not in the map at all (a label
+        // mismatch, or a window the runtime does not expose to this thread) is
+        // the candidate root cause a `Notify`-less countdown points at.
+        None => (
+            false,
+            "attention: focus probe: no window labelled \"main\" — firing anyway (fail open)"
+                .to_string(),
+        ),
+        Some(Err(e)) => (
+            false,
+            format!(
+                "attention: focus probe: is_focused() refused: {e} — firing anyway (fail open)"
+            ),
+        ),
+        // The boring case, still narrated: a `false` from a probe that worked is
+        // a different diagnosis from a `false` from a probe that gave up.
+        Some(Ok(focused)) => (
+            focused,
+            format!("attention: focus probe: is_focused()={focused}"),
+        ),
+    }
 }
 
 /// The Worker mode (ADR 0025): a fresh tokio runtime + the stdio JSONL
@@ -159,6 +241,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        // The OS notification for an attention alert (ADR 0038) — called from
+        // Rust only, so no capability entry and no npm package (the plugin's
+        // `request_permission` is a documented no-op on desktop).
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
             commands::sessions::start_session,
@@ -193,7 +279,9 @@ pub fn run() {
             commands::clipboard::read_clipboard_image,
             commands::files::read_file_bytes,
             commands::files::list_space_files,
-            commands::files::list_completion_entries
+            commands::files::list_completion_entries,
+            commands::attention::attention_arm,
+            commands::attention::attention_disarm
         ])
         .setup(|app| {
             // The on-disk dirs are named `archimedes` (NOT the bundle
@@ -242,4 +330,61 @@ pub fn run() {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::focus_probe_trace;
+
+    /// A window that cannot be FOUND is not a window the user is reading, so
+    /// the probe fires (fail open) — and says it never got a window, BY LABEL,
+    /// because under GNOME/Wayland `get_webview_window("main")` returning `None`
+    /// is a live candidate for "the countdown ran and no notification followed".
+    #[test]
+    fn a_missing_window_fires_and_says_which_window_was_missing() {
+        let (focused, line) = focus_probe_trace(None);
+        assert!(!focused, "no window means unfocused, so the alert fires");
+        assert!(
+            line.starts_with("attention:"),
+            "the greppable prefix: {line}"
+        );
+        assert!(line.contains("main"), "the line names the label: {line}");
+        assert!(
+            line.contains("no window"),
+            "and says the lookup failed: {line}"
+        );
+    }
+
+    /// `is_focused()` refusing is the OTHER Wayland candidate; the ruling must
+    /// name the error, or the log cannot tell it apart from a real `false`.
+    #[test]
+    fn an_is_focused_error_fires_and_names_the_error() {
+        let (focused, line) = focus_probe_trace(Some(Err("focus probe boom".into())));
+        assert!(
+            !focused,
+            "a window that cannot answer is treated as unfocused"
+        );
+        assert!(
+            line.contains("is_focused()"),
+            "the line names the call: {line}"
+        );
+        assert!(line.contains("focus probe boom"), "and its Display: {line}");
+    }
+
+    /// The unremarkable case still has to say what it returned: `false` from a
+    /// probe that worked reads differently from `false` from a probe that gave up.
+    #[test]
+    fn the_probe_reports_the_boolean_it_handed_back() {
+        let (focused, line) = focus_probe_trace(Some(Ok(true)));
+        assert!(focused, "a focused window suppresses the alert");
+        assert!(line.contains("is_focused()=true"), "{line}");
+        let (focused, line) = focus_probe_trace(Some(Ok(false)));
+        assert!(!focused);
+        assert!(line.contains("is_focused()=false"), "{line}");
+    }
+
+    // The delivery line moved to `attention::delivery::tests` with the delivery
+    // itself (`the_success_line_carries_the_id_the_server_gave`,
+    // `the_failure_line_names_the_error`, `the_plugin_line_admits_it_knows_nothing`)
+    // — the claim it pins is now per-transport, so it lives with the transports.
 }

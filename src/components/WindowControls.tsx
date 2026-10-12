@@ -16,7 +16,14 @@ export default function WindowControls() {
   const win = getCurrentWindow();
 
   return (
-    <div className="flex items-center gap-0.5">
+    // `data-window-control` is the attention-alert exemption (ADR 0038): the
+    // activity handler treats a pointer/key event whose target resolves inside
+    // this container as NOT attention, because "run finishes → click Minimize →
+    // walk away" is that feature's main use case and a self-cancelling alert
+    // would be worse than none. The scope is these three buttons ONLY — a click
+    // on the rest of the drag bar, a Space tab, or a pane toggle IS attention.
+    // Any control added here inherits the exemption, so add one deliberately.
+    <div className="flex items-center gap-0.5" data-window-control>
       <button
         type="button"
         title="Minimize"

@@ -64,6 +64,8 @@ vi.mock("./lib/tauri", async () => {
       sessionNamingEnabled: true,
       sessionNamingModel: null,
       sessionNamingReasoning: null,
+      attentionAlertsEnabled: true,
+      attentionAlertDelaySecs: 15,
     }),
     saveSettings: vi.fn().mockResolvedValue(undefined),
     listModels: vi.fn().mockResolvedValue([]),
@@ -82,6 +84,13 @@ vi.mock("./lib/tauri", async () => {
     listenInteractiveEvent: vi.fn().mockResolvedValue(() => {}),
     listenSubagentSessionStarted: vi.fn().mockResolvedValue(() => {}),
     listenSubagentClosed: vi.fn().mockResolvedValue(() => {}),
+    // The attention-alert commands (`useAttentionAlert`, mounted at the top of
+    // `App`). Required for the same reason as the catalog fetches above: this
+    // factory spreads `importActual`, so an un-mocked export would reach the
+    // REAL `invoke`, which rejects in jsdom and the hook logs
+    // `attention alert failed:` — stderr noise instead of a green-and-silent run.
+    attentionArm: vi.fn().mockResolvedValue(undefined),
+    attentionDisarm: vi.fn().mockResolvedValue(undefined),
   };
 });
 

@@ -27,6 +27,9 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-window-state = "2"
+# The OS notification behind an attention alert (ADR 0038) — called from Rust
+# only, so there is no capability entry and no npm package.
+tauri-plugin-notification = "2"
 # The on-disk state dirs (`~/.config/archimedes`, `~/.local/share/archimedes`,
 # `~/Library/Application Support/archimedes`, …) — the same crate Tauri uses
 # to resolve the platform base dirs, joined with a bare `archimedes` (NOT
@@ -98,6 +101,14 @@ tokio = { version = "1", features = ["test-util"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The session-bus send behind a Linux attention alert (`attention::delivery`).
+# Version AND default features are the plugin's own (`notify-rust = "4.18"`,
+# default `z`), so feature unification keeps ONE copy of the crate in the
+# graph — the target list is the plugin's own notify-rust gate verbatim:
+# android/ios are `unix` but are exactly what it excludes, and so are we
+# (`cfg(unix)` alone would ask notify-rust to build there).
+[target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies]
+notify-rust = "4.18"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

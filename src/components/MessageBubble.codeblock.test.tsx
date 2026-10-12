@@ -53,6 +53,8 @@ const SETTINGS_FIXTURE: AppSettings = {
   sessionNamingEnabled: true,
   sessionNamingModel: null,
   sessionNamingReasoning: null,
+  attentionAlertsEnabled: true,
+  attentionAlertDelaySecs: 15,
 };
 
 /** Seed the settings store with the fixture under the given palette. */

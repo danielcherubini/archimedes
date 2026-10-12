@@ -36,6 +36,8 @@ vi.mock("../lib/tauri", async () => {
       sessionNamingEnabled: true,
       sessionNamingModel: null,
       sessionNamingReasoning: null,
+      attentionAlertsEnabled: true,
+      attentionAlertDelaySecs: 15,
     }),
     startSession: vi.fn().mockResolvedValue({
       sessionId: "new1",

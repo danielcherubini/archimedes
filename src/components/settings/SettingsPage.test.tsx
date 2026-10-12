@@ -55,6 +55,8 @@ const baseSettings: AppSettings = {
   sessionNamingEnabled: true,
   sessionNamingModel: null,
   sessionNamingReasoning: null,
+  attentionAlertsEnabled: true,
+  attentionAlertDelaySecs: 15,
 };
 
 vi.mock("@/lib/version", () => ({
@@ -103,6 +105,8 @@ vi.mock("../../lib/tauri", async () => {
       sessionNamingEnabled: true,
       sessionNamingModel: null,
       sessionNamingReasoning: null,
+      attentionAlertsEnabled: true,
+      attentionAlertDelaySecs: 15,
     }),
     // The discovered agent definitions (ADR 0023 — the Subagents section's
     // data source): empty by default (the tests override per case).
@@ -1244,6 +1248,153 @@ describe("SettingsPage (the session-naming rows)", () => {
       index("Session naming model"),
     );
     expect(index("Session naming model")).toBeLessThan(index("Enabled tools"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The attention-alert rows (ADR 0038/0039): the master switch and the delay.
+// Both live in General, in the block right after the session-naming rows. The
+// switch ships ON and the delay defaults to 15 s (the backend always emits
+// both), and the delay select must render a stored value that is NOT one of
+// its four options rather than an empty control (the failure `PolicyRow`
+// documents — a hand-edited `settings.json` is a real producer).
+// ---------------------------------------------------------------------------
+
+describe("SettingsPage (the attention-alert rows)", () => {
+  it("the alert switch renders from the setting (on by default, off when stored)", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    const toggle = await screen.findByRole("switch", {
+      name: "Notify when the app is waiting on you",
+    });
+    // Alerts ship ON, so the loaded document reads as enabled — and opening
+    // the page saves nothing.
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    expect(saveSettings).not.toHaveBeenCalled();
+    cleanup();
+
+    vi.mocked(getSettings).mockResolvedValueOnce({
+      ...baseSettings,
+      attentionAlertsEnabled: false,
+    });
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    expect(
+      screen
+        .getByRole("switch", { name: "Notify when the app is waiting on you" })
+        .getAttribute("aria-checked"),
+    ).toBe("false");
+  });
+
+  it("flipping the alert switch saves the complete document with the flag", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    fireEvent.click(
+      await screen.findByRole("switch", {
+        name: "Notify when the app is waiting on you",
+      }),
+    );
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(1));
+    const saved = vi.mocked(saveSettings).mock.calls[0][0] as AppSettings;
+    // ONE save of the COMPLETE document with the FLIPPED flag (alerts ship on,
+    // so the first click turns them OFF — off must persist as `false`, not
+    // vanish as `null`/absent).
+    expect(saved.attentionAlertsEnabled).toBe(false);
+    expect(saved.attentionAlertDelaySecs).toBe(15);
+    expect(saved.theme).toBe("dark");
+    expect(saved.providers).toHaveLength(1);
+    expect(saved.filePolicy).toEqual(baseSettings.filePolicy);
+    expect(saved.font).toEqual(baseSettings.font);
+    // The switch reflects the saved document (optimistic state = what was written).
+    expect(
+      screen
+        .getByRole("switch", { name: "Notify when the app is waiting on you" })
+        .getAttribute("aria-checked"),
+    ).toBe("false");
+  });
+
+  it("the delay select shows the stored delay and offers the four options", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    const trigger = await screen.findByRole("combobox", {
+      name: "Delay before notifying",
+    });
+    // The trigger DISPLAYS the stored delay (never a placeholder).
+    expect(trigger.querySelector("[data-slot=select-value]")?.textContent).toBe(
+      "15s",
+    );
+    fireEvent.click(trigger);
+    await screen.findAllByRole("option");
+    expect(
+      screen.getAllByRole("option").map((o) => o.textContent ?? ""),
+    ).toEqual(["5s", "15s", "30s", "60s"]);
+    // Merely looking saved nothing.
+    expect(saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("choosing a delay saves the complete document with the seconds", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    fireEvent.click(
+      await screen.findByRole("combobox", { name: "Delay before notifying" }),
+    );
+    fireEvent.click(await screen.findByRole("option", { name: "60s" }));
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(1));
+    const saved = vi.mocked(saveSettings).mock.calls[0][0] as AppSettings;
+    // The wire value is the NUMBER of seconds (the `s` suffix is UI-only),
+    // and every other field rode along untouched.
+    expect(saved.attentionAlertDelaySecs).toBe(60);
+    expect(saved.attentionAlertsEnabled).toBe(true);
+    expect(saved.theme).toBe("dark");
+    expect(saved.providers).toHaveLength(1);
+    expect(saved.font).toEqual(baseSettings.font);
+    // The select reloads from the saved document.
+    expect(
+      screen
+        .getByRole("combobox", { name: "Delay before notifying" })
+        .querySelector("[data-slot=select-value]")?.textContent,
+    ).toBe("60s");
+  });
+
+  it("a stored delay outside the four options renders instead of an empty select", async () => {
+    // A hand-edited `settings.json` is a real producer and there is NO
+    // clamping layer, so `90` reaches the UI. Radix renders the PLACEHOLDER
+    // for a value with no matching item — an empty control would misrepresent
+    // the saved delay (the failure `PolicyRow` solves the same way).
+    vi.mocked(getSettings).mockResolvedValueOnce({
+      ...baseSettings,
+      attentionAlertDelaySecs: 90,
+    });
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    const trigger = await screen.findByRole("combobox", {
+      name: "Delay before notifying",
+    });
+    expect(trigger.querySelector("[data-slot=select-value]")?.textContent).toBe(
+      "90s",
+    );
+    // And the value is untouched: looking saves nothing.
+    expect(saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("the alert rows sit with the session-naming rows, above the enabled-tools list", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    const rows = document.querySelectorAll(".border-t");
+    const index = (label: string): number =>
+      [...rows].findIndex((r) =>
+        [...r.querySelectorAll("div")].some((d) => d.textContent === label),
+      );
+    expect(index("Name sessions automatically")).toBeGreaterThanOrEqual(0);
+    expect(index("Name sessions automatically")).toBeLessThan(
+      index("Notify when the app is waiting on you"),
+    );
+    expect(index("Notify when the app is waiting on you")).toBeLessThan(
+      index("Delay before notifying"),
+    );
+    expect(index("Delay before notifying")).toBeLessThan(
+      index("Enabled tools"),
+    );
   });
 });
 
