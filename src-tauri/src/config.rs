@@ -81,6 +81,13 @@ fn default_theme() -> String {
     "dark".to_string()
 }
 
+/// The serde missing-field default for a `true`-by-default bool (the shape of
+/// `default_theme` / `default_font_size`: a non-`false` default needs a
+/// named function, `#[serde(default)]` alone would mean `false`).
+fn default_true() -> bool {
+    true
+}
+
 /// The persisted app settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -164,6 +171,25 @@ pub struct Settings {
     /// migration).
     #[serde(default)]
     pub spinner_style: Option<String>,
+    /// Session naming (ported from pi-archimedes' `session-name`): the master
+    /// switch for the post-first-exchange title request. `#[serde(default =
+    /// "default_true")]` — pi ships naming ON, so a pre-feature file reads as
+    /// enabled (unlike the `#[serde(default)]` bools above, whose default is
+    /// `false`).
+    #[serde(default = "default_true")]
+    pub session_naming_enabled: bool,
+    /// The model used for title generation: the composed key
+    /// (`"provider/id"`, or a hand-edited `"provider/id:<level>"`). `None` /
+    /// blank = the session's own model (pi's `model` setting).
+    #[serde(default)]
+    pub session_naming_model: Option<String>,
+    /// The thinking level for the title request. Honoured ONLY when the chosen
+    /// model advertises it; `None` = omit the `reasoning_effort` key (the
+    /// default — `ModelOptions.reasoning_effort: None` already means "no
+    /// thinking" here, so pi's `minimal` default would ADD cost). JSON-only:
+    /// there is no settings row for it.
+    #[serde(default)]
+    pub session_naming_reasoning: Option<String>,
 }
 
 impl Default for Settings {
@@ -184,6 +210,9 @@ impl Default for Settings {
             default_thinking_levels: HashMap::new(),
             subagent_models: HashMap::new(),
             spinner_style: None,
+            session_naming_enabled: true,
+            session_naming_model: None,
+            session_naming_reasoning: None,
         }
     }
 }
@@ -246,6 +275,21 @@ pub fn load_settings(config_dir: &Path) -> Settings {
             // SAVES `""`): a blank level is "no level" — the same as `null`.
             if settings.default_thinking_level.as_deref() == Some("") {
                 settings.default_thinking_level = None;
+            }
+            // The naming override follows the same rule but is deliberately
+            // WIDER: an ALL-WHITESPACE key is blank too, so a hand-typed
+            // value with a stray space is read as "no override" instead of a
+            // model id that misses the catalog. The trim tests blankness
+            // ONLY — a non-blank value keeps its spelling verbatim (the
+            // resolver that consumes it does its own trimming). The
+            // reasoning override has NO such rule: a blank level is passed
+            // through untouched.
+            if settings
+                .session_naming_model
+                .as_deref()
+                .is_some_and(|model| model.trim().is_empty())
+            {
+                settings.session_naming_model = None;
             }
             settings
         }
@@ -451,6 +495,11 @@ mod tests {
         assert_eq!(settings.font, FontSettings::default());
         assert!(settings.subagent_models.is_empty());
         assert!(!settings.mcp_mentions_enabled);
+        // Session naming ships ON (pi's posture) — the ONE bool whose default
+        // is not `false`.
+        assert!(settings.session_naming_enabled);
+        assert_eq!(settings.session_naming_model, None);
+        assert_eq!(settings.session_naming_reasoning, None);
     }
 
     #[test]
@@ -473,6 +522,13 @@ mod tests {
         // setting existed must NOT silently enable the one trigger that
         // collides with pasted text.
         assert!(!settings.mcp_mentions_enabled);
+        // Session naming is the opposite case: it ships ON, so the same
+        // pre-feature file reads as ENABLED with no model/reasoning override
+        // (`default = "default_true"` — see
+        // `session_naming_settings_default_on_and_round_trip_in_camel_case`).
+        assert!(settings.session_naming_enabled);
+        assert_eq!(settings.session_naming_model, None);
+        assert_eq!(settings.session_naming_reasoning, None);
     }
 
     #[test]
@@ -513,6 +569,65 @@ mod tests {
         // A first-run file (no file at all) writes the defaults: `#` OFF.
         let fresh = tempfile::tempdir().unwrap();
         assert!(!load_settings(fresh.path()).mcp_mentions_enabled);
+    }
+
+    #[test]
+    fn session_naming_settings_default_on_and_round_trip_in_camel_case() {
+        // Session naming (the port of pi-archimedes' `session-name`): the
+        // master switch defaults to `true`, NOT `false` like every other
+        // settings bool, because pi ships naming ON — so a pre-feature file
+        // and a fresh first-run file both read as enabled (no migration, and
+        // no silent feature loss for existing users). The two overrides are
+        // `None`: the title request uses the session's own model with no
+        // `reasoning_effort`.
+        assert!(Settings::default().session_naming_enabled);
+        assert_eq!(Settings::default().session_naming_model, None);
+        assert_eq!(Settings::default().session_naming_reasoning, None);
+        // A pre-feature file (no naming keys at all) parses to exactly that.
+        let pre_feature: Settings =
+            serde_json::from_str(r#"{ "theme": "dark", "paneLayout": {} }"#).unwrap();
+        assert!(pre_feature.session_naming_enabled);
+        assert_eq!(pre_feature.session_naming_model, None);
+        assert_eq!(pre_feature.session_naming_reasoning, None);
+        // An explicit OFF plus both overrides parse from the camelCase wire
+        // names (the `ModelPicker` writes the composed key; the `:<level>`
+        // suffix is the hand-edited form).
+        let overridden: Settings = serde_json::from_str(
+            r#"{ "sessionNamingEnabled": false, "sessionNamingModel": "tama/m-1:xhigh", "sessionNamingReasoning": "minimal" }"#,
+        )
+        .unwrap();
+        assert!(!overridden.session_naming_enabled);
+        assert_eq!(
+            overridden.session_naming_model.as_deref(),
+            Some("tama/m-1:xhigh")
+        );
+        assert_eq!(
+            overridden.session_naming_reasoning.as_deref(),
+            Some("minimal")
+        );
+        // All three round-trip through the real file in camelCase
+        // (`write_settings` → `load_settings`).
+        let settings = Settings {
+            session_naming_enabled: false,
+            session_naming_model: Some("tama/m-1".to_string()),
+            session_naming_reasoning: Some("low".to_string()),
+            ..Settings::default()
+        };
+        let json = serde_json::to_string_pretty(&settings).unwrap();
+        for key in [
+            "\"sessionNamingEnabled\"",
+            "\"sessionNamingModel\"",
+            "\"sessionNamingReasoning\"",
+        ] {
+            assert!(json.contains(key), "missing {key} in {json}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        write_settings(dir.path(), &settings).unwrap();
+        let back = load_settings(dir.path());
+        assert_eq!(back, settings);
+        // A first-run file (no file at all) writes the defaults: naming ON.
+        let fresh = tempfile::tempdir().unwrap();
+        assert!(load_settings(fresh.path()).session_naming_enabled);
     }
 
     #[test]
@@ -779,6 +894,9 @@ mod tests {
                 "tama/m-1".to_string(),
             )]),
             spinner_style: Some("marquee".to_string()),
+            session_naming_enabled: false,
+            session_naming_model: Some("tama/m-1:xhigh".to_string()),
+            session_naming_reasoning: Some("minimal".to_string()),
             mcp_mentions_enabled: true,
             file_policy: FilePolicy {
                 reads: AccessPolicy::Sandboxed,
@@ -802,6 +920,9 @@ mod tests {
             "\"spinnerStyle\"",
             "\"filePolicy\"",
             "\"mcpMentionsEnabled\"",
+            "\"sessionNamingEnabled\"",
+            "\"sessionNamingModel\"",
+            "\"sessionNamingReasoning\"",
         ] {
             assert!(json.contains(key), "missing {key} in {json}");
         }
@@ -846,6 +967,55 @@ mod tests {
         assert_eq!(settings.default_thinking_level, None);
         // The other fields still parse (the file is not corrupt).
         assert_eq!(settings.theme, "dark");
+    }
+
+    #[test]
+    fn load_settings_normalizes_a_blank_session_naming_model_to_none() {
+        // Same rule as the thinking level above — the file is hand-editable
+        // and a blank override means "no override" (the session's own model)
+        // — but deliberately WIDER: an ALL-WHITESPACE value is blank too,
+        // because a hand-typed key carrying a stray space would otherwise be
+        // looked up verbatim, miss the catalog, and silently name nothing.
+        // The trim is ONLY the blankness test; a non-blank value is never
+        // rewritten (the composed key's spelling belongs to the file, and
+        // Task 4's resolver does its own trimming).
+        for blank in ["", "   ", "\\t\\n"] {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(
+                dir.path().join("settings.json"),
+                format!(r#"{{ "theme": "dark", "sessionNamingModel": "{blank}" }}"#),
+            )
+            .unwrap();
+            let settings = load_settings(dir.path());
+            assert_eq!(settings.session_naming_model, None, "blank {blank:?}");
+            // The other fields still parse (the file is not corrupt).
+            assert_eq!(settings.theme, "dark");
+        }
+        // A non-blank value survives VERBATIM — no trim, no rewrite.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("settings.json"),
+            r#"{ "sessionNamingModel": " tama/m-1 " }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load_settings(dir.path()).session_naming_model.as_deref(),
+            Some(" tama/m-1 ")
+        );
+        // The reasoning override has NO such rule: a blank level is passed
+        // through (Task 4 drops it against the model's advertised levels).
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("settings.json"),
+            r#"{ "sessionNamingReasoning": "" }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load_settings(dir.path())
+                .session_naming_reasoning
+                .as_deref(),
+            Some("")
+        );
     }
 
     #[test]

@@ -178,11 +178,12 @@ export default function SidePane() {
   const mainTodoItems = useMainTodoItems(activeSessionId);
 
   // The session title (the top section — the old chat header's title moved
-  // here, the header is gone): the first `user` message truncated to ~80
-  // chars (the SAME derivation the header + the sidebar rows use), else
-  // the Space's base name (the active session's `cwd` — live, stored, OR
-  // archived membership; `basenameOfPath` of it — a session whose cwd is
-  // no known Space still shows its folder's base name).
+  // here, the header is gone): the session's GENERATED title when the naming
+  // pass wrote one (`SessionInfo.title`, auto-generated only), else the first
+  // `user` message truncated to ~80 chars (the SAME derivation the header +
+  // the sidebar rows use), else the Space's base name (the active session's
+  // `cwd` — live, stored, OR archived membership; `basenameOfPath` of it — a
+  // session whose cwd is no known Space still shows its folder's base name).
   const activeMessages = useSessions((s) =>
     s.activeSessionId ? s.messages[s.activeSessionId] : undefined,
   );
@@ -195,6 +196,24 @@ export default function SidePane() {
       s.archivedSessions.find((x) => x.sessionId === s.activeSessionId)?.cwd
     );
   });
+  // The generated title, read by its OWN selector that returns a PRIMITIVE
+  // (`string | null`) over the same three-list walk as `activeCwd` above.
+  // It is NOT folded into `activeCwd` as `{ cwd, title }`: zustand v5
+  // re-runs a selector that yields a FRESH OBJECT on every snapshot read, so
+  // the pane would re-render forever (`useShallow` would fix it; a second
+  // primitive selector is cheaper and matches the shape of this file).
+  const storedTitle = useSessions((s) => {
+    if (!s.activeSessionId) return null;
+    const id = s.activeSessionId;
+    const titleOf = (rows: typeof s.sessions) =>
+      rows.find((x) => x.sessionId === id)?.title;
+    return (
+      titleOf(s.sessions) ??
+      titleOf(s.historySessions) ??
+      titleOf(s.archivedSessions) ??
+      null
+    );
+  });
   // (`find` does not narrow its result — the `kind` check on the found
   // value, THEN the `text` access, is the ChatStream pattern.)
   const firstUserMessage = activeMessages?.find((m) => m.kind === "user");
@@ -202,13 +221,20 @@ export default function SidePane() {
     firstUserMessage && firstUserMessage.text !== ""
       ? firstUserMessage.text
       : undefined;
-  const sessionTitle = firstUserText
-    ? firstUserText.length > 80
-      ? firstUserText.slice(0, 80)
+  // The title SHORT-CIRCUITS the chain: a session the naming pass titled is
+  // labelled by that title, never by a prompt truncation. (`""` is treated as
+  // no title — the backend never writes one, but an empty label would render
+  // an invisible header.)
+  const sessionTitle =
+    storedTitle !== null && storedTitle !== ""
+      ? storedTitle
       : firstUserText
-    : activeCwd
-      ? basenameOfPath(activeCwd)
-      : null;
+        ? firstUserText.length > 80
+          ? firstUserText.slice(0, 80)
+          : firstUserText
+        : activeCwd
+          ? basenameOfPath(activeCwd)
+          : null;
 
   // The auto open/close (the "popup" rule — see the component doc): the
   // frame follows `visible` EDGE-TRIGGERED (the `prevVisible` ref — a
@@ -273,9 +299,10 @@ export default function SidePane() {
       >
         <div className="flex flex-col gap-4">
           {/* The session title (the old header's title — the header is
-              gone, the title lives here): the first `user` message
-              truncated to ~80 chars, else the Space's base name. The
-              same gradient-fade mask the header used (background-agnostic). */}
+              gone, the title lives here): the generated title when there is
+              one, else the first `user` message truncated to ~80 chars, else
+              the Space's base name. The same gradient-fade mask the header
+              used (background-agnostic). */}
           {sessionTitle !== null && (
             <div
               className="min-w-0 text-ui-base font-medium text-foreground"

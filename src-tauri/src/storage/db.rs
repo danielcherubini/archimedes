@@ -458,6 +458,22 @@ impl Db {
         Ok(n > 0)
     }
 
+    /// Set a session's title ONLY when it has none (`title IS NULL`), so a
+    /// title that already exists — a generated one from an earlier turn, or
+    /// one a future rename affordance wrote — is never overwritten. The
+    /// `WHERE title IS NULL` IS the race guard: one statement under the `Db`
+    /// mutex, so a concurrent writer cannot slip between a check and a
+    /// write. Returns `true` when a row was written, `false` when the row is
+    /// missing or already titled (a missing row is a no-op, not an error —
+    /// mirroring `set_session_archived`).
+    pub fn set_session_title(&self, id: &str, title: &str) -> Result<bool, DbError> {
+        let n = self.conn.lock().expect("db mutex poisoned").execute(
+            "UPDATE sessions SET title = ?2 WHERE id = ?1 AND title IS NULL",
+            params![id, title],
+        )?;
+        Ok(n > 0)
+    }
+
     /// A session's messages in insertion order (the transcript order).
     pub fn messages_for(&self, session_id: &str) -> Result<Vec<MessageRow>, DbError> {
         let guard = self.conn.lock().expect("db mutex poisoned");
@@ -1229,6 +1245,7 @@ mod tests {
             }),
             config_options: None,
             archived: false,
+            title: None,
             context_usage: None,
             is_subagent: false,
         };
@@ -1288,6 +1305,151 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A minimal recorded-session shape for the title tests (the title
+    /// itself is never part of the literal — nothing writes it through
+    /// `record_session`, only through `set_session_title`).
+    fn title_session(id: &str) -> SessionInfo {
+        SessionInfo {
+            session_id: id.to_string(),
+            cwd: std::path::PathBuf::from("/tmp/proj"),
+            capabilities: serde_json::json!({
+                "piSessionId": id,
+                "loadSession": true,
+            }),
+            config_options: None,
+            archived: false,
+            title: None,
+            context_usage: None,
+            is_subagent: false,
+        }
+    }
+
+    /// The session's title is written ONLY while it has none, and only once:
+    /// the first `set_session_title` writes the `NULL` title and returns
+    /// `true`, and both `session()` and `list_sessions()` read it back (the
+    /// naming pass's write must reach the boot fetch that lists sessions).
+    #[test]
+    fn set_session_title_writes_a_null_title_and_reads_back() {
+        let dir = std::env::temp_dir().join(format!("db-title-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let db = Db::open(&path).expect("db should open");
+        db.record_session(&title_session("sess-1"))
+            .expect("record_session should succeed");
+        // A recorded session starts UNTITLED (`record_session` inserts NULL).
+        assert_eq!(
+            db.session("sess-1")
+                .expect("session should succeed")
+                .expect("the row exists")
+                .title,
+            None,
+            "a recorded session has no title yet"
+        );
+        assert!(
+            db.set_session_title("sess-1", "Refactor the auth middleware")
+                .expect("set_session_title should succeed"),
+            "a session with no title is written, so the call returns true"
+        );
+        assert_eq!(
+            db.session("sess-1")
+                .expect("session should succeed")
+                .expect("the row exists")
+                .title
+                .as_deref(),
+            Some("Refactor the auth middleware"),
+            "the title is stored on the row"
+        );
+        // …and it surfaces in the listing the boot fetch uses.
+        let all = db
+            .list_sessions(true)
+            .expect("list_sessions(true) should succeed");
+        assert_eq!(all.len(), 1);
+        assert_eq!(
+            all[0].title.as_deref(),
+            Some("Refactor the auth middleware"),
+            "list_sessions reads the title back"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A title that already exists is NEVER overwritten — a second
+    /// `set_session_title` returns `false` and leaves the FIRST title (the
+    /// generated title from an earlier turn, or one a future rename
+    /// affordance wrote, wins). This is the race guard: the naming pass may
+    /// fire on several turns, and only the first write lands.
+    #[test]
+    fn set_session_title_never_overwrites_an_existing_title() {
+        let dir = std::env::temp_dir().join(format!("db-title-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let db = Db::open(&path).expect("db should open");
+        db.record_session(&title_session("sess-1"))
+            .expect("record_session should succeed");
+        db.set_session_title("sess-1", "First title")
+            .expect("the first write should succeed");
+        assert!(
+            !db.set_session_title("sess-1", "Second title")
+                .expect("set_session_title should not error on a titled row"),
+            "a titled row writes nothing, so the call returns false"
+        );
+        assert_eq!(
+            db.session("sess-1")
+                .expect("session should succeed")
+                .expect("the row exists")
+                .title
+                .as_deref(),
+            Some("First title"),
+            "the first title survives the second call"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `set_session_title` on an id with no row is a no-op: `Ok(false)`
+    /// (mirrors `set_session_archived` — a missing row is not an error).
+    #[test]
+    fn set_session_title_is_a_noop_for_an_unknown_id() {
+        let dir = std::env::temp_dir().join(format!("db-title-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let db = Db::open(&path).expect("db should open");
+        assert!(
+            !db.set_session_title("no-such-session", "Any title")
+                .expect("should not error"),
+            "a missing row is a no-op returning false"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A re-`record_session` (the resume re-record) never clears the stored
+    /// title — the `ON CONFLICT … DO UPDATE` branch must not touch `title`
+    /// (resuming a titled session must not erase its label, exactly as it
+    /// must not un-archive it).
+    #[test]
+    fn record_session_preserves_the_title() {
+        let dir = std::env::temp_dir().join(format!("db-title-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let db = Db::open(&path).expect("db should open");
+        let session = title_session("sess-1");
+        db.record_session(&session)
+            .expect("record_session should succeed");
+        db.set_session_title("sess-1", "Kept title")
+            .expect("set_session_title should succeed");
+        // The resume re-record (the same upsert, a refreshed row).
+        db.record_session(&session)
+            .expect("re-record should succeed");
+        assert_eq!(
+            db.session("sess-1")
+                .expect("session should succeed")
+                .expect("the row exists")
+                .title
+                .as_deref(),
+            Some("Kept title"),
+            "a re-record never clears the stored title"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// (ADR 0016) A re-`record_session` (the resume re-record) never clears
     /// the archived flag — the `ON CONFLICT … DO UPDATE` branch must not
     /// touch `archived` (no retroactive un-archive).
@@ -1306,6 +1468,7 @@ mod tests {
             }),
             config_options: None,
             archived: false,
+            title: None,
             context_usage: None,
             is_subagent: false,
         };
@@ -1347,6 +1510,7 @@ mod tests {
             capabilities: serde_json::json!({}),
             config_options: None,
             archived: false,
+            title: None,
             context_usage: None,
             is_subagent: false,
         };
@@ -1358,6 +1522,7 @@ mod tests {
             capabilities: serde_json::json!({}),
             config_options: None,
             archived: false,
+            title: None,
             context_usage: None,
             is_subagent: true,
         };
@@ -1464,6 +1629,7 @@ mod tests {
             config_options: None,
             context_usage: None,
             archived: false,
+            title: None,
             is_subagent: false,
         };
         db.record_session(&session)

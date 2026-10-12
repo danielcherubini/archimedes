@@ -39,6 +39,12 @@ pub struct SessionInfo {
     /// started or ephemeral session; the resume paths and
     /// `list_sessions` read it from the stored row.
     pub archived: bool,
+    /// The session's generated title (`None` until a title is generated).
+    /// Auto-generated only in this change — there is no rename affordance,
+    /// so `Some` always means "the naming pass wrote this". `#[serde(default)]`
+    /// so a pre-feature stored envelope / subagent envelope deserialises.
+    #[serde(default)]
+    pub title: Option<String>,
     /// The session's last known context usage (the `context_usage_update`
     /// frame's values — the provider's `input_tokens` vs the model's
     /// window), persisted on the `sessions` row on every frame so a

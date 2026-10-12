@@ -505,6 +505,12 @@ interface SessionsState {
   archiveSession: (sessionId: string) => Promise<void>;
   /** Unarchive a session (`archivedSessions` → `historySessions` + `set_session_archived`). */
   unarchiveSession: (sessionId: string) => Promise<void>;
+  /**
+   * Record a generated title on the session's row (the `session-titled`
+   * push): `title` is set on whichever of the three lists holds the id, so
+   * the sidebar rows and the side pane re-label without a refetch.
+   */
+  titleSession: (sessionId: string, title: string) => void;
   activeSessionId: string | null;
   /**
    * The selected Space's path — the top tabs' state (a Space is a tab,
@@ -922,6 +928,32 @@ export const useSessions = create<SessionsState>((set, get) => ({
       };
     });
   },
+
+  titleSession: (sessionId, title) =>
+    set((state) => {
+      // The id lives in ONE of the three lists — `sessions` for a live
+      // session (the push is the title's ONLY source there: the boot
+      // `list_sessions` fetch predates it), `historySessions` /
+      // `archivedSessions` for a stored one (its row carries the title the
+      // database already has, and a later write must not leave a stale copy
+      // behind). A RESUMED archived session sits in TWO of them at once (the
+      // sticky membership), so EVERY list that holds the id is rewritten —
+      // its two copies may not disagree. A list without the id keeps its
+      // SAME array (no re-render for its rows), and an id in NONE of them (a
+      // session deleted while the title was in flight) is a no-op: no ghost
+      // row is appended.
+      const renamed = (rows: SessionInfo[]) =>
+        rows.some((s) => s.sessionId === sessionId)
+          ? rows.map((s) =>
+              s.sessionId === sessionId ? { ...s, title } : s,
+            )
+          : rows;
+      return {
+        sessions: renamed(state.sessions),
+        historySessions: renamed(state.historySessions),
+        archivedSessions: renamed(state.archivedSessions),
+      };
+    }),
 
   openSession: (sessionId) => {
     // The opened session's space (matched by `cwd` — live, stored, OR

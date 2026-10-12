@@ -48,6 +48,15 @@ impl SessionManager {
                 if matches!(e, RpcEvent::agent_settled) {
                     self.resolve_turn(session_id);
                 }
+                // Session naming: `agent_end` is the turn's last frame
+                // (`agent_settled` is the settle signal the turn resolver
+                // waits on). MAIN sessions only — a subagent's transcript is
+                // hidden (`is_subagent` rows are filtered out of
+                // `list_sessions`). The hook guards and spawns: the model
+                // call never blocks this router.
+                if !is_subagent && matches!(e, RpcEvent::agent_end { .. }) {
+                    self.maybe_name_session(session_id);
+                }
             }
             WorkerInboundEvent::PermissionRequest { id, payload } => {
                 // Re-emit as the `permission-request` Tauri event with the payload
@@ -99,8 +108,9 @@ impl SessionManager {
     /// `session-stalled` event + the `stalled_info` query), perform the pending-modal
     /// cleanup (the `interactive-request-close` frames — a crashed session's open
     /// permission / interactive modals are dismissed, no stuck modal alongside the
-    /// banner), and resolve the in-flight `send_prompt` (the crash outcome — the
-    /// composer unlocks; it never stays locked forever).
+    /// banner), resolve the in-flight `send_prompt` (the crash outcome — the
+    /// composer unlocks; it never stays locked forever), and drop the session's
+    /// NAMING entry (a resumed session re-uses the same id — see the site).
     pub fn handle_crash(&self, session_id: &str, code: Option<i32>) {
         let at = now_ms();
         let crash_log = find_newest_crash_log();
@@ -118,6 +128,16 @@ impl SessionManager {
         // incomplete; `Cancelled` unlocks the composer. The `StopReason` has no error
         // variant — the `session-stalled` event is the frontend's crash signal).
         self.resolve_turn_forced(session_id, StopReason::Cancelled);
+        // Drop the session's naming entry (a crash tears down the modals but
+        // NOT the per-session maps). A crashed-then-resumed session re-uses
+        // the SAME id, so a stale entry survives into the resumed session:
+        // a stale `in_flight` would block naming for ever and a stale
+        // `fails == MAX_FAILURES` would silently kill it. (`config_state`
+        // has the same pre-existing leak — out of scope here.)
+        self.naming
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(session_id);
         // Emit the `session-stalled` event (the frontend's banner — the `StalledInfo`
         // shape: `at` + `crash_log`).
         if let Some(sink) = self.sink.get() {
@@ -187,7 +207,12 @@ impl SessionManager {
     /// clean self-exit), resolve the in-flight `pending_turn` → `Cancelled`, perform
     /// the pending-modal cleanup (the `interactive-request-close` frames), and remove
     /// the live-session bookkeeping.
-    fn on_session_exited_expected(&self, session_id: &str) {
+    ///
+    /// `pub(crate)`: the ONE close / clean-self-exit teardown — `close_session`
+    /// only marks the close kind and `detach`s, reaching this site through the
+    /// Worker's EXPECTED `Exited` — so it is also what a test asserts the
+    /// per-session cleanup against.
+    pub(crate) fn on_session_exited_expected(&self, session_id: &str) {
         let (reason, exists) = {
             let live = self.live.lock().unwrap_or_else(|p| p.into_inner());
             let Some(live) = live.get(session_id) else {
@@ -221,6 +246,13 @@ impl SessionManager {
             live.remove(session_id);
         }
         self.config_state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(session_id);
+        // The naming entry goes with it (an in-flight title request of a
+        // closing session must not leave the map holding state for a session
+        // that is over — its `InFlightClaim` then finds no entry to clear).
+        self.naming
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(session_id);

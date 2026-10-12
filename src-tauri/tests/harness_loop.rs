@@ -179,6 +179,7 @@ async fn build_harness_with_settings(
         capabilities: serde_json::json!({}),
         config_options: None,
         archived: false,
+        title: None,
         context_usage: None,
         is_subagent: false,
     })

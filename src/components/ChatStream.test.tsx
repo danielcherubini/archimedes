@@ -50,6 +50,9 @@ const SETTINGS_FIXTURE: AppSettings = {
   spinnerStyle: null,
   filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
   mcpMentionsEnabled: false,
+  sessionNamingEnabled: true,
+  sessionNamingModel: null,
+  sessionNamingReasoning: null,
 };
 
 /**

@@ -1,6 +1,8 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import App from "./App";
+import { listenSessionTitled } from "./lib/tauri";
+import { useSessions } from "./store/sessions";
 import { getLeftPaneCollapsed, LEFT_PANE_RAIL, setLeftPaneCollapsed } from "./lib/leftPaneState";
 import { getSidePaneCollapsed, setSidePaneCollapsed } from "./lib/sidePaneState";
 
@@ -59,6 +61,9 @@ vi.mock("./lib/tauri", async () => {
       spinnerStyle: null,
       filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
       mcpMentionsEnabled: false,
+      sessionNamingEnabled: true,
+      sessionNamingModel: null,
+      sessionNamingReasoning: null,
     }),
     saveSettings: vi.fn().mockResolvedValue(undefined),
     listModels: vi.fn().mockResolvedValue([]),
@@ -66,6 +71,11 @@ vi.mock("./lib/tauri", async () => {
     // Every `listen*` registration resolves a no-op unlisten.
     listenSessionUpdate: vi.fn().mockResolvedValue(() => {}),
     listenSessionClosed: vi.fn().mockResolvedValue(() => {}),
+    // The stalled + titled pushes: un-mocked, either export would reach the
+    // REAL `listen()` in jsdom (no `window.__TAURI_INTERNALS__`), so the
+    // registration rejects instead of resolving its no-op unlisten.
+    listenSessionStalled: vi.fn().mockResolvedValue(() => {}),
+    listenSessionTitled: vi.fn().mockResolvedValue(() => {}),
     listenPermissionRequest: vi.fn().mockResolvedValue(() => {}),
     listenInteractiveRequest: vi.fn().mockResolvedValue(() => {}),
     listenInteractiveRequestClose: vi.fn().mockResolvedValue(() => {}),
@@ -277,5 +287,56 @@ describe("App (the gear icon + settings view swap)", () => {
     expect(screen.getByText("General")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Back" }));
     expect(screen.getByText("Sessions")).toBeTruthy();
+  });
+});
+
+describe("App (the `session-titled` listener)", () => {
+  // The store is module-scoped, and the boot fetch only fills the STORED
+  // lists — so the live row this test seeds must be cleaned up or it leaks
+  // into the next test in this file.
+  const clearStore = () =>
+    useSessions.setState({
+      sessions: [],
+      historySessions: [],
+      archivedSessions: [],
+      spaces: [],
+      activeSessionId: null,
+      activeSpacePath: null,
+      messages: {},
+    });
+  beforeEach(clearStore);
+  afterEach(clearStore);
+
+  it("writes a pushed title into the store the moment `session-titled` lands (no refetch)", () => {
+    // A live session, pre-naming (`title: null` — the shape the backend
+    // writes before the naming pass runs).
+    useSessions.setState({
+      sessions: [
+        {
+          sessionId: "s1",
+          cwd: "/tmp/alpha",
+          capabilities: {},
+          archived: false,
+          title: null,
+        },
+      ],
+      activeSessionId: "s1",
+    });
+    render(<App />);
+    // App registers the listener once on mount; the mock holds the callback
+    // it handed `listen()`, i.e. exactly what the webview invokes per event.
+    // The LAST registration is this render's (the file never clears mocks, so
+    // earlier tests' renders pushed theirs first).
+    const calls = vi.mocked(listenSessionTitled).mock.calls;
+    const onTitled = calls[calls.length - 1][0];
+    act(() => {
+      onTitled({ sessionId: "s1", title: "Porting the session namer" });
+    });
+    // The LIVE row is what the sidebar and the side pane read, so the label
+    // flips here — no `list_sessions` refetch is involved (that fetch ran
+    // once at boot, before this title existed).
+    expect(useSessions.getState().sessions[0].title).toBe(
+      "Porting the session namer",
+    );
   });
 });

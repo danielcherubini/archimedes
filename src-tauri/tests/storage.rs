@@ -26,6 +26,7 @@ fn sample_session() -> SessionInfo {
         }),
         config_options: None,
         archived: false,
+        title: None,
         context_usage: None,
         is_subagent: false,
     }
@@ -382,6 +383,7 @@ fn open_backfills_space_rows_from_existing_sessions() {
         }),
         config_options: None,
         archived: false,
+        title: None,
         context_usage: None,
         is_subagent: false,
     };

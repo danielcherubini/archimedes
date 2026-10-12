@@ -116,7 +116,7 @@ function PolicyRow({
   );
 }
 
-/** The General section: trust default / default model / thinking level / tools. */
+/** The General section: trust default / default model / thinking level / session naming / tools. */
 export default function GeneralSection({
   settings,
   models,
@@ -294,6 +294,54 @@ export default function GeneralSection({
               )}
             </SelectContent>
           </Select>
+        }
+      />
+      {/* Session naming (the port of pi's `/archimedes` naming controls):
+          the master switch, then the model the title request uses. The
+          copy carries the once-only rule — naming NEVER overwrites a name
+          a session already has, so turning it back on cannot relabel an
+          existing session. `sessionNamingReasoning` stays JSON-only by
+          decision (pi keeps it JSON-only too). */}
+      <SettingsRow
+        label="Name sessions automatically"
+        description="A short model-written name for each session after its first exchange. A session keeps the name it already has — naming never overwrites one."
+        control={
+          <Switch
+            checked={settings.sessionNamingEnabled}
+            aria-label="Name sessions automatically"
+            onCheckedChange={(checked) =>
+              onSave({ sessionNamingEnabled: checked })
+            }
+          />
+        }
+      />
+      <SettingsRow
+        label="Session naming model"
+        description="Model used to write session names (the session's own model when unset)"
+        control={
+          // The SHARED `ModelPicker` again (the "Default model" row's
+          // shape): the same catalog derivation + the unset row, whose
+          // value `""` saves `sessionNamingModel: null` (= the session's
+          // own model). The `placeholder` repeats that row's name because
+          // an unset picker renders the PLACEHOLDER, not the matched item
+          // (`ModelPicker` short-circuits on `value === ""`) — without it
+          // the trigger would be an empty box. `label` is the trigger's
+          // accessible name (the component sets `aria-label={label}`).
+          <ModelPicker
+            label="Session naming model"
+            value={settings.sessionNamingModel ?? ""}
+            placeholder="Session's own model"
+            items={[
+              ...modelItemsFromCatalog(
+                models.map((model) => `${model.provider}/${model.id}`),
+                settings.providers,
+              ),
+              { value: "", name: "Session's own model" },
+            ]}
+            onSelect={(value) =>
+              onSave({ sessionNamingModel: value === "" ? null : value })
+            }
+          />
         }
       />
       {/* The enabled-tools list (the harness-level tool filter — `[]` = all

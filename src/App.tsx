@@ -6,6 +6,7 @@ import {
   listenPermissionRequest,
   listenSessionClosed,
   listenSessionStalled,
+  listenSessionTitled,
   listenSessionUpdate,
   listenSubagentClosed,
   listenSubagentSessionStarted,
@@ -76,6 +77,15 @@ function App() {
         useSessions
           .getState()
           .markStalled(payload.sessionId, payload.at, payload.crashLog),
+      ),
+    );
+    // A generated session title (the naming pass): the label rides the
+    // PUSH, because `listSessions` is fetched ONCE at boot (below) and
+    // nothing re-fetches it — a title minted in this run would otherwise
+    // never reach the sidebar / side pane.
+    unlistenPromises.push(
+      listenSessionTitled(({ sessionId, title }) =>
+        useSessions.getState().titleSession(sessionId, title),
       ),
     );
     unlistenPromises.push(

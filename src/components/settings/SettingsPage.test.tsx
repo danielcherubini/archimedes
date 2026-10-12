@@ -52,6 +52,9 @@ const baseSettings: AppSettings = {
   spinnerStyle: null,
   filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
   mcpMentionsEnabled: false,
+  sessionNamingEnabled: true,
+  sessionNamingModel: null,
+  sessionNamingReasoning: null,
 };
 
 vi.mock("@/lib/version", () => ({
@@ -97,6 +100,9 @@ vi.mock("../../lib/tauri", async () => {
       spinnerStyle: null,
       filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
       mcpMentionsEnabled: false,
+      sessionNamingEnabled: true,
+      sessionNamingModel: null,
+      sessionNamingReasoning: null,
     }),
     // The discovered agent definitions (ADR 0023 — the Subagents section's
     // data source): empty by default (the tests override per case).
@@ -1074,6 +1080,170 @@ describe("SettingsPage (the # MCP-mention toggle)", () => {
     expect(text).toContain("#include");
     expect(text).toContain("#123");
     expect(text).toContain("off by default");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The session-naming rows (the port of pi's `/archimedes` naming controls):
+// the master switch + the model the title request uses. The thinking level
+// stays JSON-only by decision, so there is NO row for it. Both rows live in
+// General, next to the model rows (a naming model is a model setting).
+// ---------------------------------------------------------------------------
+
+describe("SettingsPage (the session-naming rows)", () => {
+  it("the naming switch renders from the setting (on by default, off when stored)", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    const toggle = await screen.findByRole("switch", {
+      name: "Name sessions automatically",
+    });
+    // Naming ships ON (pi does), so a fresh document reads as enabled — and
+    // opening the page saves nothing.
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    expect(saveSettings).not.toHaveBeenCalled();
+    cleanup();
+
+    vi.mocked(getSettings).mockResolvedValueOnce({
+      ...baseSettings,
+      sessionNamingEnabled: false,
+    });
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    expect(
+      screen
+        .getByRole("switch", { name: "Name sessions automatically" })
+        .getAttribute("aria-checked"),
+    ).toBe("false");
+  });
+
+  it("flipping the naming switch saves the complete document with the flag", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    fireEvent.click(
+      await screen.findByRole("switch", {
+        name: "Name sessions automatically",
+      }),
+    );
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(1));
+    const saved = vi.mocked(saveSettings).mock.calls[0][0] as AppSettings;
+    // ONE save of the COMPLETE document with the FLIPPED flag (naming ships
+    // on, so the first click turns it OFF — the case Task 4's guard honours:
+    // off must persist as `false`, not vanish as `null`/absent).
+    expect(saved.sessionNamingEnabled).toBe(false);
+    expect(saved.theme).toBe("dark");
+    expect(saved.providers).toHaveLength(1);
+    expect(saved.filePolicy).toEqual(baseSettings.filePolicy);
+    expect(saved.font).toEqual(baseSettings.font);
+    // The switch reflects the saved document (optimistic state = what was written).
+    expect(
+      screen
+        .getByRole("switch", { name: "Name sessions automatically" })
+        .getAttribute("aria-checked"),
+    ).toBe("false");
+  });
+
+  it("the naming switch's description says a session keeps the name it already has", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    const toggle = await screen.findByRole("switch", {
+      name: "Name sessions automatically",
+    });
+    const row = toggle.closest(".border-t");
+    expect(row).toBeTruthy();
+    const text = row!.textContent ?? "";
+    // The copy states WHEN the name is written and the once-only rule — a
+    // user must learn that naming never overwrites a name (the re-title
+    // fear) without opening a doc.
+    expect(text).toContain("first exchange");
+    expect(text).toContain("keeps the name it already has");
+  });
+
+  it("the naming model picker writes the composed key and null for its unset row", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    // The model pickers are DIALOGS (the shared `ModelPicker`): the trigger
+    // is a button labelled by its `label` prop (the component sets
+    // `aria-label={label}` on its own trigger), not a combobox.
+    const trigger = await screen.findByRole("button", {
+      name: "Session naming model",
+    });
+    fireEvent.click(trigger);
+    // The catalog entry (the BARE model id + the provider's display-name
+    // cue) + the unset row; the row is picked scoped to the dialog because
+    // its text is ALSO the trigger's readout.
+    const dialog = within(
+      document.querySelector("[data-slot=dialog-content]") as HTMLElement,
+    );
+    expect(dialog.getByText(/Qwen3\.8/)).toBeTruthy();
+    expect(dialog.getByText("Session's own model")).toBeTruthy();
+    // Choosing the model saves the COMPOSED key (the row's text is the bare
+    // id, the value is `provider/id`).
+    fireEvent.click(dialog.getByText(/Qwen3\.8/));
+    await waitFor(() =>
+      expect(saveSettings).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sessionNamingModel: "tama/Qwen3.8" }),
+      ),
+    );
+    // Choosing the unset row saves `sessionNamingModel: null` (the session's
+    // own model). Re-capture the dialog content — Radix REMOUNTS it on the
+    // second open (the reference captured above is detached and inert).
+    fireEvent.click(trigger);
+    const reopenedDialog = within(
+      document.querySelector("[data-slot=dialog-content]") as HTMLElement,
+    );
+    fireEvent.click(reopenedDialog.getByText("Session's own model"));
+    await waitFor(() =>
+      expect(saveSettings).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sessionNamingModel: null }),
+      ),
+    );
+  });
+
+  it("the naming model trigger shows the stored model, and the unset row's name when unset", async () => {
+    // A fresh document (`null`): the trigger reads the UNSET row's name —
+    // never an empty box, which would leave the user without a readout.
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    expect(
+      screen
+        .getByRole("button", { name: "Session naming model" })
+        .textContent?.includes("Session's own model"),
+    ).toBe(true);
+    cleanup();
+
+    // A stored override: the trigger shows that model (the bare id + the
+    // provider cue), NOT the unset name.
+    vi.mocked(getSettings).mockResolvedValueOnce({
+      ...baseSettings,
+      sessionNamingModel: "tama/Qwen3.8",
+    });
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    const trigger = screen.getByRole("button", {
+      name: "Session naming model",
+    });
+    expect(trigger.textContent).toContain("Qwen3.8");
+    expect(trigger.textContent).not.toContain("Session's own model");
+  });
+
+  it("the naming rows sit with the model rows, above the enabled-tools list", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    // The layout is the plan's: the naming model belongs beside the model
+    // rows, and the enabled-tools list stays last in the section.
+    const rows = document.querySelectorAll(".border-t");
+    const index = (label: string): number =>
+      [...rows].findIndex((r) =>
+        [...r.querySelectorAll("div")].some((d) => d.textContent === label),
+      );
+    expect(index("Default thinking level")).toBeGreaterThanOrEqual(0);
+    expect(index("Default thinking level")).toBeLessThan(
+      index("Name sessions automatically"),
+    );
+    expect(index("Name sessions automatically")).toBeLessThan(
+      index("Session naming model"),
+    );
+    expect(index("Session naming model")).toBeLessThan(index("Enabled tools"));
   });
 });
 

@@ -33,6 +33,9 @@ vi.mock("../lib/tauri", async () => {
       subagentModels: {},
       filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
       mcpMentionsEnabled: false,
+      sessionNamingEnabled: true,
+      sessionNamingModel: null,
+      sessionNamingReasoning: null,
     }),
     startSession: vi.fn().mockResolvedValue({
       sessionId: "new1",
@@ -917,5 +920,107 @@ describe("SpacesList (archive, ADR 0016)", () => {
     // became unopenable (no keyboard shortcut exists). Hence arithmetic:
     //   24px button (`size-6`) + 8px inset/padding + 8px clear of the edge.
     expect(LEFT_PANE_RAIL).toBeGreaterThanOrEqual(24 + 8 + 8);
+  });
+});
+
+describe("SpacesList (the generated session title)", () => {
+  /** Seed ONE archived session with a generated title and NO transcript —
+   * the title is then the row's only label source (the message derivation
+   * has nothing to fall back to but the space name). */
+  function seedArchivedTitled(title: string): void {
+    useSessions.setState({
+      sessions: [],
+      historySessions: [],
+      archivedSessions: [
+        {
+          sessionId: "a1",
+          cwd: "/tmp/alpha",
+          capabilities: {},
+          archived: true,
+          title,
+        },
+      ],
+      messages: {},
+    });
+  }
+
+  it("labels a titled STORED row by its title, and an untitled row by its first message", () => {
+    // `h1` gets a generated title; `s1` carries the backend's pre-naming
+    // `title: null`, which must keep the OLD message-derived label.
+    useSessions.setState({
+      sessions: [
+        {
+          sessionId: "s1",
+          cwd: "/tmp/alpha",
+          capabilities: {},
+          archived: false,
+          title: null,
+        },
+      ],
+      historySessions: [
+        {
+          sessionId: "h1",
+          cwd: "/tmp/alpha",
+          capabilities: {},
+          archived: false,
+          title: "Rewriting the parser",
+        },
+        { sessionId: "h2", cwd: "/tmp/beta", capabilities: {}, archived: false },
+      ],
+    });
+    render(<SpacesList />);
+    // The titled row shows the title INSTEAD of its first message.
+    expect(screen.getByText("Rewriting the parser")).toBeTruthy();
+    expect(screen.queryByText("Refactor the parser")).toBeNull();
+    // …and the untitled row is labelled exactly as before.
+    expect(screen.getByText("Fix the login bug")).toBeTruthy();
+  });
+
+  it("labels a titled LIVE row by its title (the row reads `sessions`, not only the stored lists)", () => {
+    // The live case is the one the `session-titled` push feeds: the row's
+    // `SessionInfo` is the entry in `sessions`, which the push rewrites.
+    useSessions.setState({
+      sessions: [
+        {
+          sessionId: "s1",
+          cwd: "/tmp/alpha",
+          capabilities: {},
+          archived: false,
+          title: "Porting the session namer",
+        },
+      ],
+    });
+    render(<SpacesList />);
+    expect(screen.getByText("Porting the session namer")).toBeTruthy();
+    expect(screen.queryByText("Fix the login bug")).toBeNull();
+  });
+
+  it("shows the titled archived row as `{title} · {spaceName}` (the space cue stays for a GENERATED title)", () => {
+    // The suffix rule is about the SPACE CUE, not about the title's origin:
+    // the row sits inside the Archived section, where which Space it belongs
+    // to is the one thing the section itself does not say. A generated title
+    // is never the space name, so the cue still shows.
+    seedArchivedTitled("Archiving the log rotation");
+    render(<SpacesList />);
+    fireEvent.click(screen.getByText("Archived"));
+    expect(screen.getByText(/^Archiving the log rotation/).textContent).toBe(
+      "Archiving the log rotation · alpha",
+    );
+  });
+
+  it("names the delete-confirmation dialog by the generated title", () => {
+    // The dialog's title is the SAME derivation as the row's, so the user
+    // confirms the row they just clicked.
+    seedArchivedTitled("Rotating the archived logs");
+    render(<SpacesList />);
+    fireEvent.click(screen.getByText("Archived"));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Delete Rotating the archived logs" }),
+    );
+    // Scoped to the dialog: the ROW renders the same title text, and
+    // `getByText` would otherwise match both and throw on ambiguity.
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText("Delete session?")).toBeTruthy();
+    expect(within(dialog).getByText("Rotating the archived logs")).toBeTruthy();
   });
 });

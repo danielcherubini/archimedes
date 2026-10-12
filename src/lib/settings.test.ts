@@ -62,6 +62,9 @@ function settingsFixture(overrides: Partial<AppSettings> = {}): AppSettings {
     spinnerStyle: null,
     filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
     mcpMentionsEnabled: false,
+    sessionNamingEnabled: true,
+    sessionNamingModel: null,
+    sessionNamingReasoning: null,
     ...overrides,
   };
 }
@@ -146,6 +149,9 @@ describe("loadAndApplySettings", () => {
       spinnerStyle: null,
       filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
       mcpMentionsEnabled: false,
+      sessionNamingEnabled: true,
+      sessionNamingModel: null,
+      sessionNamingReasoning: null,
     });
     stubMatchMedia(true); // OS is dark → "system" resolves to zai-dark
     const settings = await loadAndApplySettings();

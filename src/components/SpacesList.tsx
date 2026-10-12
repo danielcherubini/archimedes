@@ -66,10 +66,18 @@ function relativeTimeFor(
 }
 
 /**
- * A session row's title: the first user message truncated to ~80 chars
- * (the same derivation as the center header), else the space's name.
+ * A session row's title: the session's GENERATED title (`SessionInfo.title`)
+ * when it has one, else the first user message truncated to ~80 chars (the
+ * same derivation as the side pane's title), else the space's name.
  */
-function titleFor(messages: Message[] | undefined, spaceName: string): string {
+function titleFor(
+  messages: Message[] | undefined,
+  spaceName: string,
+  title?: string | null,
+): string {
+  // `""` is no title (the backend never writes one; a generated title is
+  // cleaned to a non-empty string or not written at all).
+  if (title !== null && title !== undefined && title !== "") return title;
   const firstUser = messages?.find((m) => m.kind === "user");
   if (!firstUser || firstUser.text === "") return spaceName;
   return firstUser.text.length > 80 ? firstUser.text.slice(0, 80) : firstUser.text;
@@ -159,6 +167,9 @@ export default function SpacesList({
     ? titleFor(
         deleteTargetMessages,
         spaceNameFor(deleteTarget.cwd, spaces),
+        // The target IS a `SessionInfo`, so its title is already in hand —
+        // the SAME label the row the user clicked shows.
+        deleteTarget.title,
       )
     : "";
 
@@ -518,12 +529,29 @@ function SessionRow({
   const messages = useSessions((s) => s.messages[sessionId]);
   const isLive = useSessions((s) => s.sessions.some((x) => x.sessionId === sessionId));
   const archiveSession = useSessions((s) => s.archiveSession);
+  // The row's generated title, read by id: `SessionRow` is given an id (by
+  // design — its parent holds `liveSessionId` / `storedSessionIds`, never the
+  // rows), so no `SessionInfo` is threaded through `SpaceView` for it. The
+  // selector returns a PRIMITIVE over the three-list walk (a `sessions` /
+  // history / archived row): zustand v5 re-runs a selector that yields a
+  // fresh OBJECT on every snapshot read, so `{ … }` here would re-render the
+  // row forever — and it is the SAME walk the `cwd` lookups use.
+  const storedTitle = useSessions((s) => {
+    const titleOf = (rows: SessionInfo[]) =>
+      rows.find((x) => x.sessionId === sessionId)?.title;
+    return (
+      titleOf(s.sessions) ??
+      titleOf(s.historySessions) ??
+      titleOf(s.archivedSessions) ??
+      null
+    );
+  });
   // The row's status (spinner / "Waiting" pill) comes from the SAME rule the
   // collapsed rail marks with — see `useSessionStatus`.
   const status = useSessionStatus(sessionId);
   const waiting = status === "waiting";
   const time = relativeTimeFor(messages);
-  const title = titleFor(messages, spaceName);
+  const title = titleFor(messages, spaceName, storedTitle);
 
   const rightSlot = waiting ? (
     <span className="rounded-full bg-success/14 px-2 text-ui-sm font-medium text-success">
@@ -668,13 +696,15 @@ function ArchivedSection({
 /**
  * One archived-session row (the `SessionRow` visual pattern): 16px
  * leading slot (empty — archived sessions are NEVER live, so no
- * spinner), the title + a subtle `· {spaceName}` suffix ONLY when the
- * title is message-derived (skipped when the title IS the space name —
- * avoid "alpha · alpha"), and the relative time (empty slot when the
- * transcript was not loaded this boot). Hover: Unarchive (`ArchiveX`,
- * reversible — no confirm) + Delete (`Trash2`, the only destructive
- * action — confirm dialog). Click opens the transcript (identical to a
- * stored row — the first send resumes it).
+ * spinner), the title + a subtle `· {spaceName}` suffix ONLY when the title
+ * is message-derived OR generated (skipped when the title IS the space name
+ * — avoid "alpha · alpha"; a GENERATED title is never the space name, so the
+ * cue still shows, which is exactly what this section needs most: it is
+ * cross-space, so the Space is the one thing the row cannot omit), and the
+ * relative time (empty slot when the transcript was not loaded this boot).
+ * Hover: Unarchive (`ArchiveX`, reversible — no confirm) + Delete (`Trash2`,
+ * the only destructive action — confirm dialog). Click opens the transcript
+ * (identical to a stored row — the first send resumes it).
  */
 function ArchivedSessionRow({
   session,
@@ -691,7 +721,7 @@ function ArchivedSessionRow({
   const spaces = useSessions((s) => s.spaces);
   const unarchiveSession = useSessions((s) => s.unarchiveSession);
   const spaceName = spaceNameFor(session.cwd, spaces);
-  const title = titleFor(messages, spaceName);
+  const title = titleFor(messages, spaceName, session.title);
   const time = relativeTimeFor(messages);
   const showSuffix = title !== spaceName;
   return (

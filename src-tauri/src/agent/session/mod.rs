@@ -53,6 +53,10 @@ use crate::config::{load_settings, write_settings};
 use crate::storage::Db;
 use crate::types::{ContextUsage, SessionInfo};
 
+// The session-naming pass (the `agent_end` hook): the primitives AND the
+// wiring live in the child module, which sees this module's private items
+// (`driver.db`, `sink`, `config_state`, `naming`) with no widening.
+mod naming;
 mod router;
 
 /// Why a session ended.
@@ -262,13 +266,17 @@ struct LiveWorkerSession {
 }
 
 /// The resume context (the `establish_worker_session` `resume` parameter —
-/// the stored `session_id` + the resolved `model` + the stored `thinkingLevel`
-/// + the desktop's `archived` flag (ADR 0016) + the stored `context_usage`).
+/// the stored `session_id`, the resolved `model`, the stored `thinkingLevel`,
+/// the desktop's `archived` flag (ADR 0016), the stored `title` (so a resumed
+/// session's label survives the round-trip) and the stored `context_usage`).
 struct ResumeCtx {
     session_id: String,
     model: Model,
     stored_level: Option<String>,
     archived: bool,
+    /// The stored title (`None` until the naming pass writes one) — carried
+    /// so a resumed session's label survives the close/resume round-trip.
+    title: Option<String>,
     context_usage: Option<ContextUsage>,
 }
 
@@ -457,6 +465,10 @@ pub struct SessionManager {
     /// field-for-field: `start` / `resume` initialize it, `set_config_option`
     /// updates it when a change is applied).
     config_state: Arc<StdMutex<HashMap<String, NativeConfigState>>>,
+    /// Per-session session-naming state (the naming pass runs on every
+    /// `agent_end`, so it needs to know "already running / given up"). The
+    /// entry is dropped with the session (`close_session` / the exit cleanup).
+    naming: Arc<StdMutex<HashMap<String, naming::NamingState>>>,
     /// The live, Worker-backed sessions (session_id → the coordinator state;
     /// replaces the main-session `LiveSession` / `driver.sessions` ownership).
     live: Arc<StdMutex<HashMap<String, LiveWorkerSession>>>,
@@ -497,6 +509,7 @@ impl SessionManager {
             sink: Arc::new(OnceLock::new()),
             persister: Arc::new(OnceLock::new()),
             config_state: Arc::new(StdMutex::new(HashMap::new())),
+            naming: Arc::new(StdMutex::new(HashMap::new())),
             live: Arc::new(StdMutex::new(HashMap::new())),
             stalled: Arc::new(StdMutex::new(HashMap::new())),
         }
@@ -782,7 +795,7 @@ impl SessionManager {
         // The stored row must exist (a native session is recorded at start —
         // `record_session`; a missing row is unresumable). KEEP THE WHOLE ROW:
         // the resume carries the desktop's `archived` flag (ADR 0016) + the
-        // stored `context_usage`.
+        // stored `title` + the stored `context_usage`.
         let row =
             db.session(session_id)
                 .ok()
@@ -816,6 +829,7 @@ impl SessionManager {
                 model,
                 stored_level,
                 archived: row.archived,
+                title: row.title,
                 context_usage,
             }),
             sink,
@@ -828,7 +842,9 @@ impl SessionManager {
     /// `start` mints a fresh UUID and starts with an empty transcript). Resolves
     /// the model + thinking level (the ADR 0015 chain), builds the `StartEnv`,
     /// `attach`es the Worker (a spawn failure → an error — NO in-process fallback),
-    /// records the session, and stores the per-session coordinator state.
+    /// records the session, and stores the per-session coordinator state. The
+    /// returned `SessionInfo` carries the stored `title` on a resume (`None` on
+    /// a fresh start — nothing has named it yet).
     #[allow(clippy::too_many_arguments)]
     async fn establish_worker_session(
         &self,
@@ -850,12 +866,13 @@ impl SessionManager {
         let catalog = self.effective_catalog(None).await;
         let settings = load_settings(&self.config_dir);
         let is_resume = resume.is_some();
-        let (session_id, model, stored_level, archived, context_usage) = match resume {
+        let (session_id, model, stored_level, archived, title, context_usage) = match resume {
             Some(ctx) => (
                 ctx.session_id,
                 ctx.model,
                 ctx.stored_level,
                 ctx.archived,
+                ctx.title,
                 ctx.context_usage,
             ),
             None => (
@@ -863,6 +880,7 @@ impl SessionManager {
                 resolve_native_model(&catalog, &settings.default_model)?,
                 None,
                 false,
+                None,
                 None,
             ),
         };
@@ -947,6 +965,10 @@ impl SessionManager {
                 env.thinking.as_deref(),
             ),
             archived,
+            // The stored title on a resume (the label survives the
+            // round-trip); `None` on a fresh start (the naming pass has not
+            // run yet).
+            title,
             context_usage,
             is_subagent: false,
         };
@@ -998,9 +1020,12 @@ impl SessionManager {
     /// the resolution chain, never a hard error) so a STORED session's
     /// composer selectors are populated (the frontend renders them
     /// disabled — a stored session can't receive `set_config_option`),
-    /// and `context_usage` read from the row's `context_usage_json` (the
-    /// last known usage — the frontend's store drops it on close, so the
-    /// row is the source of truth for the stored session's context bar).
+    /// `title` read straight from the row (`None` until the naming pass
+    /// writes one — the sidebar's label for a CLOSED session, whose live
+    /// `SessionInfo` is long gone), and `context_usage` read from the row's
+    /// `context_usage_json` (the last known usage — the frontend's store
+    /// drops it on close, so the row is the source of truth for the stored
+    /// session's context bar).
     pub async fn list_sessions(
         &self,
         include_archived: bool,
@@ -1041,6 +1066,10 @@ impl SessionManager {
                         synthesize_catalog_config_options(&catalog, m, thinking_level.as_deref())
                     }),
                     archived: row.archived,
+                    // The stored title (the naming pass's label) — the boot
+                    // fetch is the only source a CLOSED session's title has,
+                    // since the live store dropped it on close.
+                    title: row.title,
                     is_subagent: row.is_subagent,
                     context_usage: row
                         .context_usage_json
@@ -1769,8 +1798,11 @@ mod session_tests {
         assert_eq!(parsed.get_version_num(), 4, "suffix must be UUID v4");
     }
 
+    /// A recording `EventSink` (`{"event", "payload"}` per emit). The
+    /// sender is `pub(crate)` so a CHILD module's tests (`session::naming`)
+    /// can construct one and assert on what it received.
     pub struct TestSink {
-        tx: mpsc::UnboundedSender<Value>,
+        pub(crate) tx: mpsc::UnboundedSender<Value>,
     }
 
     impl EventSink for TestSink {
@@ -1787,7 +1819,8 @@ mod session_tests {
         dir
     }
 
-    fn open_db(dir: &Path) -> std::sync::Arc<Db> {
+    /// A `Db` in the temp dir (shared with `session::naming`'s tests).
+    pub(crate) fn open_db(dir: &Path) -> std::sync::Arc<Db> {
         std::sync::Arc::new(Db::open(&dir.join("archimedes.db")).expect("db should open"))
     }
 
@@ -1832,6 +1865,53 @@ mod session_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The title round-trip over IPC: a FRESH start carries `None` (nothing
+    /// has named it yet), and a RESUME carries the stored title (the naming
+    /// pass wrote it on an earlier turn — the resumed session's label must
+    /// survive the close/resume round-trip) while the resume's
+    /// `record_session` re-record did NOT clear it.
+    #[tokio::test]
+    async fn native_resume_carries_the_stored_title() {
+        let dir = temp_config_dir();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        let (manager, _wm, db) = build_worker_manager(&dir, native_test_catalog(), &sink);
+
+        let info = manager
+            .start_session(dir.clone(), &sink)
+            .await
+            .expect("the native session started");
+        assert_eq!(
+            info.title, None,
+            "a fresh session has no title until the naming pass writes one"
+        );
+        db.set_session_title(&info.session_id, "Fix the login redirect")
+            .expect("set_session_title should succeed");
+
+        let resumed = manager
+            .resume_session(&info.session_id, dir.clone(), &sink)
+            .await
+            .expect("the native resume succeeded");
+        assert_eq!(resumed.session_id, info.session_id);
+        assert_eq!(
+            resumed.title.as_deref(),
+            Some("Fix the login redirect"),
+            "the native resume carries the stored title"
+        );
+        let row = db
+            .session(&info.session_id)
+            .expect("session should work")
+            .expect("the row exists");
+        assert_eq!(
+            row.title.as_deref(),
+            Some("Fix the login redirect"),
+            "the resume's re-record did not clear the stored title"
+        );
+
+        let _ = manager.close_session(&info.session_id).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// (ADR 0016) `SessionInfo` round-trips the `archived` flag (a
     /// single-word key — the `camelCase` rename leaves it as `archived`).
     #[test]
@@ -1842,6 +1922,7 @@ mod session_tests {
             capabilities: serde_json::json!({ "loadSession": true }),
             config_options: None,
             archived: true,
+            title: None,
             context_usage: None,
             is_subagent: false,
         };
@@ -2002,7 +2083,7 @@ mod session_tests {
 
     /// Write a `settings.json` with arbitrary JSON (the camelCase wire
     /// shape — absent keys parse to the defaults).
-    fn write_settings_json(dir: &Path, settings: serde_json::Value) {
+    pub(crate) fn write_settings_json(dir: &Path, settings: serde_json::Value) {
         std::fs::write(
             dir.join("settings.json"),
             serde_json::to_string_pretty(&settings).unwrap(),
@@ -2012,7 +2093,7 @@ mod session_tests {
 
     /// A `Model` with the given `thinking_levels` (`base_url` EMPTY so
     /// `refresh_model_metadata` is a no-op — no network).
-    fn level_test_model(provider: &str, id: &str, levels: &[&str]) -> Model {
+    pub(crate) fn level_test_model(provider: &str, id: &str, levels: &[&str]) -> Model {
         Model {
             id: id.to_string(),
             provider: provider.to_string(),
@@ -2396,6 +2477,7 @@ mod session_tests {
             }),
             config_options: None,
             archived: false,
+            title: None,
             context_usage: None,
             is_subagent: false,
         })
@@ -2448,6 +2530,7 @@ mod session_tests {
             }),
             config_options: None,
             archived: false,
+            title: None,
             context_usage: None,
             is_subagent: false,
         })
@@ -2495,6 +2578,67 @@ mod session_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `list_sessions` carries the stored `title` (the naming pass's
+    /// generated label — the sidebar renders it), and a session with no
+    /// title yet carries `None` (NOT the empty string: the frontend renders
+    /// the fallback label from the absence).
+    #[tokio::test]
+    async fn list_sessions_carries_the_stored_title() {
+        let catalog = ModelCatalog {
+            models: vec![level_test_model(
+                "tama",
+                "m1",
+                &["off", "low", "high", "xhigh"],
+            )],
+            default_model: Some("tama/m1".to_string()),
+            compaction: crate::agent::harness::catalog::CompactionConfig::default(),
+        };
+        let dir = temp_config_dir();
+        let db = open_db(&dir);
+        let mut manager = SessionManager::new(dir.clone());
+        manager.attach_db(db.clone());
+        manager.set_catalog(catalog);
+        for id in ["nat-titled-1", "nat-untitled-2"] {
+            db.record_session(&SessionInfo {
+                session_id: id.to_string(),
+                cwd: dir.clone(),
+                capabilities: json!({
+                    "native": true,
+                    "model": "tama/m1",
+                    "loadSession": true,
+                }),
+                config_options: None,
+                archived: false,
+                title: None,
+                context_usage: None,
+                is_subagent: false,
+            })
+            .expect("record_session should succeed");
+        }
+        // Only ONE of them is titled (the naming pass ran for that session).
+        db.set_session_title("nat-titled-1", "Rename the persist seam")
+            .expect("set_session_title should succeed");
+        let rows = manager
+            .list_sessions(true)
+            .await
+            .expect("list_sessions should work");
+        assert_eq!(rows.len(), 2, "both stored rows are listed");
+        let by_id: std::collections::HashMap<&str, Option<&str>> = rows
+            .iter()
+            .map(|r| (r.session_id.as_str(), r.title.as_deref()))
+            .collect();
+        assert_eq!(
+            by_id["nat-titled-1"],
+            Some("Rename the persist seam"),
+            "the stored title crosses the IPC boundary"
+        );
+        assert_eq!(
+            by_id["nat-untitled-2"], None,
+            "an untitled stored row carries None"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A resume carries the stored `context_usage` (the last known before
     /// the close — the `load_transcript` re-estimate's first frame
     /// refreshes it after the resume).
@@ -2523,6 +2667,7 @@ mod session_tests {
             }),
             config_options: None,
             archived: false,
+            title: None,
             context_usage: None,
             is_subagent: false,
         })

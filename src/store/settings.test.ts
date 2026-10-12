@@ -38,6 +38,9 @@ const FULL_SETTINGS: AppSettings = {
   spinnerStyle: null,
   filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
   mcpMentionsEnabled: false,
+  sessionNamingEnabled: true,
+  sessionNamingModel: null,
+  sessionNamingReasoning: null,
 };
 
 describe("useSettings store", () => {

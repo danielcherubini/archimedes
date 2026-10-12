@@ -55,6 +55,8 @@ export interface SessionInfo {
   configOptions?: SessionConfigOption[];
   /** The desktop's archived flag (ADR 0016): `true` hides the session from its Space group into the Archived section (the transcript is kept). Always present over IPC. */
   archived: boolean;
+  /** The session's generated title (`null`/`undefined` until the naming pass writes one). Auto-generated only — there is no rename affordance yet. */
+  title?: string | null;
   /** The session's last known context usage (the `context_usage_update` frame's values — the provider's `input_tokens` vs the model's window). Persisted on the `sessions` row on every frame, so a CLOSED session's context survives (the store drops the entry on close — the row is the source of truth for the stored session's context bar). `undefined` until the first frame. */
   contextUsage?: { used: number; window: number };
 }
@@ -466,6 +468,20 @@ export interface AppSettings {
    * `settings.json` reads as `false`.
    */
   mcpMentionsEnabled: boolean;
+  /**
+   * Session naming (ported from pi-archimedes' `session-name`): the master
+   * switch for the title request the desktop fires after a session's first
+   * exchange. ON by default — pi ships naming on, so the backend's serde
+   * default is `true` and a pre-feature `settings.json` reads as enabled
+   * (unlike `mcpMentionsEnabled`, whose default is `false`). The required
+   * modifier is safe for the same reason: the backend always emits it via
+   * `#[serde(default)]`.
+   */
+  sessionNamingEnabled: boolean;
+  /** The model used to write session names: the composed key `"provider/id"` (a hand-edited `"provider/id:<level>"` is tolerated); `null` = the session's own model. */
+  sessionNamingModel: string | null;
+  /** The thinking level for the title request, honoured only when the chosen model advertises it; `null` = no reasoning effort on the request. JSON-only — there is no Settings row for it. */
+  sessionNamingReasoning: string | null;
 }
 
 /** The effective catalog's model (the Default-model select + provider discovery status). */
@@ -806,6 +822,25 @@ export function listenSessionStalled(
   callback: (payload: StalledPayload) => void,
 ): Promise<UnlistenFn> {
   return listen<StalledPayload>("session-stalled", (event) =>
+    callback(event.payload),
+  );
+}
+
+/** The `session-titled` payload: a generated session title. */
+export interface SessionTitledPayload {
+  sessionId: string;
+  title: string;
+}
+
+/**
+ * A session's generated title (the naming pass's push). The PULL form is
+ * `list_sessions` — which runs ONCE at boot, so a title generated in this
+ * run reaches the sidebar ONLY through this event.
+ */
+export function listenSessionTitled(
+  callback: (payload: SessionTitledPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<SessionTitledPayload>("session-titled", (event) =>
     callback(event.payload),
   );
 }

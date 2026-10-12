@@ -139,6 +139,7 @@ async fn build_harness(
         capabilities: json!({}),
         config_options: None,
         archived: false,
+        title: None,
         context_usage: None,
         is_subagent: false,
     })

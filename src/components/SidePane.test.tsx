@@ -96,6 +96,79 @@ describe("SidePane (the status panel)", () => {
     expect(screen.getByText("MyProject")).toBeTruthy();
   });
 
+  it("shows the GENERATED title in place of the message truncation (a titled session is labelled by its title)", () => {
+    // The naming pass writes a real title; the pane must show IT, not the
+    // first prompt's first 80 chars. The message is deliberately longer
+    // and completely different, so the assertion cannot pass by accident.
+    const longPrompt =
+      "Please implement the session naming port across the store, the sidebar and the header, with tests for every case";
+    useSessions.setState({
+      activeSessionId: "main1",
+      sessions: [
+        {
+          sessionId: "main1",
+          cwd: "/tmp/MyProject",
+          capabilities: {},
+          archived: false,
+          title: "Porting the session namer",
+        },
+      ],
+      messages: {
+        main1: [{ kind: "user", text: longPrompt, at: Date.now() }],
+      },
+    });
+    render(<SidePane />);
+    expect(screen.getByText("Porting the session namer")).toBeTruthy();
+    expect(screen.queryByText(longPrompt.slice(0, 80))).toBeNull();
+  });
+
+  it("reads the stored title from the ARCHIVED membership (the title lookup walks all three session lists)", () => {
+    // A session opened from the Archived section has no `sessions` entry;
+    // its title is read off `archivedSessions` exactly as its `cwd` is.
+    useSessions.setState({
+      activeSessionId: "arch1",
+      sessions: [],
+      historySessions: [],
+      archivedSessions: [
+        {
+          sessionId: "arch1",
+          cwd: "/tmp/MyProject",
+          capabilities: {},
+          archived: true,
+          title: "A titled archived session",
+        },
+      ],
+      messages: {
+        arch1: [{ kind: "user", text: "Archive the logs", at: Date.now() }],
+      },
+    });
+    render(<SidePane />);
+    expect(screen.getByText("A titled archived session")).toBeTruthy();
+    expect(screen.queryByText("Archive the logs")).toBeNull();
+  });
+
+  it("still truncates the first user message when the session's title is explicitly null", () => {
+    // `title: null` is the shape the backend writes before the naming pass
+    // (and when naming is off) — the OLD derivation must survive it
+    // untouched, or every untitled session loses its label.
+    const prompt = "Refactor the parser so the grammar is table-driven";
+    useSessions.setState({
+      activeSessionId: "main1",
+      sessions: [
+        {
+          sessionId: "main1",
+          cwd: "/tmp/MyProject",
+          capabilities: {},
+          archived: false,
+          title: null,
+        },
+      ],
+      messages: { main1: [{ kind: "user", text: prompt, at: Date.now() }] },
+    });
+    render(<SidePane />);
+    expect(screen.getByText(prompt)).toBeTruthy();
+  });
+
   it("renders the Todos section (label + N/M + progress) when there are open todos", () => {
     useSessions.setState({ activeSessionId: "main1" });
     useInteractive.getState().applyTodoUpdate("main1", {

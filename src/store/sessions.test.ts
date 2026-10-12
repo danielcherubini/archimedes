@@ -2189,3 +2189,81 @@ describe("setSpaceTrusted (the trust flag — the sidebar's shield UI is gone; t
     consoleError.mockRestore();
   });
 });
+
+describe("titleSession (the `session-titled` push writes the row's title)", () => {
+  beforeEach(() => {
+    useSessions.setState({
+      sessions: [],
+      historySessions: [],
+      archivedSessions: [],
+      activeSessionId: null,
+      messages: {},
+    });
+  });
+
+  it("sets the title on the LIVE entry (the boot `list_sessions` predates a generated title — the push is its only source)", () => {
+    useSessions.setState({ sessions: [info("s1", "/x")] });
+    useSessions.getState().titleSession("s1", "Porting the session namer");
+    expect(useSessions.getState().sessions).toEqual([
+      { ...info("s1", "/x"), title: "Porting the session namer" },
+    ]);
+  });
+
+  it("sets the title on the STORED entry (a session titled in an earlier run lands here, not in `sessions`)", () => {
+    useSessions.setState({ historySessions: [info("h1", "/x")] });
+    useSessions.getState().titleSession("h1", "Auditing the sidebar rows");
+    expect(useSessions.getState().historySessions).toEqual([
+      { ...info("h1", "/x"), title: "Auditing the sidebar rows" },
+    ]);
+  });
+
+  it("sets the title on the ARCHIVED entry", () => {
+    useSessions.setState({
+      archivedSessions: [{ ...info("a1", "/x"), archived: true }],
+    });
+    useSessions.getState().titleSession("a1", "Naming an archived session");
+    expect(useSessions.getState().archivedSessions).toEqual([
+      {
+        ...info("a1", "/x"),
+        archived: true,
+        title: "Naming an archived session",
+      },
+    ]);
+  });
+
+  it("titles a resumed archived session in BOTH lists it belongs to (the sticky membership)", () => {
+    // A resumed archived session is STICKY: it sits in `sessions` (live)
+    // AND `archivedSessions` at once, and a title that lands mid-run must
+    // not leave the two copies disagreeing.
+    useSessions.setState({
+      sessions: [info("a1", "/x")],
+      archivedSessions: [{ ...info("a1", "/x"), archived: true }],
+    });
+    useSessions.getState().titleSession("a1", "Resumed and renamed");
+    const st = useSessions.getState();
+    expect(st.sessions[0].title).toBe("Resumed and renamed");
+    expect(st.archivedSessions[0].title).toBe("Resumed and renamed");
+  });
+
+  it("leaves the list's OTHER entries alone (one title never rewrites its neighbours)", () => {
+    useSessions.setState({
+      historySessions: [info("h1", "/x"), info("h2", "/x")],
+    });
+    useSessions.getState().titleSession("h2", "The second session");
+    const [first, second] = useSessions.getState().historySessions;
+    expect(first.title).toBeUndefined();
+    expect(second.title).toBe("The second session");
+  });
+
+  it("is a no-op for an id in none of the three lists (does not throw, does not append a ghost row)", () => {
+    useSessions.setState({ historySessions: [info("h1", "/x")] });
+    expect(() =>
+      useSessions.getState().titleSession("ghost", "A deleted session"),
+    ).not.toThrow();
+    const st = useSessions.getState();
+    expect(st.sessions).toEqual([]);
+    expect(st.archivedSessions).toEqual([]);
+    expect(st.historySessions).toEqual([info("h1", "/x")]);
+    expect(st.historySessions).toHaveLength(1);
+  });
+});
