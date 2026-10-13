@@ -155,3 +155,15 @@ _Avoid_: spent slot (it is a set, and a single slot there was a real defect), mu
 **Activity signal**:
 Deliberate input to the app's CONTENT while an **Attention alert** is armed — `keydown`, `pointerdown`, or `wheel` at the window level, captured so a modal cannot swallow it. It disarms the alert. Window blur is NOT one (the user leaving is what the alert exists for), neither is mouse motion, programmatic auto-scroll, or a click on the frameless window's own controls (ADR 0038: Minimize means the user is leaving, not reading).
 _Avoid_: User activity (undefined scope), interaction, input (the composer's), idle reset
+
+**Side pane**:
+The resizable frame on the RIGHT of the workspace (`SidePane`) — the user's "right sidebar". It is a status panel, not a tab strip: one data-gated section per surface that has something to show, currently the **Todo board** and the session title. Its width and its collapsed flag persist; the **chrome bar** owns the toggle while it is collapsed. _Avoid_: right sidebar, inspector, sidebar (unqualified — the LEFT pane is the **Space**/**Session** list), drawer, panel
+
+**Todo board**:
+One **Session**'s own `manage_todo_list` list, held in `useInteractive.todos` under THAT session's id — a **Main session** and a **Subagent session** each have exactly one, because each runs exactly one **Agent harness** (ADR 0041). The Client attributes a board by that id, never by the frame's `source` label (which is the constant `"native"` on today's transport); a **Subagent session**'s board is found by joining `useSubagents` on `parentSessionId`. _Avoid_: todo column (the old `{main, subagents}` shape that mis-routed every board), subagent todos bucket, todo list (the tool's own word for the array of items), `native` (a transport label, never a name)
+
+**Current todo**:
+A **Todo board**'s live item: its `in_progress` entry, or — when none is in progress — its FIRST `pending` one (the next up). Never a `completed` item, and never nothing: a board reduced to one row always has one. _Avoid_: active todo, running todo, WIP item
+
+**Reduced board** / **Full board**:
+The two densities a **Todo board** renders at in the **Side pane**. A board is REDUCED to its **Current todo** when it must share the vertical space — the parent's board whenever any child board shows, a child's board whenever a second child board shows — and FULL (every item, all three states) when it is the only board at its level. The rule is one sentence: a board yields to the boards beside it. It is a render choice only — the store always holds the full list. _Avoid_: collapsed board (the pane's collapse is a different thing), compact mode, summary
