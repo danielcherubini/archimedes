@@ -18,6 +18,7 @@
 /// - Anthropic: `prompt is too long` ("prompt is too long: 213462 tokens >
 ///   200000 maximum") and `request_too_large` (the HTTP 413 byte-size
 ///   rejection).
+/// - Amazon Bedrock: `input is too long for requested model`.
 /// - z.ai: `prompt too long` / `prompt exceeds max length` (the CN endpoint)
 ///   / `model_context_window_exceeded` (a non-standard `finish_reason`
 ///   surfaced as error text). z.ai ALSO accepts some over-window prompts
@@ -39,21 +40,16 @@
 /// - DS4: `configured context size is`.
 /// - Ollama: `prompt too long` ("prompt too long; exceeded max context
 ///   length by X tokens").
+/// - DashScope / Qwen Token Plan: `range of input length should be` ("Range
+///   of input length should be [1, X]", the HTTP 400 invalid_parameter_error).
 /// - Generic fallbacks: `context_length_exceeded`, `too many tokens`,
 ///   `token limit exceeded`.
-///
-/// Two of pi's rows are deliberately NOT in this table, because our fragment
-/// set cannot express their numeric form without over-matching: Bedrock's
-/// `input is too long for requested model` and DashScope/Qwen's `range of
-/// input length should be [1, X]`. A provider whose wording is missing here
-/// gets no recovery (it stays `Fatal`) — a false NEGATIVE costs the one
-/// automatic compaction that would have helped, while a false positive
-/// rewrites the user's transcript for nothing.
 const OVERFLOW_FRAGMENTS: &[&str] = &[
     "prompt is too long",                        // Anthropic (token overflow)
     "prompt too long",                           // z.ai / Ollama
     "prompt exceeds max length",                 // z.ai (CN endpoint)
     "request_too_large",                         // Anthropic (HTTP 413 byte-size overflow)
+    "input is too long for requested model",     // Amazon Bedrock
     "exceeds the context window",                // OpenAI
     "maximum context length",                    // LiteLLM / OpenRouter / Mistral
     "context_length_exceeded",                   // generic fallback
@@ -71,6 +67,7 @@ const OVERFLOW_FRAGMENTS: &[&str] = &[
     "too many tokens",                           // generic fallback (see the exclusions!)
     "token limit exceeded",                      // generic fallback
     "configured context size is",                // DS4 server
+    "range of input length should be",           // DashScope / Qwen Token Plan
 ];
 
 /// Google (Gemini): "The input token count (1196265) exceeds the maximum
@@ -197,6 +194,25 @@ mod tests {
             "Prompt contains 300000 tokens, too large for model with 131072 maximum context length",
             // Ollama explicit overflow.
             "prompt too long; exceeded max context length by 1024 tokens",
+        ] {
+            assert!(
+                is_context_overflow_text(text),
+                "an overflow error must be detected: {text}"
+            );
+        }
+    }
+
+    /// The two wordings pi attributes to Amazon Bedrock and DashScope/Qwen
+    /// (`input is too long for requested model`, `range of input length should
+    /// be`) are plain prose, so they need a fragment of their own — the table
+    /// is only worth porting if the providers pi documented are all in it.
+    #[test]
+    fn bedrock_and_dashscope_overflow_wording_is_detected() {
+        for text in [
+            // Amazon Bedrock.
+            "Input is too long for requested model.",
+            // DashScope / Qwen (HTTP 400 invalid_parameter_error).
+            "Range of input length should be [1, 30000]",
         ] {
             assert!(
                 is_context_overflow_text(text),
