@@ -83,7 +83,7 @@ Object.freeze(NO_GATES);
  * The ONE derivation of "which gates are the children of THIS Session holding on
  * the user, and who is holding them" — the parent transcript's inline card, the
  * always-mounted overlay, and the rail's dot all read it, so they cannot
- * disagree (the standing rule `useSessionStatus` / `useMainOpenTodoCount`
+ * disagree (the standing rule `useSessionStatus` / `useBoardOpenCount`
  * exist to enforce).
  *
  * The PURE core is exported because a hook cannot express the overlay's need —
@@ -110,8 +110,9 @@ Object.freeze(NO_GATES);
  * paths — so NO `session-closed` is ever emitted for a child id. A child's
  * teardown is `finish_subagent` (`src-tauri/src/agent/worker/manager.rs`), which
  * emits only `subagent-closed`, and `App`'s handler for THAT marks the entry
- * closed and discards its messages while clearing NOTHING in `useInteractive` /
- * `usePermissions`. Nothing generic clears them either: the Supervisor's
+ * closed and discards its messages while clearing only its **todo board**
+ * (ADR 0041) — never its gates or permission prompts. Nothing generic clears
+ * them either: the Supervisor's
  * `cleanup_pending_modals` needs the same `live` entry a child never has, and
  * the ids it does relay for a child are tracked under the DELIVERY id — the
  * PARENT (`delivery_id` in `src-tauri/src/agent/worker/manager.rs`, routed into

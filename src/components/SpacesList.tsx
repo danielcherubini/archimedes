@@ -174,10 +174,11 @@ export default function SpacesList({
     : "";
 
   // The shared collapsed flag (the module seeds it from localStorage at
-  // import). The collapse control itself lives in the CHROME BAR (the
-  // top menubar — the old footer button moved up); this component only
-  // reads the flag for its width (0 while collapsed — the chrome bar's
-  // button is the re-expand control, so no rail is needed).
+  // import). This component READS it for the frame's width — the
+  // `LEFT_PANE_RAIL` sliver while collapsed, NOT 0 — and WRITES it, from its
+  // OWN toggle in the footer below (both directions). The chrome bar holds no
+  // pane control in either state, so outside the tests that toggle is the only
+  // writer of the flag.
   // The `bg-warning` dot on the collapsed toggle (see the footer).
   const hasPendingRequest = useHasPendingRequest();
   const collapsed = useSyncExternalStore(
@@ -470,16 +471,17 @@ export default function SpacesList({
             <SettingsIcon className="size-4" />
           </button>
         )}
-        {/* The pane's OWN collapse toggle — only while open. No `bg-warning`
-            pending dot here (unlike the old chrome-bar button): the collapsed
-            chrome-bar control carries it, since that is the only control
-            visible when the pane is gone. */}
-        {/* The pane's OWN collapse toggle — rendered in BOTH states. Its
-            label and `aria-pressed` flip with the state (pressed = the pane
-            is OPEN) because it performs the opposite action when collapsed;
-            `data-testid` is the stable hook tests query, since the label
-            moves. The `bg-warning` dot shows ONLY while collapsed: its
-            meaning is "something needs you behind the hidden pane", so it
+        {/* The pane's OWN collapse toggle, and its ONLY one — rendered in BOTH
+            states. The chrome bar holds no pane control in either state
+            (`App.tsx`, pinned by `App.test.tsx`'s `the chrome bar NEVER holds a
+            pane control` and by `SpacesList.test.tsx`'s `KEEPS its toggle while
+            collapsed`), so the pending dot has no other home once the pane is a
+            sliver — carrying it was the old chrome-bar button's job, and that
+            control is gone. Its label and `aria-pressed` flip with the state
+            (pressed = the pane is OPEN) because it performs the opposite action
+            when collapsed; `data-testid` is the stable hook tests query, since
+            the label moves. The `bg-warning` dot shows ONLY while collapsed:
+            its meaning is "something needs you behind the hidden pane", so it
             would be noise while the pane is open and visible. */}
         <button
           type="button"

@@ -628,13 +628,16 @@ describe("SpacesList (archive, ADR 0016)", () => {
     );
   });
 
-  // -- The collapse button + the gear MOVED to the chrome bar (the top
-  // -- menubar — the old footer controls are gone; the chrome bar's
-  // -- buttons consume the same shared flags) --
+  // -- The collapse toggle + the gear live in the pane's OWN footer row in
+  // -- BOTH states: the chrome bar holds no pane control at all (`App.tsx`,
+  // -- pinned by `App.test.tsx`'s `the chrome bar NEVER holds a pane
+  // -- control`) --
 
   // -- The pane's OWN collapse toggle (bottom-inner corner = bottom right for
-  // -- the left pane, pointing at the chat). Collapsed, it hands off to the
-  // -- chrome bar — see `App.test.tsx` for the handoff. --
+  // -- the left pane, pointing at the chat), rendered while expanded AND while
+  // -- collapsed: collapsed it sits in the rail and re-expands the pane, so it
+  // -- never hands off — see the `KEEPS its toggle while collapsed` case below
+  // -- and `App.test.tsx`. --
 
   it("holds its own collapse toggle in the footer's inner corner, with the gear beside it", () => {
     const { container } = render(<SpacesList />);
@@ -657,7 +660,10 @@ describe("SpacesList (archive, ADR 0016)", () => {
     // OUTER edge — so the alignment is asserted, not inferred from order.
     expect(footer.className).toMatch(/\bjustify-end\b/);
     expect(footer.className).not.toMatch(/\bjustify-between\b/);
-    // The pane's own toggle is NOT the chrome bar's collapsed control.
+    // Expanded, exactly ONE toggle exists and it carries the label for the
+    // direction it performs now (`Collapse sidebar`, queried above): nothing is
+    // labelled `Expand sidebar` here, because the flip is a LABEL change on the
+    // same button rather than a second control taking over.
     expect(screen.queryByRole("button", { name: "Expand sidebar" })).toBeNull();
   });
 
@@ -735,7 +741,7 @@ describe("SpacesList (archive, ADR 0016)", () => {
     expect(frame.style.width).toBe("260px");
   });
 
-  it("holds NO bg-warning dot (the dot moved to the chrome bar's collapse button)", () => {
+  it("holds NO bg-warning dot while EXPANDED, even with a pending request (the dot belongs to the collapsed rail alone)", () => {
     useSessions.setState({
       sessions: [
         { sessionId: "s1", cwd: "/tmp/alpha", capabilities: {}, archived: false },

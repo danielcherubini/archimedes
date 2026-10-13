@@ -62,7 +62,7 @@ export function sessionStatusOf({
  * spinner + its "Waiting" pill). It is a hook rather than logic inside
  * `SessionRow` because the collapsed rail is the SAME fact in less space, and a
  * summary that disagrees with the thing it summarises is worse than no summary
- * — the reasoning that put the todo count in `useMainOpenTodoCount` instead of
+ * — the reasoning that put the todo count in `useBoardOpenCount` instead of
  * in the panel that renders it.
  *
  * THE ASYMMETRY THAT IS NOT A BUG: `childGateCount` makes a PARENT `waiting`

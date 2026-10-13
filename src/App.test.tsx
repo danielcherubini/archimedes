@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import App from "./App";
-import { listenSessionTitled } from "./lib/tauri";
+import { listenSessionTitled, listenSubagentClosed } from "./lib/tauri";
 import { useSessions } from "./store/sessions";
 import { useSubagents } from "./store/subagents";
 import { useInteractive } from "./store/interactive";
@@ -173,9 +173,9 @@ describe("App (the gear icon + settings view swap)", () => {
     // Expanded sidebar (260px): the logo segment is 260px wide — the
     // tabs start at the center column's left edge.
     expect(logo.style.width).toBe("260px");
-    // Collapsed sidebar (width 0 — the chrome bar's button is the
-    // re-expand control, so no rail is needed): the segment follows
-    // (0px — the icon is clipped away with it).
+    // Collapsed sidebar (the `LEFT_PANE_RAIL` sliver — NOT 0: the pane keeps
+    // a rail wide enough to hold its OWN toggle, so a rail is needed and the
+    // segment follows it): the tabs still start at the center column's edge.
     act(() => {
       setLeftPaneCollapsed(true);
     });
@@ -831,6 +831,72 @@ describe("App (the `session-titled` listener)", () => {
     expect(useSessions.getState().sessions[0].title).toBe(
       "Porting the session namer",
     );
+  });
+});
+
+describe("App (the `subagent-closed` listener)", () => {
+  // Both stores are module-scoped, so anything seeded here leaks into the next
+  // test in this file unless both sides clear it.
+  const clearStore = () => {
+    useInteractive.getState().dismissSession("sub1");
+    for (const id of Object.keys(useSubagents.getState().entries)) {
+      useSubagents.getState().dismiss(id);
+    }
+    useSessions.setState({
+      sessions: [],
+      historySessions: [],
+      archivedSessions: [],
+      spaces: [],
+      activeSessionId: null,
+      activeSpacePath: null,
+      messages: {},
+    });
+  };
+  beforeEach(clearStore);
+  afterEach(clearStore);
+
+  it("frees a closed child's todo board, and NOTHING ELSE in `useInteractive`", () => {
+    // A child's board AND a child's pending gate, both keyed to the CHILD id
+    // (the router re-emits a Subagent's frames verbatim, so the todo frame
+    // carries the child's id — ADR 0041).
+    useInteractive.getState().applyTodoUpdate("sub1", {
+      source: "native",
+      todos: [{ content: "child task", status: "in_progress" }],
+    });
+    useInteractive.getState().addRequest("sub1", {
+      requestId: "r1",
+      method: "ask",
+      source: "subagent:reviewer",
+      params: {
+        questions: [
+          { id: "q1", question: "Which color?", options: [{ label: "Red" }] },
+        ],
+      },
+    });
+    useSubagents.getState().addSession({
+      sessionId: "sub1",
+      parentSessionId: "main1",
+      agentName: "reviewer",
+      task: "review the diff",
+      status: "running",
+    });
+    render(<App />);
+    // The LAST registration is this render's (the file never clears mocks).
+    const calls = vi.mocked(listenSubagentClosed).mock.calls;
+    const onClosed = calls[calls.length - 1][0];
+    act(() => {
+      onClosed({ sessionId: "sub1", status: "completed" });
+    });
+    // The board is gone. This is the ONLY frame that ever names the end of a
+    // CHILD session (`session-closed` never carries a child id and
+    // `src-tauri/` emits no `todos_clear` frame), so without this the child's
+    // slice sat in the store for the life of the window.
+    expect(useInteractive.getState().todos["sub1"]).toBeUndefined();
+    // NARROW on purpose: `applyTodoClear`, NOT `dismissSession` — the latter
+    // would also wipe the child's pending gates, and that IS the state ADR
+    // 0040's amendment records (paraphrased here, not quoted): a closed child
+    // keeps its gate card on screen until its entry is evicted.
+    expect(useInteractive.getState().requests["sub1"]).toHaveLength(1);
   });
 });
 

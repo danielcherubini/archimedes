@@ -32,18 +32,14 @@ export interface InteractiveRequestData {
    * literal to `todo_apply` for its `todos_update` push, for a MAIN session and
    * a Subagent session alike. So this is NOT a main/child discriminator and
    * never was one on the wire: `"main"` and `"sudo"` exist only in Rust
-   * fixtures and `bin/fake_worker.rs`. Two consumers branch on it, and they fail
-   * DIFFERENTLY. `AskQuestionCard`'s (`source === "main"` anchoring, its
-   * `subagent:` label) is UNREACHABLE — a dead branch that simply never draws.
-   * `applyTodoUpdate` here is the opposite: it RUNS, and routes wrongly. Given
-   * `"native"`, its `else` arm files the board under `subagents["native"]` and
-   * leaves `main` as `[]`, so a MAIN session's todo board sits in a bucket
-   * nothing reads — and because `column?.main` is then an empty array rather
-   * than `undefined`, `useMainTodoItems`' `rawTodos` fallback cannot fire, so
-   * `useMainOpenTodoCount` reports 0 and the `SidePane`'s todo-driven
-   * open/close never opens for a session that HAS an open todo list. Mis-routed
-   * live data, not dead code. Both are recorded as a follow-up in
-   * `docs/features/subagent-sessions.md`.
+   * fixtures and `bin/fake_worker.rs`. The one consumer that still branches on
+   * it — `AskQuestionCard`'s `source === "main"` anchoring and its `subagent:`
+   * label — is therefore DEAD: it never draws. Todo boards no longer branch on
+   * it at all: they are keyed by SESSION id, never by this label (ADR 0041), so
+   * a future real `source` must arrive as a SESSION identity the Client can
+   * join (child id → parent, `agentName` — what `useSubagents` already
+   * provides), not a prettier string. The dead card branch is recorded as a
+   * follow-up in `docs/features/subagent-sessions.md`.
    */
   source: string;
   /** The invoking process's tool-call id (absent for `confirm`/`password`). */
@@ -78,21 +74,10 @@ export interface TodoItem {
   status: "pending" | "in_progress" | "completed";
 }
 
-/** The todo board columns for a session (main + one per subagent source). */
-export interface TodoColumn {
-  main: TodoItem[];
-  subagents: Record<string, TodoItem[]>;
-}
-
 /** The bus `TODOS_UPDATE` payload (verbatim over the wire). */
 export interface TodoUpdatePayload {
   source: string;
   todos: TodoItem[];
-}
-
-/** The bus `TODOS_CLEAR` payload (verbatim over the wire). */
-export interface TodoClearPayload {
-  source: string;
 }
 
 export interface CostUpdatePayload {
@@ -107,8 +92,12 @@ export interface CostUpdatePayload {
 interface InteractiveState {
   /** Pending interactive requests, keyed by the ACP session id. */
   requests: Record<string, InteractiveRequestData[]>;
-  /** Todo board columns, keyed by the ACP session id. */
-  todos: Record<string, TodoColumn>;
+  /**
+   * One session's OWN `manage_todo_list` list, keyed by that session's id
+   * (main OR Subagent); one Session runs one Agent harness, so exactly one
+   * board (ADR 0041).
+   */
+  todos: Record<string, TodoItem[]>;
   /** The agent state machine (`working`/`idle`/`blocked`) — wired, not rendered in v1. */
   agentState: Record<string, "working" | "idle" | "blocked">;
   /** The last `cost_update` payload — wired, not rendered in v1. */
@@ -120,10 +109,45 @@ interface InteractiveState {
   addRequest: (sessionId: string, data: InteractiveRequestData) => void;
   /** Remove a settled request. */
   removeRequest: (sessionId: string, requestId: string) => void;
-  /** A `todos_update` push: set `main` for `source === "main"`, else `subagents[source]`. */
+  /**
+   * A `todos_update` push: replace this session's board. The payload's
+   * `source` is NOT consulted (ADR 0041).
+   */
   applyTodoUpdate: (sessionId: string, payload: unknown) => void;
-  /** A `todos_clear` push: delete the column. */
-  applyTodoClear: (sessionId: string, payload: unknown) => void;
+  /**
+   * A `todos_clear` push: drop this session's WHOLE board. The payload's
+   * `source` is not consulted — a clear names a SESSION, never a label
+   * (ADR 0041).
+   *
+   * The key is DELETED, never written `[]`, and that choice has TWO halves —
+   * both pinned (`interactive.test.ts` for the key itself, and
+   * `TodoBoardPanel.test.tsx` end-to-end for what renders):
+   *
+   * - A SUBAGENT session — the only real caller today, `App.tsx`'s
+   *   `subagent-closed` handler — has NOTHING to unmask, because that SAME
+   *   handler calls `discardSessionMessages`: the transcript the seed would be
+   *   read from goes with the board, so there is no list left to show. That is
+   *   true but NOT the operative reason: a CHILD's board never consults the seed
+   *   at all (`todoBoardsOf`'s rule 7 — the `rawInput` fallback walks the
+   *   transcript of the session it was called for, which would be the PARENT's),
+   *   so the transcript could not have resurfaced a child's list even if it had
+   *   stayed. Do not chase a leak here.
+   * - A MAIN session gets its `rawInput` seed BACK: `useMainTodoItems` reads
+   *   `board ?? rawTodos ?? []`, so an absent slice re-exposes the
+   *   transcript's `manage_todo_list` `rawInput`, where an empty-array write
+   *   kept it suppressed. Deliberate. The alternative — writing a "cleared"
+   *   marker in place of the board — is per-session state that nothing ever
+   *   removes: `dismissSession` runs on `session-closed`, and no
+   *   `session-closed` is emitted for a Subagent session at all
+   *   (`useChildGates` documents why), so a marker would reinstate exactly the
+   *   leak this branch fixed. And a re-appeared seed is not a lie — it is what
+   *   the transcript actually shows.
+   *
+   * The MAIN half is reachable only from a `todos_clear` frame, and
+   * `src-tauri/src/` emits none: the path is inert today (the Client's
+   * listener and the payload type stay for the day one exists).
+   */
+  applyTodoClear: (sessionId: string) => void;
   /** A `state` push (`{ state }`) — store, don't render in v1. */
   applyState: (sessionId: string, payload: unknown) => void;
   /** A `cost_update` push — store, don't render in v1. */
@@ -161,38 +185,26 @@ export const useInteractive = create<InteractiveState>((set) => ({
 
   applyTodoUpdate: (sessionId, payload) =>
     set((state) => {
-      const p = payload as { source?: string; todos?: TodoItem[] } | null;
-      if (!p || typeof p.source !== "string" || !Array.isArray(p.todos)) {
-        return state;
-      }
-      const column: TodoColumn = {
-        main: state.todos[sessionId]?.main ?? [],
-        subagents: { ...(state.todos[sessionId]?.subagents ?? {}) },
-      };
-      if (p.source === "main") {
-        column.main = p.todos;
-      } else {
-        column.subagents[p.source] = p.todos;
-      }
-      return { todos: { ...state.todos, [sessionId]: column } };
+      const p = payload as { todos?: TodoItem[] } | null;
+      if (!p || !Array.isArray(p.todos)) return state;
+      // Branch-free on purpose: the board is keyed by the SESSION id the frame
+      // already carries, never by `payload.source` — every frame the desktop
+      // emits says `"native"` for a Main session and a Subagent session alike,
+      // so any branch on that label mis-files the board (ADR 0041). Do not
+      // "restore" one.
+      return { todos: { ...state.todos, [sessionId]: p.todos } };
     }),
 
-  applyTodoClear: (sessionId, payload) =>
+  applyTodoClear: (sessionId) =>
     set((state) => {
-      const p = payload as { source?: string } | null;
-      if (!p || typeof p.source !== "string") return state;
-      const column = state.todos[sessionId];
-      if (!column) return state;
-      const cleared: TodoColumn = {
-        main: [...column.main],
-        subagents: { ...column.subagents },
-      };
-      if (p.source === "main") {
-        cleared.main = [];
-      } else {
-        delete cleared.subagents[p.source];
-      }
-      return { todos: { ...state.todos, [sessionId]: cleared } };
+      if (!(sessionId in state.todos)) return state;
+      // The key goes, not an empty array — see the interface doc for both
+      // halves: a child's transcript is discarded in the same handler (so
+      // nothing is unmasked), while a main session's `rawInput` seed comes back
+      // on purpose (ADR 0041).
+      const todos = { ...state.todos };
+      delete todos[sessionId];
+      return { todos };
     }),
 
   applyState: (sessionId, payload) =>

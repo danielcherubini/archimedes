@@ -76,59 +76,137 @@ describe("addRequest / removeRequest", () => {
   });
 });
 
+/**
+ * Boards are keyed by SESSION id and by nothing else (ADR 0041): one Session
+ * runs one Agent harness, so it produces exactly one board, and the payload's
+ * `source` label is inert. Every frame the desktop emits carries
+ * `"native"` for a MAIN session and a Subagent session alike, so the cases
+ * below deliberately drive the SAME session id through every label variant —
+ * the regression pin for the `native`-heading bug.
+ */
 describe("todos", () => {
-  it("applyTodoUpdate routes source=main to the main column", () => {
+  it("applyTodoUpdate writes the session's own board", () => {
     useInteractive.getState().applyTodoUpdate(S1, {
-      source: "main",
+      source: "native",
       todos: [{ content: "a", status: "in_progress" }],
     });
-    expect(useInteractive.getState().todos[S1]?.main).toEqual([
+    expect(useInteractive.getState().todos[S1]).toEqual([
       { content: "a", status: "in_progress" },
     ]);
   });
 
-  it("applyTodoUpdate routes a subagent source to its own column", () => {
-    useInteractive.getState().applyTodoUpdate(S1, {
-      source: "subagent:x",
-      todos: [{ content: "child", status: "pending" }],
-    });
-    const column = useInteractive.getState().todos[S1];
-    expect(column?.subagents["subagent:x"]).toEqual([
-      { content: "child", status: "pending" },
-    ]);
-    expect(column?.main).toEqual([]);
+  it("the `source` label routes NOTHING: every variant lands in the same session's slice", () => {
+    const board = [{ content: "board", status: "pending" }];
+    for (const payload of [
+      { source: "native", todos: board },
+      { source: "main", todos: board },
+      { source: "subagent:x", todos: board },
+      // No `source` key at all — the store must not read it, so a payload
+      // missing it is still a board for this session.
+      { todos: board },
+    ]) {
+      useInteractive.getState().applyTodoUpdate(S1, payload);
+      expect(useInteractive.getState().todos[S1]).toEqual(board);
+    }
+    // Keyed by id, so another session's slice is untouched (and the label
+    // never became a key of its own).
+    expect(useInteractive.getState().todos[S2]).toBeUndefined();
   });
 
-  it("applyTodoUpdate replaces the column on re-delivery (latest wins)", () => {
+  it("applyTodoUpdate replaces the board on re-delivery (latest wins)", () => {
     useInteractive.getState().applyTodoUpdate(S1, {
-      source: "main",
+      source: "native",
       todos: [{ content: "a", status: "pending" }],
     });
     useInteractive.getState().applyTodoUpdate(S1, {
-      source: "main",
+      source: "native",
       todos: [{ content: "b", status: "completed" }],
     });
-    expect(useInteractive.getState().todos[S1]?.main).toEqual([
+    expect(useInteractive.getState().todos[S1]).toEqual([
       { content: "b", status: "completed" },
     ]);
   });
 
-  it("applyTodoClear deletes the subagent column", () => {
+  /**
+   * The shape guard (`!Array.isArray(p.todos)`) is the only thing standing
+   * between a malformed frame and every board consumer in the Client —
+   * `useMainTodoItems` hands its result straight to `TodoBoardPanel`'s
+   * `.filter`/`.map`, so a write of `"nope"` or `{}` would throw inside the
+   * Side pane, not merely render oddly. It is also the ONLY guard left: ADR
+   * 0041 deleted the `source` branch, so a payload with a bad label and a
+   * good array still lands (pinned above), while a payload with a good label
+   * and a bad `todos` must not land at all.
+   */
+  it("applyTodoUpdate ignores a payload whose `todos` is not an array (the state object is returned IDENTICAL)", () => {
     useInteractive.getState().applyTodoUpdate(S1, {
-      source: "subagent:x",
-      todos: [{ content: "child", status: "pending" }],
+      source: "native",
+      todos: [{ content: "the board", status: "pending" }],
     });
-    useInteractive.getState().applyTodoClear(S1, { source: "subagent:x" });
-    expect(useInteractive.getState().todos[S1]?.subagents).toEqual({});
+    for (const todos of ["nope", {}, null, undefined, 0, true]) {
+      const before = useInteractive.getState();
+      useInteractive.getState().applyTodoUpdate(S1, { source: "native", todos });
+      // `toBe` on the STATE OBJECT, not `toEqual` on the slice: the guard
+      // returns `state` untouched, so no store notification and no re-render
+      // (an `toEqual` on `todos[S1]` would also pass for a write of the same
+      // contents, which is a different event).
+      expect(useInteractive.getState()).toBe(before);
+      expect(useInteractive.getState().todos[S1]).toEqual([
+        { content: "the board", status: "pending" },
+      ]);
+    }
+    // A payload that is not an object at all is the same no-op (the guard's
+    // `!p ||` half, which the `todos` loop above cannot reach).
+    const before = useInteractive.getState();
+    useInteractive.getState().applyTodoUpdate(S1, null);
+    useInteractive.getState().applyTodoUpdate(S1, undefined);
+    useInteractive.getState().applyTodoUpdate(S1, "nope");
+    expect(useInteractive.getState()).toBe(before);
   });
 
-  it("applyTodoClear clears the main column", () => {
+  it("applyTodoClear drops the session's WHOLE board (no `source` argument)", () => {
     useInteractive.getState().applyTodoUpdate(S1, {
-      source: "main",
+      source: "native",
       todos: [{ content: "a", status: "pending" }],
     });
-    useInteractive.getState().applyTodoClear(S1, { source: "main" });
-    expect(useInteractive.getState().todos[S1]?.main).toEqual([]);
+    useInteractive.getState().applyTodoClear(S1);
+    expect(useInteractive.getState().todos[S1]).toBeUndefined();
+  });
+
+  /**
+   * The key DELETED, not an empty array written. `toBeUndefined()` above
+   * cannot tell the two apart (`({} as …)["s1"]` is `undefined` too), and the
+   * difference is the documented consequence: `useMainTodoItems` reads
+   * `board ?? rawTodos ?? []`, so ONLY an absent slice re-exposes the
+   * transcript-derived `rawInput` seed — an empty array is a board, and a
+   * board that renders nothing. `src/components/TodoBoardPanel.test.tsx`
+   * pins the render half of that claim.
+   */
+  it("applyTodoClear DELETES the key rather than writing `[]` (so the `rawInput` seed is unmasked)", () => {
+    useInteractive.getState().applyTodoUpdate(S1, {
+      source: "native",
+      todos: [{ content: "a", status: "pending" }],
+    });
+    useInteractive.getState().applyTodoClear(S1);
+    expect("s1" in useInteractive.getState().todos).toBe(false);
+    // The sibling sessions survive the spread-copy-and-delete (the write is
+    // not a wholesale reset of the map).
+    useInteractive.getState().applyTodoUpdate(S2, {
+      source: "native",
+      todos: [{ content: "b", status: "pending" }],
+    });
+    useInteractive.getState().applyTodoClear(S1);
+    expect("s1" in useInteractive.getState().todos).toBe(false);
+    expect("s2" in useInteractive.getState().todos).toBe(true);
+  });
+
+  it("applyTodoClear for a session with no board is a no-op (identical state object)", () => {
+    useInteractive.getState().applyTodoUpdate(S1, {
+      source: "native",
+      todos: [{ content: "a", status: "pending" }],
+    });
+    const before = useInteractive.getState();
+    useInteractive.getState().applyTodoClear("nope");
+    expect(useInteractive.getState()).toBe(before);
   });
 });
 

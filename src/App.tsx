@@ -133,7 +133,9 @@ function App() {
         if (payload.event === "todos_update") {
           s.applyTodoUpdate(payload.sessionId, payload.payload);
         } else if (payload.event === "todos_clear") {
-          s.applyTodoClear(payload.sessionId, payload.payload);
+          // One argument: a clear names a SESSION, and the payload's `source`
+          // is not consulted (ADR 0041).
+          s.applyTodoClear(payload.sessionId);
         } else if (payload.event === "state") {
           s.applyState(payload.sessionId, payload.payload);
         } else if (payload.event === "cost_update") {
@@ -195,6 +197,18 @@ function App() {
         useSubagents
           .getState()
           .markClosed(p.sessionId, p.status, p.error, p.metrics);
+        // The child's todo board goes too — same reasoning as the discard
+        // above: this is the only frame that ever names the end of a CHILD
+        // session, so nothing else would free the slice (`session-closed`
+        // never carries a child id, and `src-tauri/` emits no `todos_clear`
+        // frame at all).
+        //
+        // NARROW on purpose: `applyTodoClear`, NOT `dismissSession` — the
+        // latter would also wipe the child's pending gates, and that IS the
+        // state ADR 0040's amendment records (paraphrased here, not quoted): a
+        // closed child keeps its gate card on screen until its entry is
+        // evicted.
+        useInteractive.getState().applyTodoClear(p.sessionId);
       }),
     );
     return () => {

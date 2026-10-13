@@ -4,6 +4,7 @@ import SidePane from "./SidePane";
 import { useSubagents } from "../store/subagents";
 import { useInteractive } from "../store/interactive";
 import { useSessions } from "../store/sessions";
+import type { Message } from "../store/sessions";
 import { usePermissions } from "../store/permissions";
 import { getSidePaneCollapsed, setSidePaneCollapsed, SIDE_PANE_RAIL } from "../lib/sidePaneState";
 
@@ -25,6 +26,26 @@ const entry = {
   status: "running" as const,
 };
 
+/**
+ * Give each id the `messages` entry a real session always has.
+ *
+ * `addSession` writes `messages[id] = []` (`store/sessions.ts`), so a LIVE
+ * session's transcript is an EMPTY ARRAY, never an absent key (a session reached
+ * by `openSession`/`selectSpace`/`resumeSession` has none until its history
+ * reload lands — that is the hydration gap). `SidePane` reads an absent entry as
+ * "this session is still hydrating" (see the hydration case below), so any case
+ * that pins an auto-open EDGE inside one session must model the transcript the
+ * way the store leaves it, or it is pinning the suppression rather than the edge.
+ */
+const liveSessions = (...ids: string[]): void => {
+  const existing = useSessions.getState().messages;
+  const added: Record<string, Message[]> = {};
+  for (const id of ids) {
+    if (!(id in existing)) added[id] = [];
+  }
+  useSessions.setState({ messages: { ...existing, ...added } });
+};
+
 beforeAll(() => {
   // jsdom has no pointer capture: stub it (the component guards the ELEMENT
   // with `?.`, not the method).
@@ -44,6 +65,12 @@ beforeEach(() => {
   usePermissions.getState().dismissSessionPrompts("main1");
   useInteractive.getState().dismissSession("sub1");
   useInteractive.getState().dismissSession("main1");
+  // The session-switch cases below work with a SECOND session (`main2`) and its
+  // own child (`sub2`); left seeded they would change the board set the NEXT
+  // case derives (the derivation is keyed by parent, but the parent switch is
+  // exactly what those cases exercise).
+  useInteractive.getState().dismissSession("main2");
+  useInteractive.getState().dismissSession("sub2");
   useSessions.setState({ messages: {}, activeSessionId: null });
 });
 
@@ -200,12 +227,14 @@ describe("SidePane (the status panel)", () => {
     expect(screen.queryByText("1/2")).toBeNull();
   });
 
-  // -- Auto open/close (the "popup" rule: the pane is driven by TODOS
-  // -- ONLY — a subagent session never opens it; edge-triggered, manual
-  // -- choice wins) --
+  // -- Auto OPEN (the "popup" rule, ADR 0042: the frame expands on the
+  // -- 0 → >0 edge of the TODO BOARD count — the parent's own list or a running
+  // -- child's — and NEVER collapses itself; edge-triggered, so the user's own
+  // -- toggle always wins) --
 
   it("auto-expands the frame when open todos appear (0 → visible)", () => {
     useSessions.setState({ activeSessionId: "main1" });
+    liveSessions("main1");
     act(() => {
       setSidePaneCollapsed(true);
     });
@@ -224,6 +253,7 @@ describe("SidePane (the status panel)", () => {
 
   it("does NOT auto-expand on mount when todos already exist (no 0 → visible edge on the first render)", () => {
     useSessions.setState({ activeSessionId: "main1" });
+    liveSessions("main1");
     useInteractive.getState().applyTodoUpdate("main1", {
       source: "main",
       todos: [{ content: "a", status: "pending" }],
@@ -237,10 +267,25 @@ describe("SidePane (the status panel)", () => {
     expect((container.firstChild as HTMLElement).style.width).toBe(`${SIDE_PANE_RAIL}px`);
   });
 
-  it("auto-collapses the frame when all todos complete (visible → 0)", () => {
-    useSessions.setState({ activeSessionId: "main1" });
+  it("does NOT auto-collapse when all todos complete (ADR 0042)", () => {
+    // ADR 0042: the frame may OPEN itself and NEVER close itself. A board
+    // finishing (`visible` 1 → 0) is not a reason to hide the surface that just
+    // showed it — with child boards counted (ADR 0041) that dip is routine (one
+    // child done while its siblings work), and it used to yank the pane away
+    // mid-run. The user's own toggle is the ONLY thing that collapses it.
+    useSessions.setState({
+      activeSessionId: "main1",
+      messages: {
+        main1: [{ kind: "user", text: "Run the whole board", at: Date.now() }],
+      },
+    });
+    act(() => {
+      setSidePaneCollapsed(true);
+    });
     const { container } = render(<SidePane />);
     const frame = container.firstChild as HTMLElement;
+    expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
+    // The 0 → 1 edge: the frame opens itself.
     act(() => {
       useInteractive.getState().applyTodoUpdate("main1", {
         source: "main",
@@ -251,8 +296,7 @@ describe("SidePane (the status panel)", () => {
       });
     });
     expect(frame.style.width).toBe("320px"); // auto-expanded
-    // All todos complete (the visible → 0 edge): the frame COLLAPSES (the
-    // Todos section is hidden — the pane is hidden with it).
+    // Every item completed (the 1 → 0 edge): the frame STAYS OPEN.
     act(() => {
       useInteractive.getState().applyTodoUpdate("main1", {
         source: "main",
@@ -262,26 +306,391 @@ describe("SidePane (the status panel)", () => {
         ],
       });
     });
-    expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
+    expect(frame.style.width).toBe("320px");
+    expect(getSidePaneCollapsed()).toBe(false);
+    // The accepted consequence: a finished run leaves an OPEN frame whose
+    // data-gated Todos section is simply gone — the session title remains, so
+    // the frame is not an empty box.
+    expect(screen.queryByText("Todos")).toBeNull();
+    expect(screen.getByText("Run the whole board")).toBeTruthy();
   });
 
-  it("does NOT auto-expand the frame when a subagent session starts (the pane is driven by todos only)", () => {
+  it("does NOT auto-expand the frame when a subagent session with NO todo board starts", () => {
     act(() => {
       setSidePaneCollapsed(true);
     });
     const { container } = render(<SidePane />);
     const frame = container.firstChild as HTMLElement;
     expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
-    // A subagent starts: NO 0 → visible edge (the pane is todos-only —
-    // a subagent no longer opens it): the frame STAYS COLLAPSED.
+    // A subagent starts, and writes no list: NO 0 → visible edge (the pane
+    // opens on OPEN BOARDS, not on the existence of a child — a child with
+    // nothing to show has nothing to say), so the frame STAYS COLLAPSED.
+    // The entry's `parentSessionId` is `"main1"` while this file's
+    // `beforeEach` leaves `activeSessionId: null`, which is the other half of
+    // what this pins: another Session's child never opens THIS pane.
     act(() => {
       useSubagents.getState().addSession(entry);
     });
     expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
   });
 
+  it("auto-expands the frame when a running child's open todo board appears (0 → visible)", () => {
+    // The board-wide visibility rule (ADR 0042's premise): a delegation whose
+    // PARENT never wrote a list still opens the pane, because the child's board
+    // counts. Modelled on the parent-todos case above, NOT on a seed-before-
+    // render: `useSessions` needs the active session (`useTodoBoards(null)` is
+    // the frozen empty array, so without it this case could never pass), and
+    // both writes must land AFTER the mount — seeding first initialises
+    // `prevVisibleRef` to `true`, which kills the 0 → 1 edge the frame follows.
+    useSessions.setState({ activeSessionId: "main1" });
+    liveSessions("main1");
+    act(() => {
+      setSidePaneCollapsed(true);
+    });
+    const { container } = render(<SidePane />);
+    const frame = container.firstChild as HTMLElement;
+    expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
+    act(() => {
+      useSubagents.getState().addSession(entry);
+      useInteractive.getState().applyTodoUpdate("sub1", {
+        source: "native",
+        todos: [{ content: "child one", status: "pending" }],
+      });
+    });
+    expect(frame.style.width).toBe("320px");
+    // And the child's board is what the opened pane shows.
+    expect(
+      container.querySelector('[data-testid="todo-board-child"]'),
+    ).not.toBeNull();
+  });
+
+  // -- The SESSION SWITCH is not an edge --
+  //
+  // `visible` is derived from the ACTIVE session while the collapsed flag is
+  // APP-GLOBAL (it is what localStorage persists). So landing on another
+  // Session whose board is already open moves `visible` `false → true` without
+  // anything appearing in front of the user, and ADR 0042's open-only rule was
+  // reasoned only about the within-session 0 → 1 edge. A switch therefore
+  // re-baselines the previous-visible ref and never writes the flag.
+  //
+  // The HYDRATION GAP after a switch is not an edge either (the case further
+  // down): `openSession` flips the id while `loadHistory` is still in flight,
+  // and a stored session's board is SEEDED from that transcript, so `visible`
+  // would otherwise go `false → true` a tick after the switch.
+  //
+  // What the cases below actually pin is the flag not being written. The
+  // `prevVisibleRef` re-baseline is a DEFENSIVE line rather than the thing those
+  // two cases test: the open arm can only fire on an arrival from `false`, so a
+  // switch that lands on an already-visible board is caught by the
+  // `prevSessionIdRef` guard whichever value the visible ref holds. Which case is
+  // sensitive to what is stated per case, because a comment that overstates its
+  // own pin is worse than none:
+  //   - the hydration case reddens only without the `!prevHydratedRef.current`
+  //     half of the guard (re-baselining while `!hydrated` alone does NOT catch
+  //     it — `hydrated` and `visible` flip in the same commit);
+  //   - the `re-baselines the visible ref …` case is the one that reddens if
+  //     `prevVisibleRef.current = visible` is deleted from the suppression
+  //     branch (measured: it is the only case in the file that does).
+
+  it("does NOT auto-expand when a SESSION SWITCH lands on a session whose parent board is already open", () => {
+    useSessions.setState({ activeSessionId: "main1" });
+    // BOTH sessions hydrated, so this pins the RE-BASELINE and not the
+    // hydration suppression (the case below covers the un-hydrated half).
+    liveSessions("main1", "main2");
+    act(() => {
+      setSidePaneCollapsed(true);
+    });
+    const { container } = render(<SidePane />);
+    const frame = container.firstChild as HTMLElement;
+    expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
+    // Session B's board is open BEFORE the user lands on it: nothing appears
+    // while they look, so there is no board APPEARING to popup for.
+    act(() => {
+      useInteractive.getState().applyTodoUpdate("main2", {
+        source: "native",
+        todos: [{ content: "board in the other session", status: "pending" }],
+      });
+    });
+    act(() => {
+      useSessions.setState({ activeSessionId: "main2" });
+    });
+    // The switch is not an edge: the frame keeps the user's collapsed choice.
+    expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
+    expect(getSidePaneCollapsed()).toBe(true);
+    // CONTENT, not evidence about the frame: collapsing CLIPS the pane rather
+    // than unmounting it (`invisible` + `overflow-hidden`), so its text is in the
+    // document in BOTH states. This only says the clipped pane is now holding the
+    // session the user landed on; the width assertion above is what says the
+    // frame stayed shut.
+    expect(screen.getByText("board in the other session")).toBeTruthy();
+  });
+
+  it("does NOT auto-expand when a SESSION SWITCH lands on a session whose CHILD board is already open", () => {
+    // The half that made this edge COMMON: child boards count toward `visible`
+    // (ADR 0041/0042), so a delegation running in ANOTHER session used to open
+    // this pane the moment the user switched to that session.
+    useSessions.setState({ activeSessionId: "main1" });
+    // Hydrated on both sides (see the case above): the switch is what is pinned.
+    liveSessions("main1", "main2");
+    act(() => {
+      setSidePaneCollapsed(true);
+    });
+    const { container } = render(<SidePane />);
+    const frame = container.firstChild as HTMLElement;
+    expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
+    act(() => {
+      useSubagents.getState().addSession({
+        sessionId: "sub2",
+        parentSessionId: "main2",
+        agentName: "builder",
+        task: "build in the other session",
+        status: "running",
+      });
+      useInteractive.getState().applyTodoUpdate("sub2", {
+        source: "native",
+        todos: [
+          { content: "child board in the other session", status: "pending" },
+        ],
+      });
+    });
+    act(() => {
+      useSessions.setState({ activeSessionId: "main2" });
+    });
+    expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
+    expect(getSidePaneCollapsed()).toBe(true);
+    // CONTENT only (see the case above — a collapsed pane is clipped, not
+    // unmounted): the other session's child block is mounted behind the sliver,
+    // and the width assertion above is what says the frame did not open for it.
+    expect(
+      container.querySelector('[data-testid="todo-board-child"]'),
+    ).not.toBeNull();
+  });
+
+  it("does NOT auto-expand when the session it SWITCHED TO hydrates a board that was already in its transcript (the openSession → loadHistory gap)", () => {
+    // The round-2 finding: the switch suppression did not survive HYDRATION.
+    // `useSessions.openSession` flips `activeSessionId` SYNCHRONOUSLY and loads
+    // the transcript LATER (`void (async () => loadHistory(sessionId))`), so on
+    // landing on a not-yet-loaded stored session `visible` is `false` AT the
+    // switch, and the board starts existing only when the transcript lands —
+    // `useInteractive.todos` is never persisted, so a stored session's parent
+    // board comes ONLY from the `rawInput` seed (`useMainTodoItems`). That moves
+    // `visible` `false → true` INSIDE the now-active session, one tick after the
+    // switch: a textbook open edge for a board the user never saw appear. The
+    // app already names this window in `chat/MessageList.tsx` ("the window
+    // between `openSession` and `loadHistory` hydration").
+    useSessions.setState({
+      activeSessionId: "main1",
+      messages: {
+        main1: [{ kind: "user", text: "the session you were on", at: 1 }],
+      },
+    });
+    act(() => {
+      setSidePaneCollapsed(true);
+    });
+    const { container } = render(<SidePane />);
+    const frame = container.firstChild as HTMLElement;
+    expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
+    // The switch itself (what `openSession` does before its await): `main2` has
+    // NO `messages` entry at all, so its board is not knowable yet.
+    act(() => {
+      useSessions.setState({ activeSessionId: "main2" });
+    });
+    expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
+    // …then hydration lands (`loadHistory` resolves and writes the transcript).
+    // The `manage_todo_list` call that stored session already had in its
+    // database seeds the board, so `visible` goes `false → true` right here.
+    act(() => {
+      useSessions.setState({
+        messages: {
+          main1: [
+            { kind: "user", text: "the session you were on", at: 1 },
+          ],
+          main2: [
+            { kind: "user", text: "the session you switched to", at: 2 },
+            {
+              kind: "tool-call",
+              id: "t1",
+              title: "manage_todo_list",
+              status: "completed",
+              at: 3,
+              rawInput: {
+                operation: "write",
+                todoList: [
+                  { content: "written before the switch", status: "pending" },
+                ],
+              },
+            },
+          ],
+        },
+      });
+    });
+    // Landing the transcript is NOT a board appearing in front of the user: the
+    // board was in that session the whole time, only unreadable. The switch
+    // stays a non-edge until the session it switched TO is knowable.
+    expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
+    expect(getSidePaneCollapsed()).toBe(true);
+    // The board really did arrive (so this is not a test of an empty session):
+    // the hydrated seed is what the clipped pane now holds.
+    expect(screen.getByText("written before the switch")).toBeTruthy();
+  });
+
+  it("stops suppressing the moment the session it SWITCHED TO is hydrated (a board written AFTER the transcript lands still opens the frame)", () => {
+    // The other half of the hydration rule: the suppression must not become
+    // permanent. The transcript that lands carries NO board (no
+    // `manage_todo_list` call), so `visible` is still `false` when the gap
+    // closes, and the list the session writes afterwards is a genuine 0 → 1 edge
+    // in the session the user is now looking at.
+    useSessions.setState({
+      activeSessionId: "main1",
+      messages: {
+        main1: [{ kind: "user", text: "the session you were on", at: 1 }],
+      },
+    });
+    act(() => {
+      setSidePaneCollapsed(true);
+    });
+    const { container } = render(<SidePane />);
+    const frame = container.firstChild as HTMLElement;
+    expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
+    act(() => {
+      useSessions.setState({ activeSessionId: "main2" });
+    });
+    expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
+    act(() => {
+      useSessions.setState({
+        messages: {
+          main1: [
+            { kind: "user", text: "the session you were on", at: 1 },
+          ],
+          main2: [{ kind: "user", text: "the session you switched to", at: 2 }],
+        },
+      });
+    });
+    expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
+    // The transcript has landed, so edges are being judged again: this is the
+    // same-session 0 → 1 open the pane has always performed.
+    act(() => {
+      useInteractive.getState().applyTodoUpdate("main2", {
+        source: "native",
+        todos: [{ content: "written after hydration", status: "pending" }],
+      });
+    });
+    expect(frame.style.width).toBe("320px");
+    expect(getSidePaneCollapsed()).toBe(false);
+  });
+
+  it("still auto-expands for a board that appears in the session it SWITCHED TO (the same-session edge survives)", () => {
+    // The other half of the fix: re-baselining must not disable auto-open. The
+    // switch itself carries no board, so the frame is still collapsed after it;
+    // the board then LANDS while the user is looking at that session — a
+    // genuine 0 → 1 edge inside the active session.
+    useSessions.setState({ activeSessionId: "main1" });
+    // Hydrated on both sides: the suppression ends with the transcript, so a
+    // session that has one behaves exactly as it did before the gap existed.
+    liveSessions("main1", "main2");
+    act(() => {
+      setSidePaneCollapsed(true);
+    });
+    const { container } = render(<SidePane />);
+    const frame = container.firstChild as HTMLElement;
+    act(() => {
+      useSessions.setState({ activeSessionId: "main2" });
+    });
+    expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
+    act(() => {
+      useInteractive.getState().applyTodoUpdate("main2", {
+        source: "native",
+        todos: [{ content: "a board that appears after the switch", status: "pending" }],
+      });
+    });
+    expect(frame.style.width).toBe("320px");
+    expect(getSidePaneCollapsed()).toBe(false);
+  });
+
+  it("still auto-expands for a CHILD board that lands after the switch, in the session it SWITCHED TO", () => {
+    useSessions.setState({ activeSessionId: "main1" });
+    liveSessions("main1", "main2");
+    act(() => {
+      setSidePaneCollapsed(true);
+    });
+    const { container } = render(<SidePane />);
+    const frame = container.firstChild as HTMLElement;
+    // The other session's child exists but has written no list yet: switching
+    // to it opens nothing (unchanged rule), and the ref is re-baselined.
+    act(() => {
+      useSubagents.getState().addSession({
+        sessionId: "sub2",
+        parentSessionId: "main2",
+        agentName: "builder",
+        task: "build in the other session",
+        status: "running",
+      });
+    });
+    act(() => {
+      useSessions.setState({ activeSessionId: "main2" });
+    });
+    expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
+    // The child's FIRST list arrives while the user is on that session.
+    act(() => {
+      useInteractive.getState().applyTodoUpdate("sub2", {
+        source: "native",
+        todos: [{ content: "a child board after the switch", status: "pending" }],
+      });
+    });
+    expect(frame.style.width).toBe("320px");
+    expect(getSidePaneCollapsed()).toBe(false);
+  });
+
+  it("re-baselines the visible ref to the NEW session's visibility, so a stale `true` cannot disable auto-open there", () => {
+    // The case that makes `prevVisibleRef.current = visible` inside the
+    // suppression branch load-bearing rather than decorative. The user leaves a
+    // session whose board is OPEN (visible `true`), lands on a stored one that
+    // hydrates WITHOUT a board, and that session then writes its first list.
+    // A visible ref left holding the previous session's `true` would leave the
+    // open arm unable to fire ever again in the session they are now looking at.
+    useSessions.setState({ activeSessionId: "main1" });
+    liveSessions("main1");
+    useInteractive.getState().applyTodoUpdate("main1", {
+      source: "native",
+      todos: [{ content: "open in the session you were on", status: "pending" }],
+    });
+    act(() => {
+      setSidePaneCollapsed(true);
+    });
+    const { container } = render(<SidePane />);
+    const frame = container.firstChild as HTMLElement;
+    // Mount is not an edge even though the board is open (the existing mount pin
+    // above), so the frame starts shut with `visible === true`.
+    expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
+    act(() => {
+      useSessions.setState({ activeSessionId: "main2" });
+    });
+    // Hydration lands a transcript with no board in it: `visible` is `false` in
+    // the new session, and THAT is what the baseline must now hold.
+    act(() => {
+      useSessions.setState({
+        messages: {
+          main1: [{ kind: "user", text: "the session you were on", at: 1 }],
+          main2: [{ kind: "user", text: "the session you switched to", at: 2 }],
+        },
+      });
+    });
+    expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
+    act(() => {
+      useInteractive.getState().applyTodoUpdate("main2", {
+        source: "native",
+        todos: [
+          { content: "the new session's first list", status: "pending" },
+        ],
+      });
+    });
+    expect(frame.style.width).toBe("320px");
+    expect(getSidePaneCollapsed()).toBe(false);
+  });
+
   it("respects a MANUAL collapse while work is in flight (a change without the edge does not re-expand)", () => {
     useSessions.setState({ activeSessionId: "main1" });
+    liveSessions("main1");
     const { container } = render(<SidePane />);
     const frame = container.firstChild as HTMLElement;
     act(() => {
@@ -314,8 +723,9 @@ describe("SidePane (the status panel)", () => {
   // -- bottom-right; the collapsed rail keeps it reachable) --
 
   // -- The pane's OWN collapse toggle (bottom-inner corner = bottom LEFT for
-  // -- the right pane, pointing back at the chat). Collapsed, it hands off to
-  // -- the chrome bar — see `App.test.tsx` for the handoff. --
+  // -- the right pane, pointing back at the chat). It stays HERE in BOTH states:
+  // -- the chrome bar holds NO pane control, open or collapsed — see
+  // -- `App.test.tsx`'s `the chrome bar NEVER holds a pane control`. --
 
   it("holds its own collapse toggle at the frame's inner-bottom corner", () => {
     const { container } = render(<SidePane />);
@@ -406,16 +816,49 @@ describe("SidePane (the status panel)", () => {
         { content: "c", status: "pending" },
       ],
     });
+    // A running child with a board of its own: the sliver must show it as its
+    // OWN mark, not fold it into the parent's or drop it.
+    useSubagents.getState().addSession(entry);
+    useInteractive.getState().applyTodoUpdate("sub1", {
+      source: "native",
+      todos: [{ content: "child one", status: "pending" }],
+    });
+    // A SECOND running child that has written NO todo list at all. THIS is what
+    // pins the rail's SCOPE: it iterates BOARDS, not `useSubagents` entries, so
+    // a running child with no list is neither a mark nor a term in the
+    // accessible name (rule 4 of `todoBoardsOf`). Before this entry existed both
+    // children in the fixture had a board, so the two shapes were
+    // indistinguishable and the rail could have been re-pointed at
+    // `Object.values(entries)` with every assertion below still passing.
+    useSubagents.getState().addSession({
+      sessionId: "sub2",
+      parentSessionId: "main1",
+      agentName: "builder",
+      task: "build the thing",
+      status: "running",
+    });
     const { rerender } = render(<SidePane />);
-    // Open: the board is the readout — no duplicate strip.
+    // Open: the board is the readout — no second copy of it.
     expect(screen.queryByTestId("todo-rail")).toBeNull();
     act(() => {
       setSidePaneCollapsed(true);
     });
     rerender(<SidePane />);
     // Collapsed: the marks are the only thing the sliver can show, so they
-    // appear — one per todo.
-    expect(screen.getAllByTestId("todo-mark")).toHaveLength(3);
+    // appear — one per BOARD (the parent's list first, then each child), NOT one
+    // per item: three parent rows plus one child row is TWO marks.
+    const marks = screen.getAllByTestId("todo-mark");
+    // TWO, not three: the board-less `sub2` draws no mark.
+    expect(marks).toHaveLength(2);
+    // The parent leads, and it is the live one (`in_progress` → the hot dot);
+    // the child is waiting.
+    expect(marks[0]!.className).toContain("bg-warning");
+    expect(marks[1]!.className).not.toContain("bg-warning");
+    // And every board is named, each with its OWN count — and ONLY the boards:
+    // no `builder` term, because the board-less child is not on the rail.
+    expect(
+      screen.getByTestId("todo-rail").getAttribute("aria-label"),
+    ).toBe("Todos — this session 1/3, reviewer 0/1");
   });
 
   it("hides the board's text in the sliver (the one-character-per-line column) while keeping it mounted", () => {
@@ -423,6 +866,15 @@ describe("SidePane (the status panel)", () => {
     useInteractive.getState().applyTodoUpdate("main1", {
       source: "main",
       todos: [{ content: "a very long todo label", status: "pending" }],
+    });
+    // A child board too, so the board area has text from BOTH levels: its block
+    // stays MOUNTED inside the `invisible` scroller (clipped, not unmounted),
+    // which is exactly why the rail's no-text assertion below is scoped to the
+    // rail and not to the container.
+    useSubagents.getState().addSession(entry);
+    useInteractive.getState().applyTodoUpdate("sub1", {
+      source: "native",
+      todos: [{ content: "a child label that must not leak", status: "pending" }],
     });
     act(() => {
       setSidePaneCollapsed(true);
@@ -440,6 +892,10 @@ describe("SidePane (the status panel)", () => {
     // Still mounted, and still the only copy of the text (the rail is
     // text-free), so a screen reader gets one summary, not a label and a copy.
     expect(screen.getByText("a very long todo label")).toBeTruthy();
+    expect(screen.getByText("a child label that must not leak")).toBeTruthy();
+    // The rail itself is text-free: the marks carry the boards, and the boards'
+    // own labels are `invisible` behind them, so the collapsed tree holds one
+    // summary (the rail's `aria-label`) and no painted copy of any label.
     expect(screen.getByTestId("todo-rail").textContent).toBe("");
     // And it comes back when the pane opens.
     act(() => {

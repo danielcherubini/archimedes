@@ -1,8 +1,11 @@
 /**
  * The side pane's collapsed flag — a tiny shared module (no store, no
- * React) so the `SidePane` frame (Task 4) and the header toggle (Task 6)
- * agree without event guessing: the toggle consumes this via
- * `useSyncExternalStore(subscribeSidePane, getSidePaneCollapsed)`.
+ * React) so the two halves of the `SidePane` frame agree without event
+ * guessing: the pane keeps its OWN collapse toggle — at the frame's
+ * inner-bottom corner, in BOTH states, and the chrome bar holds no pane
+ * control at all (`CONTEXT.md`: **Side pane**) — so the frame reads this
+ * flag via `useSyncExternalStore(subscribeSidePane, getSidePaneCollapsed)`
+ * and its toggle is the only thing that writes it.
  *
  * The module is the SINGLE OWNER of the persistence: `setSidePaneCollapsed`
  * writes `localStorage["side-pane-collapse"]` itself, so the toggle's

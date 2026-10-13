@@ -66,10 +66,13 @@ const SOURCES = [
  * exactly that reason — so a sentence here can ship a rule the app never uses.
  * The bare offset / cap quoted in prose did; they are now written as arithmetic
  * in words, and the test below keeps them that way.
+ *
+ * A roadmap doc is DELETED ON SHIP, so removing its entry here belongs in that
+ * same shipping commit — and the read below deliberately has no tolerance for a
+ * missing file, because silently skipping one would let a doc escape the scan.
  */
 const PROSE = [
   "docs/features/subagent-sessions.md",
-  "docs/roadmap/subagent-gates-in-parent-transcript.md",
 ];
 
 describe("the Subagent sheet geometry has one home", () => {
