@@ -8,6 +8,7 @@ import {
   readClipboardImage,
   readFileBytes,
   cancelSession,
+  compactSession,
   listSkills,
   listMcpServersEffective,
   listAgentDefinitionsForSpace,
@@ -149,6 +150,13 @@ vi.mock("../lib/tauri", async () => {
     readClipboardImage: vi.fn().mockResolvedValue(null),
     readFileBytes: vi.fn().mockResolvedValue(null),
     cancelSession: vi.fn().mockResolvedValue(undefined),
+    // The `/compact` Composer command (ADR 0044). MOCKED ON PURPOSE, and not
+    // optional: this factory spreads `importActual`, so an un-mocked
+    // `compactSession` would reach the REAL `invoke` and reject on jsdom's
+    // missing `window.__TAURI_INTERNALS__` — a dispatch test would then "pass"
+    // on the rejection landing in `send()`'s `catch` rather than on the
+    // interception. `true` = "the frame was written" (the live answer).
+    compactSession: vi.fn().mockResolvedValue(true),
     loadHistory: vi.fn().mockResolvedValue([]),
     listSkills: vi.fn().mockResolvedValue([
       {
@@ -6242,5 +6250,131 @@ describe("ChatStream (a child gate scrolls into view)", () => {
     // parent), and it renders nowhere in the transcript.
     expect(screen.queryByText("Run this command with sudo?")).toBeNull();
     expect(scroll.writes()).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The `/compact` Composer command (ADR 0044).
+//
+// A Composer command is intercepted by the Client: it never becomes a user row,
+// never expands as a Mention, and never reaches the Agent. Every dispatch below
+// CLICKS Send — it never presses Enter. With a token under the caret the picker
+// has a highlighted row, and the picker's keydown branch intercepts Enter to
+// SELECT that row (inserting `/compact `), exactly as it does today for a `?` or
+// `$` token. That is the accepted, pinned behaviour: Enter selects, and the user
+// presses Enter again on a draft whose token has ended.
+// ---------------------------------------------------------------------------
+describe("ChatStream — the /compact Composer command (ADR 0044)", () => {
+  it("the / picker lists the command with its description, and never a skill", async () => {
+    seedLiveSession();
+    render(<ChatStream />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "/" } });
+    // The command row, with the description on its secondary line.
+    expect(await screen.findByText("compact")).toBeTruthy();
+    expect(screen.getByText("Summarize the older context now")).toBeTruthy();
+    // The `else: skills.map(…)` fall-through trap: without an explicit `/` arm
+    // BEFORE the Mention chain, an empty `/` query would list EVERY skill.
+    expect(screen.queryByText("debug")).toBeNull();
+    expect(screen.queryByText("beta")).toBeNull();
+  });
+
+  it("selecting the command row inserts `/compact ` (selectMention's existing fall-through)", async () => {
+    seedLiveSession();
+    render(<ChatStream />);
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "/comp" } });
+    await screen.findByText("compact");
+    textarea.setSelectionRange(5, 5);
+    // Enter is the PICKER's key here, not the send key — and nothing dispatches.
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(
+      "/compact ",
+    );
+    expect(compactSession).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    // The trailing space ends the token, so the picker is gone and the next
+    // Enter is a send.
+    expect(screen.queryByText("compact")).toBeNull();
+  });
+
+  it("/compact dispatches compact_session with null instructions and sends nothing", async () => {
+    seedLiveSession();
+    render(<ChatStream />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "/compact" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(compactSession).toHaveBeenCalledWith("s1", null));
+    // Consumed, not sent: no prompt, no user row, no turn opened.
+    expect(sendPrompt).not.toHaveBeenCalled();
+    const messages = useSessions.getState().messages["s1"] ?? [];
+    expect(messages.some((m) => m.kind === "user")).toBe(false);
+    expect(useSessions.getState().inTurn["s1"]).toBeUndefined();
+    // The draft is cleared, like any send.
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("/compact <args> reaches compact_session as the instructions", async () => {
+    seedLiveSession();
+    render(<ChatStream />);
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "/compact keep the tests" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(compactSession).toHaveBeenCalledWith("s1", "keep the tests"),
+    );
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("a non-live answer (false) adds ONE system-style line with its own messageId", async () => {
+    seedLiveSession();
+    vi.mocked(compactSession).mockResolvedValueOnce(false);
+    render(<ChatStream />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "/compact" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(compactSession).toHaveBeenCalled());
+    await flush();
+    const messages = useSessions.getState().messages["s1"] ?? [];
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      kind: "agent-text",
+      text: "Nothing to compact — this session is not open.",
+    });
+    // Its OWN id (`client:<n>`), never the harness's `"system"` key: the store
+    // appends a same-id chunk onto the trailing agent-text with no separator, so
+    // a shared key would weld two local lines into one bubble.
+    const id = messages[0]!.kind === "agent-text" ? messages[0]!.messageId : "";
+    expect(id.startsWith("client:")).toBe(true);
+    expect(messages.some((m) => m.kind === "user")).toBe(false);
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("/compact on a RESUMABLE stored session does not resume it (ADR 0044)", async () => {
+    // The intercept sits BEFORE `send()`'s auto-resume block on purpose: a
+    // resume would both cost a process spawn and make the session report LIVE,
+    // which is exactly the flow ADR 0044 rejects.
+    seedStoredSession({ loadSession: true });
+    vi.mocked(compactSession).mockResolvedValueOnce(false);
+    render(<ChatStream />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "/compact" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(compactSession).toHaveBeenCalledWith("s1", null));
+    expect(resumeSession).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("an unmatched /name sends BYTE-IDENTICALLY (the File-completion insert fall-through)", async () => {
+    // The fixture is the literal draft a `?` FILE row produces at position 0: the
+    // trigger is consumed and the ABSOLUTE path inserted (ADR 0033/0035). A
+    // command namespace that claims a leading `/` must give this back verbatim.
+    seedLiveSession();
+    render(<ChatStream />);
+    const text = "/etc/hosts has two entries";
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: text } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(sendPrompt).toHaveBeenCalledWith("s1", text));
+    expect(compactSession).not.toHaveBeenCalled();
+    const messages = useSessions.getState().messages["s1"] ?? [];
+    const user = messages.find((m) => m.kind === "user");
+    expect(user?.kind === "user" ? user.text : null).toBe(text);
   });
 });

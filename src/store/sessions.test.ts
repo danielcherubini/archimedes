@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applySessionUpdate,
   autoSelectActive,
@@ -1054,6 +1054,71 @@ describe("compacting (the working indicator's compaction state)", () => {
       used: 12000,
       window: 128000,
     });
+  });
+});
+
+describe("addSystemLine (a Client-local line in the transcript, ADR 0044)", () => {
+  beforeEach(() => {
+    useSessions.setState({ messages: { s1: [] }, inTurn: {} });
+  });
+  // The store is a module singleton and this file has NO global reset, so a
+  // block that leaves rows behind would leak them into whichever describe
+  // follows (the next one counts messages from zero). Clean up after.
+  afterEach(() => {
+    useSessions.setState({ messages: {}, inTurn: {} });
+  });
+
+  it("appends ONE agent-text message carrying the text", () => {
+    useSessions.getState().addSystemLine("s1", "Nothing to compact — this session is not open.");
+    const messages = useSessions.getState().messages["s1"];
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      kind: "agent-text",
+      text: "Nothing to compact — this session is not open.",
+    });
+  });
+
+  it("gives the line a Client-owned messageId, never the harness's `system` key", () => {
+    useSessions.getState().addSystemLine("s1", "one");
+    const [msg] = useSessions.getState().messages["s1"];
+    expect(msg?.kind).toBe("agent-text");
+    // `case "agent_message_chunk"` APPENDS to a trailing agent-text that carries
+    // the SAME `messageId`, with NO separator. Reusing the harness's `"system"`
+    // id would therefore weld two Client lines — or a Client line onto a real
+    // harness system message — into one run-on bubble.
+    expect(msg?.kind === "agent-text" ? msg.messageId : "").toMatch(/^client:/);
+    expect(msg?.kind === "agent-text" ? msg.messageId : "").not.toBe("system");
+  });
+
+  it("two calls are TWO bubbles with DIFFERENT messageIds (no welding)", () => {
+    useSessions.getState().addSystemLine("s1", "first");
+    useSessions.getState().addSystemLine("s1", "second");
+    const messages = useSessions.getState().messages["s1"];
+    expect(messages).toHaveLength(2);
+    const ids = messages.map((m) => (m.kind === "agent-text" ? m.messageId : ""));
+    expect(ids[0]).not.toBe(ids[1]);
+    expect(messages.map((m) => (m.kind === "agent-text" ? m.text : ""))).toEqual([
+      "first",
+      "second",
+    ]);
+  });
+
+  it("does not weld onto a trailing agent-text the harness itself emitted", () => {
+    useSessions
+      .getState()
+      .applySessionUpdate("s1", chunk("m1", "the agent's own answer"));
+    useSessions.getState().addSystemLine("s1", "a client line");
+    const messages = useSessions.getState().messages["s1"];
+    expect(messages).toHaveLength(2);
+    expect(messages[1]).toMatchObject({ kind: "agent-text", text: "a client line" });
+  });
+
+  it("adds no user message and starts no turn (a command is not a prompt)", () => {
+    useSessions.getState().addSystemLine("s1", "a client line");
+    expect(
+      useSessions.getState().messages["s1"].some((m) => m.kind === "user"),
+    ).toBe(false);
+    expect(useSessions.getState().inTurn["s1"]).toBeUndefined();
   });
 });
 

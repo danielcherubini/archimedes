@@ -16,6 +16,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   attentionArm,
   attentionDisarm,
+  compactSession,
   listCompletionEntries,
   listSpaceFiles,
 } from "./tauri";
@@ -114,6 +115,51 @@ describe("listCompletionEntries (the out-of-Space `?` IPC boundary, ADR 0035)", 
     };
     mockedInvoke.mockResolvedValue(payload);
     await expect(listCompletionEntries("~/.config/")).resolves.toEqual(payload);
+  });
+});
+
+describe("compactSession (the `/compact` Composer-command IPC boundary, ADR 0044)", () => {
+  beforeEach(() => {
+    mockedInvoke.mockReset();
+  });
+
+  it("invokes `compact_session` with the `sessionId`/`instructions` argument keys", async () => {
+    mockedInvoke.mockResolvedValue(true);
+    await compactSession("s1", "keep the tests");
+    // Same trap as `list_space_files` above: Tauri maps the camelCase arg KEY
+    // to the snake_case Rust parameter (`sessionId` → `session_id`,
+    // `instructions` → `instructions` in `commands::sessions::compact_session`),
+    // and a typo in the command NAME or in either KEY is a runtime-only failure
+    // no Rust test and no component test (which mocks THIS wrapper) can see.
+    expect(mockedInvoke).toHaveBeenCalledWith("compact_session", {
+      sessionId: "s1",
+      instructions: "keep the tests",
+    });
+  });
+
+  it("passes a null `instructions` through as null (no args is not an empty string)", async () => {
+    // `/compact` with no args means "no extra instructions", which the Rust side
+    // models as `Option<String> = None`. A wrapper that normalized `null` the way
+    // `sendPrompt` normalizes `images` (`?? []`) would send `""` and make the
+    // harness summarize against an empty instruction string instead of its own
+    // default — a quiet behaviour change inside the harness's prompt.
+    mockedInvoke.mockResolvedValue(true);
+    await compactSession("s1", null);
+    expect(mockedInvoke).toHaveBeenCalledWith("compact_session", {
+      sessionId: "s1",
+      instructions: null,
+    });
+  });
+
+  it("returns the command's bool UNCHANGED (false is the not-live answer)", async () => {
+    // `false` is NOT an error — a stored (non-live) session is a NO-OP, and the
+    // composer's one-line "Nothing to compact" message is built from exactly
+    // this value, so a wrapper that swallowed or reshaped it would silence the
+    // only feedback the no-op path has.
+    mockedInvoke.mockResolvedValue(false);
+    await expect(compactSession("s1", null)).resolves.toBe(false);
+    mockedInvoke.mockResolvedValue(true);
+    await expect(compactSession("s1", "x")).resolves.toBe(true);
   });
 });
 

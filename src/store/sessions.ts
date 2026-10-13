@@ -668,6 +668,23 @@ interface SessionsState {
    */
   resumeSession: (sessionId: string) => Promise<SessionInfo>;
   addUserMessage: (sessionId: string, text: string, images?: ImageRef[]) => void;
+  /**
+   * Append ONE Client-authored line to the transcript, shaped exactly like an
+   * agent-text message (so it renders in the stream with no new renderer).
+   * Used by the `/compact` **Composer command** when there is nothing to
+   * compact (ADR 0044): a command produces no user row and no model call, so
+   * without this the no-op would be SILENT — the user would type something and
+   * the app would do nothing at all.
+   *
+   * It DELEGATES to `applySessionUpdate` with an `agent_message_chunk` rather
+   * than touching `messages` itself, and it MUST pass a UNIQUE `messageId` per
+   * call: `case "agent_message_chunk"` APPENDS to the trailing agent-text when
+   * that message carries the SAME id, with NO separator, so reusing the
+   * harness's `"system"` key would weld two local lines (or a local line onto
+   * a real harness system message) into one run-on bubble. Hence
+   * `clientSystemMessageId()` below.
+   */
+  addSystemLine: (sessionId: string, text: string) => void;
   beginTurn: (sessionId: string) => void;
   applyConfigOptions: (sessionId: string, options: SessionConfigOption[]) => void;
   applySessionUpdate: (sessionId: string, update: AcpSessionUpdate) => void;
@@ -691,6 +708,17 @@ const inFlightToggles = new Map<string, Promise<void>>();
 // pruned in `removeSpace`), so every known path has a committed
 // baseline; the UI-value fallback below is a last resort only.
 const committedTrusted = new Map<string, boolean>();
+
+// The `messageId` for a Client-authored transcript line (see `addSystemLine`).
+// A MODULE-LOCAL counter, not a timestamp: two lines appended in the same
+// millisecond must still differ, or `agent_message_chunk`'s same-id append
+// welds them into one bubble. It is not persisted either — a reloaded
+// transcript comes from the harness's own rows, and a Client line is by
+// definition not one of them.
+let clientMessageSeq = 0;
+function clientSystemMessageId(): string {
+  return `client:${++clientMessageSeq}`;
+}
 
 export const useSessions = create<SessionsState>((set, get) => ({
   sessions: [],
@@ -1220,6 +1248,17 @@ export const useSessions = create<SessionsState>((set, get) => ({
 
   beginTurn: (sessionId) =>
     set((state) => ({ inTurn: { ...state.inTurn, [sessionId]: true } })),
+
+  // A Client-authored line, appended through the SAME reducer the harness's own
+  // frames go through — see the interface doc for why the `messageId` has to be
+  // unique per call. Deliberately NOT a `user` message: a **Composer command**
+  // is consumed, it is neither a prompt nor a row the Agent will ever see.
+  addSystemLine: (sessionId, text) =>
+    get().applySessionUpdate(sessionId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text },
+      messageId: clientSystemMessageId(),
+    }),
 
   applySessionUpdate: (sessionId, update) =>
     set((state) => {

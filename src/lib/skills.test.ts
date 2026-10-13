@@ -614,6 +614,93 @@ describe("activeMentionToken", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// The `/` Composer-command token (ADR 0044): the FOURTH prefix joins the same
+// picker but a DIFFERENT semantics — a command is consumed on send, it expands
+// nothing and reaches no Agent. The grammar itself is a copy of the Mention
+// shape: the same `(^|\s)` left boundary `@`/`#` require, and the same
+// lowercase+hyphen charset, so a command name is matched EXACTLY the way a
+// Mention name is (ADR 0031's tag-safety argument applies verbatim).
+//
+// It sits AFTER the Mention shape and BEFORE the two `?` shapes, and that order
+// is what the last two cases below pin.
+// ---------------------------------------------------------------------------
+describe("activeMentionToken — the / Composer-command token (ADR 0044)", () => {
+  it("a_slash_at_line_start", () => {
+    expect(activeMentionToken("/comp", 5)).toEqual({
+      prefix: "/",
+      remainder: "comp",
+      start: 0,
+    });
+  });
+  it("a_slash_after_a_space", () => {
+    expect(activeMentionToken("say /comp", 9)).toEqual({
+      prefix: "/",
+      remainder: "comp",
+      start: 4,
+    });
+  });
+  it("the_last_token_wins (the documented rule, unchanged for a mixed draft)", () => {
+    expect(activeMentionToken("/foo /comp", 10)).toEqual({
+      prefix: "/",
+      remainder: "comp",
+      start: 5,
+    });
+  });
+  it("a_bare_slash_is_an_empty_remainder (a glyph alone still opens the picker)", () => {
+    expect(activeMentionToken("x /", 3)).toEqual({
+      prefix: "/",
+      remainder: "",
+      start: 2,
+    });
+  });
+  it("a_bare_slash_at_line_start_is_an_empty_remainder", () => {
+    expect(activeMentionToken("/", 1)).toEqual({
+      prefix: "/",
+      remainder: "",
+      start: 0,
+    });
+  });
+
+  it("uppercase_is_outside_the_charset_so_no_token_forms", () => {
+    // `/COMP` is NOT a command the user nearly typed — it is prose, exactly as
+    // `$DEBUG` is prose. `parseComposerCommand` matches EXACTLY, so the picker
+    // has nothing to offer here and the draft sends verbatim.
+    expect(activeMentionToken("/COMP", 5)).toBeNull();
+  });
+
+  it("a_path_typed_without_the_trigger_is_not_a_command_token", () => {
+    // `/etc/hosts` alone: the charset has no `.` and no interior `/`, and the
+    // `(^|\s)` boundary fails for the `/` after `etc`. It forms NO token of any
+    // prefix (`?` is required for a File token), so the picker stays shut and the
+    // draft is prose — which is what ADR 0044's fall-through needs.
+    expect(activeMentionToken("/etc/hosts", 10)).toBeNull();
+  });
+
+  it("?/etc/ho_is_STILL_a_file_token (the `/` branch cannot eat a `?` token)", () => {
+    // LOAD-BEARING. `?` is not a `(^|\s)` boundary, so the `/` in `?/etc/ho` is
+    // mid-token and the `/` shape cannot match it — the out-of-Space File
+    // completion still arms on its own shape (ADR 0035).
+    expect(activeMentionToken("?/etc/ho", 8)).toEqual({
+      prefix: "?",
+      remainder: "/etc/ho",
+      start: 0,
+    });
+  });
+
+  it("?~/notes /comp yields the / token (the ACCEPTED precedence)", () => {
+    // Pinned as a CONSEQUENCE, not a bug. Trying `/` before `?` means a draft
+    // whose trailing token is a command no longer reports the earlier absolute
+    // `?` token that admits spaces. That is the documented last-token-wins rule
+    // reading the SAME span it always read — the caret moved, so the token did.
+    expect(activeMentionToken("?~/notes /comp", 14)).toEqual({
+      prefix: "/",
+      remainder: "comp",
+      start: 9,
+    });
+  });
+});
+
 describe("activeMentionToken — the ? file-path token (ADR 0033)", () => {
   it("a_question_at_line_start_accepts_uppercase (case is PRESERVED)", () => {
     expect(activeMentionToken("?README", 7)).toEqual({
