@@ -1629,12 +1629,20 @@ impl AgentLoop {
         });
         let mut aborted = false;
         let mut error_message: Option<String> = None;
+        // The keep-recent budget comes from the COMPACTOR (its config copy +
+        // THIS model's window), not from `catalog.compaction` directly: the
+        // catalog budget is catalog-wide while the window is per-model, and an
+        // uncapped budget can cover the whole transcript of a small-window
+        // model — a compaction that shrinks nothing (see `keep_budget`).
+        // Computed BEFORE the ctx: `keep_budget(&self)` must not overlap the
+        // `compactor: &mut self.compactor` borrow.
+        let keep_recent_tokens = self.compactor.keep_budget();
         let mut ctx = compact::CompactionCtx {
             session_id: &self.session_id,
             model: &self.model,
             provider: &*self.provider,
             store: &self.store,
-            keep_recent_tokens: self.catalog.compaction.keep_recent_tokens,
+            keep_recent_tokens,
             compactor: &mut self.compactor,
         };
         match compact::run_compaction(&mut ctx, &mut self.messages, turn).await {
@@ -3807,7 +3815,10 @@ mod tests {
         });
         // Call 1 (turn 1): a usage report, then `Done(Error)` — with a
         // ONE-attempt budget the turn settles FAILED after that single call,
-        // never pushing a reply. Call 2 (turn 2): an ordinary usage-less
+        // never pushing a reply. Call 2 (turn 2): the compaction SUMMARY (the
+        // window is 16 684 against the default 16 384 reserve, so the derived
+        // keep-recent budget is 0 and the due compaction is a REAL one — see
+        // `Compactor::keep_budget`). Call 3 (turn 2): an ordinary usage-less
         // reply.
         let (provider, calls) = ScriptedProvider::new(vec![
             Some(vec![
@@ -3816,6 +3827,10 @@ mod tests {
                     output_tokens: 50,
                 }),
                 ProviderEvent::Done(FinishReason::Error),
+            ]),
+            Some(vec![
+                ProviderEvent::TextDelta("SUMMARY".to_string()),
+                ProviderEvent::Done(FinishReason::Stop),
             ]),
             Some(vec![
                 ProviderEvent::TextDelta("hi".to_string()),
@@ -3857,6 +3872,11 @@ mod tests {
         );
         let prompt_estimate = compact::estimate_context(&loop_.messages[1..2]);
         assert_eq!(prompt_estimate, 1001, "the prompt alone is 1001 tokens");
+        assert!(
+            compact::is_compaction_summary(&loop_.messages[0]),
+            "the due compaction SHRANK the transcript — the summary leads, and the prompt \
+             it kept (a budget of 0 keeps the last message) follows it"
+        );
         let frames: Vec<Value> = updates
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -3873,8 +3893,9 @@ mod tests {
         );
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            2,
-            "one failed call, then turn 2's reply"
+            3,
+            "one failed call, then turn 2's summary and reply — the measurement reconcile \
+             still retries nothing",
         );
     }
 
@@ -4100,7 +4121,19 @@ mod tests {
             vec![fake_model("m1")],
             None,
         );
-        loop_.catalog.compaction.keep_recent_tokens = 1;
+        // The keep-recent budget is read from the COMPACTOR (its config copy +
+        // THIS model's window), not from `catalog.compaction` after
+        // `AgentLoop::new`, so mutating the catalog here would be inert: a 128k
+        // window affords the full 20 000, `older` comes back empty and the
+        // compaction is skipped. Replace the compactor so the budget lands where
+        // production reads it.
+        loop_.compactor = Compactor::new(
+            CompactionConfig {
+                keep_recent_tokens: 1,
+                ..Default::default()
+            },
+            128_000,
+        );
         loop_.load_transcript(vec![
             ChatMessage {
                 role: ChatRole::User,
@@ -4128,6 +4161,21 @@ mod tests {
             },
         ]);
         loop_.run_compaction(&CancellationToken::new()).await;
+        // The compaction REALLY ran — it is not a `Skipped` whose only frame is
+        // the one `load_transcript` already emitted (which would make the frame
+        // assertions below tautological): the 4-message transcript is now the
+        // summary + the kept tail.
+        assert_eq!(
+            loop_.messages.len(),
+            2,
+            "the compaction rewrote the 4-message transcript to the summary + the kept \
+             tail, got {} messages",
+            loop_.messages.len()
+        );
+        assert!(
+            loop_.messages.iter().any(compact::is_compaction_summary),
+            "the rewritten transcript carries the compaction summary"
+        );
         let frame = last_context_usage_frame(&updates)
             .expect("a context_usage_update frame was emitted after the compaction");
         // The emitted value is the compactor's re-estimated (post-compaction)
