@@ -1,5 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { closeSession, deleteSpace } from "../lib/tauri";
 import { useSessions } from "../store/sessions";
 import { usePermissions } from "../store/permissions";
 import type { SessionInfo, SpaceRow } from "../lib/tauri";
@@ -34,6 +35,11 @@ vi.mock("../lib/tauri", async () => {
       capabilities: {},
       archived: false,
     }),
+    // Closing a tab calls BOTH: `deleteSpace` (the Space row) and, when the
+    // user confirms, `closeSession` per open Session. The real wrappers would
+    // `invoke` and reject in jsdom.
+    deleteSpace: vi.fn().mockResolvedValue(undefined),
+    closeSession: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -64,6 +70,9 @@ beforeEach(() => {
     configOptions: {},
   });
   usePermissions.setState({ prompts: {} });
+  // Closing tabs is asserted with `not.toHaveBeenCalled()` too, so the command
+  // mocks must not carry calls across cases.
+  vi.clearAllMocks();
 });
 
 describe("SpaceTabs (the Spaces as browser-style tabs at the top of the chat)", () => {
@@ -131,5 +140,375 @@ describe("SpaceTabs (the Spaces as browser-style tabs at the top of the chat)", 
       expect(screen.queryByRole("button", { name: label }), label).toBeNull();
     }
     expect(container.querySelector(".bg-warning")).toBeNull();
+  });
+
+  // -- The pill's hit area (every pixel of it is a control) ---------------
+
+  /**
+   * DOM-level pin, not a source grep: the assertions read what the component
+   * RENDERS (attribute + class list). jsdom has no layout engine, so "the
+   * label fills the pill" is asserted through the flex classes that produce
+   * it — `items-stretch` on the wrapper and a `flex items-center` label —
+   * rather than through measured heights, which are all 0 here.
+   */
+  it("the pill opts OUT of the window-drag region and leaves no slack above or below the label", () => {
+    useSessions.setState({ spaces: [space("/w/alpha")], activeSpacePath: "/w/alpha" });
+    render(<SpaceTabs />);
+    const tab = screen.getByRole("tab", { name: "alpha" });
+    const close = screen.getByRole("button", { name: "Close alpha" });
+    const pill = tab.parentElement!;
+    // The wrapper is one object holding BOTH controls (the label and the ✕).
+    expect(close.parentElement, "the ✕ left the pill").toBe(pill);
+    // (a) THE DRAG REGION. The chrome bar is `data-tauri-drag-region="deep"`,
+    // and Tauri's injected drag script walks the event's composed path and
+    // stops at the FIRST element carrying the attribute: `="false"` means "not
+    // chrome". A plain `div` with no attribute is therefore claimed as drag
+    // surface, which would make part of a control drag the window.
+    expect(pill.getAttribute("data-tauri-drag-region")).toBe("false");
+    // (b) NO SLACK. `items-center` on the wrapper centred the label's LINE
+    // inside the `h-8` pill and left ~6px of bare pill above and below it —
+    // dead pixels that (with (a) unfixed) dragged the window. The label is
+    // therefore the thing that STRETCHES (`self-stretch`) and centres its own
+    // text, while the wrapper centres everything else.
+    expect(pill.className, "the wrapper still stretches its children").not.toMatch(
+      /(^|\s)items-stretch(\s|$)/,
+    );
+    expect(pill.className, "the wrapper does not centre its children").toMatch(
+      /(^|\s)items-center(\s|$)/,
+    );
+    expect(tab.className, "the label does not fill the pill").toMatch(
+      /(^|\s)self-stretch(\s|$)/,
+    );
+    expect(tab.className, "the label does not fill the pill").toMatch(/(^|\s)flex(\s|$)/);
+    expect(tab.className, "the label is not vertically centred in its own box").toMatch(
+      /(^|\s)items-center(\s|$)/,
+    );
+    // The ✕ stays a 20px square — it must NOT stretch to the pill's height
+    // (a full-height hover patch would read as a second tab).
+    expect(close.className, "the ✕ stretched with the label").not.toMatch(
+      /(^|\s)self-stretch(\s|$)/,
+    );
+    expect(close.className, "the ✕ does not centre its own glyph").toMatch(
+      /(^|\s)place-items-center(\s|$)/,
+    );
+  });
+
+  it("the ✕ sits on EVERY tab — no hover and no active state hides it", () => {
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta")],
+      activeSpacePath: "/w/alpha",
+    });
+    render(<SpaceTabs />);
+    const active = screen.getByRole("button", { name: "Close alpha" });
+    const inactive = screen.getByRole("button", { name: "Close beta" });
+    for (const [label, close] of [
+      ["active", active],
+      ["inactive", inactive],
+    ] as const) {
+      // No opacity machinery at all: the old shape drew the control
+      // TRANSPARENT until the pointer arrived, so a tab you were not hovering
+      // looked un-closable — and an invisible-but-focusable control is its own
+      // a11y oddity.
+      expect(close.className, `${label} tab's ✕ hides itself`).not.toMatch(
+        /opacity-/,
+      );
+    }
+    // ONE kind of control: the two ✕ are the same object in two tabs, exactly
+    // as the two pills are (the pill's FILL is the only active-state class).
+    expect(inactive.className).toBe(active.className);
+  });
+
+  it("the ✕ is inset from the pill's edge by the same margin the label is", () => {
+    useSessions.setState({ spaces: [space("/w/alpha")], activeSpacePath: "/w/alpha" });
+    render(<SpaceTabs />);
+    const tab = screen.getByRole("tab", { name: "alpha" });
+    const close = screen.getByRole("button", { name: "Close alpha" });
+    // Class-level pin (jsdom lays nothing out): the label's leading inset and
+    // the ✕'s trailing inset are the SAME utility, so the ✕ no longer sits
+    // jammed against the pill's right edge while the label floats 12px from
+    // the left one.
+    expect(tab.className).toMatch(/(^|\s)pl-3(\s|$)/);
+    expect(close.className).toMatch(/(^|\s)mr-3(\s|$)/);
+    expect(close.className).not.toMatch(/(^|\s)mr-1(\s|$)/);
+  });
+
+  // -- Closing a tab (the × and the middle-click) -------------------------
+
+  it("every tab carries its own close control, named for the Space", () => {
+    useSessions.setState({ spaces: [space("/w/alpha"), space("/w/beta")] });
+    render(<SpaceTabs />);
+    expect(screen.getByRole("button", { name: "Close alpha" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Close beta" })).toBeTruthy();
+  });
+
+  it("the close control is a SIBLING of the tab, never inside it (a control inside a control is invisible to assistive tech)", () => {
+    useSessions.setState({ spaces: [space("/w/alpha")] });
+    render(<SpaceTabs />);
+    const tab = screen.getByRole("tab", { name: "alpha" });
+    expect(tab.querySelector("button")).toBeNull();
+    // The tab's own accessible name is the Space and nothing else — no
+    // `Close` smuggled in by wrapping the ✕ inside it.
+    expect(tab.textContent).toBe("alpha");
+  });
+
+  it("clicking × closes the tab WITHOUT selecting it first", async () => {
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta")],
+      activeSpacePath: "/w/alpha",
+    });
+    render(<SpaceTabs />);
+    fireEvent.click(screen.getByRole("button", { name: "Close beta" }));
+    await waitFor(() =>
+      expect(useSessions.getState().spaces.map((s) => s.path)).toEqual([
+        "/w/alpha",
+      ]),
+    );
+    // The view never moved: closing a background tab must not change what is
+    // on screen.
+    expect(useSessions.getState().activeSpacePath).toBe("/w/alpha");
+  });
+
+  it("a quiet Space closes with NO dialog (it is reversible by re-opening the folder)", async () => {
+    useSessions.setState({ spaces: [space("/w/alpha")] });
+    render(<SpaceTabs />);
+    fireEvent.click(screen.getByRole("button", { name: "Close alpha" }));
+    await waitFor(() => expect(useSessions.getState().spaces).toHaveLength(0));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("middle-clicking a tab closes it; a LEFT press and a middle-click on the empty strip do not", async () => {
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta")],
+      activeSpacePath: "/w/alpha",
+    });
+    render(<SpaceTabs />);
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "beta" }), {
+      button: 1,
+    });
+    await waitFor(() =>
+      expect(useSessions.getState().spaces.map((s) => s.path)).toEqual([
+        "/w/alpha",
+      ]),
+    );
+    await waitFor(() => expect(deleteSpace).toHaveBeenCalledTimes(1));
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "alpha" }), {
+      button: 0,
+    });
+    expect(useSessions.getState().spaces).toHaveLength(1);
+    // The EMPTY STRIP after the `+` is the browser's empty tab strip — a
+    // spacer that belongs to the window's drag region, never a tab. A
+    // middle-click there must close nothing (it used to go untested, so the
+    // test's name claimed more than it checked).
+    fireEvent.mouseDown(screen.getByTestId("space-tabs"), { button: 1 });
+    expect(deleteSpace).toHaveBeenCalledTimes(1);
+    expect(useSessions.getState().spaces).toHaveLength(1);
+  });
+
+  it("middle-clicking a tab whose Space holds a LIVE Session asks instead of closing", async () => {
+    // The middle-click is the gesture with no visible ✕ to aim at, so it is
+    // the one that could silently throw away running work. The confirm is what
+    // stands between the two, for BOTH gestures.
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta")],
+      activeSpacePath: "/w/alpha",
+    });
+    useSessions.getState().addSession(info("live-1", "/w/beta"));
+    render(<SpaceTabs />);
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "beta" }), {
+      button: 1,
+    });
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(useSessions.getState().spaces).toHaveLength(2);
+    expect(closeSession).not.toHaveBeenCalled();
+    expect(deleteSpace).not.toHaveBeenCalled();
+  });
+
+  it("a middle-click that lands ON the ✕ closes the tab exactly once", async () => {
+    // The ✕ sits inside the pill that owns the middle-click, so a press there
+    // reaches the pill too. It must not close twice (nor ask twice).
+    useSessions.setState({ spaces: [space("/w/alpha"), space("/w/beta")] });
+    render(<SpaceTabs />);
+    fireEvent.mouseDown(screen.getByRole("button", { name: "Close beta" }), {
+      button: 1,
+    });
+    await waitFor(() => expect(deleteSpace).toHaveBeenCalledTimes(1));
+    expect(useSessions.getState().spaces.map((s) => s.path)).toEqual([
+      "/w/alpha",
+    ]);
+  });
+
+  it("a middle-click on a tab you are NOT looking at closes it with no dialog when the Space is quiet", async () => {
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta")],
+      activeSpacePath: "/w/alpha",
+      activeSessionId: "live-a",
+    });
+    useSessions.getState().addSession(info("live-a", "/w/alpha"));
+    render(<SpaceTabs />);
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "beta" }), {
+      button: 1,
+    });
+    await waitFor(() => expect(useSessions.getState().spaces).toHaveLength(1));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // And the view never moved: the Space on screen is still on screen.
+    expect(useSessions.getState().activeSpacePath).toBe("/w/alpha");
+    expect(useSessions.getState().activeSessionId).toBe("live-a");
+  });
+
+  it("a Space with an OPEN session asks first — nothing is stopped or removed yet", () => {
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta")],
+      activeSpacePath: "/w/alpha",
+    });
+    useSessions.getState().addSession(info("live-1", "/w/beta"));
+    render(<SpaceTabs />);
+    fireEvent.click(screen.getByRole("button", { name: "Close beta" }));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(useSessions.getState().spaces).toHaveLength(2);
+    expect(closeSession).not.toHaveBeenCalled();
+  });
+
+  it("…and Stop and close stops each open Session of THAT Space, then closes the tab", async () => {
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta")],
+      activeSpacePath: "/w/alpha",
+    });
+    useSessions.getState().addSession(info("live-1", "/w/beta"));
+    useSessions.getState().addSession(info("live-2", "/w/beta"));
+    // A live session in the space the user is LOOKING at — not the one being
+    // closed — must not be stopped by this click.
+    useSessions.getState().addSession(info("live-3", "/w/alpha"));
+    render(<SpaceTabs />);
+    fireEvent.click(screen.getByRole("button", { name: "Close beta" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop and close" }));
+    await waitFor(() =>
+      expect(useSessions.getState().spaces.map((s) => s.path)).toEqual([
+        "/w/alpha",
+      ]),
+    );
+    expect(closeSession).toHaveBeenCalledWith("live-1");
+    expect(closeSession).toHaveBeenCalledWith("live-2");
+    expect(closeSession).not.toHaveBeenCalledWith("live-3");
+    expect(useSessions.getState().spaces.map((s) => s.path)).toEqual([
+      "/w/alpha",
+    ]);
+  });
+
+  it("…Close anyway drops the tab and leaves the Sessions running", async () => {
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta")],
+      activeSpacePath: "/w/alpha",
+    });
+    useSessions.getState().addSession(info("live-1", "/w/beta"));
+    render(<SpaceTabs />);
+    fireEvent.click(screen.getByRole("button", { name: "Close beta" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close anyway" }));
+    await waitFor(() => expect(useSessions.getState().spaces).toHaveLength(1));
+    expect(closeSession).not.toHaveBeenCalled();
+  });
+
+  it("…Cancel leaves everything exactly as it was", () => {
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta")],
+      activeSpacePath: "/w/alpha",
+    });
+    useSessions.getState().addSession(info("live-1", "/w/beta"));
+    render(<SpaceTabs />);
+    fireEvent.click(screen.getByRole("button", { name: "Close beta" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(useSessions.getState().spaces).toHaveLength(2);
+    expect(closeSession).not.toHaveBeenCalled();
+  });
+
+  it("names an untitled Session in the confirm the way its ROW names it (one title rule)", () => {
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta")],
+      activeSpacePath: "/w/alpha",
+    });
+    useSessions.getState().addSession(info("live-1", "/w/beta"));
+    // No generated title, but a first user message — the rows fall back to
+    // that text, so the confirm must not fall back to the folder name. AFTER
+    // `addSession`, which seeds the id's transcript as `[]`.
+    useSessions.setState({
+      messages: {
+        "live-1": [
+          { kind: "user", text: "Refactor the auth middleware", at: 1 },
+        ],
+      },
+    });
+    render(<SpaceTabs />);
+    fireEvent.click(screen.getByRole("button", { name: "Close beta" }));
+    expect(screen.getByText("Refactor the auth middleware")).toBeTruthy();
+  });
+
+  it("closing the ACTIVE tab lands on the neighbouring Space's session", async () => {
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta")],
+      activeSpacePath: "/w/alpha",
+      activeSessionId: "live-a",
+    });
+    useSessions.getState().addSession(info("live-a", "/w/alpha"));
+    useSessions.getState().addSession(info("live-b", "/w/beta"));
+    render(<SpaceTabs />);
+    // The active space HAS an open session, so this confirms — the point here
+    // is where the user ends up afterwards.
+    fireEvent.click(screen.getByRole("button", { name: "Close alpha" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop and close" }));
+    await waitFor(() =>
+      expect(useSessions.getState().activeSessionId).toBe("live-b"),
+    );
+    expect(useSessions.getState().activeSpacePath).toBe("/w/beta");
+    expect(useSessions.getState().activeSessionId).toBe("live-b");
+  });
+
+  // -- A close that FAILS (the backend command rejected) ------------------
+
+  it("a REJECTED close leaves the tab where it is and puts the failure on the console", async () => {
+    // `removeSpace` awaits the `delete_space` command, so a rejection makes
+    // `closeSpace` reject — and the dialog is already closed by then. Without
+    // a `catch` on the `void` call this is an unhandled rejection: the tab
+    // simply refuses to close and nothing says why.
+    vi.mocked(deleteSpace).mockRejectedValueOnce(new Error("disk on fire"));
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    useSessions.setState({ spaces: [space("/w/alpha")] });
+    render(<SpaceTabs />);
+    fireEvent.click(screen.getByRole("button", { name: "Close alpha" }));
+    await waitFor(() => expect(consoleError).toHaveBeenCalled());
+    // The Space is still there (the command failed, so the row was never
+    // removed) — the tab lies about having closed.
+    expect(useSessions.getState().spaces.map((s) => s.path)).toEqual([
+      "/w/alpha",
+    ]);
+    // And the log names WHICH Space, or it is not diagnosable.
+    expect(
+      consoleError.mock.calls.some((args) =>
+        args.some((a) => String(a).includes("/w/alpha")),
+      ),
+    ).toBe(true);
+    consoleError.mockRestore();
+  });
+
+  it("a REJECTED close from the confirm (Close anyway) is reported too — the dialog is already gone", async () => {
+    // The more dangerous half: the confirm has already closed itself, so a
+    // swallowed rejection here means the user answered the question and got
+    // neither a closed tab nor an error.
+    vi.mocked(deleteSpace).mockRejectedValueOnce(new Error("disk on fire"));
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta")],
+      activeSpacePath: "/w/alpha",
+    });
+    useSessions.getState().addSession(info("live-1", "/w/beta"));
+    render(<SpaceTabs />);
+    fireEvent.click(screen.getByRole("button", { name: "Close beta" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close anyway" }));
+    await waitFor(() => expect(consoleError).toHaveBeenCalled());
+    expect(useSessions.getState().spaces).toHaveLength(2);
+    consoleError.mockRestore();
   });
 });

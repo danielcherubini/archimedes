@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { type SessionInfo } from "../lib/tauri";
 import { basenameOfPath } from "../lib/paths";
+import { titleFor } from "../lib/sessionTitle";
 import {
   getLeftPaneCollapsed,
   LEFT_PANE_RAIL,
@@ -63,24 +64,6 @@ function relativeTimeFor(
   if (diff < 60_000) return "now";
   if (diff < 60 * 60_000) return `${Math.floor(diff / 60_000)}m`;
   return `${Math.floor(diff / (60 * 60_000))}h`;
-}
-
-/**
- * A session row's title: the session's GENERATED title (`SessionInfo.title`)
- * when it has one, else the first user message truncated to ~80 chars (the
- * same derivation as the side pane's title), else the space's name.
- */
-function titleFor(
-  messages: Message[] | undefined,
-  spaceName: string,
-  title?: string | null,
-): string {
-  // `""` is no title (the backend never writes one; a generated title is
-  // cleaned to a non-empty string or not written at all).
-  if (title !== null && title !== undefined && title !== "") return title;
-  const firstUser = messages?.find((m) => m.kind === "user");
-  if (!firstUser || firstUser.text === "") return spaceName;
-  return firstUser.text.length > 80 ? firstUser.text.slice(0, 80) : firstUser.text;
 }
 
 function spaceNameFor(cwd: string, spaces: { path: string }[]): string {

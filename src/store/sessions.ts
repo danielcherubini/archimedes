@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { ImageRef } from "../lib/chatAttachments";
 import {
+  closeSession as closeSessionCommand,
   deleteSession as deleteSessionCommand,
   deleteSpace as deleteSpaceCommand,
   loadHistory,
@@ -596,9 +597,41 @@ interface SessionsState {
   /**
    * "Forget this space": `delete_space` command + local removal. Does NOT
    * touch `sessions`/`historySessions` (conversations stay stored — design
-   * decision). `activeSessionId` is left alone.
+   * decision) and does NOT touch `activeSessionId` — this knows which Space is
+   * gone, not what the user should be looking at next.
+   *
+   * RETURNS the Space the view has to fall back to when the removed one WAS
+   * the selected one: the first remaining row (input order — `lastOpenedAt`
+   * desc), or `null` when none remains. Removing a Space that was NOT selected
+   * also answers `null` (there is nothing to fall back to), so a caller that
+   * must tell "no Space left" from "a background Space went" has to remember
+   * whether the removed Space was the selected one — which is exactly what
+   * `closeSpace` does.
    */
-  removeSpace: (path: string) => Promise<void>;
+  removeSpace: (path: string) => Promise<string | null>;
+  /**
+   * Close a Space TAB (the tab bar's ×, or a middle-click): stop the Sessions
+   * the caller named, then `removeSpace`. The caller decides WHICH Sessions to
+   * name — the tab bar asks the user first when the Space still has a live one
+   * (`CloseSpaceDialog`), so the store carries no opinion about that; it only
+   * guarantees the three consequences of a close:
+   *
+   * 1. Stopping is BEST-EFFORT. A `close_session` failure (the Worker already
+   * gone → `UnknownSession`) is logged, not propagated: a tab that cannot be
+   * closed because something is already dead is a worse bug than a session
+   * that outlives its tab, which is what the "Close anyway" button is for.
+   * 2. Conversations survive — `removeSpace` touches no `sessions` row (the
+   * standing decision recorded on it), so re-opening the folder returns the
+   * Space WITH its history.
+   * 3. Closing the SELECTED tab lands the user on the neighbour it fell back
+   * to, through `selectSpace` — so the chat shows that Space's most recent
+   * Session (live first, else newest stored) rather than a transcript whose
+   * tab is gone. The fallback path itself is `removeSpace`'s decision; this
+   * reads the result instead of restating the rule. When there is NO fallback
+   * (the last tab), this clears `activeSessionId` so the chat shows its empty
+   * state — see the note in the implementation.
+   */
+  closeSpace: (path: string, stopSessionIds?: string[]) => Promise<void>;
   /**
    * Flip a space's `trusted` flag: optimistic local update first (the spaces
    * store has NO live refresh — the flag must flip immediately, not wait for
@@ -779,14 +812,50 @@ export const useSessions = create<SessionsState>((set, get) => ({
     // removed one.
     inFlightToggles.delete(path);
     committedTrusted.delete(path);
-    set((state) => ({
-      spaces: state.spaces.filter((s) => s.path !== path),
-      // The removed space was the selected one: fall back to the first
-      // remaining space (input order — `lastOpenedAt` desc) or `null`.
-      ...(state.activeSpacePath === path
-        ? { activeSpacePath: state.spaces.filter((s) => s.path !== path)[0]?.path ?? null }
-        : {}),
-    }));
+    // The fallback is decided from the SAME `set` updater that removes the row
+    // (so the two can never disagree) and handed back to the caller, which is
+    // the only thing that knows what the view should show next.
+    let fallback: string | null = null;
+    set((state) => {
+      const remaining = state.spaces.filter((s) => s.path !== path);
+      const wasSelected = state.activeSpacePath === path;
+      fallback = wasSelected ? (remaining[0]?.path ?? null) : null;
+      return {
+        spaces: remaining,
+        // The removed space was the selected one: fall back to the first
+        // remaining space (input order — `lastOpenedAt` desc) or `null`.
+        ...(wasSelected ? { activeSpacePath: fallback } : {}),
+      };
+    });
+    return fallback;
+  },
+
+  closeSpace: async (path, stopSessionIds = []) => {
+    const wasSelected = get().activeSpacePath === path;
+    // All settled together: every named Session's Worker is detached (or fails
+    // to be) BEFORE the Space row goes, so a rejection cannot be mistaken for
+    // "the Space was never asked to close".
+    const settled = await Promise.allSettled(
+      stopSessionIds.map((id) => closeSessionCommand(id)),
+    );
+    for (const result of settled) {
+      if (result.status === "rejected") {
+        console.error(`failed to stop a session of ${path}:`, result.reason);
+      }
+    }
+    const landing = await get().removeSpace(path);
+    if (!wasSelected) return;
+    // This close removed the Space the user was looking at, so the view has to
+    // be moved by hand. A landing Space goes through `selectSpace`, which does
+    // what a click on that tab would do — including loading the transcript it
+    // lands on. With NO landing (the last tab) the honest surface is the chat's
+    // empty state ("No active session — open a Space from the tabs above"), so
+    // the session is dropped here: `removeSpace` deliberately leaves
+    // `activeSessionId` alone, and leaving it pointed at a Session whose Space
+    // row is gone would show a transcript the sidebar can no longer reach —
+    // a transcript with no tab is not a view.
+    if (landing) get().selectSpace(landing);
+    else set({ activeSessionId: null });
   },
 
   setSpaceTrusted: (path, trusted) => {

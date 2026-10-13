@@ -187,31 +187,93 @@ describe("floats over the content slab (the accepted collision)", () => {
 describe("the space tabs (active and inactive are one kind of object: pills)", () => {
   const tabs = () => code("src/components/SpaceTabs.tsx");
 
-  /** The two branches of the tab's class ternary, read from the source. */
-  const branches = (): [string, string] => {
-    const m = tabs().match(/active\s*\?\s*"([^"]+)"\s*:\s*"([^"]+)"/);
-    if (!m) throw new Error("the tab's class ternary changed shape — update this reader");
-    return [m[1]!, m[2]!];
+  /**
+   * The pill's OWN class string. The pill is a wrapper `div` carrying the
+   * geometry ONCE for both states (its two children are the label and the ✕),
+   * so "active and inactive are one kind of object" is now structural: there is
+   * literally one geometry string, not two that must be kept equal.
+   */
+  const pill = (): string => {
+    // The pill's STATIC prefix, found by the height it gives both states — not
+    // by a class that happens to come first, which a refactor is free to move.
+    const m = tabs().match(/className=\{`([^`$]*h-8[^`$]*)\$\{/);
+    if (!m) throw new Error("no active/inactive pill with a shared height exists — the one-kind-of-object contract is gone");
+    return m[1]!;
+  };
+
+  /** Every `active ? "…" : "…"` class ternary in the file, in source order. */
+  const ternaries = (): Array<[string, string]> =>
+    [...tabs().matchAll(/active\s*\?\s*"([^"]+)"\s*:\s*"([^"]+)"/g)].map(
+      (m) => [m[1]!, m[2]!],
+    );
+
+  /**
+   * The ternary whose ACTIVE branch carries `needle` (fill vs text vs ✕). A
+   * throw here is NOT a hint to go fix this file's regexes: it means the
+   * CONTRACT is gone — the state pair this block exists to pin is no longer
+   * written as a ternary, so the tab has stopped distinguishing active from
+   * inactive in the way the design says it must.
+   */
+  const ternaryWith = (needle: string, contract: string): [string, string] => {
+    const found = ternaries().find(([active]) => active.includes(needle));
+    if (!found)
+      throw new Error(
+        `${contract}: no \`active ? "…" : "…"\` class ternary in SpaceTabs.tsx has \`${needle}\` on its active side`,
+      );
+    return found;
   };
 
   it("active and inactive share the pill geometry (h-8, rounded-md, inset in the bar)", () => {
-    const [activeCls, inactiveCls] = branches();
-    for (const [label, cls] of [
-      ["active", activeCls],
-      ["inactive", inactiveCls],
-    ] as const) {
-      expect(cls, `${label} tab lost the pill geometry`).toMatch(/(^|\s)h-8(\s|$)/);
-      expect(cls, `${label} tab lost the pill corners`).toMatch(/(^|\s)rounded-md(\s|$)/);
+    const cls = pill();
+    expect(cls, "the pill lost its inset height").toMatch(/(^|\s)h-8(\s|$)/);
+    expect(cls, "the pill lost its corners").toMatch(/(^|\s)rounded-md(\s|$)/);
+    // The reader above CAN only match a literal outside the ternary, but on its
+    // own that proves only "a shared geometry string exists" — it cannot see a
+    // SECOND copy of `h-8 rounded-md` smuggled into both branches of a state
+    // ternary, which is exactly how the pill's shape starts drifting again. The
+    // next test closes that hole by forbidding geometry in the branches.
+  });
+
+  /** The utilities that decide an object's SHAPE (as opposed to its fill). */
+  const GEOMETRY = /^(h-|w-|size-|rounded)/;
+
+  it("no state ternary carries geometry — the pill's shape exists exactly once", () => {
+    // POSITIVE half of the contract the reader above cannot express: the pill
+    // geometry lives in the one static literal, so a state ternary that
+    // repeats `h-8` / `rounded-md` / `size-*` / `w-*` — in ONE branch, which
+    // resizes the active tab, or in BOTH, which is the drift that stays green
+    // under the reader — is a failure here, not a review finding.
+    const seen = ternaries();
+    // Vacuity guard: with nothing matched, the loop below asserts nothing.
+    expect(seen.length, "the reader saw no active/inactive class ternary").toBeGreaterThan(0);
+    for (const [index, pair] of seen.entries()) {
+      for (const [state, cls] of [
+        ["active", pair[0]],
+        ["inactive", pair[1]],
+      ] as const) {
+        const offending = cls.split(/\s+/).filter((token) => GEOMETRY.test(token));
+        expect(
+          offending,
+          `ternary #${index + 1}'s ${state} branch carries geometry (${offending.join(", ")}) — the pill's shape belongs in the static literal, once`,
+        ).toEqual([]);
+      }
     }
   });
 
   it("the active tab is the same pill one step lifted: surface-hover over surface, full-contrast text", () => {
-    const [activeCls, inactiveCls] = branches();
-    expect(activeCls, "the active tab is not a lifted pill").toMatch(/(^|\s)bg-surface-hover(\s|$)/);
-    expect(activeCls).toMatch(/(^|\s)text-foreground(\s|$)/);
-    expect(activeCls).toMatch(/(^|\s)font-medium(\s|$)/);
-    expect(inactiveCls, "the inactive pill changed its fill").toMatch(/(^|\s)bg-surface(\s|$)/);
-    expect(inactiveCls).toMatch(/(^|\s)text-foreground-subtle(\s|$)/);
+    const [activeFill, inactiveFill] = ternaryWith(
+      "bg-surface-hover",
+      "the lifted-pill fill ternary is gone",
+    );
+    expect(activeFill, "the active tab is not a lifted pill").toMatch(/(^|\s)bg-surface-hover(\s|$)/);
+    expect(inactiveFill, "the inactive pill changed its fill").toMatch(/(^|\s)bg-surface(\s|$)/);
+    const [activeText, inactiveText] = ternaryWith(
+      "font-medium",
+      "the full-contrast active-label ternary is gone",
+    );
+    expect(activeText).toMatch(/(^|\s)text-foreground(\s|$)/);
+    expect(activeText).toMatch(/(^|\s)font-medium(\s|$)/);
+    expect(inactiveText).toMatch(/(^|\s)text-foreground-subtle(\s|$)/);
   });
 
   it("the bridge is gone: no h-10, no rounded-top, no bridge shadow, no paint-order hack", () => {

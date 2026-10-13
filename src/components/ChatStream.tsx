@@ -832,11 +832,11 @@ export default function ChatStream() {
   // kept — it just can't be SENT while `composerEnabled` is false).
   const composerEnabled = isLive || canResume;
 
-  // The session's `SpaceView` + the `New Session in this Space` action
-  // + the side-pane toggle moved to `SpaceTabs` (the top tab bar — the
-  // old header row is gone: the session title lives in the side pane
-  // now, and the `Live` conversation selector is replaced by the tabs).
-  // Auto-scroll to the bottom as new content streams in.
+  // The session's `SpaceView` moved to `SpaceTabs` (the top tab bar — the old
+  // header row is gone: the session title lives in the side pane now, and the
+  // `Live` conversation selector is replaced by the tabs); the `New Session in
+  // this Space` action went to the sidebar's `Sessions` header, not the tab
+  // bar. Auto-scroll to the bottom as new content streams in.
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;

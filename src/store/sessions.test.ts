@@ -13,7 +13,13 @@ import {
 import { useSubagents } from "./subagents";
 import { expandMentions } from "../lib/skills";
 import type { AgentDefinitionDto, McpServerInfo } from "../lib/tauri";
-import { loadHistory, setSessionArchived, setSpaceTrusted, deleteSpace } from "../lib/tauri";
+import {
+  loadHistory,
+  setSessionArchived,
+  setSpaceTrusted,
+  deleteSpace,
+  closeSession,
+} from "../lib/tauri";
 import type {
   CloseReasonStr,
   MessageRow,
@@ -40,6 +46,8 @@ vi.mock("../lib/tauri", async () => {
     deleteSession: vi.fn().mockResolvedValue(undefined),
     deleteSpace: vi.fn().mockResolvedValue(undefined),
     setSpaceTrusted: vi.fn().mockResolvedValue(undefined),
+    // The store's `closeSpace` stops the Space's live sessions with this.
+    closeSession: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -1976,6 +1984,109 @@ describe("activeSpacePath (the selected Space — the top tabs' state)", () => {
     expect(useSessions.getState().activeSpacePath).toBe("/b");
     await useSessions.getState().removeSpace("/b");
     expect(useSessions.getState().activeSpacePath).toBeNull();
+  });
+});
+
+describe("closeSpace (closing a Space TAB — the tab bar's ×)", () => {
+  beforeEach(() => {
+    useSessions.setState({
+      sessions: [],
+      historySessions: [],
+      archivedSessions: [],
+      activeSessionId: null,
+      activeSpacePath: null,
+      spaces: [row("/a", 2000), row("/b", 1000)],
+      closeReasons: {},
+      messages: {},
+    });
+    vi.clearAllMocks();
+  });
+
+  it("forgets the Space but keeps every conversation of it", async () => {
+    useSessions.setState({
+      historySessions: [info("stored-1", "/a")],
+      activeSpacePath: "/b",
+    });
+    await useSessions.getState().closeSpace("/a");
+    expect(deleteSpace).toHaveBeenCalledWith("/a");
+    expect(useSessions.getState().spaces.map((s) => s.path)).toEqual(["/b"]);
+    // The transcript rows are NOT touched — re-opening the folder brings the
+    // Space back WITH its history (`removeSpace`'s standing decision).
+    expect(useSessions.getState().historySessions).toHaveLength(1);
+    expect(
+      useSessions.getState().historySessions[0]?.sessionId,
+    ).toBe("stored-1");
+  });
+
+  it("closing the SELECTED tab lands on the next Space's session (the same rule a tab click uses)", async () => {
+    useSessions.setState({
+      spaces: [row("/a", 2000), row("/b", 1000)],
+      activeSpacePath: "/a",
+      activeSessionId: "live-a",
+      sessions: [info("live-a", "/a"), info("live-b", "/b")],
+    });
+    await useSessions.getState().closeSpace("/a");
+    const s = useSessions.getState();
+    expect(s.activeSpacePath).toBe("/b");
+    // NOT merely the path: the user is looking at the neighbour's conversation,
+    // exactly as if they had clicked its tab.
+    expect(s.activeSessionId).toBe("live-b");
+    expect(loadHistory).toHaveBeenCalledWith("live-b");
+  });
+
+  it("closing a tab you are NOT looking at leaves the view alone", async () => {
+    useSessions.setState({
+      activeSpacePath: "/b",
+      activeSessionId: "live-b",
+      sessions: [info("live-b", "/b")],
+    });
+    await useSessions.getState().closeSpace("/a");
+    const s = useSessions.getState();
+    expect(s.activeSpacePath).toBe("/b");
+    expect(s.activeSessionId).toBe("live-b");
+    expect(loadHistory).not.toHaveBeenCalled();
+  });
+
+  it("stops the sessions it is given, then removes the Space", async () => {
+    useSessions.setState({ activeSpacePath: "/b" });
+    await useSessions.getState().closeSpace("/a", ["live-1", "live-2"]);
+    expect(closeSession).toHaveBeenCalledWith("live-1");
+    expect(closeSession).toHaveBeenCalledWith("live-2");
+    expect(deleteSpace).toHaveBeenCalledWith("/a");
+    expect(useSessions.getState().spaces.map((s) => s.path)).toEqual(["/b"]);
+  });
+
+  it("a FAILED stop still closes the tab (a dead Worker must not make a tab unclosable)", async () => {
+    useSessions.setState({ activeSpacePath: "/b" });
+    vi.mocked(closeSession).mockRejectedValueOnce(
+      new Error("unknown session live-1"),
+    );
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    await useSessions.getState().closeSpace("/a", ["live-1", "live-2"]);
+    expect(useSessions.getState().spaces.map((s) => s.path)).toEqual(["/b"]);
+    expect(consoleError).toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
+  it("closing the LAST tab leaves no Space selected AND no transcript on screen", async () => {
+    // The session is LIVE in the Space being closed, so the view has something
+    // to keep showing if the close forgets to clear it.
+    useSessions.setState({
+      spaces: [row("/a", 2000)],
+      activeSpacePath: "/a",
+      activeSessionId: "live-a",
+      sessions: [info("live-a", "/a")],
+    });
+    await useSessions.getState().closeSpace("/a");
+    const s = useSessions.getState();
+    expect(s.activeSpacePath).toBeNull();
+    // There is no landing Space, so `selectSpace` cannot repaint the view —
+    // the session must be dropped explicitly, or `ChatStream` keeps rendering
+    // a transcript whose Space row (and therefore whose sidebar row) is gone,
+    // instead of its "No active session" empty state.
+    expect(s.activeSessionId).toBeNull();
   });
 });
 
