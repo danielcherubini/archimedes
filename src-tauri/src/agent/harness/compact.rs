@@ -296,6 +296,11 @@ pub(crate) struct CompactionCtx<'a> {
     /// a caller may pass an explicit one — the seam the tests use to force a
     /// real compaction.
     pub keep_recent_tokens: u32,
+    /// The caller's EXTRA summary instructions (`/compact <args>` — the user's
+    /// own words on what the summary must keep). `None` (the automatic paths:
+    /// the threshold check, an overflow recovery) and a blank string both mean
+    /// "no extra instructions" and leave the summary prompt untouched.
+    pub instructions: Option<String>,
     /// The session's compactor — RE-ESTIMATED on the compacted transcript
     /// (the post-compaction BASELINE: the re-estimated count of what the
     /// context now is REPLACES the tracked total, and the usage ANCHOR is
@@ -403,6 +408,24 @@ pub(crate) async fn run_compaction(
     }
 }
 
+/// The summary's system prompt: the base instruction, plus ONE line carrying
+/// the caller's extra instructions when there are any (`/compact <args>` —
+/// the user's own words on what the summary must keep). The base text is
+/// unchanged either way (pinned by the `summarize_*` prompt tests): the
+/// automatic paths (the threshold check, an overflow recovery) pass `None`,
+/// and args that are only whitespace are no instructions at all.
+fn summary_system_prompt(instructions: Option<&str>) -> String {
+    let base = "Summarize these messages concisely, preserving decisions, \
+                file paths, and open tasks. Respond with the summary only."
+        .to_string();
+    match instructions {
+        Some(s) if !s.trim().is_empty() => {
+            format!("{base}\nAdditional instructions for this summary: {s}")
+        }
+        _ => base,
+    }
+}
+
 /// The summary model call (a "summarize these messages" system prompt
 /// over the older messages — NO tools; the stream is consumed
 /// silently — the summary is internal, like pi's). The call + stream
@@ -420,11 +443,7 @@ pub(crate) async fn summarize(
 ) -> Result<String, ProviderError> {
     let system = ChatMessage {
         role: ChatRole::System,
-        content: MessageContent::Text(
-            "Summarize these messages concisely, preserving decisions, \
-             file paths, and open tasks. Respond with the summary only."
-                .to_string(),
-        ),
+        content: MessageContent::Text(summary_system_prompt(ctx.instructions.as_deref())),
         tool_call_id: None,
         tool_calls: None,
     };
@@ -597,6 +616,106 @@ mod tests {
             supports_thinking: false,
             thinking_levels: Vec::new(),
             api: Some("openai-completions".to_string()),
+        }
+    }
+
+    /// The summary system prompt, byte for byte (`/compact <args>` APPENDS a
+    /// line to it — the base text must never move).
+    const SUMMARY_SYSTEM: &str = "Summarize these messages concisely, preserving decisions, file paths, and open tasks. Respond with the summary only.";
+
+    /// A `Provider` that records the SYSTEM message of every request (the
+    /// observation point for the `/compact` extra instruction line).
+    struct SystemPromptRecordingProvider {
+        recorded: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl SystemPromptRecordingProvider {
+        fn new(recorded: Arc<std::sync::Mutex<Vec<String>>>) -> Self {
+            Self { recorded }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for SystemPromptRecordingProvider {
+        async fn complete(
+            &self,
+            req: &ModelRequest,
+        ) -> Result<futures_util::stream::BoxStream<'static, ProviderEvent>, ProviderError>
+        {
+            if let Some(ChatMessage {
+                role: ChatRole::System,
+                content: MessageContent::Text(t),
+                ..
+            }) = req.messages.first()
+            {
+                self.recorded
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(t.clone());
+            }
+            Ok(futures_util::stream::iter(vec![
+                ProviderEvent::TextDelta("ok".to_string()),
+                ProviderEvent::Done(FinishReason::Stop),
+            ])
+            .boxed())
+        }
+    }
+
+    /// The summary system prompt for one `summarize` run with `instructions`
+    /// (the recorded system text).
+    async fn recorded_summary_prompt(instructions: Option<String>) -> String {
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = SystemPromptRecordingProvider::new(recorded.clone());
+        let (_db, store) = temp_store();
+        let model = fake_model("m1");
+        let mut compactor = Compactor::new(CompactionConfig::default(), model.context_window);
+        let older = vec![text_msg("history")];
+        let summary = {
+            let ctx = CompactionCtx {
+                session_id: "s1",
+                model: &model,
+                provider: &provider,
+                store: &store,
+                keep_recent_tokens: 1,
+                instructions,
+                compactor: &mut compactor,
+            };
+            summarize(&ctx, &older, &CancellationToken::new())
+                .await
+                .expect("summarize succeeds")
+        };
+        assert_eq!(summary, "ok", "the canned summary landed");
+        let prompts = recorded.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        assert_eq!(prompts.len(), 1, "one model call for the summary");
+        prompts[0].clone()
+    }
+
+    /// `/compact <args>` (ADR 0044): the user's extra instructions ride the
+    /// summary system prompt as ONE appended line, after the unchanged base
+    /// text.
+    #[tokio::test]
+    async fn summarize_appends_the_caller_instructions_as_an_extra_line() {
+        let prompt = recorded_summary_prompt(Some("keep every test name".to_string())).await;
+        assert_eq!(
+            prompt,
+            format!(
+                "{SUMMARY_SYSTEM}\nAdditional instructions for this summary: keep every test name"
+            ),
+            "the base prompt is byte-identical and the instructions ride the next line"
+        );
+    }
+
+    /// Threshold / overflow pass `None`, and a `/compact` whose args are only
+    /// whitespace is no instructions at all: the summary prompt stays
+    /// byte-identical to the base text either way.
+    #[tokio::test]
+    async fn summarize_without_instructions_is_the_unchanged_base_prompt() {
+        for instructions in [None, Some(String::new()), Some("   ".to_string())] {
+            assert_eq!(
+                recorded_summary_prompt(instructions.clone()).await,
+                SUMMARY_SYSTEM,
+                "no instructions ({instructions:?}) must not touch the prompt"
+            );
         }
     }
 
@@ -1442,6 +1561,7 @@ mod tests {
             provider,
             store: &store,
             keep_recent_tokens: 1,
+            instructions: None,
             compactor: &mut compactor,
         };
         summarize(&ctx, older, &CancellationToken::new()).await
@@ -1485,6 +1605,7 @@ mod tests {
                 provider: self.provider,
                 store: &self.store,
                 keep_recent_tokens,
+                instructions: None,
                 compactor: &mut self.compactor,
             };
             run_compaction(&mut ctx, &mut self.messages, &CancellationToken::new()).await

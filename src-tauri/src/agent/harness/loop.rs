@@ -122,6 +122,10 @@ pub enum ControlCmd {
     SetModel(Model),
     /// Set the thinking level (`None` = the model's default).
     SetThinkingLevel(Option<String>),
+    /// Compact NOW (the `/compact` Composer command — ADR 0044). Applied when
+    /// IDLE — a command sent mid-turn queues behind the turn, the same rule as
+    /// `SetModel`. `instructions` are the user's extra summary instructions.
+    Compact { instructions: Option<String> },
 }
 
 /// The suite's `sudo_exec` state (the frame-free core's dependencies —
@@ -233,8 +237,10 @@ pub struct AgentLoop {
     /// The provider transcript (the `native_messages` content).
     messages: Vec<ChatMessage>,
     compactor: Compactor,
-    /// Set by `compact()` (a forced compaction before the next model
-    /// call).
+    /// The "compact before the next model call" flag — read INSIDE a turn
+    /// (so only a path that runs in a turn can set it: the overflow recovery).
+    /// A hand-triggered `/compact` does NOT use it — a command is an IDLE
+    /// action (`ControlCmd::Compact`).
     force_compact: bool,
     /// The session's current context size in tokens (the `context_usage_
     /// update` frame source — the frontend's context-percentage display).
@@ -514,11 +520,6 @@ impl AgentLoop {
             .clone()
     }
 
-    /// Force a compaction before the next model call.
-    pub fn compact(&mut self) {
-        self.force_compact = true;
-    }
-
     /// The loop body (the spawned tokio task): receive prompts (and
     /// control commands) until the session teardown or the queue closes.
     pub async fn run(mut self) {
@@ -572,6 +573,29 @@ impl AgentLoop {
                 cmd = self.control_queue.recv() => match cmd {
                     Some(ControlCmd::SetModel(m)) => self.set_model(m),
                     Some(ControlCmd::SetThinkingLevel(l)) => self.set_thinking_level(l),
+                    Some(ControlCmd::Compact { instructions }) => {
+                        // Arm a fresh TURN token here (never in
+                        // `WorkerCore::handle`: a `Compact` can arrive while a
+                        // turn is still in flight — the command QUEUES here —
+                        // and arming there would swap out the token that
+                        // in-flight turn is racing, so a Stop for it would be
+                        // silently lost). The existing Stop path
+                        // (`Inbound::Abort`) cancels whatever token is in the
+                        // shared mutex, so THIS is what makes an idle
+                        // compaction cancellable — `summarize` already races
+                        // `turn.cancelled()`. The cancelled token is left in
+                        // place: this `select!`'s turn-cancel arm re-arms it,
+                        // and `handle_prompt` arms its own fresh token per
+                        // prompt, so a cancel cannot leak into the next turn.
+                        let turn = {
+                            let fresh = CancellationToken::new();
+                            *self.turn_cancel.lock().unwrap_or_else(|p| p.into_inner()) =
+                                fresh.clone();
+                            fresh
+                        };
+                        self.run_compaction("manual", false, instructions, &turn)
+                            .await;
+                    }
                     None => break,
                 },
                 p = self.prompt_queue.recv() => match p {
@@ -709,16 +733,16 @@ impl AgentLoop {
                 self.settle_cancelled(std::mem::take(&mut turn_tool_results));
                 return;
             }
-            // (1) The `Compactor` (the context threshold or a forced
-            // `compact()`): a summary model call, the older messages
-            // replaced by the summary, `compaction_start` /
+            // (1) The `Compactor` (the context threshold, or the
+            // forced-compaction flag): a summary model call, the older
+            // messages replaced by the summary, `compaction_start` /
             // `compaction_end` emitted.
             if self.compactor.should_compact() || self.force_compact {
                 self.force_compact = false;
                 // The context-pressure trigger. The return (did the
                 // transcript shrink?) is unread here — only an overflow
                 // recovery (Task 6) needs it.
-                self.run_compaction("threshold", false, turn).await;
+                self.run_compaction("threshold", false, None, turn).await;
             }
             // (2) The model call (the `RetryPolicy` wraps it — on
             // `ProviderError::Retryable`, exponential backoff up to 5
@@ -1631,7 +1655,9 @@ impl AgentLoop {
     /// context-pressure check, `overflow` for a provider context-overflow
     /// recovery) — it rides both events and the renderer's `compaction_update`
     /// state frame. `will_retry` is the event's "the turn continues on the
-    /// other side of this compaction" flag.
+    /// other side of this compaction" flag. `instructions` are the user's
+    /// extra summary instructions (`/compact <args>`); the automatic paths
+    /// (threshold / overflow) pass `None`.
     ///
     /// Returns whether the transcript actually SHRANK (`Compacted` — the older
     /// messages were replaced by a summary): `Skipped` (nothing old enough to
@@ -1642,6 +1668,7 @@ impl AgentLoop {
         &mut self,
         reason: &str,
         will_retry: bool,
+        instructions: Option<String>,
         turn: &CancellationToken,
     ) -> bool {
         self.emit(RpcEvent::compaction_start {
@@ -1665,6 +1692,7 @@ impl AgentLoop {
             provider: &*self.provider,
             store: &self.store,
             keep_recent_tokens,
+            instructions,
             compactor: &mut self.compactor,
         };
         match compact::run_compaction(&mut ctx, &mut self.messages, turn).await {
@@ -3119,7 +3147,7 @@ mod tests {
         // The failed compaction shrinks nothing (the wrapper's return).
         assert!(
             !loop_
-                .run_compaction("threshold", false, &CancellationToken::new())
+                .run_compaction("threshold", false, None, &CancellationToken::new())
                 .await,
             "a failed compaction rewrote nothing"
         );
@@ -3188,11 +3216,212 @@ mod tests {
         let len_before = loop_.messages.len();
         assert!(
             !loop_
-                .run_compaction("threshold", false, &CancellationToken::new())
+                .run_compaction("threshold", false, None, &CancellationToken::new())
                 .await,
             "a skipped compaction shrank nothing"
         );
         assert_eq!(loop_.messages.len(), len_before, "the transcript is intact");
+    }
+
+    /// Collect events until `pred` matches (bounded — a missing event is a
+    /// test failure, not a hang). Unlike `event_kinds` this keeps EVERY event
+    /// it saw, so the caller can also assert what did NOT arrive.
+    async fn collect_events_until(
+        rx: &mut mpsc::UnboundedReceiver<RpcEvent>,
+        pred: impl Fn(&RpcEvent) -> bool,
+    ) -> Vec<RpcEvent> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut events = Vec::new();
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Some(ev)) => {
+                    let hit = pred(&ev);
+                    events.push(ev);
+                    if hit {
+                        return events;
+                    }
+                }
+                Ok(None) | Err(_) => break,
+            }
+        }
+        events
+    }
+
+    /// A transcript large enough that `older` is non-empty (three ~20 000
+    /// token messages — over the default `keep_recent_tokens` budget), so a
+    /// compaction actually attempts the summary call.
+    fn large_transcript(n: usize) -> Vec<ChatMessage> {
+        (0..n)
+            .map(|i| ChatMessage {
+                role: ChatRole::User,
+                content: MessageContent::Text(format!("m{i}{}", "x".repeat(80000))),
+                tool_call_id: None,
+                tool_calls: None,
+            })
+            .collect()
+    }
+
+    /// ADR 0044's `/compact`: the `Compact` CONTROL command compacts with NO
+    /// turn in flight. The composer is locked during a turn, so a
+    /// hand-triggered compaction is ALWAYS an idle action — the idle control
+    /// channel is the channel that reaches the loop. The observable is the
+    /// event pair on the `events` channel, in order, with `reason:
+    /// "manual"` — and nothing else (the command is NOT a prompt: no turn).
+    #[tokio::test]
+    async fn a_compact_control_command_compacts_when_idle() {
+        // The transcript is under the keep-recent budget, so the compaction is
+        // SKIPPED — both frames still fire, and the empty script pins that no
+        // model call happened.
+        let (provider, calls) = ScriptedProvider::new(vec![Some(Vec::new())]);
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let mut loop_ = build_loop(
+            Box::new(provider),
+            events_tx,
+            Arc::new(StdMutex::new(CancellationToken::new())),
+            watch::channel(0u64).0,
+            RetryPolicy::new_with(5, Duration::from_millis(1)),
+        );
+        loop_.messages = vec![
+            ChatMessage {
+                role: ChatRole::User,
+                content: MessageContent::Text("u1".to_string()),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: MessageContent::Text("a1".to_string()),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+        let control_tx = loop_.control_tx.clone();
+        // The session token (the loop owns it — the clone ends `run()`).
+        let session_cancel = loop_.cancel.clone();
+        let join = tokio::spawn(loop_.run());
+
+        control_tx
+            .send(ControlCmd::Compact { instructions: None })
+            .await
+            .expect("the loop's control queue is open");
+        let events = collect_events_until(&mut events_rx, |e| {
+            matches!(e, RpcEvent::compaction_end { .. })
+        })
+        .await;
+        let kinds: Vec<String> = events.iter().map(|e| e.kind().to_string()).collect();
+        let start = kinds.iter().position(|k| k == "compaction_start");
+        let end = kinds.iter().position(|k| k == "compaction_end");
+        assert!(
+            matches!((start, end), (Some(s), Some(e2)) if s < e2),
+            "compaction_start THEN compaction_end, got {kinds:?}"
+        );
+        assert!(
+            events.iter().all(|e| match e {
+                RpcEvent::compaction_start { reason } | RpcEvent::compaction_end { reason, .. } =>
+                    reason == "manual",
+                _ => true,
+            }),
+            "a hand-triggered compaction carries the `manual` reason (ADR 0045), got {kinds:?}"
+        );
+        assert!(
+            matches!(
+                events.last(),
+                Some(RpcEvent::compaction_end {
+                    aborted: false,
+                    will_retry: false,
+                    ..
+                })
+            ),
+            "the compaction ended cleanly and the loop goes back to idle"
+        );
+        assert!(
+            !kinds
+                .iter()
+                .any(|k| k == "turn_start" || k == "turn_end" || k == "agent_settled"),
+            "the compact command is NOT a prompt — no turn ran, got {kinds:?}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a skipped compaction makes no model call"
+        );
+        session_cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(5), join).await;
+    }
+
+    /// The Stop (Esc → `cancel_session` → `Inbound::Abort`) cancels whatever
+    /// token is in the shared `turn_cancel` mutex, so an IDLE compaction is
+    /// cancellable only because `run()`'s compact arm ARMS a fresh turn token
+    /// before compacting. A summary over a large history is bounded solely by
+    /// the transport's `read_timeout` *between bytes*, so this is the real
+    /// hang the arming defends.
+    #[tokio::test]
+    async fn abort_cancels_an_idle_compaction() {
+        // The single script is `None`: `complete` never resolves (the hanging
+        // call the turn-cancel tests use), so the summary is genuinely
+        // in flight when the Stop lands.
+        let (provider, _calls) = ScriptedProvider::new(vec![None]);
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let turn_cancel = Arc::new(StdMutex::new(CancellationToken::new()));
+        let mut loop_ = build_loop(
+            Box::new(provider),
+            events_tx,
+            turn_cancel.clone(),
+            watch::channel(0u64).0,
+            RetryPolicy::new_with(5, Duration::from_millis(1)),
+        );
+        // Large enough that `older` is non-empty — the summary is attempted.
+        loop_.messages = large_transcript(3);
+        // The observation point for "the transcript is unchanged": a
+        // SUCCESSFUL compaction REWRITES the stored transcript
+        // (`replace_messages`), an aborted one writes nothing.
+        let store = loop_.store.clone();
+        let control_tx = loop_.control_tx.clone();
+        let session_cancel = loop_.cancel.clone();
+        let join = tokio::spawn(loop_.run());
+
+        control_tx
+            .send(ControlCmd::Compact { instructions: None })
+            .await
+            .expect("the loop's control queue is open");
+        wait_for_event(&mut events_rx, 5000, |e| {
+            matches!(e, RpcEvent::compaction_start { .. })
+        })
+        .await
+        .expect("the idle compaction started");
+        // The Stop: `Inbound::Abort` cancels the token in the SHARED mutex —
+        // which is the FRESH token `run()`'s arm armed for this compaction.
+        turn_cancel
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .cancel();
+        let end = wait_for_event(&mut events_rx, 5000, |e| {
+            matches!(e, RpcEvent::compaction_end { .. })
+        })
+        .await
+        .expect("the cancelled compaction still ended");
+        assert!(
+            matches!(
+                &end,
+                RpcEvent::compaction_end {
+                    aborted: true,
+                    reason,
+                    ..
+                } if reason == "manual"
+            ),
+            "the compaction ended ABORTED with the manual reason, got {end:?}"
+        );
+        assert!(
+            store.load_messages("s1").expect("load_messages").is_empty(),
+            "an aborted compaction rewrote NOTHING (a failed compaction is never a lost context)"
+        );
+        session_cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(5), join).await;
     }
 
     /// (ADR 0017) `prepend_system` PERSISTS the leading system message at
@@ -4238,7 +4467,7 @@ mod tests {
         // The compaction REALLY shrank the transcript (the wrapper's return).
         assert!(
             loop_
-                .run_compaction("threshold", false, &CancellationToken::new())
+                .run_compaction("threshold", false, None, &CancellationToken::new())
                 .await,
             "a compaction that rewrote the transcript shrank it"
         );

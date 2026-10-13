@@ -255,6 +255,7 @@ pub fn run() {
             commands::sessions::resume_session,
             commands::sessions::set_session_config_option,
             commands::sessions::cancel_session,
+            commands::sessions::compact_session,
             commands::sessions::get_stalled_info,
             commands::history::list_sessions,
             commands::history::load_history,
