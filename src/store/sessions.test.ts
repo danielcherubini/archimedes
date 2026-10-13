@@ -726,21 +726,19 @@ describe("discardSessionMessages (ephemeral subagent cleanup)", () => {
     expect(useSessions.getState().messages).toEqual({});
   });
 
-  it("deletes the transcript when the `subagent-closed` path runs `discardSessionMessages` + `markClosed` (the `listenSubagentClosed` handler's call sequence — the `session-closed`-beats-`subagent-session-started` ordering-race guarantee)", () => {
-    // WHY this exists: `subagent-session-started` is emitted by the
-    // WORKER task (after `drive_session` returns) while `session-closed`
-    // is emitted by the DRIVER task (after teardown) — different tasks.
-    // If the agent dies (or a cancel lands) immediately
-    // post-establishment, `session-closed` can beat `started`: the
-    // `session-closed` handler's `discardSessionMessages` no-ops (no
-    // subagent entry yet) while `handleSessionClosed` creates
-    // `messages[sid]`, and nothing else re-runs the discard — a small
-    // unreclaimed leak (at most a partial transcript) per occurrence.
-    // The `subagent-closed` handler therefore discards too: the entry
-    // exists from `started` (the worker task emits `started` before
-    // `subagent-closed` sequentially) and `running` entries are never
-    // evicted, so the discard-first order is deterministic. (Discard
-    // must run BEFORE `markClosed`: `markClosed` can evict this entry
+  it("deletes the transcript when the `subagent-closed` path runs `discardSessionMessages` + `markClosed` (the `listenSubagentClosed` handler's call sequence — the discard-before-eviction guarantee)", () => {
+    // WHY this exists: `subagent-closed` is the ONLY frame that ever names the
+    // end of a child session, so it is the only thing that can free the
+    // transcript that child streamed into `messages[childId]`. No
+    // `session-closed` carries a child id — its one emitter,
+    // `on_session_exited_expected` (`src-tauri/src/agent/session/router.rs`),
+    // returns without a `live` entry, and the only insert into `live` is
+    // `establish_worker_session` (`src-tauri/src/agent/session/mod.rs`) on the
+    // main-session paths — so the `session-closed` handler's own discard is a
+    // guard that never fires here, and `markClosed`'s `evictOldestClosed` drops
+    // the `SubagentEntry` alone, never `messages`. Without the discard the
+    // transcript would outlive every surface that could show it.
+    // (Discard must run BEFORE `markClosed`: `markClosed` can evict this entry
     // synchronously — the oldest of 21+ closed entries — and a discard
     // running after would then no-op its guard.)
     useSubagents.getState().addSession({
@@ -750,7 +748,8 @@ describe("discardSessionMessages (ephemeral subagent cleanup)", () => {
       task: "review the diff",
       status: "running",
     });
-    // `session-closed` beat `started` and created the transcript:
+    // A transcript the child streamed before it died (the shape the
+    // `subagent-closed` handler has to clear):
     useSessions.setState({
       messages: {
         sub2: [{ kind: "agent-text", messageId: "m1", text: "partial", at: 1 }],

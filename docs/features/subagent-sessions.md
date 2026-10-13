@@ -1,10 +1,17 @@
 ---
 status: live
-last-verified: 2026-10-03
-verified-by: cargo test (the subagent.rs native-dispatch, throwaway-Db, and cancel suites) + pnpm test in archimedes-desktop + the subagent-model-overrides plan (shipped 2026-10-03; history in git)
+last-verified: 2026-10-13
+verified-by: pnpm test (1702 passed / 79 files) + pnpm build on the subagent-gates-in-parent-transcript branch — THE CLIENT HALF ONLY: the Presentation section's render-site partition, the sheet-vs-panel geometry, and the Settings round-trip keeping the sheet. The Rust sections above are NOT covered by this stamp. They date from the subagent-model-overrides plan (shipped 2026-10-03, verified then by cargo test — the subagent.rs native-dispatch, throwaway-Db, and cancel suites) and have not been re-read since: they cite `ExternalClose`, `NativeDeps`, `TempFileGuard` and `agent/interactive.rs`, none of which exist under `src-tauri/src` any more, and describe the metrics as a self-emitted per-turn `cost_update` (source `"main"`) when `SubagentCapture` in fact accumulates them from the child's `message_update` frames and no `cost_update` is emitted at all. Treat that half as unverified prose pending its own pass — history in git
 ---
 
 # Subagent sessions
+
+> **Unverified below this line (the Rust half).** Everything from here down to
+> the `Presentation` section predates the current stamps and has NOT been
+> re-read against the code — the `verified-by` stamp in this file's frontmatter
+> covers the client half only, and the section headings below ("Metrics are
+> real", "The driver task") read as authority they have not earned. Treat the
+> symbol names there as claims pending their own pass.
 
 A **Subagent session** is a native `AgentLoop` child the desktop spawns **in
 process** — the SAME in-process runtime (the main tokio runtime) and the
@@ -157,31 +164,182 @@ DENY). Only the `sudo` RUN that follows is time-bounded, by the caller's
 Subagents live under the "Delegating" tool card in the main chat view
 (`SubagentDelegatingCard` — one row per subagent: status icon + agent name +
 task + a live one-line activity preview; open by default); clicking a row
-opens a dedicated right-side transcript modal. The sidebar Subagents panel
-is removed (`SidePane` is todos-only + the subagent sudo modals at the frame
-root; its auto open/close is driven by todos only — a subagent no longer
-opens the pane). Grouping is session-level: every `SubagentDelegatingCard`
-in a session lists all of that session's subagent rows (the
-`subagent-session-started` payload carries no `toolCallId`), while the
-activity preview resolves only from each card's own `rawOutput.details`.
+opens a dedicated right-side transcript SHEET (`SubagentDetailHost`). The
+sidebar Subagents panel is removed (`SidePane` is todos-only: its auto
+open/close is driven by todos only, a subagent no longer opens the pane, and
+the pane mounts NO gate host of any kind). Grouping is session-level: every
+`SubagentDelegatingCard` in a session lists all of that session's subagent
+rows (the `subagent-session-started` payload carries no `toolCallId`), while
+the activity preview resolves only from each card's own `rawOutput.details`.
 
-**The "always mounted" invariant (load-bearing):** a subagent's interactive
-requests (`ask` / permission / sudo `confirm` / `password`) MUST be rendered
-by a mounted React component — there is NO prompt deadline left to expire,
-so an unrendered request waits on an answer that can never arrive and the
-dispatch runs to the `settle_timeout`. `SubagentDetailHost` (always mounted
-at the `App` root) renders every subagent's `SubagentTranscript` exactly
-once — the selected one in the visible modal, the rest hidden (the `hidden`
-attribute keeps the component mounted) — so an unrendered request can never
-hang. Closing the modal (X / Esc) only clears the selection; the entry stays
-in `useSubagents`. The modal's `onKeyDown` Esc handler is a React handler on
-the sheet (NOT a window-level capture handler) so it stops the native event
-before `ChatStream`'s window-level Escape-cancel fires, and a nested
-consumer's own `stopPropagation` (e.g. `AskQuestionCard`'s Esc-dismiss)
-still wins.
+**The render-site partition (load-bearing):** a Subagent session's four
+gates (`ask`, `confirm`, `password`, Permission prompt) are answerable in
+exactly ONE place per gate, split on ONE question — **is this gate's parent
+the ACTIVE session** — with the derivation in one place (`childGatesOf` /
+`useChildGates`, `src/hooks/useChildGates.ts`) and the contract stated on
+`SubagentModals`:
+
+- `ask` / Permission prompt of a child whose parent IS active → **inline** at
+  the bottom of that parent's transcript (`MessageList`, fed by
+  `useChildGates(activeSessionId)` in `ChatStream`), below the parent's own
+  cards and labelled `↳ <agentName>` — that is the conversation the user is
+  already reading, so answering there is the point.
+- `ask` / Permission prompt of a child whose parent is NOT active → the
+  **`SubagentModals` overlay** (a right-anchored `fixed` panel). `ChatStream`
+  renders only `activeSessionId`, so there is no transcript for it to render
+  into.
+- `confirm` / `password` of EVERY child, active parent or not → the overlay,
+  always. `SudoConfirmModal` / `SudoPasswordModal` are Radix `Dialog`s and
+  modal by nature; inlining a `Dialog` into a scrolling transcript is not on
+  the menu, so these two kinds never move.
+
+Exactly one site draws any one gate: never twice (two live copies would mean
+divergent typed-but-unsubmitted `ask` drafts and an Esc that closes only one),
+and never nowhere **while the workspace view is mounted**. The one accepted
+exception is the Settings view with the gate's parent the active Session — the
+hole the accepted-geometry list below names, pinned by `App.test.tsx`'s
+`KNOWN HOLE (accepted, documented)` test.
+
+**The never-nowhere invariant (the guarantee is unchanged; the mechanism
+is new).** A gate MUST be rendered by a mounted component — while the
+workspace view is mounted, with the one accepted Settings-view exception the
+list below records. The interactive
+wait carries no deadline (above), so an unrendered gate waits on an answer
+that can never arrive and strands the child until the drive's 30-minute
+`settle_timeout` (`DEFAULT_SUBAGENT_SETTLE_TIMEOUT`,
+`src-tauri/src/agent/worker/manager.rs`) — which surfaces as a child
+`Failed "timed out"`, NOT as a forgotten question. The old design held this
+by mounting EVERY child's `SubagentTranscript` and keeping the unselected
+ones hidden; that host is deleted, because the guarantee now comes from the
+partition instead: the overlay is mounted at the `App` root as a SIBLING of
+the whole `view === "settings" ? … : …` ternary — so it is up whenever the
+workspace is not — and covers every parent that is not the active Session (the
+active parent's own cards are the transcript's half), so
+a child of a Session you navigated away from is still on screen — and
+`SubagentTranscript` renders no gate at all, so a gate appearing inside the
+sheet would be a THIRD site (`App.test.tsx`: `opening the gate-holding child's
+OWN sheet still renders the card EXACTLY ONCE (the sheet is not a third site)`).
+Closing the sheet (X / Esc) still only clears the selection; the entry
+stays in `useSubagents`.
+
+**Escape.** The sheet's `onKeyDown` Esc handler is a React handler on the
+sheet (NOT a window-level handler), so it stops the native event before
+`ChatStream`'s window-level Escape-cancel fires: closing a child's transcript
+never cancels the PARENT's turn (accepted limitation: it fires only while
+focus is inside the sheet). The two gate wrappers stop `Escape` the same way,
+non-dismissibly, because `ChatStream`'s listener would otherwise kill the
+parent's turn. What used to be pinned in the sheet — an Esc consumed by a
+nested `AskQuestionCard` staying with that card — cannot happen there any
+more, since the sheet renders no cards; that guarantee now lives in
+`src/components/ChatStream.test.tsx` (`an Escape INSIDE the inline child card
+answers the CHILD and does NOT cancel the parent`), with the overlay's half
+pinned in `src/components/SubagentModals.test.tsx`.
+
+**Accepted geometry and stacking** (deliberate, and each pinned where it is
+named):
+
+- The overlay panel is `z-40` and the sheet is `fixed … z-50` and one width
+  wide, so a
+  right-anchored panel sits entirely UNDER an open child sheet — including the
+  card the attention alert just pointed at. The panel therefore shifts to the
+  sheet's left edge, but only from a viewport width where that leaves a usable
+  card: the dodge is the breakpoint variant of 760 applied to a 480 offset and a
+  viewport-minus-480 cap, with the corner geometry as the unconditional base
+  (760 = the sheet's 480 +
+  the 280px floor a card needs — `src/lib/subagentSheetLayout.ts`). Below it the
+  dodge is the WORSE option: `min(480, 100vw − 480)` is a 120px strip at 600px
+  and, at ≤ 480px, a zero-width box placed off-viewport — a gate that is mounted
+  and UNREACHABLE until the child's 30-minute `settle_timeout`, which is worse
+  than buried-behind-the-sheet and recoverable (close the sheet, the card is
+  there). Those classes live as literals in `src/lib/subagentSheetLayout.ts`
+  alone — the sheet's width class and the dodge pair — and both surfaces
+  interpolate them, so the two cannot be widened independently; each literal is
+  type-annotated against the number it names (widening `SUBAGENT_SHEET_WIDTH`
+  without it is a `tsc` error), `src/lib/subagentSheetLayout.test.ts` pins that
+  no other file spells a geometry class, and
+  `src/components/SubagentModals.test.tsx` re-pins the rendered pair along with
+  the variant and the fallback, since jsdom runs no layout. The panel is also
+  `pointer-events-none` with `pointer-events-auto` per card, so it is
+  click-transparent outside its cards and its rect steals no clicks from the
+  panes underneath it — at the cost of the frame's own scrollbar not being
+  draggable and a text drag not starting in a gap, both named and accepted on the
+  component. Opening Settings UNMOUNTS the sheet (`SubagentDetailHost` is inside
+  the view ternary, this host is not) but keeps the SELECTION, and tells the
+  overlay which view is mounted (`sheetMounted`): the panel stops dodging a sheet
+  that is not painted, and Back from Settings re-opens the transcript the user
+  had open. `App.test.tsx` pins both halves; clearing the selection instead was
+  the earlier fix and threw the user's sheet away to repair a geometry the
+  overlay could simply be told about.
+- While a sudo `Dialog` is open, Radix's `hideOthers` +
+  `disableOutsidePointerEvents` make everything outside it inert — so an
+  `ask` / Permission prompt is NOT answerable then, in the overlay panel AND
+  inline in the parent's transcript (pre-existing for the parent's own cards).
+  The gate stays mounted and pending and is answerable again the moment the
+  modal settles; `App.test.tsx` pins the overlay half.
+- Opening the **Settings** view unmounts the workspace (`ChatStream`
+  included), so an ACTIVE parent's inline `ask` / Permission prompt has no
+  transcript to render into, and the overlay stands down for it rather than
+  hosting the active session's own cards. Accepted: it is the pre-existing
+  main-session hole, reachable by the same two clicks and escaped the same
+  way — leave Settings, which re-mounts the transcript. Nothing closes the gate
+  in the meantime: the only bound on an unanswered one is the child's
+  `DEFAULT_SUBAGENT_SETTLE_TIMEOUT` (30 min,
+  `src-tauri/src/agent/worker/manager.rs`), and that ends the DELEGATION (a
+  `Failed "timed out"`), it does not close the gate. The overlay's
+  own half — every NON-active parent's gates — is pinned answerable with
+  Settings open, which is why it lives outside that ternary.
+- Navigating away from the active parent moves its child's `ask` to a
+  different component instance, so a typed-but-unsubmitted draft is lost
+  (`AskQuestionCard` keeps drafts in component state). The price of one site
+  per gate.
 
 ## Follow-ups
 
+- **`source` is one value on today's transport: two `AskQuestionCard` branches
+  are unreachable, and the todo board is mis-routed.** Every
+  `interactive-request` the desktop builds carries `"native"`:
+  `ask_flow` (`src-tauri/src/agent/harness/ask.rs`) emits it
+  verbatim, and the `sudo_run_flow` core
+  (`src-tauri/src/agent/interactive/mod.rs`) is handed it as its `source`
+  argument by the `AgentLoop`'s tool dispatch
+  (`src-tauri/src/agent/harness/loop.rs`) — which passes the same literal to
+  `todo_apply` — for a MAIN session and a Subagent session alike. So the card's
+  `source === "main"` anchoring path never fires: nothing anchors, a main `ask`
+  included, since `ask_flow` sends `toolCallId: null` too — and that is why the
+  two lifted child sites pass `autoFocus={false}` (an unanchored card takes
+  focus on mount). Its `subagent:` label never renders either. `"main"` and
+  `"sudo"` exist only in Rust fixtures, `bin/fake_worker.rs` and
+  the frontend's own test seeds. **The todo board is the worse half, because it
+  is not dead code.** `todo_apply` pushes `todos_update` with that same
+  `"native"`, so `useInteractive.applyTodoUpdate` takes its `else` arm and files
+  a MAIN session's board in `todos[sessionId].subagents["native"]` while
+  `column.main` stays `[]`; `useMainTodoItems`' `column?.main ?? rawTodos`
+  fallback cannot fire on an EMPTY array (only `undefined` reaches the `??`), so
+  the `rawInput` seed never rescues it, `useMainOpenTodoCount` reads 0, and the
+  `SidePane` — whose auto open/close is that count (`visible = mainTodoCount > 0`)
+  — never opens for a session that has an open todo list. `applyTodoClear` mirrors
+  the same branch (it would delete `subagents["native"]`, leaving `main`), though
+  nothing in `src-tauri/src` emits a `todos_clear` frame at all today. Fixing the
+  `source` value fixes this too; note that a child's board is separately
+  unreachable, since its frames are keyed to the CHILD id in the payload while
+  `TodoBoardPanel` reads the ACTIVE session's slice.
+  The label branch and the fixtures that drive it are deliberately KEPT (they
+  exercise a live code path a future emitter would
+  use), so the fix here is a decision, not a deletion: either make the emitter
+  name the child (and give a main `ask` a real `toolCallId` so it can anchor),
+  or delete the two branches and the seeds with them.
+- **A child's `interactive-request-close` frames are mis-keyed.** The pump
+  relays a Subagent's frames under the PARENT's delivery id (`delivery_id` in
+  `src-tauri/src/agent/worker/manager.rs`, routed into `route_event`, which is
+  what `track_modal` records), so any close frame that IS emitted for one
+  carries `sessionId = parent` and reaches `App`'s `interactive-request-close`
+  listener as `removeRequest(parent, <the child's request id>)` — a no-op on the
+  child's slice, leaving the card mounted with nothing behind it. ADR 0040
+  records this as a known upstream defect with the follow-up outstanding; this
+  is the durable ticket. The one emitter that gets the key right is
+  `SudoPromptCleanup` (`src-tauri/src/agent/interactive/sudo_exec.rs`), and it
+  covers only a DROPPED sudo flow's `confirm` / `password` — never an `ask` or a
+  Permission prompt.
 - 2026-09-15 hang (two concurrent sessions on one tokio runtime):
   **no longer reproduces** on current versions (resolved 2026-09-22 — root
   cause never confirmed, likely version/environment-specific); the one-live

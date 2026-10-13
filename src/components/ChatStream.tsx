@@ -35,7 +35,8 @@ import { useSessions } from "../store/sessions";
 import { usePermissions } from "../store/permissions";
 import { useInteractive } from "../store/interactive";
 import { useSettings } from "../store/settings";
-import { usePendingSubagentRequests } from "../hooks/usePendingSubagentRequests";
+import { useHasPendingRequest } from "../hooks/useHasPendingRequest";
+import { useChildGates, isInlineChildGate } from "../hooks/useChildGates";
 import { useSpinQuip } from "../hooks/useSpinQuip";
 import { useMentionCatalogs, useCompletionDir } from "../hooks/useMentionCatalogs";
 import { normalizeVariant } from "../lib/braille-loader";
@@ -285,13 +286,43 @@ export default function ChatStream() {
     [activeSessionId, applyConfigOptions],
   );
 
-  // Pending subagent requests (the toggle dot) — called UNCONDITIONALLY,
-  // BEFORE the `!activeSessionId` early return below: this hook contains
-  // `useSyncExternalStore` (via zustand), so calling it only on the
-  // full-frame path would change the hook count when the active session
-  // appears/disappears and crash React ("Rendered more hooks than during
-  // the previous render" → white page).
-  const pendingSubagentRequests = usePendingSubagentRequests();
+  // Whether the user owes an answer — the ACTIVE session's own prompts/pauses,
+  // or ANY child's gate anywhere in the app — and here it drives the "Send a
+  // prompt to start" hint's suppression (see `hasPendingRequest` below). It is
+  // the SAME hook the `SidePane` and `SpacesList` toggles read for their
+  // `bg-warning` dots, so the cue in the transcript and the dots cannot drift
+  // (one derivation, many consumers).
+  // The subagent half is app-wide ON PURPOSE: every NON-active parent's gates
+  // are on screen in the `SubagentModals` overlay, so the cue means "you owe
+  // something, somewhere" and never lies. Which Session owes it is the inline
+  // card's and the parent row's status' business, not this dot's, and an
+  // unrendered gate would strand the child until its 30-minute `settle_timeout`
+  // anyway — so counting wide is both honest and safe. Called UNCONDITIONALLY,
+  // BEFORE the `!activeSessionId` early return below: it reads stores via
+  // `useSyncExternalStore` (zustand), so
+  // calling it only on the full-frame path would change the hook count when the
+  // active session appears/disappears and crash React ("Rendered more hooks than
+  // during the previous render" → white page). Pinned by the ChatStream test that
+  // goes no-session → active-session WITH a pending child gate.
+  const hasPendingRequest = useHasPendingRequest();
+  // The gates this Session's CHILDREN are holding on the user (the inline half
+  // of the render-site partition): they render INLINE at the bottom of THIS
+  // transcript, because the parent — the session on screen — is who the child
+  // is waiting for. `SubagentModals`
+  // renders the complementary half (a child whose parent is NOT active, plus
+  // every child's `confirm`/`password` `Dialog`s), so exactly one site draws
+  // any one gate. Called UNCONDITIONALLY, BEFORE the `!activeSessionId` early
+  // return, for the same reason as the hook above: it reads three stores via
+  // `useSyncExternalStore`, so a hook count that depends on the active session
+  // crashing React when one appears. `null` → `[]` (no session, no transcript).
+  const childGates = useChildGates(activeSessionId);
+  // The gates of that list that actually draw a row IN THIS TRANSCRIPT (the
+  // same predicate `MessageList` filters its rows with — one definition, so the
+  // count and the render cannot drift). `confirm`/`password` are overlay
+  // `Dialog`s, so they are NOT rows here: the auto-scroll dep below counts THIS,
+  // never `childGates.length`, or a child's sudo prompt would yank the
+  // transcript to the bottom for a row that never appeared.
+  const inlineChildGates = childGates.filter(isInlineChildGate);
 
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -302,7 +333,7 @@ export default function ChatStream() {
   // ALL of the attachment hooks live HERE, before the `!activeSessionId`
   // early return below — a hook called only on the full-frame path would
   // change the hook count when the active session appears/disappears and
-  // crash React (the same bug the `usePendingSubagentRequests` comment
+  // crash React (the same bug the `useHasPendingRequest` comment
   // above warns about).
   const [attachments, setAttachments] = useState<ChatComposerAttachment[]>([]);
   const attachmentsRef = useRef(attachments);
@@ -418,7 +449,7 @@ export default function ChatStream() {
   // ALL of the hooks below live in the UNCONDITIONAL top block (before the
   // `!activeSessionId` early return further down) — placing any of them after
   // the early return would change the hook count across the session/no-session
-  // transition and crash React (the same bug the `usePendingSubagentRequests`
+  // transition and crash React (the same bug the `useHasPendingRequest`
   // comment above warns about). Plain (non-hook) functions like `selectMention`
   // are placement-flexible (the file's own comment says so for the attachment
   // handlers) and live with the other handlers below.
@@ -809,7 +840,16 @@ export default function ChatStream() {
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, prompts.length, stackedAskRequests.length]);
+  }, [
+    messages,
+    prompts.length,
+    stackedAskRequests.length,
+    // A child's inline gate is at the BOTTOM of this transcript, so an
+    // un-scrolled view would hide the very card the user must answer (the same
+    // reason the two counts above are deps). The INLINE count, not the full gate
+    // list — see `inlineChildGates` above.
+    inlineChildGates.length,
+  ]);
 
   if (!activeSessionId) {
     return (
@@ -1011,19 +1051,14 @@ export default function ChatStream() {
             m.kind === "diff" ? [{ path: m.path, patch: m.patch }] : [],
           );
 
-  // The `bg-warning` dot on the toggle — the cue for the COLLAPSED-PANE
-  // case (the `SidePane` "Waiting" pill is clipped by the frame's
-  // `width: 0` + `overflow: hidden` when collapsed): it counts the
-  // ACTIVE session's requests PLUS pending subagent requests (subagent
-  // session ids are never active, so the active-session count alone
-  // would strand a pending subagent request until the interactive timeout).
-  const hasPendingRequest =
-    prompts.length > 0 ||
-    interactiveRequests.some(
-      (r) =>
-        r.method === "ask" || r.method === "confirm" || r.method === "password",
-    ) ||
-    pendingSubagentRequests > 0;
+    // `hasPendingRequest` (computed ABOVE, next to the other unconditional cue
+  // hooks) is what suppresses the hint below. It is the SAME hook the `SidePane`
+  // and `SpacesList` toggles read for their `bg-warning` dots — the cue for the
+  // COLLAPSED-PANE case, where the pane's content is clipped away by the
+  // `SIDE_PANE_RAIL` sliver + `overflow: hidden` and only the toggle's dot is
+  // left to say "something needs you" — so the hint and the dots can only ever
+  // agree; a hand-rolled copy of the hook's terms in THIS file (what this
+  // comment's previous version described) was how they could not.
   // The "Send a prompt to start" hint is hidden when a pending request
   // (permission prompt or interactive `ask`/`confirm`/`password` — the cards
   // render in the stream regardless of the transcript's length) or a
@@ -1291,6 +1326,7 @@ export default function ChatStream() {
         askRequests={askRequests}
         prompts={prompts}
         stackedAskRequests={stackedAskRequests}
+        childGates={childGates}
         hasPendingRequest={hasPendingRequest}
         workingOrInTurn={workingOrInTurn}
         agentState={agentState}

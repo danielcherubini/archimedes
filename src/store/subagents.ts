@@ -52,11 +52,19 @@ export interface SubagentEntry {
   error?: string;
   /**
    * Snapshot from the `subagent-closed` payload. The metrics line MUST read
-   * THIS (never `useInteractive.cost[sessionId]`): the `session-closed` handler
-   * calls `useInteractive.dismissSession`, which DELETES `cost`/`agentState` for
-   * the id — and `session-closed` (driver teardown) and `subagent-closed`
-   * (worker task) are CONCURRENT, so the ordering is racy. This store is
-   * the only one `dismissSession` never touches.
+   * THIS (never `useInteractive.cost[sessionId]`): the payload is the only
+   * place a child's usage reaches the Client today — the tokens are
+   * accumulated Supervisor-side in `SubagentCapture`
+   * (`src-tauri/src/agent/worker/manager.rs`) from the child's
+   * `message_update` frames, an `RpcEvent` stream the router deliberately
+   * never re-emits — and `durationMs` is that task's wall clock, a number no
+   * Client-side store is in a position to know. Nor is there a teardown
+   * racing it: no `session-closed` ever names a child id (its one emitter,
+   * `on_session_exited_expected` in
+   * `src-tauri/src/agent/session/router.rs`, returns without a `live` entry,
+   * and the only insert into `live` is `establish_worker_session` on the
+   * main-session start / resume paths), so `dismissSession` never runs for a
+   * child at all.
    */
   metrics?: SubagentMetrics;
   model?: string;

@@ -70,7 +70,10 @@ function draftHasAnswer(draft: QuestionDraft): boolean {
  * the `toolCallId` is carried for anchoring to the ACP `tool_call` frame
  * when present). Subagent asks (`source` starts with `subagent:`) render a
  * labeled card anchored by `source` (the desktop has no ACP `tool_call`
- * frame for child tool calls). If the request arrives before its ACP
+ * frame for child tool calls). No emitter sends a `subagent:` source today —
+ * `InteractiveRequestData.source` says what the transport really carries — so
+ * this branch is live for a future emitter and for the fixtures that pin it,
+ * not for traffic. If the request arrives before its ACP
  * `tool_call` frame, the card renders queued (bounded ~1.5 s) then
  * unanchored/labeled.
  *
@@ -79,21 +82,36 @@ function draftHasAnswer(draft: QuestionDraft): boolean {
  * mount when UNANCHORED (a standalone card — no focus steal from the
  * message stream) so the advertised Enter/Esc shortcuts work immediately.
  * Cancel → `{ cancelled: true, results: [] }` + `removeRequest`.
+ *
+ * `autoFocus` (default `true`) opts out of that mount focus. It exists for a
+ * CHILD's gate lifted into its parent's transcript or into the overlay: such a
+ * card is NEVER anchored (anchoring needs `source === "main"`, and every frame
+ * the transport emits carries `source: "native"` — see
+ * `InteractiveRequestData.source` — while `ask_flow` and the sudo sub-prompts
+ * both send `toolCallId: null`), so the unanchored rule above would fire for
+ * every one of them — and a child's `ask` can arrive at any moment, including
+ * while the user is mid-sentence in the composer. Focus would jump to a
+ * `tabIndex={-1}` div, the remaining keystrokes would be lost, and Enter would
+ * stop sending. Both lifted sites therefore pass `autoFocus={false}`; the
+ * shortcuts still work as soon as the user clicks into the card (the `onKeyDown`
+ * lives on the card root either way).
  */
 export default function AskQuestionCard({
   sessionId,
   requestId,
+  autoFocus = true,
 }: {
   sessionId: string;
   requestId: string;
+  autoFocus?: boolean;
 }) {
   const request = useInteractive((state) =>
     (state.requests[sessionId] ?? []).find((r) => r.requestId === requestId),
   );
   const removeRequest = useInteractive((state) => state.removeRequest);
-  // The card takes focus on mount when unanchored (see the component doc
-  // above) so the Enter/Esc `onKeyDown` — which only fires with focus
-  // INSIDE the card — works immediately for a standalone card.
+  // The card takes focus on mount when unanchored AND `autoFocus` (see the
+  // component doc above) so the Enter/Esc `onKeyDown` — which only fires with
+  // focus INSIDE the card — works immediately for a standalone card.
   const cardRef = useRef<HTMLDivElement>(null);
   // Anchoring: the ACP `tool_call` frame for this request is in the stream
   // (only a `main` ask with a `toolCallId` can anchor — the desktop has no
@@ -133,14 +151,15 @@ export default function AskQuestionCard({
   }, [queued, anchored]);
 
   useEffect(() => {
-    if (!queued) {
+    if (!queued && autoFocus) {
       // Unanchored (a standalone card): take focus so the Enter/Esc
       // shortcuts work immediately. Anchored (inline in the message
       // stream): don't steal focus — the shortcuts work once the user
-      // clicks into the card.
+      // clicks into the card. `autoFocus === false` (a lifted child gate)
+      // opts out for the same reason, unconditionally: see the component doc.
       if (!anchored) cardRef.current?.focus();
     }
-  }, [queued, anchored]);
+  }, [queued, anchored, autoFocus]);
 
   if (!request) return null;
   const questions =

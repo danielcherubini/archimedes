@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
-import { respondInteractiveRequest } from "../lib/tauri";
 import SubagentDetailHost from "./SubagentDetailHost";
 import { useSubagents } from "../store/subagents";
 import { useSubagentSelection } from "../store/subagentSelection";
@@ -8,15 +7,16 @@ import { useInteractive } from "../store/interactive";
 import { usePermissions } from "../store/permissions";
 import { useSessions } from "../store/sessions";
 
-// Mock the Tauri IPC layer; everything else (stores) is the real code.
-vi.mock("../lib/tauri", async () => {
-  const actual = await vi.importActual<Record<string, unknown>>("../lib/tauri");
-  return {
-    ...actual,
-    respondInteractiveRequest: vi.fn().mockResolvedValue(undefined),
-    respondPermission: vi.fn().mockResolvedValue(undefined),
-  };
-});
+// NO `vi.mock("../lib/tauri")` here on purpose. This file used to mock
+// `respondInteractiveRequest` / `respondPermission`, which implied the sheet
+// hosts prompt cards and could answer them — the inference the render-site
+// partition removed when the transcript stopped rendering gates (see
+// `SubagentTranscript`'s doc: a gate
+// rendered there is a bug). Nothing this file renders reaches IPC, so the mock
+// is gone rather than kept as a hint of a capability the component no longer
+// has. If a gate ever DOES render inside the sheet, this file needs the mock
+// back — and `App.test.tsx`'s sheet pin fails first, because that is a third
+// render site.
 
 const entry = {
   sessionId: "sub1",
@@ -33,17 +33,6 @@ const otherEntry = {
   task: "explore the codebase",
   status: "running" as const,
 };
-
-/**
- * The hidden host's visibility: hidden via the wrapper's `hidden`
- * ATTRIBUTE (the content stays MOUNTED — see the `SubagentDetailHost`
- * doc). The modal's `hidden` CLASS does not match `[hidden]`, so this
- * distinguishes the two: a match means the content is in the hidden
- * host, not the modal.
- */
-function isHidden(el: Element): boolean {
-  return el.closest("[hidden]") !== null;
-}
 
 /** Seed the selection and flush the re-render. */
 function select(id: string | null): void {
@@ -66,11 +55,11 @@ beforeEach(() => {
   useSessions.setState({ messages: {} });
 });
 
-describe("SubagentDetailHost (the dedicated transcript modal + the always-mounted host)", () => {
+describe("SubagentDetailHost (the subagent transcript sheet)", () => {
   it("renders the modal HIDDEN (no header) when selectedSessionId is null", () => {
     useSubagents.getState().addSession(entry);
     render(<SubagentDetailHost />);
-    // The sheet is ALWAYS mounted...
+    // The sheet's outer `div` stays in the DOM even with nothing selected...
     const dialog = screen.getByRole("dialog", { name: /transcript/ });
     expect(dialog.className).toContain("hidden");
     // ...and the inner content (the header) is NOT mounted.
@@ -100,11 +89,10 @@ describe("SubagentDetailHost (the dedicated transcript modal + the always-mounte
     select("sub1");
     const dialog = screen.getByRole("dialog", { name: /transcript/ });
     const msg = screen.getByText("hello from the subagent");
-    // The transcript is inside the modal...
+    // The transcript is inside the sheet...
     expect(dialog.contains(msg)).toBe(true);
-    // ...rendered EXACTLY ONCE (the hidden host skips the selected entry
-    // — the "every subagent's transcript is rendered exactly once"
-    // invariant).
+    // ...rendered EXACTLY ONCE (the sheet is the transcript's only mount
+    // point — a second copy would mean a second live instance of one stream).
     expect(screen.getAllByText("hello from the subagent")).toHaveLength(1);
   });
 
@@ -161,7 +149,7 @@ describe("SubagentDetailHost (the dedicated transcript modal + the always-mounte
     expect(windowEsc).not.toHaveBeenCalled();
   });
 
-  it("closing does NOT dismiss the entry (it stays in useSubagents; the transcript moves to the hidden host in the same render)", () => {
+  it("closing does NOT dismiss the entry (it stays in useSubagents) and the transcript is GONE from the DOM", () => {
     useSubagents.getState().addSession(entry);
     useSessions.getState().applySessionUpdate("sub1", {
       sessionUpdate: "agent_message_chunk",
@@ -169,21 +157,30 @@ describe("SubagentDetailHost (the dedicated transcript modal + the always-mounte
     });
     render(<SubagentDetailHost />);
     select("sub1");
-    // Open: the transcript is in the modal (visible).
-    expect(isHidden(screen.getByText("hello from the subagent"))).toBe(false);
+    // Open: the transcript renders inside the sheet.
+    const dialog = screen.getByRole("dialog", { name: /transcript/ });
+    expect(dialog.contains(screen.getByText("hello from the subagent"))).toBe(
+      true,
+    );
     fireEvent.click(
       screen.getByRole("button", { name: "Close subagent transcript" }),
     );
     // The entry is NOT dismissed (closing is `select(null)` only — it
-    // never calls `dismiss`)...
+    // never calls `dismiss`): the row stays in the subagent list.
     expect(useSubagents.getState().entries["sub1"]).toBeDefined();
-    // ...and the transcript stays MOUNTED (it moved from the modal to
-    // the hidden host in the SAME render — the prompt cards never
-    // unmount, so they never hang until the interactive timeout).
-    expect(isHidden(screen.getByText("hello from the subagent"))).toBe(true);
+    // The sheet's inner content (the header) is unmounted.
+    expect(
+      screen.queryByRole("button", { name: "Close subagent transcript" }),
+    ).toBeNull();
+    // And the transcript is NOT rendered anywhere any more — the sheet is
+    // its only mount point. A copy still in the DOM here would be the
+    // retired second mount, whose only purpose was keeping the child's
+    // prompt cards rendered so an unseen request could not hang; the
+    // transcript renders no gate at all, so that reason is gone.
+    expect(screen.queryByText("hello from the subagent")).toBeNull();
   });
 
-  it("renders a HIDDEN SubagentTranscript for every NON-selected entry (the always-mounted host)", () => {
+  it("renders the transcript EXACTLY ONCE, for the SELECTED entry only (the others render nothing)", () => {
     useSubagents.getState().addSession(entry);
     useSubagents.getState().addSession(otherEntry);
     useSessions.getState().applySessionUpdate("sub1", {
@@ -196,51 +193,26 @@ describe("SubagentDetailHost (the dedicated transcript modal + the always-mounte
     });
     render(<SubagentDetailHost />);
     select("sub1");
-    // sub1 (selected): in the modal (visible)...
-    expect(isHidden(screen.getByText("hello from the subagent"))).toBe(false);
-    // ...sub2 (NOT selected): in the hidden host (in the DOM, hidden
-    // via the `hidden` ATTRIBUTE = `display: none` — the component stays
-    // MOUNTED, so the prompt cards are always rendered).
-    expect(screen.getByText("hello from the explorer")).toBeTruthy();
-    expect(isHidden(screen.getByText("hello from the explorer"))).toBe(true);
+    // The selected entry's transcript is in the sheet, EXACTLY ONCE.
+    expect(screen.getAllByText("hello from the subagent")).toHaveLength(1);
+    // A NON-selected entry renders NOTHING at all: nothing mounts a
+    // transcript for an entry the sheet is not showing.
+    expect(screen.queryByText("hello from the explorer")).toBeNull();
   });
 
-  it("an Escape consumed by a nested AskQuestionCard does NOT close the modal (the card's stopPropagation stops it before the sheet)", async () => {
-    useSubagents.getState().addSession(entry);
-    // The subagent's OWN `ask` (keyed by the subagent's session id) —
-    // the card renders inside the modal's transcript.
-    useInteractive.getState().addRequest("sub1", {
-      requestId: "r1",
-      method: "ask",
-      source: "main",
-      params: {
-        questions: [
-          {
-            id: "q1",
-            question: "Which color?",
-            options: [{ label: "Red" }, { label: "Blue" }],
-          },
-        ],
-      },
-    });
-    render(<SubagentDetailHost />);
-    select("sub1");
-    // The card's ROOT (the only `tabindex="-1"` element in the card)
-    // consumes the Escape: its `stopPropagation()` stops the event
-    // BEFORE it reaches the sheet's (parent) React handler.
-    const card = screen.getByText("Which color?").closest("[tabindex='-1']")!;
-    fireEvent.keyDown(card, { key: "Escape" });
-    // The modal header is STILL present (the modal did NOT close)...
-    expect(
-      screen.getByRole("button", { name: "Close subagent transcript" }),
-    ).toBeTruthy();
-    expect(useSubagentSelection.getState().selectedSessionId).toBe("sub1");
-    // ...and the CARD's own Esc-dismiss fired (the request was
-    // responded to as cancelled — the event was consumed by the card,
-    // not swallowed on the way).
-    await act(async () => {
-      await Promise.resolve();
-    });
-    expect(vi.mocked(respondInteractiveRequest)).toHaveBeenCalled();
-  });
+  // NOTE: the former test `an Escape consumed by a nested
+  // AskQuestionCard does NOT close the modal` was DELETED here, not deferred:
+  // the transcript no longer renders ANY prompt card (every child gate renders
+  // in `SubagentModals`), so no card can exist inside the sheet to consume an
+  // Escape — the subject of that test no longer exists. The sheet-level Esc
+  // tests above (`CLOSES on Escape`, and the window-listener one) are
+  // untouched and still pin the sheet's own behaviour.
+  //
+  // The guarantee that test pinned — an Esc consumed by a child's card stays
+  // with the card and reaches nothing else — now lives in `ChatStream.test.tsx`
+  // (`an Escape INSIDE the inline child card answers the CHILD and does NOT
+  // cancel the parent`), which is where a child's `ask` card renders today: the
+  // parent's transcript when the parent is active, the `SubagentModals` panel
+  // otherwise (pinned there by `an `ask` card's OWN Escape still dismisses the
+  // card (the wrapper's stop does not swallow it)`).
 });

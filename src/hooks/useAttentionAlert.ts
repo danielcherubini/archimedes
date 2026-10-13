@@ -9,7 +9,8 @@ import {
   type AttentionSnapshot,
 } from "../lib/attention";
 import { attentionArm, attentionDisarm } from "../lib/tauri";
-import { useInteractive } from "../store/interactive";
+import { childGateKey, childGatesOf } from "./useChildGates";
+import { isInteractivePause, useInteractive } from "../store/interactive";
 import { usePermissions } from "../store/permissions";
 import { useSessions } from "../store/sessions";
 import { useSettings } from "../store/settings";
@@ -107,34 +108,97 @@ export function useAttentionAlert(): void {
     const push = (id: string | null) => {
       if (id !== null && !candidateOrder.includes(id)) candidateOrder.push(id);
     };
-    // Active session first, then live MAIN sessions in store order, then
-    // subagent ids: the pause the user is looking at outranks one they have
-    // scrolled away from, and a subagent's gate ranks last (its parent is still
-    // in turn, so it is never `settled` — `settledWatch` above).
+    // Active session first, then live MAIN sessions in store order, then the
+    // PARENT of every live `SubagentEntry` (`push` dedupes): the pause the user
+    // is looking at outranks one they have scrolled away from. A child's gate is
+    // answered in its parent's transcript, so it rides at the PARENT's rank —
+    // child ids never enter this list. Registering the parent explicitly is not
+    // redundant with "live main sessions": `historySessions` never enters
+    // `candidateOrder`, and `attentionCandidates` visits ONLY the ids listed
+    // there, so a parent registered by nothing would make every child of a
+    // Session the user navigated away from — this feature's motivating case —
+    // permanently unannounceable.
     push(activeSessionId);
     for (const s of sessions) push(s.sessionId);
-    for (const id of Object.keys(subagentEntries)) push(id);
+    for (const entry of Object.values(subagentEntries)) push(entry.parentSessionId);
 
     const waitingIds: Record<string, string[]> = {};
     const gate = (id: string, gateId: string) => {
       (waitingIds[id] ??= []).push(gateId);
     };
-    // Interactive gates FIRST, then permission prompts: EVERY entry of the array
-    // is a candidate in this order, so this is also the order they are announced
-    // in (a second question from the same session ranks after the first).
-    // The `method` filter is kept even though the union has only these three
-    // (the same filter `sessionStatusOf` applies) — a future method that is not
-    // a pause on the user must not start announcing itself. No `?? {}` on the
-    // maps: they are the stores' own, always present.
+    // `gateId` is OPAQUE to the pure rule (equality and membership only, see
+    // `sameAttentionTrigger` / `pauseOver`), which is what lets a child's gate be
+    // keyed to its parent with no change to `lib/attention.ts`.
+    //
+    // A CHILD's gate therefore carries the COMPOSITE id `childSessionId:requestId`
+    // (`childGateKey`, the same string the React list keys use), never the bare
+    // `requestId`. That is load-bearing: trigger identity is
+    // `(kind, sessionId, gateId)` (`sameAttentionTrigger`, over
+    // `AttentionTrigger`), and once the sessionId half is the shared PARENT, two
+    // children answering to the same recurring gateway tool-call id (`call_0` —
+    // `AttentionTrigger`'s own doc comment says ids recur per response) would
+    // collapse into ONE trigger, and after the
+    // first was announced `spent` would mute the survivor forever.
+    //
+    // A parent's OWN gate keeps its bare `requestId`, and the two shapes cannot
+    // collide — but say the reason the right way round, because it is the ONLY
+    // thing standing between this composite and someone "simplifying" it away.
+    // It is NOT that a session id contains a `:` (it does not: `mint_session_id`
+    // is `arch_<uuid v4>` in `src-tauri/src/agent/types.rs`, pinned by the
+    // `mint_session_id_format` test in `src-tauri/src/agent/session/mod.rs`),
+    // and it is NOT that a bare id has no `:` (it can: the sudo flow derives
+    // `{toolCallId}:confirm` / `{toolCallId}:password` and emits THOSE as the
+    // `requestId`, in the sudo prompt flow in
+    // `src-tauri/src/agent/interactive/mod.rs`). The reason is the PREFIX: for a
+    // parent's own gate id to be read as
+    // a child's, that id would have to begin with a WHOLE minted child session id
+    // (`arch_` + a UUID v4) followed by `:` — and a parent's ids are a provider-
+    // minted tool-call id, optionally with a `:confirm` / `:password` suffix,
+    // which never carries an `arch_<uuid>` prefix. That is the invariant to
+    // preserve; do not restate it as "session ids contain colons".
+    //
+    // ORDER within one parent's array, i.e. the order its pauses are announced
+    // in (ADR 0040's within-Session arrival rule). Filling this in a single pass
+    // over `Object.entries(requests)` would use KEY-INSERTION order, so a child's
+    // gate would land BEFORE the parent's own whenever the child's key was
+    // inserted first — a silent inversion of that rule. Hence two passes:
+    //
+    // 1. every NON-child session's gates — `requests` to completion, THEN
+    //    `prompts`, so a parent's own `ask` *and* its own Permission prompt both
+    //    outrank any of its children's gates;
+    // 2. the child gates after that, in `childGatesOf` order, grouped by parent.
+    //    Deliberately re-using the ONE `childGatesOf` derivation rather than
+    //    hand-rolling a second ordering over `Object.entries`: it keeps ONE
+    //    definition of child arrival order, and it survives `dismissSession`
+    //    DELETING a session's key (`store/interactive.ts`), which a
+    //    key-order sort would read as "arrived last" and flip a sibling's rank
+    //    on.
+    //
+    // Across two children of one parent the rank is therefore
+    // `(childStartedAt, request arrival)` — e.g. child A asks t1, child B asks t2,
+    // A asks t3 gives `A:t1, B:t2, A:t3`. The stores hold no cross-child arrival
+    // stamp, so that IS the defined rule, not an approximation of the true
+    // wall-clock interleave.
+    //
+    // The `method` filter is `isInteractivePause` — the ONE predicate the whole
+    // cue family shares (`childGatesOf`, `sessionStatusOf`, and
+    // `useHasPendingRequest` read the same function) — kept even though the union
+    // has only its three members: a future method that is not a pause on the user
+    // must not start announcing itself. No `?? {}` on the maps: they are the
+    // stores' own, always present.
+    const isChild = (id: string) => subagentEntries[id] !== undefined;
     for (const [id, list] of Object.entries(requests)) {
+      if (isChild(id)) continue;
       for (const r of list) {
-        if (r.method === "ask" || r.method === "confirm" || r.method === "password") {
-          gate(id, r.requestId);
-        }
+        if (isInteractivePause(r.method)) gate(id, r.requestId);
       }
     }
     for (const [id, list] of Object.entries(prompts)) {
+      if (isChild(id)) continue;
       for (const p of list) gate(id, p.requestId);
+    }
+    for (const g of childGatesOf(subagentEntries, requests, prompts, null)) {
+      gate(g.parentSessionId, childGateKey(g));
     }
 
     // The stalled map's values ARE optional (`handleSessionClosed` clears the
@@ -144,10 +208,84 @@ export function useAttentionAlert(): void {
       stalled[id] = !!info;
     }
 
+    // Three accepted consequences of speaking of a child's gate as its parent's,
+    // all falling out of R3's evidence arms in `attentionStep` now reading the
+    // PARENT's flags for a child trigger (the `next.stalled[id]` and
+    // `!next.candidateOrder.includes(id)` clauses):
+    //
+    // - A STALLED parent disarms (and R5 immediately re-arms) a still-open child
+    //   countdown — and NOT once. `attentionStep` is stateless per pass and R3's
+    //   stall clause has no latch, so while `stalled[parent]` stays true (Rust
+    //   clears it only on a resume or a close) EVERY pass whose deps changed
+    //   re-arms the same trigger with a fresh `armedExpiresAt = now + delay`, and
+    //   Rust restarts its clock on every `arm`. The consequence is therefore
+    //   STARVATION, not one lost second: the alert that would tell the user about
+    //   a child parked on an `ask` while its parent's Worker crashed
+    //   (`handle_crash` marks the parent stalled and runs the pending-modal cleanup
+    //   for the crashed session alone — `handle_crash` → `cleanup_pending_modals` in
+    //   `src-tauri/src/agent/session/router.rs`;
+    //   a child's gates are NOT closed by its parent's crash) can be pushed back
+    //   indefinitely by unrelated churn in other Sessions, and fires only after
+    //   `delaySecs` of total dependency quiet. Accepted, and pinned by
+    //   `re-times the SAME child countdown on EVERY pass …`; the mechanism
+    //   predates this branch (it is R3's kind-agnostic stall clause, whose cost
+    //   `attentionStep` documents for a Session's OWN gate) — what the
+    //   re-key did is extend its blast radius to every child gate.
+    // - Because the gate is keyed to the PARENT, a child's OWN `stalled` flag no
+    //   longer reaches its gate's evidence at all (R3 reads the parent's) — and the
+    //   Rust crash cleanup the reader would reach for as the backstop does NOT fire
+    //   for a Subagent session. `cleanup_pending_modals` opens
+    //   `live.get(session_id) else { return }` and the ONLY insert into `live` is on
+    //   the main-session start/resume path (`establish_worker_session` in
+    //   `src-tauri/src/agent/session/mod.rs`), so a child has no `live` entry; and
+    //   `route_event` tracks a child's relayed modal ids under the DELIVERY id — the
+    //   PARENT (the pump's `delivery_id` in `src-tauri/src/agent/worker/manager.rs`) —
+    //   so a close frame that IS emitted carries `sessionId = parent` and lands in
+    //   `App.tsx`'s `interactive-request-close` listener as
+    //   `removeRequest(parent, <the child's request id>)`, which changes nothing on
+    //   the child's slice. That mis-keying is a known upstream defect with a
+    //   follow-up outstanding (ADR 0040's amendment records it). So a CRASHED
+    //   CHILD's open `ask` / Permission prompt is NOT auto-closed today: the card
+    //   stays on screen. The DELEGATION still resolves — on the Worker's own exit
+    //   for a crash, or at the 30-minute `settle_timeout`
+    //   (`DEFAULT_SUBAGENT_SETTLE_TIMEOUT`, `src-tauri/src/agent/worker/manager.rs`)
+    //   for a child parked on an unanswered gate — but no close frame reaches the
+    //   gate either way. The only Rust close frame that DOES reach a
+    //   child's slice is `SudoPromptCleanup`'s
+    //   (`src-tauri/src/agent/interactive/sudo_exec.rs`) — and only for a DROPPED
+    //   sudo flow (a cancel), and only for `confirm` / `password`. What the JS side
+    //   guarantees is therefore narrower than it looks, and it is the whole
+    //   guarantee: the countdown is disarmed ONLY when the gate leaves
+    //   `waitingIds[parent]` (R3's MEMBERSHIP arm — `App.tsx`'s
+    //   `interactive-request-close` listener calling `removeRequest`, or an answer).
+    //   Pinned by
+    //   `only the gate leaving waitingIds disarms it — the CHILD's own stall disarms
+    //   nothing`, which MANUFACTURES that removal: it pins the Client's reaction to
+    //   the gate going away, not a promise that Rust emits the frame.
+    // - A child whose `SubagentEntry` disappears stops being announced — and that
+    //   is UNCHANGED behaviour, only a moved mechanism: the snapshot then no
+    //   longer recognises the id as a child, so the gate keys back to
+    //   `waitingIds[childId]`, and `childId` is absent from `candidateOrder` both
+    //   before this change (it was pushed from `subagentEntries`, which just lost
+    //   the key) and after (only parents of LIVE entries are pushed). So
+    //   `attentionCandidates` never visits it and R3's membership arm disarms
+    //   either way. Note the asymmetry with `childGatesOf`, which DROPS
+    //   the same gate: a card needs a parent transcript to sit in, whereas the
+    //   alert can still name an owner it cannot resolve.
+    //
+    // And one inherited hole, pre-existing in shape: `deleteSession`
+    // (`store/sessions.ts`) drops the parent from every session list but
+    // clears neither its children's entries nor their gates, so a parent pushed
+    // into `candidateOrder` above can still arm `"A session needs your answer"`
+    // for a deleted Session. The child-keyed shape armed `"A session"` too;
+    // accepted.
     return {
       candidateOrder,
       // Live main sessions ONLY — also the liveness test that retires a
-      // "finished" alert when the Session is paused or closed.
+      // "finished" alert when the Session is paused or closed. UNCHANGED by the
+      // re-key, and `attentionCandidates`' `settledWatch` skip — "a subagent
+      // finishing is not the user's pause" — keeps
+      // working for free now that no child id ever reaches `candidateOrder`.
       settledWatch: sessions.map((s) => s.sessionId),
       inTurn,
       stopReasons,
@@ -240,6 +378,16 @@ export function useAttentionAlert(): void {
     // is its sole holder), so a gate whose parent is absent from
     // `sessions`/`historySessions` labels `"A session"` — accepted, no second
     // parent map.
+    //
+    // THIS MAP IS NOW A NO-OP FOR A CHILD'S GATE, AND MUST STAY. The snapshot
+    // re-keys a child's gate to its PARENT, so `trigger.sessionId` already holds
+    // the parent id: the `ctx.parents[trigger.sessionId]` lookup in
+    // `attentionAlertText` MISSES and falls through to the id itself — which is
+    // already the parent, so the
+    // body still names it. Do NOT "clean up" this map: the interface still
+    // requires the field, `lib/attention.test.ts` still exercises the child-id
+    // path directly, and the fall-through is what keeps the alert naming the
+    // parent (pinned by `arms for a subagent's gate …, naming the PARENT`).
     const parents: Record<string, string> = {};
     for (const [id, entry] of Object.entries(subagentEntries)) {
       parents[id] = entry.parentSessionId;

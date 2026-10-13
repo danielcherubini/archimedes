@@ -84,10 +84,13 @@ describe("SubagentTranscript (the read-only session transcript, expanded inline 
     // The metrics line (the status word lives in the DIRECTORY row — the
     // transcript's header was dropped: the row IS the header).
     expect(screen.getByText(/1234 ms/)).toBeTruthy();
-    // The race: the driver teardown's `session-closed` fires the interactive
-    // store's `dismissSession` for the same id (DELETING `cost`/`agentState`).
-    // The metrics line is read from the `subagent-closed` SNAPSHOT in
-    // `useSubagents` — it must survive the interactive-store deletion.
+    // What this pins: the metrics line reads the `subagent-closed` SNAPSHOT in
+    // `useSubagents`, so it is immune to the interactive store dropping the id.
+    // (`dismissSession` is NOT what drops it today — no `session-closed` ever
+    // names a child id, so it never runs for one; `SubagentEntry.metrics`' doc
+    // in `src/store/subagents.ts` says why. The call below pins the store
+    // contract regardless: whatever clears a session's slice of
+    // `useInteractive`, the metrics line does not read that slice.)
     act(() => {
       useInteractive.getState().dismissSession("sub1");
     });
@@ -102,10 +105,8 @@ describe("SubagentTranscript (the read-only session transcript, expanded inline 
     expect(screen.getByText("boom")).toBeTruthy();
   });
 
-  it("renders an `ask` request for the subagent session id as an AskQuestionCard", () => {
+  it("renders NEITHER an ask card NOR a permission prompt for a child holding both (the transcript renders no gate at all)", () => {
     useSubagents.getState().addSession(entry);
-    // The subagent's OWN `ask` carries `source: "main"` (keyed by the
-    // subagent's own session id) — the header provides the name.
     useInteractive.getState().addRequest("sub1", {
       requestId: "r1",
       method: "ask",
@@ -120,13 +121,6 @@ describe("SubagentTranscript (the read-only session transcript, expanded inline 
         ],
       },
     });
-    render(<SubagentTranscript sessionId="sub1" />);
-    expect(screen.getByText("Which color?")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Red" })).toBeTruthy();
-  });
-
-  it("renders a permission prompt for the subagent session", () => {
-    useSubagents.getState().addSession(entry);
     act(() => {
       usePermissions.getState().addPrompt("sub1", "p1", {
         toolCall: { title: "Bash (apt install ripgrep)" },
@@ -134,10 +128,16 @@ describe("SubagentTranscript (the read-only session transcript, expanded inline 
       });
     });
     render(<SubagentTranscript sessionId="sub1" />);
-    // The prompt card renders in the transcript (the panel is the ONLY
-    // render site for subagent-session requests).
-    expect(screen.getByText("Bash (apt install ripgrep)")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Allow" })).toBeTruthy();
+    // NEGATIVE PIN: `SubagentTranscript` renders NO gate of any kind — a
+    // child's gate has exactly ONE site, and it is never this component (the
+    // active parent's `ask`/permission go inline in the PARENT's transcript,
+    // everything else to `SubagentModals`). A second site would put two
+    // answerable copies of one gate on screen, and a gate rendered HERE and in
+    // the overlay is a gate whose answer can arrive twice.
+    expect(screen.queryByText("Which color?")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Red" })).toBeNull();
+    expect(screen.queryByText("Bash (apt install ripgrep)")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Allow" })).toBeNull();
   });
 
   it("renders thinking (streaming — expanded)", () => {

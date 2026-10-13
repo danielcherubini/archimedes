@@ -1,6 +1,4 @@
 import { useSubagents } from "../store/subagents";
-import { useInteractive } from "../store/interactive";
-import { usePermissions } from "../store/permissions";
 import { useSessions } from "../store/sessions";
 import { groupConsecutiveFileWrites } from "../lib/toolGroups";
 import { summarizeSubagentFor } from "../lib/toolOutput";
@@ -9,8 +7,6 @@ import MessageBubble from "./MessageBubble";
 import ChangesGroupCard from "./ChangesGroupCard";
 import ToolCallCard from "./ToolCallCard";
 import DiffBlock from "./DiffBlock";
-import PermissionPrompt from "./PermissionPrompt";
-import AskQuestionCard from "./AskQuestionCard";
 
 /**
  * Shared empty fallback (a STABLE reference — a `?? []` at the call site
@@ -39,13 +35,22 @@ const EMPTY: never[] = [];
  *   on completion); the enclosing row caps it at `max-h-48` (the content
  *   scrolls). Reasoning keeps the main-chat treatment (streaming =
  *   expanded, completed = auto-collapsed, user-expandable).
- * - The prompt cards render HERE (the `SidePane` is the ONLY render site
- *   for subagent-session requests; the transcript is ALWAYS MOUNTED —
- *   the row's `hidden` attribute hides it visually, never unmounts it).
+ * - The transcript renders NO gate of any kind. A child's `ask` / `confirm` /
+ *   `password` / Permission prompt renders either INLINE in its PARENT's
+ *   transcript (when the parent is the active session — `MessageList`) or in
+ *   the `SubagentModals` overlay (every `confirm`/`password`, and the
+ *   `ask`/permission of a parent you navigated away from). Two answerable
+ *   copies of one gate would let its answer arrive twice, so a gate rendered
+ *   HERE is a bug, not a fallback.
  * - The metrics line on close: the `subagent-closed` SNAPSHOT from
- *   `useSubagents` — NEVER `useInteractive.cost[sessionId]` (the
- *   `session-closed` handler's `dismissSession` deletes it, and the two
- *   events are concurrent).
+ *   `useSubagents` — NEVER `useInteractive.cost[sessionId]`. The snapshot is
+ *   the only place a child's usage reaches the Client today (the tokens are
+ *   accumulated Supervisor-side in `SubagentCapture`,
+ *   `src-tauri/src/agent/worker/manager.rs`, from the child's
+ *   `message_update` frames, which the router does not forward to the UI, and
+ *   `durationMs` is that task's wall clock), and no close clears it either:
+ *   `session-closed` never names a child id, so `dismissSession` never runs
+ *   for one.
  */
 export function SubagentTranscript({ sessionId }: { sessionId: string }) {
   // Read FROM THE STORE (not a prop — see the component doc): the entry
@@ -60,19 +65,14 @@ export function SubagentTranscript({ sessionId }: { sessionId: string }) {
   // `undefined` is a stable reference too — the shared `EMPTY` fallback
   // is never minted per render (a `?? []` selector defeats slice
   // equality).
-  const requests = useInteractive((s) => s.requests[entry.sessionId]);
-  const prompts = usePermissions((s) => s.prompts[entry.sessionId]);
   const messages = useSessions((s) => s.messages[entry.sessionId]);
   // The parent's `subagent` tool-call `details` (the progress envelope) —
   // the transcript's FALLBACK when the subagent's own stream is empty
   // (the `progressSummary` derivation below).
   const parentMessages = useSessions((s) => s.messages[entry.parentSessionId]);
-  const requestList = requests ?? EMPTY;
-  const promptList = prompts ?? EMPTY;
   const messageList = messages ?? EMPTY;
   // The stream is grouped ONCE per render (not inside the map).
   const units = groupConsecutiveFileWrites(messageList);
-  const askRequests = requestList.filter((r) => r.method === "ask");
   // The progress fallback (the subagent's activity from the parent's
   // `subagent` tool-call `details` — rendered only while the subagent's
   // OWN stream is empty, so it never duplicates the real transcript):
@@ -145,24 +145,10 @@ export function SubagentTranscript({ sessionId }: { sessionId: string }) {
           {progressSummary}
         </pre>
       ) : null}
-      {/* The prompt cards render in the transcript (the component is
-          session-id-keyed and already generic; the transcript is ALWAYS
-          MOUNTED, so a request is never unrendered — an unrendered
-          request would hang until the interactive timeout). */}
-      {promptList.map((p) => (
-        <PermissionPrompt
-          key={p.requestId}
-          sessionId={entry.sessionId}
-          requestId={p.requestId}
-        />
-      ))}
-      {askRequests.map((r) => (
-        <AskQuestionCard
-          key={r.requestId}
-          sessionId={entry.sessionId}
-          requestId={r.requestId}
-        />
-      ))}
+      {/* NO gate renders here: a child's `ask` / `confirm` / `password` /
+          Permission prompt renders in its PARENT's transcript (parent active)
+          or in `SubagentModals` (parent not active, plus every sudo `Dialog`)
+          — see the component doc. */}
       {/* The metrics line on close (see the component doc). */}
       {entry.status !== "running" && (entry.metrics || entry.error) && (
         <p className="text-ui-xs text-foreground-subtlest">

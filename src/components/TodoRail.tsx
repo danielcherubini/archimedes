@@ -6,12 +6,13 @@ import type { TodoItem } from "../store/interactive";
  * (the 40px sliver): the board's shape at a glance — how far through the list
  * the session is, and which item is live — with no text and no scrolling.
  *
- * WHY IT EXISTS: the pane's collapse is `width: 40px` + `overflow: hidden`
- * with the content kept MOUNTED (the `fixed` sudo modals must survive a
- * collapse, so that is not negotiable), so the board used to paint INTO the
- * sliver — text wrapped to one character per line ("th / so / is / s …")
- * inside its own `overflow-y-auto`, which then grew a SCROLLBAR in a 40px
- * column. This is the only thing a 40px column can actually render.
+ * WHY IT EXISTS: the pane's collapse is `width: 40px` + `overflow: hidden` —
+ * a CLIP, not an unmount, so the board's scroll position (DOM state an
+ * unmount would lose) survives it — and the board therefore used to paint
+ * INTO the sliver: text wrapped to one character per line
+ * ("th / so / is / s …") inside its own `overflow-y-auto`, which then grew a
+ * SCROLLBAR in a 40px column. This is the only thing a 40px column can
+ * actually render.
  *
  * THE GEOMETRY IS CSS, NOT MEASURED. Each row is `flex-1 min-h-5 max-h-10` in
  * a top-anchored column: the rows share the rail's height, stop shrinking at

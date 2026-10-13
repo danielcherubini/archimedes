@@ -7,6 +7,8 @@ import FileSummaryCard from "../FileSummaryCard";
 import type { RenderUnit } from "../../lib/toolGroups";
 import type { PermissionPromptData } from "../../store/permissions";
 import type { InteractiveRequestData } from "../../store/interactive";
+import type { ChildGate } from "../../hooks/useChildGates";
+import { childGateKey, isInlineChildGate } from "../../hooks/useChildGates";
 import type { StopReason } from "../../lib/tauri";
 
 /**
@@ -37,11 +39,41 @@ function isToolUnit(unit: RenderUnit): boolean {
 /**
  * The transcript scroll region: the empty-state hint, the render-unit loop
  * (the `kind`→component dispatch, each unit wrapped in the rhythm row above),
- * the stacked permission/`ask` cards, the file summary card, and the
- * stop-reason line.
+ * the stacked permission/`ask` cards, the CHILD gates lifted into this
+ * Session's transcript, the file summary card, and the stop-reason line.
  *
  * Props-only by design — it MUST NOT read the stores (every value is derived
- * in `ChatStream` and passed down).
+ * in `ChatStream` and passed down). That includes `childGates`: this component
+ * must not call `useChildGates` itself, because the partition it renders is
+ * defined by WHO ASKS (`ChatStream`'s `activeSessionId`) and a second reader
+ * would be a second opinion on which gates belong here.
+ *
+ * CHILD GATES (`childGates`): a Subagent session's `ask` and Permission prompt
+ * render HERE — at the bottom of the PARENT's transcript, under the parent's
+ * own cards — when the parent is the ACTIVE session, because that is the
+ * conversation the user is already reading. `↳ <agentName>` names whose
+ * question each is. The child's `confirm` / `password` are deliberately NOT
+ * rendered here even though they arrive in the same list: `SudoConfirmModal`
+ * and `SudoPasswordModal` are Radix `Dialog`s — modal by nature — and inlining
+ * a `Dialog` into a scrolling transcript is a different change than this one.
+ * They stay in `SubagentModals` for EVERY child, active parent or not. Do not
+ * "complete" this by rendering them: that would move a gate out of the ONE
+ * site that owns it. The kinds that DO render here are one predicate —
+ * `isInlineChildGate`, which `ChatStream` also counts for its auto-scroll dep —
+ * so the scroll can never follow a row this component would not draw.
+ *
+ * The child-gate row also stops `Escape` (non-dismissibly, exactly like the
+ * overlay's panel) — see the comment on that wrapper: without it an Esc landing
+ * on the row cancels the PARENT's turn from `ChatStream`'s window-level
+ * listener, and a lifted card no longer takes focus to protect itself.
+ *
+ * ACCEPTED (and pre-existing for the parent's own cards below): while a sudo
+ * `Dialog` is open, Radix's `hideOthers` + `disableOutsidePointerEvents` make
+ * the WHOLE rest of the document inert, so these INLINE child cards are
+ * unanswerable too — not just the overlay's panel (`App.test.tsx` pins the
+ * overlay's half). Nothing is lost by it: the gate stays mounted and pending,
+ * and is answerable again the moment the `Dialog` settles, which is the prompt
+ * the user was already being shown.
  */
 export default function MessageList({
   scrollRef,
@@ -52,6 +84,7 @@ export default function MessageList({
   askRequests,
   prompts,
   stackedAskRequests,
+  childGates,
   hasPendingRequest,
   workingOrInTurn,
   agentState,
@@ -66,6 +99,10 @@ export default function MessageList({
   askRequests: InteractiveRequestData[];
   prompts: PermissionPromptData[];
   stackedAskRequests: InteractiveRequestData[];
+  /** This Session's children's gates (`ChatStream` derives them — this
+   * component reads no store). Only `ask`/`permission` render here; see the
+   * component doc for why the sudo kinds do not. */
+  childGates: ChildGate[];
   hasPendingRequest: boolean;
   workingOrInTurn: boolean;
   agentState: "working" | "idle" | "blocked" | undefined;
@@ -164,6 +201,55 @@ export default function MessageList({
           requestId={r.requestId}
         />
       ))}
+      {/* This Session's CHILDREN's gates (see the component doc): below the
+          parent's own cards, above the file summary. `confirm`/`password` are
+          filtered out with `isInlineChildGate` — the SAME predicate `ChatStream`
+          counts inline gates with for its auto-scroll dep, so the count can
+          never include a row this component would not draw. `ChatStream` derives
+          the full gate list for its own reasons and this component renders the
+          two kinds that are inline by nature. */}
+      {childGates.filter(isInlineChildGate).map((gate) => (
+          // Keyed by `childGateKey` (child id + request id), imported — never
+          // re-derived here: a child's `requestId` is the model's tool-call id,
+          // which some gateways reuse per response, so a bare `requestId`
+          // collides across children and silently drops one card.
+          <div
+            key={childGateKey(gate)}
+            // Escape is stopped here with NO answering action (the row is not
+            // dismissible), mirroring `SubagentModals`' panel: `ChatStream`'s
+            // window-level `keydown` sends `session/cancel` while a turn is in
+            // flight, `PermissionPrompt` has no Esc handler at all, and a lifted
+            // `AskQuestionCard` stops propagation only once focus is INSIDE it —
+            // which `autoFocus={false}` now makes the normal case. Without this
+            // stop an Esc meant for the row would cancel the PARENT's turn while
+            // the child's question sits unanswered in this very transcript. It
+            // does not break a card's own Esc: React runs the innermost handler
+            // first, so a card that answers Esc never reaches this one.
+            onKeyDown={(e) => {
+              if (e.key === "Escape") e.stopPropagation();
+            }}
+            className="flex flex-col"
+          >
+            {/* The chip lives on the WRAPPER, never inside the card: both card
+                components stay parent/child-agnostic and are reused unchanged
+                by the main chat (the overlay labels them the same way). */}
+            <p className="mb-1 text-ui-xs text-foreground-subtle">
+              ↳ {gate.agentName}
+            </p>
+            {gate.kind === "ask" ? (
+              <AskQuestionCard
+                sessionId={gate.childSessionId}
+                requestId={gate.requestId}
+                autoFocus={false}
+              />
+            ) : (
+              <PermissionPrompt
+                sessionId={gate.childSessionId}
+                requestId={gate.requestId}
+              />
+            )}
+          </div>
+        ))}
       {turnDiffs.length > 0 && <FileSummaryCard diffs={turnDiffs} />}
       {!inTurn && stopReason && stopReason !== "end_turn" && (
         <p className="text-ui-sm text-foreground-subtlest">

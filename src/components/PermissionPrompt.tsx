@@ -11,7 +11,10 @@ import { Button } from "./ui/button";
  * one `button` per agent-defined option (first = primary, the rest =
  * outline) + a Cancel. Buttons answer the agent via the
  * `respond_permission` command; the prompt is removed locally on success
- * (and auto-dismissed on session-closed by the store).
+ * (and auto-dismissed on session-closed by the store — a MAIN session only: the
+ * lifted child prompts this component renders from `MessageList` /
+ * `SubagentModals` are never dismissed that way, because no `session-closed`
+ * names a child id, so they clear only by being answered — ADR 0040).
  */
 export default function PermissionPrompt({
   sessionId,

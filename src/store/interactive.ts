@@ -22,13 +22,54 @@ export interface InteractiveRequestData {
   /** The frame UUID (the correlation key — never the bare `toolCallId`). */
   requestId: string;
   method: "ask" | "confirm" | "password";
-  /** `"main"` or `"subagent:<name>"`. */
+  /**
+   * The emitter's label. Every `interactive-request` the desktop builds today
+   * carries `"native"`: `ask_flow` (`src-tauri/src/agent/harness/ask.rs`) emits
+   * it verbatim, and the `sudo_run_flow` core
+   * (`src-tauri/src/agent/interactive/mod.rs`) — the `confirm` / `password`
+   * sub-prompts — is handed it as its `source` argument by the `AgentLoop`'s
+   * tool dispatch (`src-tauri/src/agent/harness/loop.rs`), which passes the same
+   * literal to `todo_apply` for its `todos_update` push, for a MAIN session and
+   * a Subagent session alike. So this is NOT a main/child discriminator and
+   * never was one on the wire: `"main"` and `"sudo"` exist only in Rust
+   * fixtures and `bin/fake_worker.rs`. Two consumers branch on it, and they fail
+   * DIFFERENTLY. `AskQuestionCard`'s (`source === "main"` anchoring, its
+   * `subagent:` label) is UNREACHABLE — a dead branch that simply never draws.
+   * `applyTodoUpdate` here is the opposite: it RUNS, and routes wrongly. Given
+   * `"native"`, its `else` arm files the board under `subagents["native"]` and
+   * leaves `main` as `[]`, so a MAIN session's todo board sits in a bucket
+   * nothing reads — and because `column?.main` is then an empty array rather
+   * than `undefined`, `useMainTodoItems`' `rawTodos` fallback cannot fire, so
+   * `useMainOpenTodoCount` reports 0 and the `SidePane`'s todo-driven
+   * open/close never opens for a session that HAS an open todo list. Mis-routed
+   * live data, not dead code. Both are recorded as a follow-up in
+   * `docs/features/subagent-sessions.md`.
+   */
   source: string;
   /** The invoking process's tool-call id (absent for `confirm`/`password`). */
   toolCallId?: string;
   /** The method's params: the ask schema for `ask`; `{ command, reason }` for `confirm`/`password`. */
   params: Record<string, unknown>;
 }
+
+/**
+ * Whether a `method` is a PAUSE ON THE USER — a request that sits unanswered
+ * until a human answers it, and therefore the thing every "this Session is
+ * waiting on you" cue is derived from.
+ *
+ * ONE predicate, exported from the store that owns the union, because four
+ * consumers ask the question and a cue that disagrees with another cue is worse
+ * than no cue (the standing "one derivation, many consumers" rule
+ * `useSessionStatus` documents): `childGatesOf` (which feeds the inline card,
+ * the overlay and the dot), `sessionStatusOf`, the attention snapshot, and
+ * `useHasPendingRequest`. Each of them hand-writing the three comparisons is
+ * how a fourth `method` would be counted by one surface and dropped by
+ * another — and `childGatesOf`'s comment promises the filter exists precisely
+ * for that day, which `useChildGates.test.ts` now pins.
+ */
+export const isInteractivePause = (
+  method: InteractiveRequestData["method"],
+): boolean => method === "ask" || method === "confirm" || method === "password";
 
 /** A todo list item (the `manage_todo_list` `TodoItem` shape). */
 export interface TodoItem {

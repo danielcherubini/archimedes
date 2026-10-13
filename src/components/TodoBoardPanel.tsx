@@ -146,10 +146,20 @@ function TodoItems({ items }: { items: TodoItem[] }) {
  *   OPEN main todo exists (a fully-completed main list is hidden even
  *   while a subagent column is still open).
  * - Subagent todo columns (`subagents[source]`, fed by the same interactive
- *   events — a unique `source` per child, cleared on child exit) as
- *   indented sub-rows (`pl-6`, `text-ui-sm`), one block per source with a
+ *   events) as indented sub-rows (`pl-6`, `text-ui-sm`), one block per source with a
  *   `text-ui-xs text-foreground-subtlest` header — a column renders only
- *   while it has an OPEN item (an all-completed column is hidden).
+ *   while it has an OPEN item (an all-completed column is hidden). The shape
+ *   promises one column per child and delivers neither half of that: no emitter
+ *   sends a per-child `source` (`InteractiveRequestData.source` is `"native"`
+ *   for every one of them, `"main"`/`"sudo"` being fixture-only), and nothing
+ *   clears a child's slice when the child exits — `dismissSession` is the only
+ *   thing that deletes a `todos` entry and it runs from the `session-closed`
+ *   handler, which never names a child id (see `SubagentClosedPayload`); the
+ *   per-source `applyTodoClear` is no help, since nothing in `src-tauri/src`
+ *   emits a `todos_clear` frame at all. The
+ *   `SidePane` also passes `activeSessionId` here, so a child's own column is
+ *   never drawn at all. Recorded as a follow-up in
+ *   `docs/features/subagent-sessions.md`.
  * - `rawInput` fallback for non-interactive agents (via `useMainTodoItems`).
  * - The `SidePane` frame owns the auto open/close (the board no longer
  *   auto-collapses on its own — the frame's auto open/close does it).

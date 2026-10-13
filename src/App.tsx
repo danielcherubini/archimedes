@@ -30,6 +30,7 @@ import ChatStream from "./components/ChatStream";
 import SidePane from "./components/SidePane";
 import WindowControls from "./components/WindowControls";
 import SubagentDetailHost from "./components/SubagentDetailHost";
+import { SubagentModals } from "./components/SubagentModals";
 import SettingsPage from "./components/settings/SettingsPage";
 import { useAttentionAlert } from "./hooks/useAttentionAlert";
 
@@ -71,9 +72,13 @@ function App() {
         useSessions
           .getState()
           .handleSessionClosed(payload.sessionId, payload.reason);
-        // Ephemeral subagent sessions have no stored history: their
-        // transcript is deleted (a no-op for MAIN sessions, whose
-        // `handleSessionClosed` behavior above stays unchanged).
+        // Defensive for EPHEMERAL (subagent) sessions: their transcript has
+        // no stored history to keep, so a close that named one would delete
+        // it (`discardSessionMessages` no-ops for MAIN ids, whose
+        // `handleSessionClosed` behavior above stays unchanged). It is a
+        // guard, not the path: no `session-closed` ever names a CHILD id, so
+        // the child's transcript is freed by the `listenSubagentClosed`
+        // handler below.
         discardSessionMessages(payload.sessionId);
       }),
     );
@@ -163,23 +168,29 @@ function App() {
         // entry synchronously (the oldest of 21+ closed entries by
         // insertion order) — a discard running AFTER would then no-op
         // its `entries[sessionId]` guard. The entry exists from
-        // `subagent-session-started` (the worker task emits `started`
-        // before `subagent-closed` sequentially) and `running` entries
-        // are never evicted, so the discard-first order is deterministic
-        // (absent an explicit user `dismiss`).
+        // `subagent-session-started` (`dispatch_subagent` emits `started`
+        // before it spawns the drive task that reaches `finish_subagent`) and
+        // `running` entries are never evicted, so the discard-first order is
+        // deterministic (absent an explicit user `dismiss`).
         //
-        // Why discard here AT ALL (not only in `listenSessionClosed`):
-        // `subagent-session-started` is emitted by the WORKER task
-        // (after `drive_session` returns) while `session-closed` is
-        // emitted by the DRIVER task (after teardown) — different
-        // tasks. If the agent dies (or a cancel lands) immediately
-        // post-establishment, `session-closed` can beat `started`: the
-        // `session-closed` handler's `discardSessionMessages` no-ops (no
-        // subagent entry yet) while `handleSessionClosed` creates
-        // `messages[sid]`, and nothing else re-runs the discard — a
-        // small unreclaimed leak (at most a partial transcript) per
-        // occurrence. Discarding here covers that race independent of
-        // the cross-task ordering.
+        // Why discard here AT ALL: this is the ONLY frame that ever names
+        // the end of a CHILD session, so it is the only thing that can free
+        // the transcript the `subagent-session-started` handler's stream
+        // filled in. Checked against the Rust (read only): `session-closed`
+        // has exactly ONE emitter, `on_session_exited_expected`
+        // (`src-tauri/src/agent/session/router.rs`), which returns without a
+        // `live` entry, and the only insert into `live` is
+        // `establish_worker_session` (`src-tauri/src/agent/session/mod.rs`)
+        // on the main-session start / resume paths — a child has no `live`
+        // entry, so no close frame ever carries its id (a crash would say
+        // `session-stalled`, not a close). A child's teardown is
+        // `finish_subagent` (`src-tauri/src/agent/worker/manager.rs`), which
+        // emits `subagent-closed` and NOTHING else. So the
+        // `listenSessionClosed` handler above cannot be the one that
+        // discards here, and nothing else is: `markClosed`'s
+        // `evictOldestClosed` drops the `SubagentEntry` alone and never
+        // touches `useSessions.messages`, so without this call every child's
+        // transcript would sit in the store for the life of the window.
         discardSessionMessages(p.sessionId);
         useSubagents
           .getState()
@@ -209,6 +220,23 @@ function App() {
   // (the listener `useEffect`s above are view-independent), and the
   // `SpacesList` / `ChatStream` / `SidePane` re-read them on remount.
   const [view, setView] = useState<"workspace" | "settings">("workspace");
+  // The Subagent sheet needs to know about this transition, and it is told — it
+  // is not rewritten. `SubagentDetailHost` lives in the ternary's else-branch, so
+  // opening Settings UNMOUNTS the sheet while `useSubagentSelection` keeps its
+  // value; `SubagentModals` is a sibling of the whole ternary and reads that
+  // selection to decide whether to dodge the sheet, so a selection naming a sheet
+  // that is not mounted would detach the card panel by the sheet's own width
+  // (`SUBAGENT_SHEET_WIDTH`) and float it across the Settings page. The fix is to
+  // hand that overlay the one fact it cannot see for itself — `sheetMounted` on
+  // the JSX below — NOT to `select(null)` on the way in: the selection is the
+  // SHEET's state (`store/subagentSelection`, written only by `SubagentDetailHost`
+  // and the `SubagentDelegatingCard` rows that open the sheet), so clearing it here
+  // both reached across a store boundary to fix a different component's geometry
+  // and cost the user their open
+  // sheet, leaving Back from Settings with the transcript closed. Keeping the
+  // selection is also the cheaper answer: the sheet re-mounts with the same
+  // transcript it had, and the `hidden`-class outer `div` plus the store-backed
+  // rows mean nothing else needs re-syncing.
   // The panes' collapsed flags (the shared `leftPaneState` /
   // `leftPaneState` module — the SAME flag the pane reads, so the pane's own
   // toggle and this segment agree without event guessing. The left logo
@@ -307,14 +335,29 @@ function App() {
               <ChatStream />
             </div>
             <SidePane />
-            {/* The dedicated subagent transcript view (Task 5): the single
-                ALWAYS-MOUNTED host — the visible modal for the selected
-                subagent + a hidden `SubagentTranscript` for every other one
-                (a `fixed` overlay, so its position in the flex row does not
-                affect layout). */}
+            {/* The subagent transcript sheet: the `fixed` right-side panel
+                holding the SELECTED subagent's transcript (a child gate is
+                never rendered here — `SubagentModals` below and `MessageList`
+                own every gate). A `fixed` overlay, so its position in the flex
+                row does not affect layout. */}
             <SubagentDetailHost />
           </>
         )}
+        {/* The child-gate overlay host: the half of every child's gates that
+            the transcript structurally cannot render — every `confirm`/
+            `password` `Dialog`, and the `ask`/permission of a child whose
+            parent is NOT the active session (the active parent's half renders
+            inline in `ChatStream`'s transcript). A SIBLING of the whole
+            settings ternary, not a child of `SidePane`/`SubagentDetailHost`:
+            those live in the else-branch and render NOTHING while Settings is
+            open, which would strand the gates it owns. A `fixed` overlay, so
+            its position in this flex row does not affect layout.
+            `sheetMounted` is the one fact that split gives it: the sheet above
+            unmounts with this ternary while the overlay does not, so the overlay
+            is told which view is up instead of inferring it from the sheet's
+            selection store (which survives the transition, so the user's open
+            transcript survives it too). */}
+        <SubagentModals sheetMounted={view === "workspace"} />
       </div>
     </div>
   );

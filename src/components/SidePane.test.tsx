@@ -385,9 +385,9 @@ describe("SidePane (the status panel)", () => {
     const { container } = render(<SidePane />);
     const frame = container.firstChild as HTMLElement;
     expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
-    // The content (the Todos section) is clipped (width 0 +
-    // `overflow: hidden`) — NOT unmounted (the `fixed` sudo modals +
-    // the todo state stay alive).
+    // The content (the Todos section) is clipped (the 40px rail +
+    // `overflow: hidden`) — NOT unmounted, so the board's scroll position and
+    // its todo state stay alive across the collapse.
     expect(screen.queryByText("Todos")).not.toBeNull();
     // Expanding via the shared flag restores the full frame.
     act(() => {
@@ -519,7 +519,7 @@ describe("SidePane (the status panel)", () => {
     expect(localStorage.getItem("side-pane-width")).toBe("240");
   });
 
-  it("collapses the frame to the sliver (a pending modal stays mounted) and re-opens", () => {
+  it("collapses the frame to the sliver and re-opens", () => {
     const { container } = render(<SidePane />);
     // The module seeds the flag from localStorage at import — the flag is
     // false, the frame is at its width.
@@ -528,21 +528,13 @@ describe("SidePane (the status panel)", () => {
     act(() => {
       setSidePaneCollapsed(true);
     });
-    // The `w-0 overflow-hidden` mechanism (NOT `display: none` / unmount).
+    // The `w-0 overflow-hidden` mechanism (NOT `display: none` / unmount): the
+    // pane's OWN content stays mounted, so re-opening never rebuilds it. (The
+    // old version of this test also asserted a pending subagent
+    // `SudoPasswordModal` was still in the document here — the gate host moved
+    // to the `App` root, so that guarantee is pinned in `App.test.tsx`.)
     expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
     expect(frame.className).toContain("overflow-hidden");
-    // A pending subagent `password` request's `SudoPasswordModal` is STILL
-    // in the document (the pane is clipped, not hidden).
-    act(() => {
-      useSubagents.getState().addSession(entry);
-      useInteractive.getState().addRequest("sub1", {
-        requestId: "r1",
-        method: "password",
-        source: "subagent:reviewer",
-        params: { command: "apt install ripgrep", reason: "install the tool" },
-      });
-    });
-    expect(screen.getByText("Sudo password required")).toBeTruthy();
     act(() => {
       setSidePaneCollapsed(false);
     });

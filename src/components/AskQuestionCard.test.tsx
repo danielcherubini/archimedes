@@ -132,6 +132,37 @@ describe("AskQuestionCard", () => {
     expect(document.activeElement).toBe(container.firstChild);
   });
 
+  it("does NOT take focus on mount with `autoFocus={false}` (a lifted child card)", () => {
+    // A child gate is lifted into its PARENT's transcript (or the overlay), and
+    // it can NEVER anchor: `anchored` needs `source === "main"` AND a
+    // `toolCallId`, and a child's `interactive-request` carries neither — the
+    // backend emits `"native"` for both of its emitters (`ask_flow` in
+    // `src-tauri/src/agent/harness/ask.rs`, and the sudo sub-prompts in
+    // `src-tauri/src/agent/interactive/mod.rs`, which the `AgentLoop`'s
+    // `sudo_exec` arm hands `"native"` too) with `toolCallId: null` on both.
+    // So the unanchored auto-focus above would fire for EVERY child ask —
+    // yanking focus out of the composer mid-keystroke. `autoFocus={false}` is how
+    // both lifted sites opt out; the shortcuts still work once the user clicks
+    // into the card. (Not that `source` could carry that check alone: the only
+    // value the desktop's transport really emits is `native` — `main` and `sudo`
+    // exist only in fixtures, `bin/fake_worker.rs` and the Rust gate fixtures — so
+    // a `subagent:<name>` test value here exercises the store's shape and the
+    // label branch, not a string the transport sends.)
+    useInteractive.getState().addRequest("s1", {
+      ...singleRequest,
+      source: "subagent:reviewer",
+    });
+    const input = document.createElement("textarea");
+    document.body.append(input);
+    input.focus();
+    const { container } = render(
+      <AskQuestionCard sessionId="s1" requestId="r1" autoFocus={false} />,
+    );
+    expect(document.activeElement).toBe(input);
+    expect(document.activeElement).not.toBe(container.firstChild);
+    input.remove();
+  });
+
   it("labels a subagent request by its source", () => {
     useInteractive.getState().addRequest("s1", {
       requestId: "r1",

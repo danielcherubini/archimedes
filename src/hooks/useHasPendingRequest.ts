@@ -1,17 +1,30 @@
-import { useInteractive } from "../store/interactive";
+import { isInteractivePause, useInteractive } from "../store/interactive";
 import { usePermissions } from "../store/permissions";
 import { useSessions } from "../store/sessions";
 import { usePendingSubagentRequests } from "./usePendingSubagentRequests";
 
 /**
- * Whether ANY pending attention exists for the active session: the active
- * session's permission prompts OR interactive `ask`/`confirm`/`password`
- * requests, plus pending subagent requests (a subagent session id is never
- * the ACTIVE session, so its count comes from the shared
- * `usePendingSubagentRequests` hook — the SAME derivation the `ChatStream`
- * header toggle dot used inline; moved here so the header dot, the
- * `SidePane` footer toggle dot, and the `SpacesList` collapse-button dot
- * share ONE source of truth).
+ * Whether the user owes an answer anywhere: the active session's permission
+ * prompts OR interactive requests whose method is a pause on the user
+ * (`isInteractivePause` — `ask`/`confirm`/`password`), PLUS every `Subagent
+ * session`'s gates app-wide (the shared `usePendingSubagentRequests` hook).
+ *
+ * The subagent half is app-wide BY DESIGN, not as a shortcut: `SubagentModals`
+ * is mounted at the `App` root and genuinely surfaces every NON-active
+ * parent's gates, so "you owe something, somewhere" is exactly what is on
+ * screen. Attribution is NOT this cue's job — that is the inline card in the
+ * parent's transcript and the parent row's `waiting` status (see
+ * `usePendingSubagentRequests`, which owns the reasoning).
+ *
+ * THIS is the dot's ONE derivation: `ChatStream`, the `SidePane` toggle and the
+ * `SpacesList` toggle all call it, and the latter two draw the `bg-warning` dot
+ * while collapsed, so the cues cannot disagree. (`ChatStream` used to hand-roll
+ * these same four terms — which is precisely the drift this hook
+ * exists to prevent, and the reason it now reads this hook instead.)
+ *
+ * Like every cue hook here, it is called UNCONDITIONALLY: it reads stores via
+ * `useSyncExternalStore`, so a caller that sits behind an early return would
+ * change its hook count when the active Session appears and crash the render.
  */
 export function useHasPendingRequest(): boolean {
   const activeSessionId = useSessions((s) => s.activeSessionId);
@@ -26,10 +39,7 @@ export function useHasPendingRequest(): boolean {
   const pendingSubagentRequests = usePendingSubagentRequests();
   return (
     prompts.length > 0 ||
-    interactiveRequests.some(
-      (r) =>
-        r.method === "ask" || r.method === "confirm" || r.method === "password",
-    ) ||
+    interactiveRequests.some((r) => isInteractivePause(r.method)) ||
     pendingSubagentRequests > 0
   );
 }

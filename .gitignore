@@ -26,3 +26,7 @@ src-tauri/target
 
 # local scratch
 .research/
+# The review workflow's scratch dir (`$PWD/.tmp`: test scratch, Tailwind probes).
+# Ignored because Tailwind v4's source detection scans it: a probe file here
+# compiles into the shipped CSS (`dist/assets/index-*.css`) unless gitignored.
+.tmp/

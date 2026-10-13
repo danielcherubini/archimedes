@@ -12,7 +12,6 @@ import {
 } from "../lib/sidePaneState";
 import TodoBoardPanel, { useMainOpenTodoCount, useMainTodoItems } from "./TodoBoardPanel";
 import TodoRail from "./TodoRail";
-import { SubagentModals } from "./SubagentModals";
 
 const WIDTH_KEY = "side-pane-width";
 const MIN_WIDTH = 240;
@@ -45,16 +44,21 @@ function initialWidth(): number {
  * - **Auto open/close (the "popup" rule): the frame EXPANDS when open
  *   todos go 0 → >0 and COLLAPSES when there are no open todos. The
  *   pane is driven by TODOS ONLY — a subagent session never opens it
- *   (the subagents live under the "Delegating" card + the dedicated
- *   modal; their sudo modals stay mounted at the frame root regardless).
+ *   (the subagents live under the "Delegating" card + the child's
+ *   transcript SHEET (`SubagentDetailHost`); their gates never render in this
+ *   pane either — they are inline in the parent's transcript or hosted by
+ *   `SubagentModals`, neither of which the pane mounts).
  *   The logic is EDGE-TRIGGERED (a `prevVisible` ref): a MANUAL
  *   collapse/expand while `visible` is unchanged is respected — a count
  *   change without the edge never flips the flag.
  * - **Collapse mechanism: the frame's `SIDE_PANE_RAIL` (a sliver, NOT 0) +
  *   `overflow: hidden` — NOT `display: none`, NOT a transform, NOT unmount.**
- *   The content stays mounted and `fixed` overlays escape `overflow`
- *   clipping, so a collapsed pane never hides a pending `SudoConfirmModal`/
- *   `SudoPasswordModal` (rendered by `SubagentModals` at the frame root).
+ *   The pane's OWN content (its toggle, the board and the board's scroll
+ *   position) stays MOUNTED and simply clipped, so re-opening never rebuilds it
+ *   and the toggle never leaves the cursor. (A pending subagent gate survives
+ *   a collapse too, but no longer because of this paragraph: the gate host
+ *   `SubagentModals` is mounted at the `App` root, so
+ *   it was never inside the clipped frame to begin with.)
  *   The pane owns its collapse toggle at the frame's INNER-BOTTOM corner
  *   (bottom LEFT — the side facing the chat) and keeps it in BOTH states: the
  *   sliver is exactly the room that keeps it on screen, so the control never
@@ -74,10 +78,6 @@ function initialWidth(): number {
  *   ~60/s sync writes). The handle captures the pointer on `pointerdown`
  *   (released on `pointerup`/`pointercancel`) so a release outside the
  *   webview still ends the drag; a `blur` listener is the fallback.
- * - **`SubagentModals`:** the interactive sudo modals for the subagent
- *   entries, rendered at the frame ROOT (a `fixed` overlay, NOT inside
- *   the scrollable content — see the component doc in
- *   `SubagentModals`).
  */
 export default function SidePane() {
   const [width, setWidthState] = useState(initialWidth);
@@ -241,7 +241,7 @@ export default function SidePane() {
   // manual collapse/expand while `visible` is unchanged is respected: a
   // count change without the edge never flips the flag). The pane is
   // driven by TODOS ONLY (a subagent session never opens it — the
-  // subagents live under the "Delegating" card + the dedicated modal).
+  // subagents live under the "Delegating" card + the child's transcript SHEET).
   // The `bg-warning` dot on the collapsed toggle (see the toggle below).
   const hasPendingRequest = useHasPendingRequest();
   const visible = mainTodoCount > 0;
@@ -255,11 +255,12 @@ export default function SidePane() {
 
   return (
     // Collapse = `SIDE_PANE_RAIL` (a 40px sliver, NOT 0) + `overflow: hidden`
-    // — the content stays MOUNTED (so the `fixed` sudo modals survive a
-    // collapse and the pane keeps its scroll position) and is CLIPPED. The
-    // sliver is not merely empty space: it is the room that keeps the pane's
-    // own toggle on screen, and while collapsed the toggle is joined by the
-    // todo overview (`TodoRail`), because the clipped board cannot render in 40px.
+    // — the content stays MOUNTED and is CLIPPED, which is what keeps the
+    // board's scroll position (and everything else that lives in that subtree)
+    // across a collapse. The sliver is not merely empty space: it is the room
+    // that keeps the pane's own toggle on screen, and while collapsed the
+    // toggle is joined by the todo overview (`TodoRail`), because the clipped
+    // board cannot render in 40px.
     <div
       style={{ width: collapsed ? SIDE_PANE_RAIL : width }}
       className="relative m-1 flex shrink-0 flex-col overflow-hidden rounded-xl bg-inspector"
@@ -356,10 +357,6 @@ export default function SidePane() {
           only while collapsed (the open pane already shows the board, and a
           second copy of it would be a second thing to keep in sync). */}
       {collapsed && <TodoRail items={mainTodoItems} />}
-      {/* The interactive sudo modals for the entries (at the frame ROOT —
-          `fixed` overlays, NOT inside the scrollable content: a collapsed
-          pane never hides a pending modal). */}
-      <SubagentModals />
     </div>
   );
 }

@@ -172,6 +172,9 @@ describe("attentionCandidates", () => {
   it("carries the SUBAGENT's own id when a subagent holds the gate", () => {
     // The subagent id is what the evidence rule later looks for: the alert is
     // disarmed when THAT gate closes, not when the parent's turn does.
+    // Since the parent-keying change the HOOK no longer emits this shape (a child's
+    // gate rides on its PARENT with a composite `gateId`) — `useAttentionAlert.test.ts`
+    // pins the emitted shape; this one stays a legal snapshot the pure rules handle.
     const next = snap({
       candidateOrder: ["A", "sub1"],
       settledWatch: ["A"],
@@ -196,6 +199,10 @@ describe("attentionCandidates", () => {
   });
 
   it("follows the candidate order: active first, live sessions before subagents", () => {
+    // Since the parent-keying change the HOOK no longer emits this shape either
+    // (a child's gate rides on its PARENT's id, which ranks where the parent
+    // ranks) — the hook-level tests in `useAttentionAlert.test.ts` pin what it
+    // emits; this stays a legal ordering the pure rules must honour.
     const prev = snap({
       candidateOrder: ["B", "A"],
       settledWatch: ["B", "A"],
@@ -321,7 +328,7 @@ describe("attentionStep — R3 evidence disarm", () => {
     // `settled` branch on `stalled` — an open gate is still a candidate — so R5,
     // on the SAME pass (R3 falls through on purpose), finds that gate again and
     // arms it. One command leaves the hook and it is the `arm`: the stall's
-    // disarm never reaches Rust, and the countdown is re-timed once.
+    // disarm never reaches Rust, and the countdown is simply re-timed from `now`.
     //
     // That is the RIGHT end state, not a hole in R3. A stalled Session with an
     // unanswered question is still a Session waiting on the user: the question is
@@ -330,9 +337,16 @@ describe("attentionStep — R3 evidence disarm", () => {
     // cleanup cannot dismiss a Permission prompt from the renderer's `prompts`
     // map (its `interactive-request-close` frames are routed to the interactive
     // store alone). So the alert stays owed, and muting it would be the
-    // self-disarming latch this rule was rewritten to remove. The only cost is
-    // the one re-time, and a Session stalls once — the flag is cleared only by a
-    // resume or a close — so it cannot re-time into a storm.
+    // self-disarming latch this rule was rewritten to remove.
+    //
+    // What this single step does NOT show is the whole cost — ONE re-time is the
+    // price of THIS pass. R3's stall clause has no latch and `markStalled` keeps
+    // the flag until a resume or a close, so every LATER pass whose deps changed
+    // re-arms the same trigger and pushes Rust's deadline out another
+    // `delaySecs` — the alert lands only after `delaySecs` of total dependency
+    // quiet. That is a multi-pass property, so it is pinned at the hook:
+    // `useAttentionAlert.test.ts` › `re-times the SAME child countdown on EVERY
+    // pass while its parent stays stalled`.
     const prev = snap({
       candidateOrder: ["A"],
       settledWatch: ["A"],
@@ -359,7 +373,8 @@ describe("attentionStep — R3 evidence disarm", () => {
 
     // ONE effect, and it is the arm, not the disarm R3 thought it owed.
     expect(effect).toEqual({ type: "arm", trigger: waiting("A", "g1") });
-    // Still armed on the SAME gate, re-timed from `now` — the whole price.
+    // Still armed on the SAME gate, re-timed from `now` — the price of this pass
+    // (see the note above for the whole cost).
     expect(memory).toEqual({
       armed: waiting("A", "g1"),
       armedExpiresAt: NOW + DELAY * 1000,

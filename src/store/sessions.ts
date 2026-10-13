@@ -204,20 +204,31 @@ export function finalizeSessionMessages(messages: Message[]): Message[] {
 }
 
 /**
- * Session-closed cleanup for EPHEMERAL (subagent) sessions: delete the
- * transcript entirely. Subagent sessions are never persisted (the
- * desktop's Rust side records them with `db: None`), so there is no
- * history to preserve. MAIN sessions are untouched — `handleSessionClosed`
- * keeps their transcript (finalized) for the history list, so this is a
- * no-op when the id has no subagent entry.
+ * Free a Subagent session's transcript from the store — delete it outright
+ * instead of keeping a finalized copy. THIS IS THE CHILD'S ONLY CLEANUP PATH:
+ * `subagent-closed` is the one frame that ever names the end of a child session
+ * (see `SubagentClosedPayload`), and `App`'s `listenSubagentClosed` handler calls
+ * this there, BEFORE `markClosed` — the order matters because `markClosed` can
+ * evict the very `SubagentEntry` this function's guard reads. `App`'s
+ * `listenSessionClosed` handler calls it too, but only as a guard that cannot
+ * fire: no `session-closed` ever names a child id.
+ *
+ * Deleting is safe because nothing can ask for that transcript back: a child's
+ * rows DO persist (`TranscriptPersister::apply` writes them with the
+ * `is_subagent` flag), but `list_sessions` filters those rows out, so no surface
+ * can re-open a closed child — while leaving the in-memory copy would keep every
+ * child's transcript for the life of the window. MAIN sessions are untouched (the
+ * guard below returns for any id with no `SubagentEntry`); a MAIN transcript is
+ * kept — finalized by `handleSessionClosed` — for the history list.
  */
 export function discardSessionMessages(sessionId: string): void {
-  // ASSUMES ACP session ids are globally unique across main + subagent
-  // sessions: the subagent-entry guard below would delete a MAIN
-  // transcript if a subagent id ever collided with a main id (a
-  // collision would already merge the sessions' `session-update` event
-  // streams into one `messages[id]` before the delete matters; the Rust
-  // side is immune — separate `sessions` maps per manager).
+  // ASSUMES the minted session ids (`mint_session_id` — `arch_<uuid v4>`,
+  // ADR 0022) are globally unique across main + child sessions: the
+  // subagent-entry guard below would delete a MAIN transcript if a child id ever
+  // collided with a main id (a collision would already merge the two sessions'
+  // `session-update` streams into one `messages[id]` before the delete matters;
+  // the Rust side keeps the two apart by construction — main sessions live in
+  // `SessionManager`'s `live` map, children in `WorkerManager`'s `drives`).
   if (!useSubagents.getState().entries[sessionId]) return; // main: keep
   useSessions.setState((state) => {
     if (!(sessionId in state.messages)) return state;

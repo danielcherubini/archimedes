@@ -290,10 +290,24 @@ export type InteractiveResponseDto =
 
 /**
  * The `metrics` of the `subagent-closed` payload / the `dispatch_subagent`
- * response (same shape over the wire). v1: the suite does NOT push the
- * subagent's OWN usage, so the captured values are `{0, 0, 0, <real
- * durationMs>}` — `durationMs` is real (wall clock), the token/cost fields
- * are 0.
+ * response (same shape over the wire) — the usage the Supervisor accumulated
+ * for the child plus its wall-clock duration, i.e. what `SubagentClosedPayload`
+ * calls the sole hand-off of a child's usage: no other frame carries a child's
+ * usage to the client, so the subagents-store snapshot is built from this object
+ * and from nothing else.
+ *
+ * `inputTokens` / `outputTokens` are REAL on a completed child: the Supervisor's
+ * `SubagentCapture` (`src-tauri/src/agent/worker/manager.rs`) reads the child's
+ * `message_update` `usage` frames and keeps the MAX of each field across them
+ * (a turn's usage is cumulative per message, so the last is the largest) —
+ * `the_subagent_capture_captures_the_final_text_from_the_sink_frames` pins that
+ * accumulation. `durationMs` is the drive task's wall clock.
+ *
+ * `cost` is the ONE constant: `drive_subagent`'s `Completed` arm builds the
+ * struct with `cost: 0.0` literally, because nothing prices a child's usage.
+ * And a FAILED child carries `SubagentMetrics::default()` (`finish_subagent`),
+ * whose token fields ARE 0 — the turn never settled, so nothing was read off
+ * the accumulator.
  */
 export interface SubagentMetrics {
   inputTokens: number;
@@ -303,9 +317,21 @@ export interface SubagentMetrics {
 }
 
 /**
- * A `subagent-session-started` event payload (camelCase over the wire —
- * emitted by the `SubagentSessionManager` once the subagent's ACP session
- * is ESTABLISHED, so `sessionId` is the ACP id, never the placeholder).
+ * A `subagent-session-started` event payload (camelCase over the wire).
+ *
+ * Emitted by `dispatch_subagent` (`src-tauri/src/agent/worker/manager.rs`) on
+ * the PARENT session's sink — the `WorkerManager`'s Supervisor-side flow, which
+ * `SubagentSessionManager::dispatch_native` only delegates to. There is no
+ * session to "establish" first (ADR 0022 removed the ACP layer): the child id is
+ * minted (`mint_session_id`, or handed in already minted by the in-process
+ * `dispatch_native`) BEFORE this frame is emitted and never changes after, so
+ * `sessionId` is that final id — never a stand-in for a later one.
+ *
+ * The ordering is load-bearing and is what `App`'s `listenSubagentClosed`
+ * handler relies on: the frame fires BEFORE the flow spawns the drive task that
+ * spawns the child's Worker and reaches `finish_subagent`, so a
+ * `subagent-closed` can never precede its own `started` — not even when the
+ * Worker spawn fails, which short-circuits straight into that teardown.
  */
 export interface SubagentSessionStartedPayload {
   sessionId: string;
@@ -319,11 +345,17 @@ export interface SubagentSessionStartedPayload {
 
 /**
  * A `subagent-closed` event payload (camelCase over the wire). `error` is
- * present only for `failed`; `metrics` = the captured `cost_update` payload
- * + duration (see `SubagentMetrics`). CONCURRENT with the driver teardown's
- * `session-closed` for the same id (the worker task does not await it) —
- * the frontend stores the snapshot in the subagents store for exactly this
- * reason.
+ * present only for `failed`; `metrics` = the usage the Supervisor accumulated
+ * for the child plus its wall-clock duration (see `SubagentMetrics`). This is
+ * the ONLY frame that names the end of a child session: `session-closed` never
+ * carries a child id — its one emitter, `on_session_exited_expected`
+ * (`src-tauri/src/agent/session/router.rs`), returns without a `live` entry and
+ * the only insert into `live` is `establish_worker_session`
+ * (`src-tauri/src/agent/session/mod.rs`) on the main-session start / resume
+ * paths — while a child's teardown, `finish_subagent`
+ * (`src-tauri/src/agent/worker/manager.rs`), emits this event and nothing else.
+ * Hence the snapshot the frontend keeps in the subagents store: it is the sole
+ * hand-off of a child's usage, not a race-covering copy of one.
  */
 export interface SubagentClosedPayload {
   sessionId: string;

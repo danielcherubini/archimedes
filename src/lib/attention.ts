@@ -40,8 +40,11 @@ export type AttentionKind = "settled" | "waiting";
  */
 export type AttentionTrigger =
   /** The gate's identity is part of the trigger: a new question from the same
-   * session is a new trigger (and re-arms). A subagent's gate keeps the
-   * SUBAGENT's id — its closing is what disarms the alert. */
+   * session is a new trigger (and re-arms). A subagent's gate is keyed to its
+   * PARENT — `sessionId` is the parent's id and `gateId` the composite
+   * `childSessionId:requestId` (`childGateKey`) — so the PARENT's evidence is
+   * what disarms the alert, and the parent's own gates stay distinguishable from
+   * them by that prefix (ADR 0040, amended 2026-10-13). */
   | { kind: "waiting"; sessionId: string; gateId: string }
   | { kind: "settled"; sessionId: string };
 
@@ -63,7 +66,8 @@ export function sameAttentionTrigger(
  */
 export interface AttentionSnapshot {
   /** Deterministic candidate order: active session first, then live MAIN
-   * sessions in store order, then subagent ids in store order (deduped). */
+   * sessions in store order, then the PARENT of every live `SubagentEntry`
+   * (deduped) — a child's id never appears here (ADR 0040, amended 2026-10-13). */
   candidateOrder: string[];
   /** Live main session ids ONLY (a subagent finishing is not the user's pause —
    * its parent is still in turn). ALSO the liveness test for a settled trigger:
@@ -73,7 +77,8 @@ export interface AttentionSnapshot {
   /** From `useSessions.stopReasons` — a `cancelled` turn never "finished". */
   stopReasons: Record<string, StopReason | undefined>;
   /** id → EVERY pending gate id for that session (`InteractiveRequestData.requestId`
-   * for `ask`/`confirm`/`password`, then `PermissionPromptData.requestId`).
+   * for `ask`/`confirm`/`password`, then `PermissionPromptData.requestId`; under a
+   * PARENT's id also the composite `childGateKey` ids of its children's gates).
    * Non-empty = that session is waiting. EVERY entry is a candidate, in array
    * order (a second question is a second pause); membership (not position) is the
    * evidence an armed countdown stands on. */
@@ -266,8 +271,17 @@ export function attentionStep(
       // The crash that raced the trigger (see the `stopReasons` guard above).
       // Kind-agnostic on purpose: a stalled Session holding an UNANSWERED gate is
       // still waiting on the user, so R5 re-arms that gate on this same pass and
-      // the only observable cost is that Rust's deadline is re-timed once
-      // (`attention.test.ts`: the stall that lands on an armed question).
+      // the owed disarm never reaches Rust (`attention.test.ts`:
+      // "re-arms the SAME open gate when a stall lands on an armed question (the
+      // stall-disarm is self-cancelling)"). What is NOT true is that this costs ONE
+      // re-time: there is no latch, this clause is re-tested on every pass, and
+      // Rust clears the stall flag only on a resume or a close — so while it
+      // holds, every pass whose deps changed re-arms the same trigger and moves
+      // Rust's deadline a full `delaySecs` from then. The honest cost is "the
+      // alert lands after `delaySecs` of total dependency quiet", pinned at
+      // `useAttentionAlert.test.ts` (`re-times the SAME child countdown on EVERY
+      // pass …`), where a child's gate under a stalled PARENT is the shape that
+      // makes that starvation user-visible.
       next.stalled[id] === true ||
       // A new turn started in THAT session — "finished" would be a lie. Scoped
       // to the armed session on purpose: a turn elsewhere does not make this
