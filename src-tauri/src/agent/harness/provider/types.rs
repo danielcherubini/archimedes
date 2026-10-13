@@ -261,6 +261,17 @@ pub enum ProviderError {
     /// Missing / bad credentials (HTTP 401 / 403).
     #[error("auth: {0}")]
     Auth(String),
+    /// The prompt is over the model's context window (ADR 0045) — the FOURTH
+    /// tier, and deliberately NOT one the retry ladder owns. Retrying an
+    /// oversized request re-sends the identical oversized bytes, so every
+    /// attempt fails identically with backoff in between; the tier is
+    /// recovered by the `AgentLoop` IN the turn instead (a forced compaction,
+    /// then the same model call again), which is why [`Retryable`] must stay
+    /// the ladder's only input.
+    ///
+    /// [`Retryable`]: ProviderError::Retryable
+    #[error("context overflow: {0}")]
+    ContextOverflow(String),
 }
 
 /// A model provider. Object-safe (a `Box<dyn Provider>` compiles) so a

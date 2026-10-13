@@ -16,6 +16,7 @@ use serde_json::json;
 use serde_json::Value;
 
 use super::openai::{parse_arguments, LineAssembler};
+use super::overflow::is_context_overflow_text;
 use super::transport::{build_client, litellm_headers, map_response, ANTHROPIC_API_VERSION};
 use super::types::{
     ChatRole, FinishReason, MessageContent, ModelRequest, Provider, ProviderError, ProviderEvent,
@@ -80,7 +81,9 @@ pub fn normalize_anthropic_base_url(base_url: &str) -> String {
 /// are transient, `authentication_error` / `permission_error` are auth,
 /// the rest are permanent; an UNKNOWN type is conservative — retryable,
 /// a new error type is probably transient, and the `RetryPolicy`'s
-/// budget bounds the damage).
+/// budget bounds the damage). The ONE exception is the context-overflow
+/// message (ADR 0045), which is checked FIRST because Anthropic reports an
+/// over-window prompt as an ordinary `invalid_request_error`.
 fn map_anthropic_error(v: &Value) -> ProviderError {
     let message = v
         .get("error")
@@ -92,6 +95,16 @@ fn map_anthropic_error(v: &Value) -> ProviderError {
         .and_then(|e| e.get("type"))
         .and_then(|t| t.as_str())
         .unwrap_or("");
+    // (ADR 0045) An over-window prompt arrives here as an
+    // `invalid_request_error` — a `kind` that maps to `Fatal` on its own — so
+    // the MESSAGE has to decide the tier, before the `kind` match. This is the
+    // only place a mid-stream `ProviderEvent::Error` is built, so without it
+    // nothing could ever produce a mid-stream overflow and the loop's
+    // mid-stream recovery arm would be dead code. The exclusions run first
+    // inside the check, so a throttle stays the tier its `kind` says.
+    if is_context_overflow_text(message) {
+        return ProviderError::ContextOverflow(format!("{kind}: {message}"));
+    }
     match kind {
         "overloaded_error" | "api_error" => ProviderError::Retryable(format!("{kind}: {message}")),
         "authentication_error" | "permission_error" => {
@@ -834,6 +847,66 @@ mod tests {
                 other => panic!("an absent/empty type is retryable, got {other:?}"),
             }
         }
+    }
+
+    /// (ADR 0045) `map_anthropic_error` is the ONLY producer of mid-stream
+    /// `ProviderError`s, so it is the only place a mid-stream SSE `error`
+    /// event can become a `ContextOverflow` — without it the loop's
+    /// mid-stream recovery arm would be unreachable. Anthropic reports an
+    /// over-window prompt as `invalid_request_error` (which maps to `Fatal`
+    /// on its own), so the MESSAGE decides: the overflow check runs BEFORE
+    /// the `kind` match, and a throttle / rate-limit message is excluded
+    /// first (a Bedrock-style throttle behind a gateway stays the tier its
+    /// `kind` says).
+    #[test]
+    fn map_anthropic_error_detects_a_context_overflow() {
+        fn err(kind: &str, message: &str) -> ProviderError {
+            map_anthropic_error(&json!({
+                "type": "error",
+                "error": { "type": kind, "message": message },
+            }))
+        }
+        // The real Anthropic wording, behind the `kind` that used to be
+        // `Fatal`: the tier is the overflow, message included.
+        assert_eq!(
+            err(
+                "invalid_request_error",
+                "prompt is too long: 213462 tokens > 200000 maximum"
+            ),
+            ProviderError::ContextOverflow(
+                "invalid_request_error: prompt is too long: 213462 tokens > 200000 maximum"
+                    .to_string()
+            )
+        );
+        // The `kind` does not have to be `invalid_request_error` — the
+        // message is what the tier reads (a gateway may wrap it).
+        for kind in ["api_error", "mystery_error", ""] {
+            assert!(
+                matches!(
+                    err(kind, "Your input exceeds the context window of this model"),
+                    ProviderError::ContextOverflow(_)
+                ),
+                "{kind} with an overflow message is the overflow tier"
+            );
+        }
+        // An `invalid_request_error` that is NOT about length stays `Fatal`
+        // (a bad tool spec, a malformed body — nothing a compaction fixes).
+        assert_eq!(
+            err("invalid_request_error", "boom"),
+            ProviderError::Fatal("invalid_request_error: boom".to_string())
+        );
+        // The exclusions run first, so a throttle behind an
+        // `invalid_request_error` is not read as an overflow.
+        assert_eq!(
+            err(
+                "invalid_request_error",
+                "ThrottlingException: Too many tokens, please wait before trying again."
+            ),
+            ProviderError::Fatal(
+                "invalid_request_error: ThrottlingException: Too many tokens, please wait before trying again."
+                    .to_string()
+            )
+        );
     }
 
     #[test]

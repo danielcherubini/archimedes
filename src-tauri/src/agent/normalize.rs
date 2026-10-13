@@ -355,8 +355,23 @@ pub(crate) fn normalize(e: &RpcEvent, st: &mut TurnState) -> Vec<Value> {
                 "reason": reason,
             }),
         ],
-        RpcEvent::compaction_end { reason, .. } => vec![
-            system_chunk("Compaction finished"),
+        // A `compaction_end` that carries an `error_message` (ADR 0045: the
+        // overflow recovery's actionable line — "not enough older context to
+        // compact" / "the summary call failed") prints THAT instead of the
+        // success line, never both: these one-liners all share
+        // `messageId: "system"`, and the frontend appends same-`messageId`
+        // chunks with no separator, so two in one batch weld into one bubble.
+        // A successful compaction has no `error_message`, so the pinned
+        // "Compaction finished" still ships on the success path.
+        RpcEvent::compaction_end {
+            reason,
+            error_message,
+            ..
+        } => vec![
+            match error_message {
+                Some(m) => system_chunk(format!("Compaction failed: {m}")),
+                None => system_chunk("Compaction finished"),
+            },
             json!({
                 "sessionUpdate": "compaction_update",
                 "active": false,
@@ -993,6 +1008,75 @@ mod normalize_tests {
                 "{t} must emit no frame"
             );
         }
+    }
+    /// A `compaction_end` that CARRIES an `error_message` prints it INSTEAD
+    /// of the success line — and not in addition to it. Both lines are
+    /// `system_chunk`s, i.e. they share `messageId: "system"`, and the
+    /// frontend's `applySessionUpdate` APPENDS same-`messageId` chunks with NO
+    /// separator: two of them in one batch weld into one bubble reading
+    /// `Compaction finishedCompaction failed: …` (pinned at the store level in
+    /// `src/store/sessions.test.ts`). Replacing the line is what keeps the
+    /// transcript readable — and a SUCCESSFUL compaction has no `error_message`,
+    /// so the pinned `"Compaction finished"` string still ships on that path.
+    ///
+    /// The scope is any `error_message`, not just the overflow ones: this is
+    /// the first time a provider-side compaction failure is visible to the user
+    /// at all (see `a_failed_summary_does_not_rewrite_the_transcript`).
+    #[test]
+    fn a_compaction_error_message_replaces_the_success_line() {
+        let mut st = TurnState::default();
+        let failed = normalize(
+            &ev(json!({
+                "type": "compaction_end",
+                "reason": "overflow",
+                "aborted": false,
+                "willRetry": true,
+                "errorMessage": "Context overflow: not enough older context to compact — try a larger-context model.",
+            })),
+            &mut st,
+        );
+        assert_eq!(failed.len(), 2, "the one-liner + the state frame");
+        assert_eq!(
+            failed[0]["content"]["text"],
+            "Compaction failed: Context overflow: not enough older context to compact — try a larger-context model.",
+            "the actionable message is the line the user reads"
+        );
+        assert!(
+            !failed[0]["content"]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Compaction finished"),
+            "the success line is REPLACED, not followed (the weld)"
+        );
+        assert_eq!(
+            failed[0]["messageId"], "system",
+            "the failure line keeps the system id"
+        );
+        assert_eq!(
+            failed[1],
+            json!({ "sessionUpdate": "compaction_update", "active": false, "reason": "overflow" }),
+            "the frame order is unchanged: [one-liner, state frame]"
+        );
+
+        // A `Failed` compaction (aborted) prints the same way.
+        let aborted = normalize(
+            &ev(json!({
+                "type": "compaction_end",
+                "reason": "overflow",
+                "aborted": true,
+                "willRetry": true,
+                "errorMessage": "Context overflow: the summary call failed (boom) — the transcript was left unchanged.",
+            })),
+            &mut st,
+        );
+        assert!(
+            aborted[0]["content"]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("Compaction failed: Context overflow: the summary call failed (boom)"),
+            "an aborted compaction prints its error too, got {:?}",
+            aborted[0]["content"]["text"]
+        );
     }
 }
 

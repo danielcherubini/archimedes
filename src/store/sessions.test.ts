@@ -1028,6 +1028,56 @@ describe("compacting (the working indicator's compaction state)", () => {
     expect(useSessions.getState().messages["s1"]).toBe(before);
   });
 
+  /**
+   * The weld the Rust side avoids by REPLACING the transcript line (ADR 0045).
+   *
+   * Every `system_chunk` carries `messageId: "system"`, and this reducer
+   * APPENDS same-`messageId` chunks with NO separator — so if `compaction_end`
+   * emitted BOTH `"Compaction finished"` and `"Compaction failed: …"`, one
+   * batch would render a single bubble reading
+   * `Compaction finishedCompaction failed: …`. The frame-level Rust test cannot
+   * see that (it inspects each frame on its own), so it is pinned HERE, at the
+   * level the user actually reads.
+   */
+  it("a failed compaction lands as ONE unwelded agent-text line", () => {
+    const failure =
+      "Context overflow: not enough older context to compact — try a larger-context model.";
+    const systemLine = (text: string): AcpSessionUpdate => ({
+      sessionUpdate: "agent_message_chunk",
+      messageId: "system",
+      content: { type: "text", text },
+    });
+
+    // The two frames `compaction_end` emits when it carries an `error_message`.
+    useSessions.getState().applySessionUpdates([
+      { sessionId: "s1", update: systemLine(`Compaction failed: ${failure}`) },
+      { sessionId: "s1", update: settled("overflow") },
+    ]);
+    const messages = useSessions.getState().messages["s1"] ?? [];
+    const texts = messages.filter(
+      (m): m is Extract<Message, { kind: "agent-text" }> => m.kind === "agent-text",
+    );
+    expect(texts).toHaveLength(1);
+    expect(texts[0].text).toBe(`Compaction failed: ${failure}`);
+    expect(texts[0].text).not.toContain("finishedCompaction");
+    expect(texts[0].text).not.toContain("Compaction finished");
+    // The state frame added no message of its own.
+    expect(messages).toHaveLength(1);
+
+    // The hazard itself, spelled out: the two lines in ONE batch DO weld (which
+    // is exactly why `normalize` replaces the success line instead of adding to
+    // it).
+    const welded = applySessionUpdate(
+      applySessionUpdate([], systemLine("Compaction finished"), 1),
+      systemLine(`Compaction failed: ${failure}`),
+      1,
+    );
+    expect(welded).toHaveLength(1);
+    expect((welded[0] as Extract<Message, { kind: "agent-text" }>).text).toContain(
+      "finishedCompaction",
+    );
+  });
+
   it("markStalled clears it (a stalled session can no longer end its own compaction)", () => {
     useSessions
       .getState()
