@@ -912,6 +912,151 @@ describe("contextUsage (the context-percentage state)", () => {
   });
 });
 
+describe("compacting (the working indicator's compaction state)", () => {
+  // The store is global — reset the maps the previous test may have left
+  // behind (and the `afterAll` cleans up AFTER this block, so the next
+  // block's assumption of a fresh store holds).
+  beforeEach(() => {
+    useSessions.setState({
+      compacting: {},
+      contextUsage: {},
+      messages: {},
+      stalled: {},
+    });
+  });
+  afterAll(() => {
+    useSessions.setState({
+      compacting: {},
+      contextUsage: {},
+      messages: {},
+      stalled: {},
+    });
+  });
+
+  const active = (reason: string): AcpSessionUpdate => ({
+    sessionUpdate: "compaction_update",
+    active: true,
+    reason,
+  });
+  const settled = (reason: string): AcpSessionUpdate => ({
+    sessionUpdate: "compaction_update",
+    active: false,
+    reason,
+  });
+
+  it("applySessionUpdates records the reason on an active frame", () => {
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s1", update: active("manual") }]);
+    expect(useSessions.getState().compacting["s1"]).toBe("manual");
+  });
+
+  it("all three reasons are stored verbatim (the indicator's label is reason-independent, the state is not)", () => {
+    for (const reason of ["manual", "threshold", "overflow"]) {
+      useSessions
+        .getState()
+        .applySessionUpdates([{ sessionId: "s1", update: active(reason) }]);
+      expect(useSessions.getState().compacting["s1"]).toBe(reason);
+    }
+  });
+
+  it("an inactive frame clears it (any outcome ends the indicator)", () => {
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s1", update: active("overflow") }]);
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s1", update: settled("overflow") }]);
+    expect(useSessions.getState().compacting["s1"]).toBeUndefined();
+  });
+
+  it("a batch carrying ONLY a compaction_update still updates the store (the changed sentinel)", () => {
+    // The batch reducer ENDS with an early `return state` when nothing
+    // changed. A compaction frame carries no message content and touches no
+    // config/context, so without its OWN sentinel this update would be
+    // silently dropped and the indicator would never appear.
+    const before = useSessions.getState();
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s1", update: active("manual") }]);
+    expect(useSessions.getState()).not.toBe(before);
+    expect(useSessions.getState().compacting["s1"]).toBe("manual");
+  });
+
+  it("a coalescing batch (active then inactive in ONE frame) leaves it cleared (last-wins is deliberate)", () => {
+    // A `Skipped` compaction emits both frames back-to-back, so they can
+    // land in the SAME rAF batch. Last-wins within the batch is what makes
+    // the indicator blink out instead of pinning on forever.
+    useSessions.getState().applySessionUpdates([
+      { sessionId: "s1", update: active("threshold") },
+      { sessionId: "s1", update: settled("threshold") },
+    ]);
+    expect(useSessions.getState().compacting["s1"]).toBeUndefined();
+  });
+
+  it("one session's frame does not touch another session's entry", () => {
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s1", update: active("manual") }]);
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s2", update: active("overflow") }]);
+    expect(useSessions.getState().compacting["s1"]).toBe("manual");
+    expect(useSessions.getState().compacting["s2"]).toBe("overflow");
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s2", update: settled("overflow") }]);
+    expect(useSessions.getState().compacting["s1"]).toBe("manual");
+    expect(useSessions.getState().compacting["s2"]).toBeUndefined();
+  });
+
+  it("the single-frame action sets and clears it too (every frame reaches the frontend through one of the two)", () => {
+    useSessions.getState().applySessionUpdate("s1", active("threshold"));
+    expect(useSessions.getState().compacting["s1"]).toBe("threshold");
+    useSessions.getState().applySessionUpdate("s1", settled("threshold"));
+    expect(useSessions.getState().compacting["s1"]).toBeUndefined();
+  });
+
+  it("a compaction frame adds no message to the transcript", () => {
+    useSessions.setState({
+      messages: { s1: [{ kind: "agent-text", messageId: "m1", text: "hi", at: 1 }] },
+    });
+    const before = useSessions.getState().messages["s1"];
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s1", update: active("manual") }]);
+    expect(useSessions.getState().messages["s1"]).toBe(before);
+  });
+
+  it("markStalled clears it (a stalled session can no longer end its own compaction)", () => {
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s1", update: active("manual") }]);
+    useSessions.getState().markStalled("s1", 123, null);
+    expect(useSessions.getState().compacting["s1"]).toBeUndefined();
+  });
+
+  it("handleSessionClosed clears it, but KEEPS the context usage (unchanged invariant)", () => {
+    useSessions.getState().applySessionUpdates([
+      { sessionId: "s1", update: active("manual") },
+      {
+        sessionId: "s1",
+        update: {
+          sessionUpdate: "context_usage_update",
+          usedTokens: 12000,
+          windowTokens: 128000,
+        },
+      },
+    ]);
+    useSessions.getState().handleSessionClosed("s1", "user");
+    expect(useSessions.getState().compacting["s1"]).toBeUndefined();
+    expect(useSessions.getState().contextUsage["s1"]).toEqual({
+      used: 12000,
+      window: 128000,
+    });
+  });
+});
+
 describe("user message with image attachments", () => {
   it("(a) stores a user message with image attachments", () => {
     useSessions.getState().addUserMessage("s1", "hi", [{ name: "a.png", mimeType: "image/png", sizeBytes: 3, data: "QUJD" }]);

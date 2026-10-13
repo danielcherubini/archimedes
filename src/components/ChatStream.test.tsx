@@ -226,6 +226,7 @@ function seedLiveSession(): void {
     stopReasons: {},
     closeReasons: {},
     configOptions: {},
+    compacting: {},
   });
 }
 
@@ -401,6 +402,7 @@ beforeEach(() => {
     stopReasons: {},
     closeReasons: {},
     configOptions: {},
+    compacting: {},
   });
   useInteractive.getState().dismissSession("s1");
   usePermissions.getState().dismissSessionPrompts("s1");
@@ -592,6 +594,146 @@ describe("ChatStream", () => {
     expect(
       container.querySelector('[data-testid="working-indicator"]'),
     ).toBeNull();
+  });
+
+  // --- The compaction indicator (ADR 0045): an IDLE compaction has no turn,
+  // so neither `inTurn` nor `agentState` says "working" — the row's render
+  // gate itself had to widen for `compacting`. ---
+
+  it("shows the Compacting row at IDLE while a compaction runs (the widened gate)", () => {
+    seedLiveSession();
+    useSessions.setState({ compacting: { s1: "manual" } });
+    const { container } = render(<ChatStream />);
+    const indicator = container.querySelector(
+      '[data-testid="working-indicator"]',
+    );
+    // The gate: nothing else would render the row here (no turn, idle agent).
+    expect(indicator).toBeTruthy();
+    // The LABEL. Read off the `<p>` rather than `getByText("Compacting")`:
+    // the loader's `sr-only` label is a second match, and its `aria-hidden`
+    // frame span contributes braille glyphs to `textContent`.
+    expect(
+      container.querySelector('[data-testid="working-indicator"] p')
+        ?.textContent,
+    ).toBe("Compacting");
+  });
+
+  it("labels every reason 'Compacting' (one label is the product decision)", () => {
+    for (const reason of ["manual", "threshold", "overflow"]) {
+      seedLiveSession();
+      useSessions.setState({ compacting: { s1: reason } });
+      const { container, unmount } = render(<ChatStream />);
+      expect(
+        container.querySelector('[data-testid="working-indicator"] p')
+          ?.textContent,
+      ).toBe("Compacting");
+      unmount();
+    }
+  });
+
+  it("overrides the user's spinner style with the pulse variant while compacting", () => {
+    seedLiveSession();
+    useSettings.getState().setSettings({
+      ...SETTINGS_FIXTURE,
+      spinnerStyle: "pendulum",
+    });
+    // BOTH a turn in flight AND a compaction: the pulse still wins (the
+    // compaction branch sits above the spinner+quip branch).
+    useSessions.getState().beginTurn("s1");
+    useSessions.setState({ compacting: { s1: "threshold" } });
+    const { container } = render(<ChatStream />);
+    const span = container.querySelector(
+      '[data-testid="working-indicator"] span[aria-hidden="true"]',
+    );
+    // The `pendulum` setting is IGNORED here: a compaction is a different
+    // kind of wait, so this is a variant override, not the user's style.
+    const [w, h] = getVariantGridSize("pulse");
+    expect(span?.textContent).toBe(generateFrames("pulse", w, h).frames[0]);
+  });
+
+  it("does not render the rotating quip while compacting (one line, not two)", () => {
+    seedLiveSession();
+    useSessions.setState({ compacting: { s1: "manual" } });
+    const { container } = render(<ChatStream />);
+    expect(
+      container.querySelectorAll('[data-testid="working-indicator"] p'),
+    ).toHaveLength(1);
+  });
+
+  it("prefers the 'Waiting for your input…' line over Compacting when blocked AND compacting", () => {
+    seedLiveSession();
+    useSessions.setState({ compacting: { s1: "manual" } });
+    useInteractive.getState().applyState("s1", { state: "blocked" });
+    const { container } = render(<ChatStream />);
+    const indicator = container.querySelector(
+      '[data-testid="working-indicator"]',
+    )!;
+    // `blocked` needs an answer NOW — it outranks the spinner.
+    expect(indicator.textContent).toContain("Waiting for your input…");
+    expect(indicator.querySelector("p")?.textContent).toBe(
+      "Waiting for your input…",
+    );
+  });
+
+  it("clears the Compacting row when a coalescing batch carries both frames (a Skipped compaction)", async () => {
+    seedLiveSession();
+    const { container } = render(<ChatStream />);
+    await act(async () => {
+      // The two frames of a `Skipped` compaction in ONE rAF batch: last-wins
+      // leaves it cleared, so no row (deliberate — a stuck row would lock the
+      // composer on a session that already finished).
+      useSessions.getState().applySessionUpdates([
+        { sessionId: "s1", update: { sessionUpdate: "compaction_update", active: true, reason: "threshold" } },
+        { sessionId: "s1", update: { sessionUpdate: "compaction_update", active: false, reason: "threshold" } },
+      ]);
+    });
+    expect(
+      container.querySelector('[data-testid="working-indicator"]'),
+    ).toBeNull();
+  });
+
+  it("disables the send button and no-ops Enter while compacting (the harness is one-turn-at-a-time)", () => {
+    seedLiveSession();
+    render(<ChatStream />);
+    const sendButton = screen.getByRole("button", { name: "Send" });
+    const textarea = screen.getByRole("textbox");
+    // Idle → enabled (sanity: the compaction has not started yet).
+    fireEvent.change(textarea, { target: { value: "hi" } });
+    expect(sendButton.hasAttribute("disabled")).toBe(false);
+    act(() => {
+      useSessions.setState({ compacting: { s1: "manual" } });
+    });
+    // The send is dead for the whole compaction (a prompt now would be
+    // REJECTED by `send_prompt`), while the draft survives for when it ends.
+    expect(sendButton.hasAttribute("disabled")).toBe(true);
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("Esc while compacting cancels the session (the Esc listener attaches at idle too)", async () => {
+    seedLiveSession();
+    render(<ChatStream />);
+    // No turn in flight — the effect's gate had to widen for `compacting`,
+    // or the listener would never be attached and Esc would do nothing.
+    act(() => {
+      useSessions.setState({ compacting: { s1: "overflow" } });
+    });
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "Escape" });
+    });
+    expect(vi.mocked(cancelSession)).toHaveBeenCalledWith("s1");
+  });
+
+  it("Esc while ANOTHER session compacts does NOT cancel the active one", async () => {
+    seedLiveSession();
+    render(<ChatStream />);
+    act(() => {
+      useSessions.setState({ compacting: { other: "manual" } });
+    });
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "Escape" });
+    });
+    expect(vi.mocked(cancelSession)).not.toHaveBeenCalled();
   });
 
   it("renders a FileSummaryCard with the turn's diff totals", () => {

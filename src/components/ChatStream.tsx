@@ -150,6 +150,15 @@ export default function ChatStream() {
     activeSessionId ? s.agentState[activeSessionId] : undefined,
   );
   const workingOrInTurn = agentState === "working" || inTurn;
+  // The active session's in-flight compaction reason (ADR 0045) — the
+  // `compaction_update` frame the harness emits around a compaction, and the
+  // ONLY signal for one: an idle compaction (the `/compact` command) emits no
+  // `turn_start` / `agent_settled`, so `inTurn` stays false and `agentState`
+  // stays idle. Indexed on `s.activeSessionId` INSIDE the selector (the outer
+  // `activeSessionId` is `string | null`, which TS2538 rejects as an index).
+  const compacting = useSessions((s) =>
+    s.activeSessionId ? s.compacting[s.activeSessionId] : undefined,
+  );
   // The working-indicator spinner style (the settings' `spinnerStyle` — a
   // `braille-loader` variant name): `null` / absent = the `typing` default.
   // A hand-edited settings file may carry an unknown name: `normalizeVariant`
@@ -197,7 +206,10 @@ export default function ChatStream() {
   // `composerLocked` guard no-ops Enter, the draft is kept for when the
   // turn ends). (`agentState === "blocked"` also covers a blocked state
   // without an in-flight turn, where `inTurn` alone would not lock.)
-  const composerLocked = workingOrInTurn || agentState === "blocked";
+  // A compaction locks for the same reason: the harness is one-turn-at-a-time
+  // and a prompt racing the rewrite would be rejected (or reorder history).
+  const composerLocked =
+    workingOrInTurn || agentState === "blocked" || compacting !== undefined;
   // Called UNCONDITIONALLY at the top of the component body (the hook
   // contains `useState`/`useEffect` — invoking it inside the `working`
   // branch would be a conditional hook call and crash React when the
@@ -382,9 +394,19 @@ export default function ChatStream() {
   // `stopReason: "cancelled"`, which completes `sendPrompt` and unlocks the
   // composer). The textarea is DISABLED during a turn (the composer is
   // locked), so the listener is global — and active only while `inTurn`,
-  // so Esc never hijacks a keypress outside a turn.
+  // so Esc never hijacks a keypress outside a turn. A compaction joins the
+  // gate (Esc cancels a runaway `/compact`), which is why `compacting` is in
+  // the DEPS too: without it the listener is never attached at idle and Esc
+  // does nothing while compacting.
+  //
+  // KNOWN COSMETIC CONSEQUENCE (deliberate, not fixed here): `ComposerRow`
+  // closes the `?`/`@`/`#` picker on Esc WITHOUT stopping propagation, so now
+  // that the window listener can be attached while compacting, one Esc both
+  // dismisses an open picker AND cancels the compaction. That is the
+  // pre-existing shape during a turn — the fix belongs to the composer's key
+  // handling, not to this gate.
   useEffect(() => {
-    if (!inTurn || !activeSessionId) return;
+    if ((!inTurn && compacting === undefined) || !activeSessionId) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         void cancelSession(activeSessionId);
@@ -392,7 +414,7 @@ export default function ChatStream() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [inTurn, activeSessionId]);
+  }, [inTurn, activeSessionId, compacting]);
   // Session-change guard: `ChatStream` is one long-lived component (no
   // `key`), so `attachments` would otherwise survive a switch to another
   // session — images staged in session A (image-capable) could be sent to
@@ -1342,6 +1364,7 @@ export default function ChatStream() {
       <WorkingIndicator
         agentState={agentState}
         workingOrInTurn={workingOrInTurn}
+        compacting={compacting}
         spinnerStyle={spinnerStyle}
         quip={quip}
       />

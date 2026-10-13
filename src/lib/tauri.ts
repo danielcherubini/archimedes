@@ -136,7 +136,7 @@ export type ToolCallContent =
   | { type: "diff"; path: string; oldText?: string | null; newText: string };
 
 /**
- * A `session/update` notification body. The six update types the desktop
+ * A `session/update` notification body. The seven update types the desktop
  * handles are modelled; anything else (unknown/future types) falls through
  * to the reducer's `default` branch and is ignored (forward-compat).
  *
@@ -179,6 +179,13 @@ export type AcpSessionUpdate =
       usedTokens: number;
       /** The session model's context window (tokens). */
       windowTokens: number;
+    }
+  | {
+      sessionUpdate: "compaction_update";
+      /** True while a compaction runs; false when it ends (any outcome). */
+      active: boolean;
+      /** "manual" | "threshold" | "overflow" (ADR 0045's vocabulary). */
+      reason: string;
     };
 
 export interface SessionUpdatePayload {

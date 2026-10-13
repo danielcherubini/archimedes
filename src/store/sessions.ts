@@ -551,6 +551,19 @@ interface SessionsState {
    * session that isn't live).
    */
   contextUsage: Record<string, { used: number; window: number } | undefined>;
+  /**
+   * The session's in-flight compaction per session id — the value is the
+   * `compaction_update` frame's `reason` (`"manual" | "threshold" |
+   * "overflow"`, ADR 0045's vocabulary) while one runs, `undefined` when
+   * none does (set on `active: true`, cleared on `active: false`, on
+   * `handleSessionClosed` and on `markStalled`). The composer's working
+   * indicator reads it (an idle compaction has no turn, so neither
+   * `inTurn` nor `agentState` says "working"), and the composer locks on it
+   * — hence the clears: a lingering entry would pin the composer locked on
+   * a session that can no longer compact (its Worker is closed, or crashed,
+   * and will never emit the closing frame).
+   */
+  compacting: Record<string, string | undefined>;
   /** Whether a prompt turn is in flight for a session. */
   inTurn: Record<string, boolean>;
   /** Last stop reason reported for a session's turn. */
@@ -690,6 +703,7 @@ export const useSessions = create<SessionsState>((set, get) => ({
   messages: {},
   configOptions: {},
   contextUsage: {},
+  compacting: {},
   inTurn: {},
   stopReasons: {},
   stalled: {},
@@ -697,6 +711,10 @@ export const useSessions = create<SessionsState>((set, get) => ({
   markStalled: (sessionId, at, crashLog) =>
     set((state) => ({
       stalled: { ...state.stalled, [sessionId]: { at, crashLog } },
+      // A crashed Worker never emits the closing `compaction_update`, so
+      // the indicator would spin forever and the composer would stay locked
+      // on a session that can no longer compact.
+      compacting: { ...state.compacting, [sessionId]: undefined },
     })),
 
   addSession: (info) =>
@@ -1224,6 +1242,18 @@ export const useSessions = create<SessionsState>((set, get) => ({
         };
       }
 
+      // The compaction STATE frame (ADR 0045): the reason while one runs,
+      // `undefined` when it ends. `undefined` under a spread rather than
+      // `delete` — the store's convention for a cleared per-session flag
+      // (see `stalled`), and cheap: the key keeps its slot.
+      let compacting = state.compacting;
+      if (update.sessionUpdate === "compaction_update") {
+        compacting = {
+          ...state.compacting,
+          [sessionId]: update.active ? update.reason : undefined,
+        };
+      }
+
       return {
         messages: {
           ...state.messages,
@@ -1231,6 +1261,7 @@ export const useSessions = create<SessionsState>((set, get) => ({
         },
         configOptions,
         contextUsage,
+        compacting,
       };
     }),
 
@@ -1262,6 +1293,8 @@ export const useSessions = create<SessionsState>((set, get) => ({
       let configChanged = false;
       let contextUsage = state.contextUsage;
       let contextChanged = false;
+      let compacting = state.compacting;
+      let compactingChanged = false;
       for (const sessionId of order) {
         const sessionUpdates = bySession.get(sessionId)!;
         let sessionMessages = messages[sessionId] ?? [];
@@ -1284,6 +1317,20 @@ export const useSessions = create<SessionsState>((set, get) => ({
             };
             contextChanged = true;
           }
+          // The compaction STATE frame. It carries NO message content, so the
+          // pure reducer below reports no change for it — without this own
+          // sentinel the early `return state` at the bottom of this reducer
+          // would silently DISCARD the frame and the indicator would never
+          // appear. Last-wins within the batch, which is what makes a
+          // `Skipped` compaction's two frames (active, then inactive — they
+          // can coalesce into ONE rAF batch) end cleared rather than stuck on.
+          if (update.sessionUpdate === "compaction_update") {
+            compacting = {
+              ...compacting,
+              [sessionId]: update.active ? update.reason : undefined,
+            };
+            compactingChanged = true;
+          }
         }
         if (sessionChanged) {
           if (!messagesChanged) messages = { ...messages };
@@ -1292,12 +1339,19 @@ export const useSessions = create<SessionsState>((set, get) => ({
         }
       }
 
-      if (!messagesChanged && !configChanged && !contextChanged) return state;
+      if (
+        !messagesChanged &&
+        !configChanged &&
+        !contextChanged &&
+        !compactingChanged
+      )
+        return state;
       return {
         ...state,
         ...(messagesChanged ? { messages } : {}),
         ...(configChanged ? { configOptions } : {}),
         ...(contextChanged ? { contextUsage } : {}),
+        ...(compactingChanged ? { compacting } : {}),
       };
     }),
 
@@ -1346,6 +1400,13 @@ export const useSessions = create<SessionsState>((set, get) => ({
         // A closed session cannot be stalled (the banner would linger on
         // the paused transcript — a close supersedes the crash).
         stalled: { ...state.stalled, [sessionId]: undefined },
+        // Nor compacting: a close ends the Worker, so the closing
+        // `compaction_update` may never arrive, and a lingering entry would
+        // pin `composerLocked` on a session that can no longer compact.
+        // (`contextUsage` above deliberately SURVIVES the close — a pause,
+        // not a discard, pinned by its own test; this flag is not state the
+        // bottom bar reads, so it does not.)
+        compacting: { ...state.compacting, [sessionId]: undefined },
       };
     });
   },
