@@ -45,7 +45,7 @@ done-when: "Typing `/compact` at idle compacts the session immediately and the c
 | `send()`'s `try {` is `:880` (right after `sendingRef.current = true;` `:879`; `setError(null)` is `:881`) with `finally { sendingRef.current = false }` at `:1008-1010` — an early `return` OUTSIDE the `try` leaves `sendingRef.current` stuck `true` and every later send no-ops at `:878` | — |
 | `take_pump()` returns `Some` only AFTER `core.handle(Inbound::from(&env)).await` (`core.rs:349-358`), and its tuple is `(events_rx, join_handle)` — the pump itself is a separate `pump_tx`/`pump_rx` pair (`core.rs:727-740`). `src/bin/fake_worker.rs:597` matches `Inbound` with a `_ => {}` catch-all | — |
 | HTTP status → `ProviderError` happens in ONE shared place: `provider/transport.rs` `map_status`/`map_response` (`:57-92`, the 4xx→`Fatal` arm is `:69-70`), used by `openai.rs:88,110`, `anthropic.rs:732`, `responses.rs:676`. `map_anthropic_error` (`anthropic.rs:84-108`) maps an SSE `error` EVENT, not a status, and is the ONLY mid-stream `ProviderError` producer | — |
-| `stream_options` latch logic is `openai.rs:90-110` (the doc comment is `:59-66`) and its gate is `!matches!(err, ProviderError::Fatal(_))` at `openai.rs:97` | — |
+| `stream_options` latch logic is `openai.rs:90-110` (the doc comment is `:59-66`); its gate is a NEGATIVE chain — the latch fires only when the error IS `Fatal` AND mentions `stream_options`, so anything non-`Fatal` already returns early | — |
 | `RetryPolicy` already returns any non-`Retryable` variant verbatim (`retry.rs:139`, `:177-179`); the pin test is `fatal_is_never_retried` at `retry.rs:311` | — |
 | `Inbound` deserialization uses an EXPLICIT `type` allow-list in `decode_inbound` (`protocol.rs:321-342`); everything else → `Inbound::Unknown`. The Inbound round-trip test is at `protocol.rs:666` | — |
 | `WorkerCore::handle` returns `Vec::new()` for control-ish frames; `RpcEvent`s leave through the PUMP (`take_pump()` at `core.rs:351`, one-shot `&mut self`), not the outbound channel. `stub_core` `core.rs:660`, `stub_handles` `core.rs:595` (its `CannedProvider` at `:535-550` returns a COMPLETE stream synchronously) | — |
@@ -493,7 +493,7 @@ ADR 0045. A context-length 400 arrives as `ProviderError::Fatal`, `RetryPolicy` 
    /// than missing an overflow.
    pub(crate) fn is_context_overflow_text(text: &str) -> bool
    ```
-   Lowercase substring matching (NO regex crate). Overflow fragments: `prompt is too long`, `prompt too long`, `prompt exceeds max length`, `request_too_large`, `exceeds the context window`, `maximum context length`, `context_length_exceeded`, `input token count`+`exceeds the maximum`, `maximum prompt length is`, `reduce the length of the messages`, `maximum context length is`, `exceeds the maximum allowed input length`, `is longer than the model's context length`, `exceeds the limit of`, `exceeds the available context size`, `greater than the context length`, `context window exceeds limit`, `exceeded model token limit`, `model_context_window_exceeded`, `too many tokens`, `token limit exceeded`, `configured context size is`. Non-overflow exclusions, checked FIRST: `rate limit`, `too many requests`, `throttling error:`, `throttlingexception`, `service unavailable:`.
+   Lowercase substring matching (NO regex crate). Overflow fragments: `prompt is too long`, `prompt too long`, `prompt exceeds max length`, `request_too_large`, `exceeds the context window`, `maximum context length`, `context_length_exceeded`, `input token count`+`exceeds the maximum`, `maximum prompt length is`, `reduce the length of the messages`, `maximum context length is`, `exceeds the maximum allowed input length`, `is longer than the model's context length`, `exceeds the limit of`, `exceeds the available context size`, `greater than the context length`, `context window exceeds limit`, `exceeded model token limit`, `model_context_window_exceeded`, `too many tokens`, `token limit exceeded`, `configured context size is`, `input is too long for requested model` (Amazon Bedrock), `range of input length should be` (DashScope / Qwen). Non-overflow exclusions, checked FIRST: `rate limit`, `too many requests`, `throttling error:`, `throttlingexception`, `service unavailable:`.
    **Deliberate divergence from pi, and why:** pi's exclusion is the ANCHORED `/^(Throttling error|Service unavailable):/i`, which does NOT match AWS's `ThrottlingException: Too many tokens, please wait before trying again.` — one of pi's own documented examples. Since our fragments include `too many tokens`, that string would classify as overflow and a Bedrock throttle would trigger a pointless compaction. Adding `throttlingexception` to the exclusion list fixes it here; say so in the doc comment so nobody "restores parity".
 2. `ProviderError::ContextOverflow(String)` with `#[error("context overflow: {0}")]`. Then `grep -rn "ProviderError::" src-tauri/src` and handle every `match` the compiler surfaces.
 3. In `transport.rs::map_status` (`:57-72`), which returns `Option<ProviderError>` as one `if / else if` chain, insert an arm AFTER the 401/403 (`Auth`) and 429/5xx (`Retryable`) arms and BEFORE `else if status.is_client_error()` (the 4xx→`Fatal` arm, `:69-70`), keeping the neighbouring arms' message shape:
@@ -503,7 +503,7 @@ ADR 0045. A context-length 400 arrives as `ProviderError::Fatal`, `RetryPolicy` 
    ```
    Note the terminal 1xx/3xx arm deliberately never reads the body — do not change that.
 3b. In `map_anthropic_error` (`anthropic.rs:84-108`), BEFORE the `kind` match: `if is_context_overflow_text(message) { return ProviderError::ContextOverflow(format!("{kind}: {message}")); }`. Without it nothing can ever produce a mid-stream overflow and the mid-stream arm below is dead code.
-4. `openai.rs:97` gates the `stream_options` latch on `!matches!(err, ProviderError::Fatal(_))`. An overflow 4xx is no longer `Fatal`, so a body naming both `stream_options` and overflow wording would trigger a pointless re-issue and permanently lose usage reporting for the session. Widen the exclusion to `!matches!(err, ProviderError::Fatal(_) | ProviderError::ContextOverflow(_))` and pin it.
+4. `openai.rs` gates the `stream_options` latch behind a chain that returns early unless the error IS `Fatal` AND names `stream_options`. INVARIANT TO PIN: a `ContextOverflow` must never trip the latch (a pointless re-issue would permanently lose usage reporting for the session). Name the tier explicitly in the early-return chain — `|| matches!(err, ProviderError::ContextOverflow(_))` — so a future change to the tier gate cannot silently re-enable it. NOTE: writing this as `!matches!(err, Fatal(_) | ContextOverflow(_))` INVERTS it (that form ADDS overflow to the set allowed to latch); pin the behaviour with a test rather than trusting the shape of the condition.
 5. `loop.rs` — replace `force_compact: bool` with a trigger that carries what the event needs:
    ```rust
    /// A compaction the loop must run before its next model call, and what to
@@ -577,7 +577,7 @@ ADR 0045. A context-length 400 arrives as `ProviderError::Fatal`, `RetryPolicy` 
 **Steps:**
 - [ ] `overflow.rs` tests FIRST — every pi example classifies `true` (`"prompt is too long: 213462 tokens > 200000 maximum"`, `"413 {\"error\":{\"type\":\"request_too_large\",\"message\":\"Request exceeds the maximum size\"}}"`, `"Your input exceeds the context window of this model"`, `"Requested token count exceeds the model's maximum context length of 131072 tokens"`, `"Input length (265330) exceeds model's maximum context length (262144)."`, `"The input token count (1196265) exceeds the maximum number of tokens allowed (1048575)"`, `"This model's maximum prompt length is 131072 but the request contains 537812 tokens"`, `"Please reduce the length of the messages or completion"`, `"the request exceeds the available context size, try increasing it"`, `"Prompt exceeds max length"` (z.ai CN), `"{\"code\":\"1261\",\"message\":\"Prompt too long\"}"`, `"model_context_window_exceeded"`, `"prompt token count of 250000 exceeds the limit of 200000"`, `"context window exceeds limit"`); and these are `false`: `"ThrottlingException: Too many tokens, please wait before trying again."`, `"rate limit exceeded"`, `"429 Too Many Requests"`, `"invalid api key"`, `"{\"detail\":\"field required\"}"`.
 - [ ] Run `cd src-tauri && cargo test overflow` — FAIL (missing function), implement, green.
-- [ ] Add the `transport.rs` cases to its existing status-table test (`:117-146`): a 400 whose body matches → `ContextOverflow`; a 400 whose body does not → `Fatal`; a 401 with matching text → still `Auth`. Do NOT write per-provider HTTP tests — `wiremock` is declared but unused; provider suites drive parsers over canned SSE (`provider/test_util.rs::collect`), and the only HTTP-level precedent is the `TcpListener` stub at `transport.rs:292-347`.
+- [ ] Add the `transport.rs` cases to its existing status-table test: a 400 whose body matches → `ContextOverflow`; a 400 whose body does not → `Fatal`; a 401 with matching text → still `Auth`. Provider-level HTTP suites DO exist (`tests/provider.rs` is a live `wiremock` suite holding the `stream_options` latch tests) — add nothing there; the in-file precedent for a status-classification test is the `TcpListener` stub in `transport.rs`, and the provider suites drive parsers over canned SSE (`provider/test_util.rs::collect`).
 - [ ] Add the tier; fix every compile error it surfaces; add a `retry.rs` test `context_overflow_is_never_retried` mirroring `fatal_is_never_retried` (`retry.rs:311`). Update `retry.rs`'s doc comments (`:3`, `:108`) — its `match` needs no change.
 - [ ] Add the `openai.rs` pin that a `ContextOverflow` does NOT trigger the `stream_options` latch.
 - [ ] `loop.rs` tests (three, one per entry path):
@@ -641,3 +641,29 @@ ADR 0046 / ADR 0028's named consequence: `Usage` carries only `input_tokens`/`ou
 - A second Composer command, `/help`, fuzzy command matching, or a command palette.
 - A post-turn (`agent_end`) compaction check: ours runs at the top of the next turn — the same moment for the user, and it keeps every compaction inside the loop that owns the forced trigger.
 - Making a hand-typed `/compact` send on the first Enter: the picker intercepts Enter whenever it has a matching row, exactly as it does for `?`/`$`. Pinned, not fixed.
+
+---
+
+## Execution log
+
+| Task | Commit | Result |
+|---|---|---|
+| 1 | `eb8f07a` | 936 Rust tests |
+| 2 | `7a62aaa` | 938 Rust tests |
+| 3 | `7cf51ce` | 946 Rust tests |
+| 4 | `a4ad4eb` | 1803 frontend tests |
+| 5 | `9ece76e` | 1837 frontend tests |
+| 6 | `bd1cb0c` | 960 Rust / 1838 frontend tests |
+| 7 | `442c7cb` | 965 Rust / 1838 frontend tests |
+| follow-up | `885d75d` | Bedrock + DashScope overflow wording |
+
+**Where execution corrected the plan** (the plan text above was amended to match):
+
+- **Task 6 item 4 was written backwards.** The `stream_options` latch sits behind a chain that only fires when the error IS `Fatal`, so the prescribed `!matches!(err, Fatal(_) | ContextOverflow(_))` would have *enabled* the hazard it was meant to prevent. Implemented as an explicit early return on `ContextOverflow`, pinned by a test, with a companion test proving the latch still works for its real `Fatal` case.
+- **Task 6's fragment list had dropped two of pi's own entries** (Bedrock `input is too long for requested model`, DashScope `range of input length should be`). Closed in `885d75d`; those providers now recover instead of ending the turn.
+- **"`wiremock` is declared but unused" was wrong** — `tests/provider.rs` and `tests/worker_e2e.rs` use it. No tests were added there.
+- **Two fixtures were pinned to the bug Task 1 removes**, so they had to be re-anchored rather than left alone: `a_compaction_emits_a_context_usage_update_from_the_reestimate` (its `catalog.compaction.keep_recent_tokens = 1` knob became inert, and it had quietly stopped exercising a compaction at all) and `a_failed_turn_still_measures_the_next_prompt` (its `calls == 2` asserted a compaction that shrank nothing).
+- **Task 6's mid-stream arm needed `map_anthropic_error` to be able to emit the tier**, or the arm would have been dead code — the plan named that, and it is pinned by `map_anthropic_error_detects_a_context_overflow`.
+- Beyond the plan's listed tests: `a_later_overflow_in_the_same_turn_gets_its_own_compact_and_retry` pins "the guard resets after a successful model call", which no listed test covered.
+
+**Known load-flaky tests** (pass in isolation and in a quiet full run; they fail under a busy machine at vitest's 5 s default and are unrelated to this feature): `SettingsPage.test.tsx`, `ModelPicker.test.tsx`, `App.test.tsx`, `SkillsDialog`, `SpacesList`, and Rust's `agent::mcp::http::tests::http_a_slow_sse_stream_completes` (an idle-bound timing test).
