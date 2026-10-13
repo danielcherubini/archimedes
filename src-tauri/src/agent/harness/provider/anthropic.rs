@@ -159,8 +159,11 @@ struct AnthropicStream {
     /// `tool_use` block; flushed as `ToolCall`s at the `message_delta`
     /// `stop_reason` / stream end).
     tool_acc: BTreeMap<u32, AnthropicToolAcc>,
-    /// The `message_start` input tokens (the `usage` there carries the
-    /// INPUT count only; the output comes from `message_delta`).
+    /// The `message_start` WHOLE-PROMPT input count — the wire's
+    /// `input_tokens` PLUS both cache fields (ADR 0046: on this wire the
+    /// cached prefix is NOT in `input_tokens`). The `usage` there carries
+    /// the INPUT count only; the output comes from `message_delta`.
+    /// `None` when the wire reported no input-side count at all.
     input_tokens: Option<u32>,
     /// The last `message_delta` `usage.output_tokens` seen (cumulative on
     /// the wire — the FINAL `message_delta` carries the full count).
@@ -233,13 +236,47 @@ impl AnthropicStream {
             .or_else(|| v.get("type").and_then(|t| t.as_str()));
         match kind {
             Some("message_start") => {
-                if let Some(t) = v
-                    .get("message")
-                    .and_then(|m| m.get("usage"))
-                    .and_then(|u| u.get("input_tokens"))
-                    .and_then(|t| t.as_u64())
-                {
-                    self.input_tokens = Some(u32::try_from(t).unwrap_or(u32::MAX));
+                // ADR 0046: `Usage.input_tokens` is the WHOLE prompt the
+                // model was shown, cached prefix included — and on THIS
+                // wire the cached prefix is NOT in `input_tokens`: it
+                // lives in `cache_read_input_tokens` (read) and
+                // `cache_creation_input_tokens` (written), which are
+                // DISJOINT parts of the prompt here. (On the OpenAI-shaped
+                // wires the cached count is a SUBSET of the input total
+                // and must never be added — pinned there.) So the sum is
+                // computed HERE, at the seam that knows the wire's
+                // vocabulary, leaving `Usage` two fields and the Anchor
+                // formula (ADR 0028) untouched.
+                //
+                // Stored ONLY when at least one of the three counts is
+                // present: an absent `usage` must leave `input_tokens`
+                // `None`, or `emit_usage`'s guard could not tell "the
+                // stream reported nothing" from a genuine zero and would
+                // emit a spurious `Usage(0, n)`.
+                //
+                // No early `return` in this arm: `handle_chunk` clears the
+                // `event:` tag at its END, so bailing out here would leave
+                // a stale tag to mis-dispatch the NEXT tagless `data:`
+                // line (a proxy may strip the tags).
+                if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
+                    // Per-field clamp stays `u32::MAX` (a silent `as u32`
+                    // would TRUNCATE); the sum SATURATES rather than wrapping.
+                    let mut whole_prompt: Option<u32> = None;
+                    for key in [
+                        "input_tokens",
+                        "cache_read_input_tokens",
+                        "cache_creation_input_tokens",
+                    ] {
+                        let Some(n) = u
+                            .get(key)
+                            .and_then(|t| t.as_u64())
+                            .map(|t| u32::try_from(t).unwrap_or(u32::MAX))
+                        else {
+                            continue;
+                        };
+                        whole_prompt = Some(whole_prompt.unwrap_or(0).saturating_add(n));
+                    }
+                    self.input_tokens = whole_prompt;
                 }
             }
             Some("content_block_start") => {
@@ -360,7 +397,8 @@ impl AnthropicStream {
         self.event = None;
     }
 
-    /// Emit the combined `Usage` ONCE (the input from `message_start` +
+    /// Emit the combined `Usage` ONCE (the input from `message_start` —
+    /// already the WHOLE prompt, cached prefix included, ADR 0046 — plus
     /// the last `output_tokens` seen; a `None` side becomes `0` — an
     /// absent count is reported as zero, NOT dropped: a `Usage` with one
     /// real side is more useful than none).
@@ -1260,6 +1298,90 @@ mod tests {
                 }),
                 ProviderEvent::Done(FinishReason::Stop),
             ]
+        );
+    }
+
+    /// (ADR 0046) The Anthropic Messages wire reports `input_tokens` as
+    /// the UNCACHED remainder — the cached prefix lives in
+    /// `cache_read_input_tokens` / `cache_creation_input_tokens`. The
+    /// parser seam is where that is reconciled: `Usage.input_tokens` IS
+    /// the whole prompt the model was shown, so the cached prefix is
+    /// SUMMED IN here and the **Anchor** (ADR 0028) sees the real context
+    /// size instead of under-reading it and letting compaction arrive
+    /// late (a Provider 400).
+    #[tokio::test]
+    async fn anthropic_sse_usage_sums_the_cached_prefix_into_input_tokens() {
+        let events = collect(anthropic_stream(&[
+            "event: message_start\n\
+             data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":50,\"cache_creation_input_tokens\":25}}}\n\n\
+             event: message_delta\n\
+             data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\n",
+        ]))
+        .await;
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::Usage(Usage {
+                    input_tokens: 175,
+                    output_tokens: 7,
+                }),
+                ProviderEvent::Done(FinishReason::Stop),
+            ]
+        );
+    }
+
+    /// The other half of the seam: with no cache fields on the wire (an
+    /// endpoint that never caches), `input_tokens` passes through
+    /// UNCHANGED — the sum is over the fields that are PRESENT.
+    #[tokio::test]
+    async fn anthropic_sse_usage_without_cache_fields_passes_input_tokens_through() {
+        let events = collect(anthropic_stream(&[
+            "event: message_start\n\
+             data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":100}}}\n\n\
+             event: message_delta\n\
+             data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\n",
+        ]))
+        .await;
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::Usage(Usage {
+                    input_tokens: 100,
+                    output_tokens: 7,
+                }),
+                ProviderEvent::Done(FinishReason::Stop),
+            ]
+        );
+    }
+
+    /// The `emit_usage` guard survives the sum: a stream that reports
+    /// NOTHING (no `usage` on `message_start`, no `output_tokens` on the
+    /// `message_delta`) emits NO `Usage` at all — storing a sum
+    /// unconditionally would turn the absent counts into `Some(0)` and
+    /// emit a spurious `Usage(0, 0)`. (A `message_delta` that DOES carry
+    /// `output_tokens` emits `Usage(0, n)` by the documented
+    /// absent-side-becomes-zero rule — that is NOT the case under test.)
+    #[tokio::test]
+    async fn anthropic_sse_no_usage_anywhere_emits_no_usage_event() {
+        let events = collect(anthropic_stream(&[
+            "event: message_start\n\
+             data: {\"type\":\"message_start\",\"message\":{}}\n\n\
+             event: content_block_delta\n\
+             data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}\n\n\
+             event: message_delta\n\
+             data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+        ]))
+        .await;
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::TextDelta("x".to_string()),
+                ProviderEvent::Done(FinishReason::Stop),
+            ]
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, ProviderEvent::Usage(_))),
+            "a stream with no counts on either side emits NO Usage (got {events:?})"
         );
     }
 

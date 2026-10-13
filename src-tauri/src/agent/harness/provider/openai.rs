@@ -752,6 +752,37 @@ mod tests {
         );
     }
 
+    /// (ADR 0046) The ANTI-DOUBLE-COUNT pin. On this wire `prompt_tokens`
+    /// is ALREADY the whole prompt — cached tokens included — and
+    /// `prompt_tokens_details.cached_tokens` is a SUBSET of it, so the
+    /// count passes through UNCHANGED and the detail is NOT read at all.
+    /// (The Anthropic wire reports its cache fields as DISJOINT parts and
+    /// DOES sum them; copying that "for consistency" here would add the
+    /// entire cached prefix a second time, over-read the **Anchor** and
+    /// make compaction arrive EARLY — that tempting edit is exactly what
+    /// this test exists to break.)
+    #[tokio::test]
+    async fn sse_usage_does_not_add_the_cached_tokens_detail() {
+        let events = collect(sse_stream(&[
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":800}}}\n\n\
+             data: [DONE]\n\n",
+        ]))
+        .await;
+        assert_eq!(
+            events,
+            vec![
+                // A `usage`-only chunk carries an EMPTY `choices`, so the
+                // only events are the `Usage` and the synthetic `Done`
+                // (no `finish_reason` arrived).
+                ProviderEvent::Usage(Usage {
+                    input_tokens: 1000,
+                    output_tokens: 5,
+                }),
+                ProviderEvent::Done(FinishReason::Error),
+            ]
+        );
+    }
+
     /// `LineAssembler::finish` is shared by all three SSE parsers, so its
     /// contract is pinned directly: a non-empty tail is returned ONCE as
     /// lossy text and the buffer is left empty (a second call yields `None`),
