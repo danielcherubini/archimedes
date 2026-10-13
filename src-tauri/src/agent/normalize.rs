@@ -339,8 +339,30 @@ pub(crate) fn normalize(e: &RpcEvent, st: &mut TurnState) -> Vec<Value> {
         // strings are stable for tests). They carry a `messageId` of
         // `"system"` (a dedicated key — never mixed into a real message's
         // accumulated text).
-        RpcEvent::compaction_start { .. } => vec![system_chunk("Compacting context…")],
-        RpcEvent::compaction_end { .. } => vec![system_chunk("Compaction finished")],
+        //
+        // A compaction emits a SECOND frame beside the one-liner: the
+        // `compaction_update` STATE frame ("a compaction is running", and the
+        // trigger `reason` — `manual` / `threshold` / `overflow`) the
+        // renderer's indicator reads. It has no display row (see
+        // `compute_display_rows`' catch-all), so the one-liner stays the only
+        // durable transcript trace — the summary itself is a `native_messages`
+        // `System` row, never a display row.
+        RpcEvent::compaction_start { reason } => vec![
+            system_chunk("Compacting context…"),
+            json!({
+                "sessionUpdate": "compaction_update",
+                "active": true,
+                "reason": reason,
+            }),
+        ],
+        RpcEvent::compaction_end { reason, .. } => vec![
+            system_chunk("Compaction finished"),
+            json!({
+                "sessionUpdate": "compaction_update",
+                "active": false,
+                "reason": reason,
+            }),
+        ],
         RpcEvent::auto_retry_start {
             attempt,
             max_attempts,
@@ -903,26 +925,45 @@ mod normalize_tests {
 
     /// The bookkeeping one-liners (stable strings for tests) + the
     /// no-frame bookkeeping events (`agent_settled` / `turn_end` / …).
+    ///
+    /// A compaction event carries TWO frames: the durable transcript
+    /// one-liner (the only trace of the compaction in the display rows —
+    /// the summary itself is a `native_messages` `System` row) AND the
+    /// `compaction_update` STATE frame ("a compaction is running", with
+    /// the trigger `reason` — `manual` / `threshold` / `overflow`), which
+    /// the renderer's indicator reads and which persists no display row.
     #[test]
     fn bookkeeping_events_and_one_liners() {
         let mut st = TurnState::default();
         let compacting = normalize(
-            &ev(json!({ "type": "compaction_start", "reason": "auto" })),
+            &ev(json!({ "type": "compaction_start", "reason": "manual" })),
             &mut st,
         );
+        assert_eq!(compacting.len(), 2, "the one-liner + the state frame");
         assert_eq!(compacting[0]["content"]["text"], "Compacting context…");
         assert_eq!(
             compacting[0]["messageId"], "system",
             "the one-liners key the dedicated system id"
         );
+        assert_eq!(
+            compacting[1],
+            json!({ "sessionUpdate": "compaction_update", "active": true, "reason": "manual" }),
+            "the state frame carries the trigger reason"
+        );
 
         let done = normalize(
             &ev(
-                json!({ "type": "compaction_end", "reason": "auto", "aborted": false, "willRetry": false }),
+                json!({ "type": "compaction_end", "reason": "manual", "aborted": false, "willRetry": false }),
             ),
             &mut st,
         );
+        assert_eq!(done.len(), 2, "the one-liner + the state frame");
         assert_eq!(done[0]["content"]["text"], "Compaction finished");
+        assert_eq!(
+            done[1],
+            json!({ "sessionUpdate": "compaction_update", "active": false, "reason": "manual" }),
+            "the state frame closes the indicator, with the same reason"
+        );
 
         let retry = normalize(
             &ev(
@@ -1104,5 +1145,54 @@ mod compute_display_rows_tests {
         store.persist_display("s1", &all_rows).unwrap();
         let db_rows = db.messages_for("s1").unwrap();
         assert_eq!(db_rows.len(), 4, "the upsert never duplicates");
+    }
+
+    /// The `compaction_update` STATE frame (the renderer's "a compaction is
+    /// running" indicator) is bookkeeping, NOT transcript content: it persists
+    /// NO display row and leaves the thinking-segment state untouched (a
+    /// compaction that lands mid-stream must not split the thought segment
+    /// that straddles it). Pinned because the frame falls through
+    /// `compute_display_rows`' catch-all `_ => Vec::new()` — a future change
+    /// to that catch-all would make it replay as a chat bubble on resume.
+    #[test]
+    fn a_compaction_update_frame_persists_no_display_row() {
+        let text_acc = StdMutex::new(HashMap::new());
+        let tool_state = StdMutex::new(HashMap::new());
+        let thought_state = StdMutex::new(ThoughtState::default());
+
+        // An OPEN thought segment first, so the no-side-effect half is
+        // asserted on live state rather than on a fresh one.
+        let opening = compute_display_rows(
+            &json!({ "sessionUpdate": "agent_thought_chunk", "messageId": "m1", "content": { "text": "think" } }),
+            &text_acc,
+            &tool_state,
+            &thought_state,
+        );
+        assert_eq!(opening.len(), 1, "the thought chunk writes a row");
+
+        for active in [true, false] {
+            let rows = compute_display_rows(
+                &json!({ "sessionUpdate": "compaction_update", "active": active, "reason": "threshold" }),
+                &text_acc,
+                &tool_state,
+                &thought_state,
+            );
+            assert!(
+                rows.is_empty(),
+                "the compaction_update frame (active: {active}) persists no display row, got {rows:?}"
+            );
+        }
+
+        // The thinking-segment state is UNTOUCHED: the next chunk continues
+        // the SAME segment (`m1#1`, the text grows) instead of starting #2.
+        let after = compute_display_rows(
+            &json!({ "sessionUpdate": "agent_thought_chunk", "messageId": "m1", "content": { "text": "ing" } }),
+            &text_acc,
+            &tool_state,
+            &thought_state,
+        );
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].message_key, "m1#1", "the segment was not split");
+        assert_eq!(after[0].payload_json, json!({ "text": "thinking" }));
     }
 }

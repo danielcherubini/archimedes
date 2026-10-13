@@ -715,7 +715,10 @@ impl AgentLoop {
             // `compaction_end` emitted.
             if self.compactor.should_compact() || self.force_compact {
                 self.force_compact = false;
-                self.run_compaction(turn).await;
+                // The context-pressure trigger. The return (did the
+                // transcript shrink?) is unread here — only an overflow
+                // recovery (Task 6) needs it.
+                self.run_compaction("threshold", false, turn).await;
             }
             // (2) The model call (the `RetryPolicy` wraps it — on
             // `ProviderError::Retryable`, exponential backoff up to 5
@@ -1623,12 +1626,31 @@ impl AgentLoop {
     /// the `compaction_start` / `compaction_end` `RpcEvent` emission (which
     /// needs the loop's `normalize` / display-persistence pipeline) and the
     /// post-compaction `context_usage_update` frame.
-    async fn run_compaction(&mut self, turn: &CancellationToken) {
+    ///
+    /// `reason` is the TRIGGER (`manual` for `/compact`, `threshold` for the
+    /// context-pressure check, `overflow` for a provider context-overflow
+    /// recovery) — it rides both events and the renderer's `compaction_update`
+    /// state frame. `will_retry` is the event's "the turn continues on the
+    /// other side of this compaction" flag.
+    ///
+    /// Returns whether the transcript actually SHRANK (`Compacted` — the older
+    /// messages were replaced by a summary): `Skipped` (nothing old enough to
+    /// summarize) and `Failed` (the summary call errored, the transcript is
+    /// intact) both shrink nothing. A caller recovering from an overflow reads
+    /// this to decide whether a second request is worth sending at all.
+    async fn run_compaction(
+        &mut self,
+        reason: &str,
+        will_retry: bool,
+        turn: &CancellationToken,
+    ) -> bool {
         self.emit(RpcEvent::compaction_start {
-            reason: "context_limit".to_string(),
+            reason: reason.to_string(),
         });
         let mut aborted = false;
         let mut error_message: Option<String> = None;
+        // Whether the rewrite happened (the return value — see above).
+        let mut shrank = false;
         // The keep-recent budget comes from the COMPACTOR (its config copy +
         // THIS model's window), not from `catalog.compaction` directly: the
         // catalog budget is catalog-wide while the window is per-model, and an
@@ -1648,6 +1670,7 @@ impl AgentLoop {
         match compact::run_compaction(&mut ctx, &mut self.messages, turn).await {
             compact::CompactionOutcome::Skipped => {}
             compact::CompactionOutcome::Compacted { context_tokens } => {
+                shrank = true;
                 // The re-estimate is the post-compaction BASELINE (the
                 // `context_usage_update` frame — the percentage drops
                 // after the compaction instead of staying at the
@@ -1661,12 +1684,13 @@ impl AgentLoop {
             }
         }
         self.emit(RpcEvent::compaction_end {
-            reason: "context_limit".to_string(),
+            reason: reason.to_string(),
             result: None,
             aborted,
-            will_retry: false,
+            will_retry,
             error_message,
         });
+        shrank
     }
 
     /// The model request (the `messages` vec + the tool specs + the
@@ -3092,7 +3116,13 @@ mod tests {
             })
             .collect();
         loop_.force_compact = true;
-        loop_.run_compaction(&CancellationToken::new()).await;
+        // The failed compaction shrinks nothing (the wrapper's return).
+        assert!(
+            !loop_
+                .run_compaction("threshold", false, &CancellationToken::new())
+                .await,
+            "a failed compaction rewrote nothing"
+        );
         // The summary failed: the transcript is UNCHANGED (NOT replaced
         // by a truncated summary + a rewritten `native_messages`).
         assert_eq!(loop_.messages.len(), 3, "the transcript is intact");
@@ -3118,6 +3148,51 @@ mod tests {
         };
         assert!(aborted, "the compaction was aborted");
         assert!(error_message.is_some(), "the error was reported");
+    }
+
+    /// A compaction the `Compactor` SKIPPED (the transcript is under the
+    /// keep-recent budget: `older` is empty, so no summary call is made and
+    /// nothing is rewritten) reports that the transcript did NOT shrink.
+    /// The wrapper's return value is "the transcript shrank" — the signal a
+    /// caller reads to decide whether a second request over the shrunken
+    /// context is worth sending at all.
+    #[tokio::test]
+    async fn a_skipped_compaction_reports_no_shrink() {
+        // An empty script: a skipped compaction makes NO model call, so the
+        // test would also catch a summary call that should not have happened.
+        let (provider, _calls) = ScriptedProvider::new(vec![Some(Vec::new())]);
+        let (events_tx, _events_rx) = mpsc::unbounded_channel();
+        let mut loop_ = build_loop(
+            Box::new(provider),
+            events_tx,
+            Arc::new(StdMutex::new(CancellationToken::new())),
+            watch::channel(0u64).0,
+            RetryPolicy::new_with(5, Duration::from_millis(1)),
+        );
+        // Two tiny messages — far under the keep-recent budget, so nothing is
+        // old enough to summarize.
+        loop_.messages = vec![
+            ChatMessage {
+                role: ChatRole::User,
+                content: MessageContent::Text("u1".to_string()),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: MessageContent::Text("a1".to_string()),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+        let len_before = loop_.messages.len();
+        assert!(
+            !loop_
+                .run_compaction("threshold", false, &CancellationToken::new())
+                .await,
+            "a skipped compaction shrank nothing"
+        );
+        assert_eq!(loop_.messages.len(), len_before, "the transcript is intact");
     }
 
     /// (ADR 0017) `prepend_system` PERSISTS the leading system message at
@@ -4160,7 +4235,13 @@ mod tests {
                 tool_calls: None,
             },
         ]);
-        loop_.run_compaction(&CancellationToken::new()).await;
+        // The compaction REALLY shrank the transcript (the wrapper's return).
+        assert!(
+            loop_
+                .run_compaction("threshold", false, &CancellationToken::new())
+                .await,
+            "a compaction that rewrote the transcript shrank it"
+        );
         // The compaction REALLY ran — it is not a `Skipped` whose only frame is
         // the one `load_transcript` already emitted (which would make the frame
         // assertions below tautological): the 4-message transcript is now the
