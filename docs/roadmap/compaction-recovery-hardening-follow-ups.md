@@ -10,7 +10,11 @@ NOT fixed by it. §3 was found in review of the PR that shipped it, and is not
 fixed there either — for the reason stated in it. None is a blocker; all are
 recorded so the next reader finds a decision rather than an oversight.
 
+**Disposition (2026-10-14).** §1 is folded into `session-incarnation.md` (ADR 0050) and §3 is RETIRED by ADR 0049 — resolved before it was ever planned as its own change. §2 stays open. §4 is the stalled tail, written down when §3 was retired.
+
 ## 1. `resumeSession`'s merge counts array positions, and the reducer can now shrink the array
+
+**Status: folded into `session-incarnation.md` (ADR 0050).** The analysis below stands as written; the fix is the merge rule that spec selects.
 
 `applySessionUpdate` could previously only ever APPEND or REPLACE-LAST
 (`sessions.ts:131-159`). The Retraction makes it able to **remove**
@@ -66,6 +70,8 @@ Both are bigger than the Retraction and want their own ADR.
 
 ## 3. A resumed Worker reuses the previous Worker's messageIds, so a Retraction can erase history that is not its own
 
+**Status: RETIRED — resolved by ADR 0049, which chose neither option below.** Every id the harness mints now carries its **incarnation** stamp, so two Workers of one Session share no key at all. The two options here also undercounted the problem: `agent-text` rows are keyed by the constants `"system"` and `"default"` too, which no counter seed can separate — the reason stamping won. Kept because it is the analysis the ADR answered.
+
 `TurnState` is built once per `AgentLoop` (`loop.rs`, the `turn_state` mutex's
 `TurnState::default()`), and `msg_counter` and `retract_seq` both start at 0.
 A resume is a NEW Worker with a NEW loop, so the resumed session's first
@@ -119,3 +125,36 @@ the seeded id's uniqueness.
 `sessions.test.ts`, then a Worker-level test that resumes a session whose
 persisted rows include `m1` and asserts the next reply's `messageId` is not
 `m1`.
+
+## 4. A crashed Worker leaves a reply on screen that the model never had
+
+ADR 0048 makes an **Abandoned attempt** loud: every retry path retracts the text
+it streamed. A **crash** is the one turn exit with nobody left to emit the frame.
+The chunks are already persisted — the sink wrote them as they arrived — so a
+**Stalled session** shows a half sentence, **Resume** starts a fresh Worker, and
+the model's own history (`native_messages`) never contained that reply at all.
+The UI already treats the turn as ended (a crash resolves the in-flight turn the
+way a real finish does, ADR 0038's note in **Attention alert**); it is only the
+text that lies.
+
+**Repro shape:** stream text, kill the Worker mid-turn (`tests/ipc.rs` already
+drives a crash and a resume), then assert from `messages_for` that the truncated
+`agent-text` row is still there after `resume_session` — which it is, and which
+is the defect.
+
+**The fork, which is why this wants its own ADR:**
+
+- **erase it on Resume** — the Supervisor is the sole writer and has seen every
+  `DisplayUpsert` for the session, so it knows the last `agent-text` key; a
+  Resume could retract it and say so, which is ADR 0048's vocabulary applied by
+  the **Supervisor** instead of the harness. Honest about the model's history,
+  and it throws away the only trace of where the reply stopped.
+- **keep it, marked** — the row stays as evidence that a reply was cut off, with
+  something distinguishing "truncated by a death" from "finished". Today the
+  display schema carries no such marker, so this is a schema question, not a
+  call-site one.
+
+Erasing and keeping are both defensible and they optimise for different readers,
+so the decision is a product one. Not fixed by the incarnation work, which is
+about ids that cannot collide — not about who owns the last word of a dead
+Worker's reply.
