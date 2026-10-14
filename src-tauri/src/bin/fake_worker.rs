@@ -591,6 +591,15 @@ fn main() {
                     },
                 );
             }
+            // The `/compact` command (ADR 0044): WITHOUT this arm the
+            // `_ => {}` catch-all swallows it, so the IPC-parity fixture would
+            // silently ignore a frame the real Worker forwards to its loop.
+            // STDERR is the fixture's observation point for what arrived
+            // (stdout is the protocol stream — a non-frame line there would
+            // corrupt it; the Supervisor drains stderr to the debug log).
+            Inbound::Compact { instructions } => {
+                eprintln!("fake worker: compact requested (instructions: {instructions:?})");
+            }
             // `abort` / a `permission-response` to an unknown id / an
             // `interactive-response` / an unknown `type`: no response
             // (the fixture is permissive).

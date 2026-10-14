@@ -12,9 +12,11 @@ import {
   readFileBytes,
   sendPrompt,
   setSessionConfigOption,
+  compactSession,
 } from "../lib/tauri";
 import { basenameOfPath } from "../lib/paths";
 import { fuzzyMatch } from "../lib/fuzzy";
+import { composerCommands, parseComposerCommand } from "../lib/composerCommands";
 import {
   activeMentionToken,
   dirPartOfOutsideQuery,
@@ -135,6 +137,9 @@ export default function ChatStream() {
     (r) => !anchoredAskRequestIds.has(r.requestId),
   );
   const addUserMessage = useSessions((s) => s.addUserMessage);
+  // A Client-authored transcript line — the `/compact` no-op's only feedback
+  // (ADR 0044). Pulled the same way every other store action is pulled here.
+  const addSystemLine = useSessions((s) => s.addSystemLine);
   const beginTurn = useSessions((s) => s.beginTurn);
   const turnCompleted = useSessions((s) => s.turnCompleted);
   const resumeSession = useSessions((s) => s.resumeSession);
@@ -150,6 +155,15 @@ export default function ChatStream() {
     activeSessionId ? s.agentState[activeSessionId] : undefined,
   );
   const workingOrInTurn = agentState === "working" || inTurn;
+  // The active session's in-flight compaction reason (ADR 0045) — the
+  // `compaction_update` frame the harness emits around a compaction, and the
+  // ONLY signal for one: an idle compaction (the `/compact` command) emits no
+  // `turn_start` / `agent_settled`, so `inTurn` stays false and `agentState`
+  // stays idle. Indexed on `s.activeSessionId` INSIDE the selector (the outer
+  // `activeSessionId` is `string | null`, which TS2538 rejects as an index).
+  const compacting = useSessions((s) =>
+    s.activeSessionId ? s.compacting[s.activeSessionId] : undefined,
+  );
   // The working-indicator spinner style (the settings' `spinnerStyle` — a
   // `braille-loader` variant name): `null` / absent = the `typing` default.
   // A hand-edited settings file may carry an unknown name: `normalizeVariant`
@@ -197,7 +211,10 @@ export default function ChatStream() {
   // `composerLocked` guard no-ops Enter, the draft is kept for when the
   // turn ends). (`agentState === "blocked"` also covers a blocked state
   // without an in-flight turn, where `inTurn` alone would not lock.)
-  const composerLocked = workingOrInTurn || agentState === "blocked";
+  // A compaction locks for the same reason: the harness is one-turn-at-a-time
+  // and a prompt racing the rewrite would be rejected (or reorder history).
+  const composerLocked =
+    workingOrInTurn || agentState === "blocked" || compacting !== undefined;
   // Called UNCONDITIONALLY at the top of the component body (the hook
   // contains `useState`/`useEffect` — invoking it inside the `working`
   // branch would be a conditional hook call and crash React when the
@@ -382,9 +399,19 @@ export default function ChatStream() {
   // `stopReason: "cancelled"`, which completes `sendPrompt` and unlocks the
   // composer). The textarea is DISABLED during a turn (the composer is
   // locked), so the listener is global — and active only while `inTurn`,
-  // so Esc never hijacks a keypress outside a turn.
+  // so Esc never hijacks a keypress outside a turn. A compaction joins the
+  // gate (Esc cancels a runaway `/compact`), which is why `compacting` is in
+  // the DEPS too: without it the listener is never attached at idle and Esc
+  // does nothing while compacting.
+  //
+  // KNOWN COSMETIC CONSEQUENCE (deliberate, not fixed here): `ComposerRow`
+  // closes the `?`/`@`/`#` picker on Esc WITHOUT stopping propagation, so now
+  // that the window listener can be attached while compacting, one Esc both
+  // dismisses an open picker AND cancels the compaction. That is the
+  // pre-existing shape during a turn — the fix belongs to the composer's key
+  // handling, not to this gate.
   useEffect(() => {
-    if (!inTurn || !activeSessionId) return;
+    if ((!inTurn && compacting === undefined) || !activeSessionId) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         void cancelSession(activeSessionId);
@@ -392,7 +419,7 @@ export default function ChatStream() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [inTurn, activeSessionId]);
+  }, [inTurn, activeSessionId, compacting]);
   // Session-change guard: `ChatStream` is one long-lived component (no
   // `key`), so `attachments` would otherwise survive a switch to another
   // session — images staged in session A (image-capable) could be sent to
@@ -676,6 +703,37 @@ export default function ChatStream() {
       // too-many-matches note".
       return { rows, matched: hits.length, live: true };
     }
+    // `/` is a **Composer command** (ADR 0044) — the fourth prefix on this
+    // picker and the third semantics: a command row is CONSUMED on send, it
+    // expands nothing and reaches no Agent. The arm MUST come before the
+    // `prefix === "#" ? …` chain below, whose fall-through is `skills.map(…)`: a
+    // `/` token that reached it would list every skill (an empty `/` query
+    // matches every name). And the rows are built HERE rather than inside that
+    // chain, because the chain ends in a shared case-INSENSITIVE name-SUBSTRING
+    // filter — routing commands through it would silently replace the EXACT,
+    // case-sensitive `startsWith` the grammar uses with a fuzzy match, and
+    // `/COMP` would offer a row the dispatcher then refuses to run.
+    // `startsWith` on the RAW `query` is therefore the one filter a command row
+    // gets — NOT `activeRemainder`, which is `""` for any non-`?` prefix and
+    // would list every command whatever the user typed.
+    if (prefix === "/") {
+      const rows: MentionRow[] = composerCommands
+        .filter((c) => c.name.startsWith(query))
+        .map((c) => ({
+          // The `/` ON THE KEY keeps a command from colliding with a skill of
+          // the same name (a `?` row does the same thing for the same reason).
+          // `description` is required by `MentionRow`, and a command has one.
+          key: `/${c.name}`,
+          prefix: "/" as const,
+          name: c.name,
+          description: c.description,
+        }));
+      // Selection needs NO new code: `selectMention`'s final branch already
+      // inserts `${row.prefix}${row.name.toLowerCase()} ` — `/compact ` — and
+      // `setPicker(null)` ends the token, so the next Enter is a send. Pinned by
+      // a test rather than implemented twice.
+      return { rows, matched: rows.length, live: true };
+    }
     const rows: MentionRow[] =
       prefix === "#"
         ? mcpCatalog.map((s) => ({
@@ -879,6 +937,45 @@ export default function ChatStream() {
     sendingRef.current = true;
     try {
       setError(null);
+      // ── A **Composer command** is consumed HERE and goes no further (ADR
+      // 0044): no `addUserMessage`, no `beginTurn`, no `sendPrompt`, no
+      // `turnCompleted`. ADR 0031's byte-identity contract is deliberately
+      // narrower than "nothing in the draft is rewritten" — it governs text that
+      // IS SENT, and this sends nothing.
+      //
+      // TWO PLACEMENT RULES, both load-bearing:
+      //  • INSIDE the `try`, not before it. `send()` ends in a
+      //    `finally { sendingRef.current = false }`, so an early `return` above
+      //    the `try` would leave the ref stuck `true` and silently break EVERY
+      //    later send — the composer would look alive and never fire.
+      //  • BEFORE the `if (!isLive)` auto-resume block below. A command that
+      //    fell through it would RESUME a stored session purely to compact it —
+      //    the exact flow ADR 0044 rejects — and would then make
+      //    `compact_session` report the session LIVE, so the non-live answer
+      //    below could never happen. The order is the feature.
+      // Because it also precedes the FileReader block, staged attachments are
+      // left staged and unsent: a Composer command is not a prompt.
+      const command = parseComposerCommand(rawText);
+      if (command) {
+        setDraft("");
+        if (command.name === "compact") {
+          // `args` are the user's extra summary instructions; an argument-less
+          // `/compact` is `null`, NOT `""` (see `compactSession`). `false` is the
+          // not-live answer, not an error, and this line is its only feedback —
+          // a silent no-op would look like a dead button.
+          const live = await compactSession(
+            activeSessionId,
+            command.args || null,
+          );
+          if (!live) {
+            addSystemLine(
+              activeSessionId,
+              "Nothing to compact — this session is not open.",
+            );
+          }
+        }
+        return;
+      }
       // Auto-resume a stored (non-live) session before sending. A non-resumable
       // stored session can't be sent to; a failed resume aborts (error already set).
       if (!isLive) {
@@ -1342,6 +1439,7 @@ export default function ChatStream() {
       <WorkingIndicator
         agentState={agentState}
         workingOrInTurn={workingOrInTurn}
+        compacting={compacting}
         spinnerStyle={spinnerStyle}
         quip={quip}
       />

@@ -136,7 +136,7 @@ export type ToolCallContent =
   | { type: "diff"; path: string; oldText?: string | null; newText: string };
 
 /**
- * A `session/update` notification body. The six update types the desktop
+ * A `session/update` notification body. The seven update types the desktop
  * handles are modelled; anything else (unknown/future types) falls through
  * to the reducer's `default` branch and is ignored (forward-compat).
  *
@@ -179,6 +179,13 @@ export type AcpSessionUpdate =
       usedTokens: number;
       /** The session model's context window (tokens). */
       windowTokens: number;
+    }
+  | {
+      sessionUpdate: "compaction_update";
+      /** True while a compaction runs; false when it ends (any outcome). */
+      active: boolean;
+      /** "manual" | "threshold" | "overflow" (ADR 0045's vocabulary). */
+      reason: string;
     };
 
 export interface SessionUpdatePayload {
@@ -621,6 +628,28 @@ export async function sendPrompt(
   images?: ImageRef[],
 ): Promise<StopReason> {
   return invoke<StopReason>("send_prompt", { sessionId, text, images: images ?? [] });
+}
+
+/**
+ * Compact a session NOW — the `/compact` **Composer command** (ADR 0044), the
+ * one control command the Client consumes instead of sending. The command never
+ * reaches the Agent, so this invoke is its only route in.
+ *
+ * `false` is the NOT-LIVE answer, not an error: compacting a stored (non-live)
+ * session is a no-op by design, and the composer turns this one boolean into
+ * its whole one-line explanation. `true` means the frame was actually written.
+ *
+ * `instructions` are the user's extra summary instructions (`/compact <args>`),
+ * `null` when the command stood alone — passed through VERBATIM, and
+ * deliberately NOT normalized the way `sendPrompt` one line above normalizes
+ * its `images` (`?? []`): the Rust parameter is `Option<String>`, so `""` is a
+ * different instruction to the harness than `None`.
+ */
+export async function compactSession(
+  sessionId: string,
+  instructions: string | null,
+): Promise<boolean> {
+  return invoke<boolean>("compact_session", { sessionId, instructions });
 }
 
 export async function closeSession(sessionId: string): Promise<void> {

@@ -6,7 +6,8 @@ import type { BrailleLoaderVariant } from "../../lib/braille-loader";
 
 /**
  * The working indicator pinned above the composer (the braille spinner +
- * the rotating quip, or the waiting line while `blocked`).
+ * the rotating quip, the `Compacting` line while a compaction runs, or the
+ * waiting line while `blocked`).
  *
  * Its own component because it sits BETWEEN the error line and the composer
  * (a different tree position from the `fixed` modals), so the two pieces of
@@ -18,11 +19,14 @@ import type { BrailleLoaderVariant } from "../../lib/braille-loader";
 export function WorkingIndicator({
   agentState,
   workingOrInTurn,
+  compacting,
   spinnerStyle,
   quip,
 }: {
   agentState: "working" | "idle" | "blocked" | undefined;
   workingOrInTurn: boolean;
+  /** The active session's in-flight compaction reason (ADR 0045), or `undefined` when none runs. */
+  compacting?: string;
   spinnerStyle: BrailleLoaderVariant;
   quip: string;
 }) {
@@ -35,9 +39,14 @@ export function WorkingIndicator({
   // loader — both would render otherwise). The `-mb-2` pulls the row
   // a few px down so it hugs the composer (the composer's `m-3` top
   // margin minus 8px).
+  //
+  // THE GATE WIDENS FOR `compacting`: an IDLE compaction (the `/compact`
+  // command, ADR 0045) emits no `turn_start`/`agent_settled`, so neither
+  // `agentState === "blocked"` nor `workingOrInTurn` holds — without this
+  // term the branch below could never render.
   return (
     <>
-      {agentState === "blocked" || workingOrInTurn ? (
+      {agentState === "blocked" || compacting !== undefined || workingOrInTurn ? (
         <div
           className="-mb-2 flex items-center gap-2 px-4 py-1.5"
           data-testid="working-indicator"
@@ -46,6 +55,23 @@ export function WorkingIndicator({
             <p className="text-ui-sm text-foreground-subtle">
               Waiting for your input…
             </p>
+          ) : compacting !== undefined ? (
+            // One label for all three reasons (`manual` / `threshold` /
+            // `overflow`) is the product decision: what the user needs to
+            // know is that the context is being rewritten, not why. The
+            // variant is an OVERRIDE — `pulse`, not the settings'
+            // `spinnerStyle`: this wait is a different kind of work, and
+            // the quip is deliberately absent (the quips are about the
+            // agent thinking, which it is not).
+            <>
+              <BrailleLoader
+                variant="pulse"
+                speed="normal"
+                fontSize={14}
+                label="Compacting"
+              />
+              <p className="text-ui-sm text-foreground-subtle">Compacting</p>
+            </>
           ) : (
             <>
               <BrailleLoader

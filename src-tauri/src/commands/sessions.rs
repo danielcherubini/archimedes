@@ -166,6 +166,20 @@ pub async fn cancel_session(
     state.cancel_session(&session_id).await
 }
 
+/// Compact a session NOW (the `/compact` Composer command — ADR 0044). The
+/// command is intercepted by the Client and NEVER reaches the Agent, so this is
+/// its only route in. `Ok(false)` = nothing ran: a session that is not live (a
+/// stored one) is a NO-OP, not an error. `instructions` are the user's extra
+/// summary instructions (`/compact <args>`).
+#[tauri::command]
+pub async fn compact_session(
+    state: State<'_, Arc<SessionManager>>,
+    session_id: String,
+    instructions: Option<String>,
+) -> Result<bool, crate::agent::SessionError> {
+    state.compact_session(&session_id, instructions).await
+}
+
 /// The stalled-session query (the frontend's banner query — ADR 0025):
 /// a Worker crash marks the session STALLED (the Supervisor's `stalled`
 /// registry); the `session-stalled` event is the PUSH, this is the PULL

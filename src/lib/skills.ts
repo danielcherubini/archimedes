@@ -269,8 +269,10 @@ export type MentionKind = "skill" | "agent" | "mcp";
 /** The composer's picker prefixes. `$`/`@`/`#` are **Mention**s (they expand
  *  into a block on send); `?` is **File completion**, which expands NOTHING
  *  and only inserts a path — the three share a picker, not a semantics
- *  (ADR 0031 vs ADR 0033). */
-export type ComposerPrefix = "$" | "@" | "#" | "?";
+ *  (ADR 0031 vs ADR 0033). `/` is a **Composer command**: it shares the picker
+ *  too, and is CONSUMED on send — no user row, no prompt, nothing expanded
+ *  (ADR 0044). Four prefixes, three semantics, ONE picker. */
+export type ComposerPrefix = "$" | "@" | "#" | "?" | "/";
 
 /**
  * The `@` mention regex (an agent definition): a leading whitespace or
@@ -296,17 +298,18 @@ export interface MentionCatalogs {
  * The active picker token at the caret (generalizes `activeSkillToken`):
  * the span between the nearest preceding whitespace (or start) and the caret.
  * Returns `{ prefix, remainder, start }` when the span starts with one of the
- * four prefixes — `remainder` is the token's remainder AFTER the prefix (a
- * bare `$`/`@`/`#` glyph is `""`; a bare `?` is NOT a token at all), `start`
+ * five prefixes — `remainder` is the token's remainder AFTER the prefix (a
+ * bare `$`/`@`/`#`/`/` glyph is `""`; a bare `?` is NOT a token at all), `start`
  * is the prefix's index in the string — else `null` (no active token: the span
  * doesn't start with a prefix, or it contains a character that can't be part
- * of a token, e.g. uppercase for a Mention — the regex `[a-z0-9-]*$` simply
- * won't reach the caret).
+ * of a token, e.g. uppercase for a Mention or a Composer command — the regex
+ * `[a-z0-9-]*$` simply won't reach the caret).
  * (`$` keeps the SAME live-caret boundary as `activeSkillToken` — the
  * boundary-free-left applies to the EXPANSION regex only.)
  *
- * The `?` glyph is matched by TWO shapes, tried after the Mention shape: the
- * out-of-Space absolute one (ADR 0035) and then the relative Space one
+ * The `?` glyph is matched by TWO shapes, tried after the Mention shape AND
+ * after the `/` Composer-command shape (ADR 0044): the out-of-Space absolute
+ * one (ADR 0035) and then the relative Space one
  * (ADR 0033). The return shape is UNCHANGED by that — both file branches yield
  * `prefix: "?"`, and the caller derives the mode from `remainder` via
  * `isOutsideSpaceQuery`. Adding a mode field here would be the wrong move: the
@@ -330,6 +333,21 @@ export function activeMentionToken(
       remainder: m[2]!.slice(1),
       start: (m.index ?? 0) + m[1]!.length,
     };
+  }
+  // The `/` Composer-command token (ADR 0044) — the SAME shape as the Mention
+  // one above on purpose: the `(^|\s)` left boundary `@`/`#` require, and the
+  // Mention charset (lowercase + hyphen), so a command name is matched EXACTLY
+  // the way a Mention name is and `/COMPACT` forms no more of a token than
+  // `$DEBUG` does. ORDER IS LOAD-BEARING: this sits AFTER the Mention shape
+  // (which cannot match a `/` glyph anyway) and BEFORE the two `?` shapes,
+  // because the out-of-Space `?` shape ADMITS SPACES and would otherwise claim
+  // the whole draft of `"?~/notes /comp"`. That precedence is ACCEPTED and
+  // pinned in `skills.test.ts`: it is the documented last-token-wins rule
+  // reading the span under the caret. It cannot eat a real File token — `?` is
+  // not a `(^|\s)` boundary, so `"?/etc/ho"` is still one `?` token.
+  const c = before.match(/(^|\s)(\/[a-z0-9-]*)$/);
+  if (c) {
+    return { prefix: "/", remainder: c[2]!.slice(1), start: (c.index ?? 0) + c[1]!.length };
   }
   const f = before.match(FILE_ABSOLUTE_TOKEN_RE) ?? before.match(FILE_TOKEN_RE);
   if (!f) return null;

@@ -1294,6 +1294,58 @@ impl SessionManager {
         }
         Ok(())
     }
+
+    /// Compact a session NOW (the `/compact` Composer command — ADR 0044).
+    /// The frame goes to the session's Worker, which applies it on the loop's
+    /// CONTROL channel when the loop is IDLE (the composer is locked during a
+    /// turn, so a hand-triggered compaction is always an idle action).
+    ///
+    /// The return is "the command was delivered", not "the transcript shrank":
+    /// the outcome rides the event stream (`compaction_start` /
+    /// `compaction_end`). A session that is NOT live (a stored session) is a
+    /// NO-OP returning `Ok(false)` — resuming a session in order to compact it
+    /// is a larger flow than the command is worth, and the resume's own
+    /// re-estimate is what reveals whether compaction is even needed.
+    ///
+    /// `cancel_requested` is deliberately NOT touched: `send_prompt` clears it
+    /// and the router reads it only while a turn slot is occupied, so an idle
+    /// compaction that set it would map the NEXT settle to `Cancelled`.
+    pub async fn compact_session(
+        &self,
+        session_id: &str,
+        instructions: Option<String>,
+    ) -> Result<bool, SessionError> {
+        // The `WorkerManager` (the late-wire) — the frame's only route.
+        let wm = self.worker_manager.get().cloned().ok_or_else(|| {
+            SessionError::Io("the session's WorkerManager is not attached".to_string())
+        })?;
+        let is_live = self
+            .live
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains_key(session_id);
+        if !is_live {
+            // A stored (non-live) session: a no-op, never an error.
+            return Ok(false);
+        }
+        let Some(handle) = wm.handle_for(session_id) else {
+            // `live` but no Worker (it is gone) — the frame cannot be sent.
+            return Err(SessionError::UnknownSession {
+                id: session_id.to_string(),
+            });
+        };
+        // The `Ok(true)` means the frame WAS sent (finding 12's precedent, the
+        // `set_config_option` mirror-on-success rule): a failed send (the
+        // Worker died / the pipe closed) is the caller's error, never a
+        // reported success.
+        handle
+            .send_compact(instructions)
+            .map_err(|e| SessionError::Command {
+                error: format!("the session's Worker is not running; the compaction could not be requested: {e}"),
+            })?;
+        Ok(true)
+    }
+
     /// Set a session config option (the model or the thinking level) on a
     /// live session.
     ///
@@ -3074,5 +3126,58 @@ mod session_tests {
         assert!(!refreshed.models.iter().any(|m| m.id == "v1"));
         server.abort();
         server2.abort();
+    }
+
+    /// ADR 0044: `/compact` on a session that is NOT live (a stored session)
+    /// is a NO-OP, not an error — resuming a session in order to compact it is
+    /// a larger flow than the command is worth. `Ok(false)` = "nothing ran".
+    #[tokio::test]
+    async fn compact_session_on_a_non_live_session_is_a_no_op() {
+        let dir = temp_config_dir();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        let (manager, _wm, _db) = build_worker_manager(&dir, native_test_catalog(), &sink);
+        assert!(
+            !manager
+                .compact_session("arch_not_live", None)
+                .await
+                .expect("a stored session is not an error"),
+            "a non-live session compacts nothing (false)"
+        );
+    }
+
+    /// `/compact` on a LIVE session sends the `compact` frame (`Ok(true)` —
+    /// the return is "the frame was sent", not "the transcript shrank": the
+    /// Worker emits the frames) and touches NOTHING else: above all it does
+    /// NOT set `cancel_requested` (`send_prompt` clears it and the router
+    /// reads it only while a turn slot is occupied, so an idle compaction that
+    /// set it would map the NEXT settle to `Cancelled`).
+    #[tokio::test]
+    async fn compact_session_sends_the_frame_and_never_marks_a_cancel() {
+        let dir = temp_config_dir();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        let (manager, _wm, _db) = build_worker_manager(&dir, native_test_catalog(), &sink);
+        let info = manager
+            .start_session(dir.clone(), &sink)
+            .await
+            .expect("the native session started");
+        assert!(
+            manager
+                .compact_session(&info.session_id, Some("keep the tests".to_string()))
+                .await
+                .expect("the live send succeeds"),
+            "the frame was sent to the live session"
+        );
+        let cancel_requested = {
+            let live = manager.live.lock().unwrap_or_else(|p| p.into_inner());
+            live.get(&info.session_id)
+                .map(|l| *l.cancel_requested.lock().unwrap_or_else(|p| p.into_inner()))
+        };
+        assert_eq!(
+            cancel_requested,
+            Some(false),
+            "an idle compaction does not touch the session's cancel flag"
+        );
     }
 }

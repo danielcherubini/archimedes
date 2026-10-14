@@ -8,6 +8,7 @@ import {
   readClipboardImage,
   readFileBytes,
   cancelSession,
+  compactSession,
   listSkills,
   listMcpServersEffective,
   listAgentDefinitionsForSpace,
@@ -149,6 +150,13 @@ vi.mock("../lib/tauri", async () => {
     readClipboardImage: vi.fn().mockResolvedValue(null),
     readFileBytes: vi.fn().mockResolvedValue(null),
     cancelSession: vi.fn().mockResolvedValue(undefined),
+    // The `/compact` Composer command (ADR 0044). MOCKED ON PURPOSE, and not
+    // optional: this factory spreads `importActual`, so an un-mocked
+    // `compactSession` would reach the REAL `invoke` and reject on jsdom's
+    // missing `window.__TAURI_INTERNALS__` — a dispatch test would then "pass"
+    // on the rejection landing in `send()`'s `catch` rather than on the
+    // interception. `true` = "the frame was written" (the live answer).
+    compactSession: vi.fn().mockResolvedValue(true),
     loadHistory: vi.fn().mockResolvedValue([]),
     listSkills: vi.fn().mockResolvedValue([
       {
@@ -226,6 +234,7 @@ function seedLiveSession(): void {
     stopReasons: {},
     closeReasons: {},
     configOptions: {},
+    compacting: {},
   });
 }
 
@@ -401,6 +410,7 @@ beforeEach(() => {
     stopReasons: {},
     closeReasons: {},
     configOptions: {},
+    compacting: {},
   });
   useInteractive.getState().dismissSession("s1");
   usePermissions.getState().dismissSessionPrompts("s1");
@@ -592,6 +602,146 @@ describe("ChatStream", () => {
     expect(
       container.querySelector('[data-testid="working-indicator"]'),
     ).toBeNull();
+  });
+
+  // --- The compaction indicator (ADR 0045): an IDLE compaction has no turn,
+  // so neither `inTurn` nor `agentState` says "working" — the row's render
+  // gate itself had to widen for `compacting`. ---
+
+  it("shows the Compacting row at IDLE while a compaction runs (the widened gate)", () => {
+    seedLiveSession();
+    useSessions.setState({ compacting: { s1: "manual" } });
+    const { container } = render(<ChatStream />);
+    const indicator = container.querySelector(
+      '[data-testid="working-indicator"]',
+    );
+    // The gate: nothing else would render the row here (no turn, idle agent).
+    expect(indicator).toBeTruthy();
+    // The LABEL. Read off the `<p>` rather than `getByText("Compacting")`:
+    // the loader's `sr-only` label is a second match, and its `aria-hidden`
+    // frame span contributes braille glyphs to `textContent`.
+    expect(
+      container.querySelector('[data-testid="working-indicator"] p')
+        ?.textContent,
+    ).toBe("Compacting");
+  });
+
+  it("labels every reason 'Compacting' (one label is the product decision)", () => {
+    for (const reason of ["manual", "threshold", "overflow"]) {
+      seedLiveSession();
+      useSessions.setState({ compacting: { s1: reason } });
+      const { container, unmount } = render(<ChatStream />);
+      expect(
+        container.querySelector('[data-testid="working-indicator"] p')
+          ?.textContent,
+      ).toBe("Compacting");
+      unmount();
+    }
+  });
+
+  it("overrides the user's spinner style with the pulse variant while compacting", () => {
+    seedLiveSession();
+    useSettings.getState().setSettings({
+      ...SETTINGS_FIXTURE,
+      spinnerStyle: "pendulum",
+    });
+    // BOTH a turn in flight AND a compaction: the pulse still wins (the
+    // compaction branch sits above the spinner+quip branch).
+    useSessions.getState().beginTurn("s1");
+    useSessions.setState({ compacting: { s1: "threshold" } });
+    const { container } = render(<ChatStream />);
+    const span = container.querySelector(
+      '[data-testid="working-indicator"] span[aria-hidden="true"]',
+    );
+    // The `pendulum` setting is IGNORED here: a compaction is a different
+    // kind of wait, so this is a variant override, not the user's style.
+    const [w, h] = getVariantGridSize("pulse");
+    expect(span?.textContent).toBe(generateFrames("pulse", w, h).frames[0]);
+  });
+
+  it("does not render the rotating quip while compacting (one line, not two)", () => {
+    seedLiveSession();
+    useSessions.setState({ compacting: { s1: "manual" } });
+    const { container } = render(<ChatStream />);
+    expect(
+      container.querySelectorAll('[data-testid="working-indicator"] p'),
+    ).toHaveLength(1);
+  });
+
+  it("prefers the 'Waiting for your input…' line over Compacting when blocked AND compacting", () => {
+    seedLiveSession();
+    useSessions.setState({ compacting: { s1: "manual" } });
+    useInteractive.getState().applyState("s1", { state: "blocked" });
+    const { container } = render(<ChatStream />);
+    const indicator = container.querySelector(
+      '[data-testid="working-indicator"]',
+    )!;
+    // `blocked` needs an answer NOW — it outranks the spinner.
+    expect(indicator.textContent).toContain("Waiting for your input…");
+    expect(indicator.querySelector("p")?.textContent).toBe(
+      "Waiting for your input…",
+    );
+  });
+
+  it("clears the Compacting row when a coalescing batch carries both frames (a Skipped compaction)", async () => {
+    seedLiveSession();
+    const { container } = render(<ChatStream />);
+    await act(async () => {
+      // The two frames of a `Skipped` compaction in ONE rAF batch: last-wins
+      // leaves it cleared, so no row (deliberate — a stuck row would lock the
+      // composer on a session that already finished).
+      useSessions.getState().applySessionUpdates([
+        { sessionId: "s1", update: { sessionUpdate: "compaction_update", active: true, reason: "threshold" } },
+        { sessionId: "s1", update: { sessionUpdate: "compaction_update", active: false, reason: "threshold" } },
+      ]);
+    });
+    expect(
+      container.querySelector('[data-testid="working-indicator"]'),
+    ).toBeNull();
+  });
+
+  it("disables the send button and no-ops Enter while compacting (the harness is one-turn-at-a-time)", () => {
+    seedLiveSession();
+    render(<ChatStream />);
+    const sendButton = screen.getByRole("button", { name: "Send" });
+    const textarea = screen.getByRole("textbox");
+    // Idle → enabled (sanity: the compaction has not started yet).
+    fireEvent.change(textarea, { target: { value: "hi" } });
+    expect(sendButton.hasAttribute("disabled")).toBe(false);
+    act(() => {
+      useSessions.setState({ compacting: { s1: "manual" } });
+    });
+    // The send is dead for the whole compaction (a prompt now would be
+    // REJECTED by `send_prompt`), while the draft survives for when it ends.
+    expect(sendButton.hasAttribute("disabled")).toBe(true);
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("Esc while compacting cancels the session (the Esc listener attaches at idle too)", async () => {
+    seedLiveSession();
+    render(<ChatStream />);
+    // No turn in flight — the effect's gate had to widen for `compacting`,
+    // or the listener would never be attached and Esc would do nothing.
+    act(() => {
+      useSessions.setState({ compacting: { s1: "overflow" } });
+    });
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "Escape" });
+    });
+    expect(vi.mocked(cancelSession)).toHaveBeenCalledWith("s1");
+  });
+
+  it("Esc while ANOTHER session compacts does NOT cancel the active one", async () => {
+    seedLiveSession();
+    render(<ChatStream />);
+    act(() => {
+      useSessions.setState({ compacting: { other: "manual" } });
+    });
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "Escape" });
+    });
+    expect(vi.mocked(cancelSession)).not.toHaveBeenCalled();
   });
 
   it("renders a FileSummaryCard with the turn's diff totals", () => {
@@ -6100,5 +6250,131 @@ describe("ChatStream (a child gate scrolls into view)", () => {
     // parent), and it renders nowhere in the transcript.
     expect(screen.queryByText("Run this command with sudo?")).toBeNull();
     expect(scroll.writes()).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The `/compact` Composer command (ADR 0044).
+//
+// A Composer command is intercepted by the Client: it never becomes a user row,
+// never expands as a Mention, and never reaches the Agent. Every dispatch below
+// CLICKS Send — it never presses Enter. With a token under the caret the picker
+// has a highlighted row, and the picker's keydown branch intercepts Enter to
+// SELECT that row (inserting `/compact `), exactly as it does today for a `?` or
+// `$` token. That is the accepted, pinned behaviour: Enter selects, and the user
+// presses Enter again on a draft whose token has ended.
+// ---------------------------------------------------------------------------
+describe("ChatStream — the /compact Composer command (ADR 0044)", () => {
+  it("the / picker lists the command with its description, and never a skill", async () => {
+    seedLiveSession();
+    render(<ChatStream />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "/" } });
+    // The command row, with the description on its secondary line.
+    expect(await screen.findByText("compact")).toBeTruthy();
+    expect(screen.getByText("Summarize the older context now")).toBeTruthy();
+    // The `else: skills.map(…)` fall-through trap: without an explicit `/` arm
+    // BEFORE the Mention chain, an empty `/` query would list EVERY skill.
+    expect(screen.queryByText("debug")).toBeNull();
+    expect(screen.queryByText("beta")).toBeNull();
+  });
+
+  it("selecting the command row inserts `/compact ` (selectMention's existing fall-through)", async () => {
+    seedLiveSession();
+    render(<ChatStream />);
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "/comp" } });
+    await screen.findByText("compact");
+    textarea.setSelectionRange(5, 5);
+    // Enter is the PICKER's key here, not the send key — and nothing dispatches.
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(
+      "/compact ",
+    );
+    expect(compactSession).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    // The trailing space ends the token, so the picker is gone and the next
+    // Enter is a send.
+    expect(screen.queryByText("compact")).toBeNull();
+  });
+
+  it("/compact dispatches compact_session with null instructions and sends nothing", async () => {
+    seedLiveSession();
+    render(<ChatStream />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "/compact" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(compactSession).toHaveBeenCalledWith("s1", null));
+    // Consumed, not sent: no prompt, no user row, no turn opened.
+    expect(sendPrompt).not.toHaveBeenCalled();
+    const messages = useSessions.getState().messages["s1"] ?? [];
+    expect(messages.some((m) => m.kind === "user")).toBe(false);
+    expect(useSessions.getState().inTurn["s1"]).toBeUndefined();
+    // The draft is cleared, like any send.
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("/compact <args> reaches compact_session as the instructions", async () => {
+    seedLiveSession();
+    render(<ChatStream />);
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "/compact keep the tests" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(compactSession).toHaveBeenCalledWith("s1", "keep the tests"),
+    );
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("a non-live answer (false) adds ONE system-style line with its own messageId", async () => {
+    seedLiveSession();
+    vi.mocked(compactSession).mockResolvedValueOnce(false);
+    render(<ChatStream />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "/compact" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(compactSession).toHaveBeenCalled());
+    await flush();
+    const messages = useSessions.getState().messages["s1"] ?? [];
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      kind: "agent-text",
+      text: "Nothing to compact — this session is not open.",
+    });
+    // Its OWN id (`client:<n>`), never the harness's `"system"` key: the store
+    // appends a same-id chunk onto the trailing agent-text with no separator, so
+    // a shared key would weld two local lines into one bubble.
+    const id = messages[0]!.kind === "agent-text" ? messages[0]!.messageId : "";
+    expect(id.startsWith("client:")).toBe(true);
+    expect(messages.some((m) => m.kind === "user")).toBe(false);
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("/compact on a RESUMABLE stored session does not resume it (ADR 0044)", async () => {
+    // The intercept sits BEFORE `send()`'s auto-resume block on purpose: a
+    // resume would both cost a process spawn and make the session report LIVE,
+    // which is exactly the flow ADR 0044 rejects.
+    seedStoredSession({ loadSession: true });
+    vi.mocked(compactSession).mockResolvedValueOnce(false);
+    render(<ChatStream />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "/compact" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(compactSession).toHaveBeenCalledWith("s1", null));
+    expect(resumeSession).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("an unmatched /name sends BYTE-IDENTICALLY (the File-completion insert fall-through)", async () => {
+    // The fixture is the literal draft a `?` FILE row produces at position 0: the
+    // trigger is consumed and the ABSOLUTE path inserted (ADR 0033/0035). A
+    // command namespace that claims a leading `/` must give this back verbatim.
+    seedLiveSession();
+    render(<ChatStream />);
+    const text = "/etc/hosts has two entries";
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: text } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(sendPrompt).toHaveBeenCalledWith("s1", text));
+    expect(compactSession).not.toHaveBeenCalled();
+    const messages = useSessions.getState().messages["s1"] ?? [];
+    const user = messages.find((m) => m.kind === "user");
+    expect(user?.kind === "user" ? user.text : null).toBe(text);
   });
 });

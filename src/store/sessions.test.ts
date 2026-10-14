@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applySessionUpdate,
   autoSelectActive,
@@ -909,6 +909,297 @@ describe("contextUsage (the context-percentage state)", () => {
       window: 128000,
     });
     expect(useSessions.getState().configOptions["s1"]?.[0]?.id).toBe("model");
+  });
+});
+
+describe("compacting (the working indicator's compaction state)", () => {
+  // The store is global — reset the maps the previous test may have left
+  // behind (and the `afterAll` cleans up AFTER this block, so the next
+  // block's assumption of a fresh store holds).
+  beforeEach(() => {
+    useSessions.setState({
+      compacting: {},
+      contextUsage: {},
+      messages: {},
+      stalled: {},
+    });
+  });
+  afterAll(() => {
+    useSessions.setState({
+      compacting: {},
+      contextUsage: {},
+      messages: {},
+      stalled: {},
+    });
+  });
+
+  const active = (reason: string): AcpSessionUpdate => ({
+    sessionUpdate: "compaction_update",
+    active: true,
+    reason,
+  });
+  const settled = (reason: string): AcpSessionUpdate => ({
+    sessionUpdate: "compaction_update",
+    active: false,
+    reason,
+  });
+
+  it("applySessionUpdates records the reason on an active frame", () => {
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s1", update: active("manual") }]);
+    expect(useSessions.getState().compacting["s1"]).toBe("manual");
+  });
+
+  it("all three reasons are stored verbatim (the indicator's label is reason-independent, the state is not)", () => {
+    for (const reason of ["manual", "threshold", "overflow"]) {
+      useSessions
+        .getState()
+        .applySessionUpdates([{ sessionId: "s1", update: active(reason) }]);
+      expect(useSessions.getState().compacting["s1"]).toBe(reason);
+    }
+  });
+
+  it("an inactive frame clears it (any outcome ends the indicator)", () => {
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s1", update: active("overflow") }]);
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s1", update: settled("overflow") }]);
+    expect(useSessions.getState().compacting["s1"]).toBeUndefined();
+  });
+
+  it("a batch carrying ONLY a compaction_update still updates the store (the changed sentinel)", () => {
+    // The batch reducer ENDS with an early `return state` when nothing
+    // changed. A compaction frame carries no message content and touches no
+    // config/context, so without its OWN sentinel this update would be
+    // silently dropped and the indicator would never appear.
+    const before = useSessions.getState();
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s1", update: active("manual") }]);
+    expect(useSessions.getState()).not.toBe(before);
+    expect(useSessions.getState().compacting["s1"]).toBe("manual");
+  });
+
+  it("a coalescing batch (active then inactive in ONE frame) leaves it cleared (last-wins is deliberate)", () => {
+    // A `Skipped` compaction emits both frames back-to-back, so they can
+    // land in the SAME rAF batch. Last-wins within the batch is what makes
+    // the indicator blink out instead of pinning on forever.
+    useSessions.getState().applySessionUpdates([
+      { sessionId: "s1", update: active("threshold") },
+      { sessionId: "s1", update: settled("threshold") },
+    ]);
+    expect(useSessions.getState().compacting["s1"]).toBeUndefined();
+  });
+
+  it("one session's frame does not touch another session's entry", () => {
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s1", update: active("manual") }]);
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s2", update: active("overflow") }]);
+    expect(useSessions.getState().compacting["s1"]).toBe("manual");
+    expect(useSessions.getState().compacting["s2"]).toBe("overflow");
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s2", update: settled("overflow") }]);
+    expect(useSessions.getState().compacting["s1"]).toBe("manual");
+    expect(useSessions.getState().compacting["s2"]).toBeUndefined();
+  });
+
+  it("the single-frame action sets and clears it too (every frame reaches the frontend through one of the two)", () => {
+    useSessions.getState().applySessionUpdate("s1", active("threshold"));
+    expect(useSessions.getState().compacting["s1"]).toBe("threshold");
+    useSessions.getState().applySessionUpdate("s1", settled("threshold"));
+    expect(useSessions.getState().compacting["s1"]).toBeUndefined();
+  });
+
+  it("a compaction frame adds no message to the transcript", () => {
+    useSessions.setState({
+      messages: { s1: [{ kind: "agent-text", messageId: "m1", text: "hi", at: 1 }] },
+    });
+    const before = useSessions.getState().messages["s1"];
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s1", update: active("manual") }]);
+    expect(useSessions.getState().messages["s1"]).toBe(before);
+  });
+
+  /**
+   * The weld the Rust side avoids by REPLACING the transcript line (ADR 0045).
+   *
+   * Every `system_chunk` carries `messageId: "system"`, and this reducer
+   * APPENDS same-`messageId` chunks with NO separator — so if `compaction_end`
+   * emitted BOTH `"Compaction finished"` and `"Compaction failed: …"`, one
+   * batch would render a single bubble reading
+   * `Compaction finishedCompaction failed: …`. The frame-level Rust test cannot
+   * see that (it inspects each frame on its own), so it is pinned HERE, at the
+   * level the user actually reads.
+   */
+  it("a failed compaction lands as ONE unwelded agent-text line", () => {
+    const failure =
+      "Context overflow: not enough older context to compact — try a larger-context model.";
+    const systemLine = (text: string): AcpSessionUpdate => ({
+      sessionUpdate: "agent_message_chunk",
+      messageId: "system",
+      content: { type: "text", text },
+    });
+
+    // The two frames `compaction_end` emits when it carries an `error_message`.
+    useSessions.getState().applySessionUpdates([
+      { sessionId: "s1", update: systemLine(`Compaction failed: ${failure}`) },
+      { sessionId: "s1", update: settled("overflow") },
+    ]);
+    const messages = useSessions.getState().messages["s1"] ?? [];
+    const texts = messages.filter(
+      (m): m is Extract<Message, { kind: "agent-text" }> => m.kind === "agent-text",
+    );
+    expect(texts).toHaveLength(1);
+    expect(texts[0].text).toBe(`Compaction failed: ${failure}`);
+    expect(texts[0].text).not.toContain("finishedCompaction");
+    expect(texts[0].text).not.toContain("Compaction finished");
+    // The state frame added no message of its own.
+    expect(messages).toHaveLength(1);
+
+    // The hazard itself, spelled out: the two lines in ONE batch DO weld (which
+    // is exactly why `normalize` replaces the success line instead of adding to
+    // it).
+    const welded = applySessionUpdate(
+      applySessionUpdate([], systemLine("Compaction finished"), 1),
+      systemLine(`Compaction failed: ${failure}`),
+      1,
+    );
+    expect(welded).toHaveLength(1);
+    expect((welded[0] as Extract<Message, { kind: "agent-text" }>).text).toContain(
+      "finishedCompaction",
+    );
+  });
+
+  it("markStalled clears it (a stalled session can no longer end its own compaction)", () => {
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s1", update: active("manual") }]);
+    useSessions.getState().markStalled("s1", 123, null);
+    expect(useSessions.getState().compacting["s1"]).toBeUndefined();
+  });
+
+  it("an active frame that was still in flight when the Worker crashed does NOT re-lock it", () => {
+    // The race: `App.tsx` coalesces `session-update` frames into ONE store
+    // write per animation frame, while the `session-stalled` event is applied
+    // immediately. So a frame that arrived BEFORE the crash is applied AFTER
+    // `markStalled` cleared the entry — and with a dead Worker there is no
+    // closing frame coming, so the indicator spins on and the composer stays
+    // locked on a session that can never compact again. An ACTIVE frame for a
+    // stalled session is therefore stale by construction.
+    useSessions.getState().markStalled("s1", 123, "boom");
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s1", update: active("manual") }]);
+    expect(useSessions.getState().compacting["s1"]).toBeUndefined();
+    // The single-frame form takes the same rule (every frame reaches the
+    // frontend through one of the two).
+    useSessions.getState().applySessionUpdate("s1", active("manual"));
+    expect(useSessions.getState().compacting["s1"]).toBeUndefined();
+    // Clearing is never harmful, so an INACTIVE frame is still applied.
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s1", update: settled("manual") }]);
+    expect(useSessions.getState().compacting["s1"]).toBeUndefined();
+    // A RESUMED session (the stall cleared) compacts normally again — the guard
+    // is about the crash, not about the reason.
+    useSessions.setState({ stalled: { s1: undefined } });
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s1", update: active("manual") }]);
+    expect(useSessions.getState().compacting["s1"]).toBe("manual");
+  });
+
+  it("handleSessionClosed clears it, but KEEPS the context usage (unchanged invariant)", () => {
+    useSessions.getState().applySessionUpdates([
+      { sessionId: "s1", update: active("manual") },
+      {
+        sessionId: "s1",
+        update: {
+          sessionUpdate: "context_usage_update",
+          usedTokens: 12000,
+          windowTokens: 128000,
+        },
+      },
+    ]);
+    useSessions.getState().handleSessionClosed("s1", "user");
+    expect(useSessions.getState().compacting["s1"]).toBeUndefined();
+    expect(useSessions.getState().contextUsage["s1"]).toEqual({
+      used: 12000,
+      window: 128000,
+    });
+  });
+});
+
+describe("addSystemLine (a Client-local line in the transcript, ADR 0044)", () => {
+  beforeEach(() => {
+    useSessions.setState({ messages: { s1: [] }, inTurn: {} });
+  });
+  // The store is a module singleton and this file has NO global reset, so a
+  // block that leaves rows behind would leak them into whichever describe
+  // follows (the next one counts messages from zero). Clean up after.
+  afterEach(() => {
+    useSessions.setState({ messages: {}, inTurn: {} });
+  });
+
+  it("appends ONE agent-text message carrying the text", () => {
+    useSessions.getState().addSystemLine("s1", "Nothing to compact — this session is not open.");
+    const messages = useSessions.getState().messages["s1"];
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      kind: "agent-text",
+      text: "Nothing to compact — this session is not open.",
+    });
+  });
+
+  it("gives the line a Client-owned messageId, never the harness's `system` key", () => {
+    useSessions.getState().addSystemLine("s1", "one");
+    const [msg] = useSessions.getState().messages["s1"];
+    expect(msg?.kind).toBe("agent-text");
+    // `case "agent_message_chunk"` APPENDS to a trailing agent-text that carries
+    // the SAME `messageId`, with NO separator. Reusing the harness's `"system"`
+    // id would therefore weld two Client lines — or a Client line onto a real
+    // harness system message — into one run-on bubble.
+    expect(msg?.kind === "agent-text" ? msg.messageId : "").toMatch(/^client:/);
+    expect(msg?.kind === "agent-text" ? msg.messageId : "").not.toBe("system");
+  });
+
+  it("two calls are TWO bubbles with DIFFERENT messageIds (no welding)", () => {
+    useSessions.getState().addSystemLine("s1", "first");
+    useSessions.getState().addSystemLine("s1", "second");
+    const messages = useSessions.getState().messages["s1"];
+    expect(messages).toHaveLength(2);
+    const ids = messages.map((m) => (m.kind === "agent-text" ? m.messageId : ""));
+    expect(ids[0]).not.toBe(ids[1]);
+    expect(messages.map((m) => (m.kind === "agent-text" ? m.text : ""))).toEqual([
+      "first",
+      "second",
+    ]);
+  });
+
+  it("does not weld onto a trailing agent-text the harness itself emitted", () => {
+    useSessions
+      .getState()
+      .applySessionUpdate("s1", chunk("m1", "the agent's own answer"));
+    useSessions.getState().addSystemLine("s1", "a client line");
+    const messages = useSessions.getState().messages["s1"];
+    expect(messages).toHaveLength(2);
+    expect(messages[1]).toMatchObject({ kind: "agent-text", text: "a client line" });
+  });
+
+  it("adds no user message and starts no turn (a command is not a prompt)", () => {
+    useSessions.getState().addSystemLine("s1", "a client line");
+    expect(
+      useSessions.getState().messages["s1"].some((m) => m.kind === "user"),
+    ).toBe(false);
+    expect(useSessions.getState().inTurn["s1"]).toBeUndefined();
   });
 });
 
