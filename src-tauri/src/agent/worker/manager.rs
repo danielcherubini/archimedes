@@ -113,10 +113,16 @@ pub struct SubagentCapture {
     /// The LAST `messageId` with a non-empty capture (updated on every
     /// non-empty capture of a chunk that is NOT harness bookkeeping — the
     /// final-output source; the bookkeeping chunks (`normalize::
-    /// is_bookkeeping_message_id`: the shared `"system"` one-liner key, and
-    /// the `"retract:N"` discard line) are NEVER captured: a failed child
-    /// turn must not settle with a one-liner as its output, and a parent
-    /// must never read a discard line as its child's answer).
+    /// is_bookkeeping_message_id`: the shared one-liner key and the
+    /// `retract:N` discard line, EITHER stamped — `{stamp}:system` /
+    /// `{stamp}:retract:N`, the shape production emits (ADR 0049) — OR bare,
+    /// which is the pre-stamp id shape: the test fixtures that hand-write these
+    /// ids and `TurnState::default()`'s empty stamp) are NEVER captured: a
+    /// failed child turn must not settle with a one-liner as its output, and a
+    /// parent must never read a discard line as its child's answer). NOTE the
+    /// scope: `observe_sink_frame` reads LIVE frames off the Worker's stdout and
+    /// never touches the `messages` table, so the bare shape is accepted for an
+    /// id with NO stamp — not because any stored database is re-read here.
     last_message_id: StdMutex<Option<String>>,
     /// The `message_update` `usage` accumulation (the `inputTokens` /
     /// `outputTokens` fields — the MAX across the frames: a turn's
@@ -1749,7 +1755,10 @@ mod tests {
     /// `session-update` stream — the enveloped `agent_message_chunk`
     /// frames — the last-`messageId`-with-non-empty-text rule (a tool-using
     /// turn does NOT concatenate every intermediate message; the
-    /// `messageId: "system"` bookkeeping chunks are NEVER captured).
+    /// `messageId: "system"` bookkeeping chunks are NEVER captured). NOTE the
+    /// id shape: the bare `"system"` below is FIXTURE INPUT — a frame written
+    /// by hand into `observe_sink_frame`. What production puts on the wire is
+    /// the stamped `{stamp}:system` (ADR 0049); the predicate accepts both.
     #[test]
     fn the_subagent_capture_captures_the_final_text_from_the_sink_frames() {
         let capture = SubagentCapture::new();

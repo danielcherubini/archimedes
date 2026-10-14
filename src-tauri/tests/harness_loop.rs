@@ -224,6 +224,7 @@ async fn build_harness_with_settings(
         SudoDeps::default(),
         retry,
         config_dir.clone(),
+        "t".to_string(),
     );
     let task = tokio::spawn(loop_.run());
     (
@@ -343,7 +344,10 @@ async fn text_response_emits_normalized_events_and_persists_transcript() {
         .map(|(_, p)| p.clone())
         .expect("an agent_message_chunk frame");
     assert_eq!(chunk["update"]["content"]["text"], "Hello");
-    assert_eq!(chunk["update"]["messageId"], "m1");
+    // The stamp is the loop's own (`"t"` — the `AgentLoop::new` arg): the
+    // counter restarts at 1 every incarnation, so the id is only unique WITH
+    // the prefix (ADR 0049).
+    assert_eq!(chunk["update"]["messageId"], "t:m1");
 
     // (3) The provider transcript (the `native_messages` table): the
     // user + assistant messages.
@@ -683,5 +687,30 @@ async fn context_threshold_triggers_compaction() {
         other => panic!("the summary is text, got {other:?}"),
     };
     assert!(text.contains("SUMMARY"), "the summary, got {text:?}");
+
+    // (ADR 0049) The LOOP-level pin for the shared `system` key — the one id
+    // family with NO counter, so a design that only seeded the message counter
+    // would have left these one-liners unstamped and SHARED between two
+    // incarnations. Every compaction line the loop puts on the wire (the
+    // "Compacting context…" announce and the "Compaction finished" /
+    // "Compaction failed: …" result) carries the loop's own stamp (`"t"` — the
+    // `AgentLoop::new` arg).
+    let frames = drain_sink(&mut h.sink_rx);
+    let system_lines: Vec<(&str, &str)> = frames
+        .iter()
+        .filter(|(_, p)| p["update"]["sessionUpdate"] == "agent_message_chunk")
+        .map(|(_, p)| {
+            (
+                p["update"]["content"]["text"].as_str().unwrap_or_default(),
+                p["update"]["messageId"].as_str().unwrap_or_default(),
+            )
+        })
+        .filter(|(text, _)| text.starts_with("Compact"))
+        .collect();
+    assert!(
+        !system_lines.is_empty() && system_lines.iter().all(|(_, id)| *id == "t:system"),
+        "every compaction one-liner rides the stamped shared key `t:system`, \
+         got {system_lines:?}"
+    );
     task.abort();
 }

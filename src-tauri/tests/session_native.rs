@@ -18,6 +18,7 @@ use archimedes_lib::agent::worker::client::WorkerHandle;
 use archimedes_lib::agent::worker::manager::{WorkerFactory, WorkerManager};
 use archimedes_lib::agent::{EventSink, SessionInfo, SessionManager, StopReason};
 use archimedes_lib::storage::Db;
+use archimedes_lib::test_support::is_incarnation_stamp;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
@@ -166,7 +167,9 @@ async fn drain(rx: &mut mpsc::UnboundedReceiver<(String, Value)>) {
 /// store frames are persisted (the `native_messages` transcript + the
 /// `messages` display rows) → `resume_session` (the native branch — NOT
 /// `NotResumable` — the `native_messages` re-read) → the resumed session
-/// operates normally (a fresh `fake_worker` + re-hydrate).
+/// operates normally (a fresh `fake_worker` + re-hydrate) → and the TWO
+/// incarnations' `agent-text` display rows COEXIST, one per Worker life
+/// (ADR 0049).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_session_end_to_end() {
     let dir = temp_config_dir();
@@ -236,6 +239,24 @@ async fn native_session_end_to_end() {
     // (3) The turn: `send_prompt` → the `session-update` `SinkFrame`s flow
     // (re-emitted VERBATIM — the SAME frozen shapes) + `EndTurn` (the
     // `agent_settled` settle).
+    //
+    // Before the turn: the FIRST incarnation's stamp, read off the start
+    // envelope echo (ADR 0049). The resume below spawns a NEW Worker, which
+    // must carry a DIFFERENT stamp.
+    let first_env = wait_for_update(&mut sink_rx, "session_info").await;
+    let stamp_a = first_env["incarnation"]
+        .as_str()
+        .expect("the start envelope echoes its incarnation stamp")
+        .to_string();
+    // The shape is pinned by the SAME predicate the `protocol` unit test uses
+    // (`test_support::is_incarnation_stamp` — six chars, LOWERCASE, and the
+    // `[0-9a-f]` byte set): `len() == 6` + a radix parse also accepts
+    // `A3F9C1`, and lowercase is part of ADR 0049's contract.
+    assert!(
+        is_incarnation_stamp(&stamp_a),
+        "the stamp is six LOWERCASE hex chars, got {stamp_a:?}"
+    );
+
     let reason = manager
         .send_prompt(&sid, "hi".to_string())
         .await
@@ -273,11 +294,41 @@ async fn native_session_end_to_end() {
 
     // (5) Close + RESUME (the native branch — the `native_messages`
     // re-read: NOT `NotResumable`).
+    //
+    // `stamp_a` is the FIRST Worker's stamp; the resume below spawns a SECOND
+    // Worker (life B) which re-reads the transcript and starts its counters
+    // from zero — so both lives mint `:m1` for one `session_id`. What keeps
+    // them apart is the stamp, and the assertion at the END of this test is
+    // what proves it (one display row per incarnation, coexisting).
+
     manager.close_session(&sid).await.expect("close works");
     let resumed = manager
         .resume_session(&sid, dir.clone(), &sink)
         .await
         .expect("a native session resumes from the native_messages table (not NotResumable)");
+
+    // The RESUMED Worker's own stamp (ADR 0049) — two Worker processes
+    // spawned for one Session are two incarnations. Read BEFORE the `drain`
+    // below (which discards everything pending — this frame is already in the
+    // channel). The display KEYS carry this stamp: the `fake_worker` fixture
+    // namespaces its canned `DisplayUpsert` key with the stamp its `StartEnv`
+    // carried, exactly as `normalize` namespaces every id the real harness
+    // mints — so the coexistence assertion at the end of the test is the row-
+    // level counterpart of `normalize_tests`' seam test.
+    let second_env = wait_for_update(&mut sink_rx, "session_info").await;
+    let stamp_b = second_env["incarnation"]
+        .as_str()
+        .expect("the resumed start envelope echoes its incarnation stamp")
+        .to_string();
+    assert!(
+        is_incarnation_stamp(&stamp_b),
+        "the resumed stamp is six LOWERCASE hex chars, got {stamp_b:?}"
+    );
+    assert_ne!(
+        stamp_a, stamp_b,
+        "a resumed Worker is a NEW incarnation and must not inherit the stamp"
+    );
+
     assert_eq!(resumed.session_id, sid);
     assert!(
         resumed.capabilities.get("piSessionFile").is_none(),
@@ -301,6 +352,76 @@ async fn native_session_end_to_end() {
     assert_eq!(
         resumed_chunk["content"]["text"], "canned ",
         "the resumed turn's first canned chunk"
+    );
+
+    // (ADR 0049) TWO INCARNATIONS COEXIST in one display table. Life A (the
+    // first Worker) and life B (the resumed Worker) BOTH counted to `m1` for
+    // the SAME `session_id`, so the display store's
+    // `UNIQUE(session_id, kind, message_key)` sees two DIFFERENT keys and
+    // keeps one row per life. This is what gives the assertion its teeth:
+    // drop the stamp from the key the id-minter builds and life A's
+    // `{stamp_a}:m1` is simply GONE (life B UPSERTs over the one shared row);
+    // make `mint_incarnation` constant and the two lives share one stamp — the
+    // `assert_ne!(stamp_a, stamp_b)` above is what fires first, and the shared
+    // key (hence a 1-row table instead of 2) is what that inequality protects.
+    //
+    // The poll is the house bounded wait (100 × 50 ms — `tests/worker_e2e.rs`):
+    // the resumed turn's `DisplayUpsert` is persisted ASYNCHRONOUSLY, so a
+    // single read could land before life B has written anything.
+    let key_life_a = format!("{stamp_a}:m1");
+    let key_life_b = format!("{stamp_b}:m1");
+    let mut expected_keys = vec![key_life_a.clone(), key_life_b.clone()];
+    expected_keys.sort();
+    let mut agent_text_keys: Vec<String> = Vec::new();
+    for _ in 0..100 {
+        agent_text_keys = db
+            .messages_for(&sid)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.kind == "agent-text")
+            .map(|m| m.message_key.unwrap_or_default())
+            .collect();
+        // Wait for the EXACT set, not just for both keys to appear. Breaking on
+        // the two membership checks would let the compare below run at whatever
+        // instant the second key landed, so a hypothetical third `agent-text`
+        // row would pass or fail depending on whether it had been persisted
+        // yet. Waiting for the whole set makes an extra row fail DETERMINISTICALLY,
+        // after the bounded wait, with the keys printed.
+        let mut seen = agent_text_keys.clone();
+        seen.sort();
+        if seen == expected_keys {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // The two membership checks FIRST, and named per life: when the pair is
+    // not both present, the message has to say WHICH life vanished — A's key
+    // was overwritten and B never wrote are different bugs.
+    assert!(
+        agent_text_keys.contains(&key_life_a),
+        "life A's display row ({key_life_a}) is gone — life B wrote into its \
+         key, so the ids are not namespaced by incarnation; the agent-text \
+         keys are {agent_text_keys:?}"
+    );
+    assert!(
+        agent_text_keys.contains(&key_life_b),
+        "life B's display row ({key_life_b}) never appeared — the resumed \
+         Worker wrote no row of its own; the agent-text keys are \
+         {agent_text_keys:?}"
+    );
+    // And EXACTLY these two rows, nothing else in the `agent-text` family.
+    // Sorted so the comparison is read-order-independent, and an EXACT value
+    // rather than a suffix matcher: `filter(|k| k.ends_with(":m1")).count()
+    // == 2` passed while a THIRD unstamped row (`m1`) sat in the table, and
+    // it could not see an extra `agent-text` row whose key does not end in
+    // `:m1` at all (the repo rule: an id assertion changes to a different
+    // EXACT value, never to `contains` / `ends_with`).
+    agent_text_keys.sort();
+    assert_eq!(
+        agent_text_keys, expected_keys,
+        "two incarnations of one session must hold EXACTLY two `agent-text` \
+         rows — one per Worker life, and no other `agent-text` row in the \
+         table; the agent-text keys are {agent_text_keys:?}"
     );
 
     let _ = manager.close_session(&sid).await;

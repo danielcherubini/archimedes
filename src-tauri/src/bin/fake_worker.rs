@@ -78,7 +78,15 @@ fn emit<W: Write>(stdout: &mut W, frame: &Outbound) {
 /// before the settle signal), and the store frames (the transcript
 /// persistence) land with the message completion — ALSO before
 /// `agent_settled`.
-fn emit_canned_turn<W: Write>(stdout: &mut W, session_id: &str) {
+///
+/// `incarnation` is the stamp this Worker's `StartEnv` carried (ADR 0049). It
+/// namespaces the `DisplayUpsert` `message_key`, so two Worker lives for one
+/// Session write TWO display rows instead of UPSERTing over one key — the
+/// shape the two-incarnation e2e assertion reads.
+/// (The `SubagentCapture` fixture is a SEPARATE concern: the `SinkFrame`
+/// `messageId`s below stay the literal `m1`, because that capture keys on the
+/// frame's id, not on the display row's.)
+fn emit_canned_turn<W: Write>(stdout: &mut W, session_id: &str, incarnation: &str) {
     // The `RpcEvent` stream (the Supervisor's INTERNAL bookkeeping —
     // settle detection, the `SubagentCapture`'s usage, the debug
     // log).
@@ -185,7 +193,7 @@ fn emit_canned_turn<W: Write>(stdout: &mut W, session_id: &str) {
             session_id: session_id.to_string(),
             rows: vec![DisplayRow {
                 kind: "agent-text".to_string(),
-                message_key: "m1".to_string(),
+                message_key: format!("{incarnation}:m1"),
                 payload_json: serde_json::json!({ "text": "canned answer" }),
                 created_at: 1,
             }],
@@ -312,6 +320,10 @@ fn main() {
     // would be unknown when the parent's model is a different provider
     // (e.g. the `ipc` test's seeded `tama/m1`)).
     let mut model_key: Option<String> = None;
+    // The stamp this Worker's `StartEnv` carried (ADR 0049) — the fixture
+    // namespaces its canned display key with it, exactly as the real harness
+    // namespaces every id it mints.
+    let mut incarnation = String::new();
 
     while let Ok(n) = reader.read_line(&mut line) {
         if n == 0 {
@@ -330,6 +342,7 @@ fn main() {
             Inbound::Start(env) => {
                 session_id = Some(env.session_id.clone());
                 model_key = Some(ModelKey::from(&env.model).to_string());
+                incarnation = env.incarnation.clone();
                 // The advertised tool set (the `SubagentCapture` /
                 // wire-convention test input — a `session-update`
                 // `SinkFrame` with the `enabledTools` field — the
@@ -347,7 +360,12 @@ fn main() {
                     "sessionUpdate": "session_info",
                     "enabledTools": env.enabled_tools,
                     "systemPrompt": serde_json::to_value(&env.system_prompt).unwrap(),
-                    "trusted": env.trusted
+                    "trusted": env.trusted,
+                    // The stamp the Worker mints its ids with (ADR 0049) — the
+                    // two-incarnation assertion: the e2e resume test reads the
+                    // echo to prove two Workers for one Session get
+                    // DIFFERENT stamps.
+                    "incarnation": env.incarnation
                 });
                 emit(
                     &mut stdout,
@@ -423,7 +441,7 @@ fn main() {
                 // shorter, so the timeout wins).
                 "__slow__" => {
                     std::thread::sleep(std::time::Duration::from_secs(10));
-                    emit_canned_turn(&mut stdout, &sid);
+                    emit_canned_turn(&mut stdout, &sid, &incarnation);
                 }
                 // The `interactive-event` `SinkFrame` (the `todos_update`
                 // push — the frontend's `useInteractive.applyTodoUpdate`
@@ -542,7 +560,7 @@ fn main() {
                 // The default prompt (the canned turn — the full
                 // event + store-frame + `SinkFrame` stream).
                 _ => {
-                    emit_canned_turn(&mut stdout, &sid);
+                    emit_canned_turn(&mut stdout, &sid, &incarnation);
                 }
             },
             // The `SubagentResult` (the Supervisor's delivery — the

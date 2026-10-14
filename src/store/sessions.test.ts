@@ -566,6 +566,29 @@ describe("applySessionUpdate — message_retracted (ADR 0048)", () => {
       ),
     ).toEqual([before[0], before[1], before[2]]);
   });
+
+  it("drops only the reply of the incarnation the Retraction names (two lives, the same counter value — ADR 0049)", () => {
+    // WHY THIS EXISTS: every other case in this block uses BARE ids, so none of
+    // them could tell an exact comparison from a NORMALISED one. Stripping an
+    // id's `{stamp}:` prefix (or its `#seg` suffix) before comparing looks
+    // harmless against bare ids and is exactly the defect ADR 0049 removes:
+    // two Worker lives of one Session both mint `m1`, so a normalising filter
+    // erases the PREVIOUS incarnation's answer along with the abandoned reply.
+    // ADR 0050 weighed that normalisation and rejected it for the same reason.
+    // So: red for any future change that touches an id before comparing it
+    // (verified — stripping the stamp in the comparison reddens THIS test).
+    const before: Message[] = [
+      { kind: "agent-text", messageId: "a3f9c1:m1", text: "old", at: 1 },
+      { kind: "agent-text", messageId: "bbbbbb:m1", text: "new", at: 2 },
+    ];
+    expect(
+      applySessionUpdate(
+        before,
+        { sessionUpdate: "message_retracted", messageId: "bbbbbb:m1" },
+        3,
+      ),
+    ).toEqual([{ kind: "agent-text", messageId: "a3f9c1:m1", text: "old", at: 1 }]);
+  });
 });
 
 // A Retraction has no row kind of its own: the display store has no DELETE, so
@@ -2060,6 +2083,361 @@ describe("resumeSession (history reload race)", () => {
         msgs.filter((m) => m.kind === "user" && m.text === expanded),
       ).toHaveLength(1);
     });
+
+  it("keeps a user message added while the reload is in flight when a retraction shrinks the transcript (ADR 0050)", async () => {
+    useSessions.setState({
+      activeSessionId: "s1",
+      historySessions: [
+        {
+          sessionId: "s1",
+          cwd: "/x",
+          capabilities: { loadSession: true },
+          archived: false,
+        },
+      ],
+      messages: {
+        s1: [
+          { kind: "user", text: "one", at: 1 },
+          { kind: "agent-text", messageId: "a3f9c1:m1", text: "two", at: 2 },
+        ],
+      },
+    });
+    // The history reload is slow (the resume IPC spawns the agent): it is
+    // still in flight while the Retraction AND the new prompt land.
+    let resolveRows: (rows: MessageRow[]) => void = () => {};
+    vi.mocked(loadHistory).mockImplementationOnce(
+      () => new Promise<MessageRow[]>((r) => (resolveRows = r)),
+    );
+    await useSessions.getState().resumeSession("s1");
+    // The abandoned attempt is retracted (ADR 0048): the transcript SHRINKS
+    // 2 → 1, so every index shifts LEFT.
+    useSessions.getState().applySessionUpdate("s1", {
+      sessionUpdate: "message_retracted",
+      messageId: "a3f9c1:m1",
+    });
+    expect(useSessions.getState().messages.s1).toHaveLength(1);
+    // And the user's next prompt arrives in the SAME window: the array is 2
+    // again — the length alone says "nothing happened", which is exactly the
+    // blind spot of `slice(prior.length)`.
+    useSessions.getState().addUserMessage("s1", "three");
+    expect(useSessions.getState().messages.s1).toHaveLength(2);
+    // The reload settles with ONLY the persisted user row (the retracted
+    // reply was never persisted, and the new prompt postdates the query).
+    resolveRows([
+      {
+        id: 1,
+        sessionId: "s1",
+        kind: "user",
+        messageKey: null,
+        payloadJson: JSON.stringify({ text: "one" }),
+        createdAt: 1,
+      },
+    ]);
+    // Let the fire-and-forget reload's continuation run.
+    await new Promise((r) => setTimeout(r, 0));
+    // The prompt SURVIVES: the merge selects its additions by identity, so a
+    // shrink-then-grow across the await cannot hide the new message (ADR 0050).
+    expect(
+      useSessions
+        .getState()
+        .messages.s1.some((m) => m.kind === "user" && m.text === "three"),
+    ).toBe(true);
+  });
+
+  it("counts an added message that is identical to one already in the snapshot (identity is a COUNTED multiset, not a Set)", async () => {
+    useSessions.setState({
+      activeSessionId: "s1",
+      historySessions: [
+        {
+          sessionId: "s1",
+          cwd: "/x",
+          capabilities: { loadSession: true },
+          archived: false,
+        },
+      ],
+      messages: {
+        s1: [{ kind: "user", text: "again", at: 5 }],
+      },
+    });
+    let resolveRows: (rows: MessageRow[]) => void = () => {};
+    vi.mocked(loadHistory).mockImplementationOnce(
+      () => new Promise<MessageRow[]>((r) => (resolveRows = r)),
+    );
+    await useSessions.getState().resumeSession("s1");
+    // A SECOND `again` with the SAME content AND the same `at` — pushed
+    // directly into the store so `at` is exact (a real `addUserMessage` would
+    // stamp `Date.now()`). Identity (`mergeDedupeKey` + `at`) cannot tell the
+    // two apart, so it is COUNTED: the snapshot has one, the second occurrence
+    // is the new one. A Set-based identity would treat it as "already in the
+    // snapshot" and drop it (verified: degrading the count to a Set reddens
+    // THIS test and only this test).
+    useSessions.setState((s) => ({
+      messages: {
+        ...s.messages,
+        s1: [...s.messages.s1!, { kind: "user", text: "again", at: 5 }],
+      },
+    }));
+    // The persisted `again` is STRICTLY OLDER (`createdAt: 4`, NOT 5) on
+    // purpose: this test is about the IDENTITY selection, and the second gate
+    // — the dedupe against the reloaded rows, which is NOT what is under test
+    // and is unchanged by ADR 0050 — dedupes a `user` message whenever the
+    // matching reloaded row is newer-OR-EQUAL (`reloadedAt < m.at` keeps it).
+    // At `createdAt: 5` that gate would legitimately collapse the pair to one
+    // and this assertion would say nothing about counting.
+    resolveRows([
+      {
+        id: 1,
+        sessionId: "s1",
+        kind: "user",
+        messageKey: null,
+        payloadJson: JSON.stringify({ text: "again" }),
+        createdAt: 4,
+      },
+    ]);
+    await new Promise((r) => setTimeout(r, 0));
+    // BOTH `again` messages survive: the reloaded older one, and the one the
+    // counted identity selected out of the window.
+    const again = useSessions
+      .getState()
+      .messages.s1.filter((m) => m.kind === "user" && m.text === "again");
+    expect(again).toHaveLength(2);
+  });
+
+  it("merges to exactly the reloaded rows when nothing landed during the load (the O(1) fast path)", async () => {
+    // The fast path: `current === prior` proves nothing arrived in the window,
+    // so NO addition is selected and `mergeDedupeKey` is never called. That
+    // matters because its `user` case concatenates every attachment's full
+    // base64 `data` — running it over the WHOLE live snapshot of an
+    // attachment-heavy session on every resume allocates a copy of every
+    // attachment to conclude nothing changed.
+    //
+    // Reference equality is a sound change-detector here because every write
+    // path that adds or removes a message builds a NEW array (the reducer's
+    // arms spread, `addUserMessage` spreads, `finalizeSessionMessages` maps,
+    // and the batch reducer stores only what the pure reducer returned) —
+    // nothing pushes or pops in place. The no-match Retraction below pins that
+    // premise at its source: a store write that changes nothing leaves the
+    // SAME array, so it must not trip the fast path.
+    //
+    // What is pinned: the fast path selects NOTHING. The snapshot holds a live
+    // thought (`a3f9c1:m1`) whose persisted key is `a3f9c1:m1#1`, so content
+    // can never dedupe it — a fast path that handed back the whole snapshot
+    // instead of `[]` would re-append it as a FOURTH message (verified by
+    // mutation: `current === prior ? current : …` reddens HERE and only here).
+    useSessions.setState({
+      activeSessionId: "s1",
+      historySessions: [
+        {
+          sessionId: "s1",
+          cwd: "/x",
+          capabilities: { loadSession: true },
+          archived: false,
+        },
+      ],
+      messages: {
+        s1: [
+          { kind: "user", text: "one", at: 1 },
+          { kind: "agent-text", messageId: "a3f9c1:m1", text: "two", at: 2 },
+          { kind: "agent-thought", messageId: "a3f9c1:m1", text: "think", at: 2 },
+        ],
+      },
+    });
+    let resolveRows: (rows: MessageRow[]) => void = () => {};
+    vi.mocked(loadHistory).mockImplementationOnce(
+      () => new Promise<MessageRow[]>((r) => (resolveRows = r)),
+    );
+    await useSessions.getState().resumeSession("s1");
+    const snapshot = useSessions.getState().messages.s1;
+    // Silence in the window: a Retraction that matches nothing changes neither
+    // the content NOR the array reference.
+    useSessions.getState().applySessionUpdate("s1", {
+      sessionUpdate: "message_retracted",
+      messageId: "deadbe:m9",
+    });
+    expect(useSessions.getState().messages.s1).toBe(snapshot);
+    // The reload settles with the persisted rows for exactly that transcript —
+    // the thought row carries the `#1` segment suffix the live row never had.
+    resolveRows([
+      {
+        id: 1,
+        sessionId: "s1",
+        kind: "user",
+        messageKey: null,
+        payloadJson: JSON.stringify({ text: "one" }),
+        createdAt: 1,
+      },
+      {
+        id: 2,
+        sessionId: "s1",
+        kind: "agent-text",
+        messageKey: "a3f9c1:m1",
+        payloadJson: JSON.stringify({ text: "two" }),
+        createdAt: 2,
+      },
+      {
+        id: 3,
+        sessionId: "s1",
+        kind: "agent-thought",
+        messageKey: "a3f9c1:m1#1",
+        payloadJson: JSON.stringify({ text: "think" }),
+        createdAt: 2,
+      },
+    ]);
+    await new Promise((r) => setTimeout(r, 0));
+    // The transcript is the reloaded rows and nothing else — unchanged in
+    // content, no snapshot message re-appended behind them.
+    expect(useSessions.getState().messages.s1).toEqual([
+      { kind: "user", text: "one", at: 1 },
+      { kind: "agent-text", messageId: "a3f9c1:m1", text: "two", at: 2 },
+      { kind: "agent-thought", messageId: "a3f9c1:m1#1", text: "think", at: 2 },
+    ]);
+  });
+
+  it("duplicates a tool card when a session close finalizes it inside the load window (the third mutator ADR 0050 accepts)", async () => {
+    // The third mutator of the load window (ADR 0050's second consequence):
+    // `handleSessionClosed` runs `finalizeSessionMessages`, which maps every
+    // still-`pending` tool call to `failed`. Resume and then Pause/Close
+    // before `loadHistory` resolves, and that card's `mergeDedupeKey`
+    // (`tool-call|<id>|<title>|<status>` — content-inclusive, so `status` IS
+    // part of the identity) changes in the window: the card is no longer "in
+    // the snapshot", it re-enters `added`, and the `reloadedKeys` gate cannot
+    // catch it either, because the persisted row still carries the status the
+    // WORKER last wrote (`pending` — the close is a frontend-only map, it
+    // never reaches the display store). So the same tool call lands TWICE.
+    //
+    // This is ADR 0050's decision APPLIED, not a defect to fix here: where
+    // identity cannot decide the merge KEEPS the message, because duplication
+    // beats loss. Verified before being pinned — the transcript below is what
+    // the merge actually produced (both cards present, one `pending` from the
+    // reloaded row and one `failed` from the finalized live copy; nothing
+    // dropped). The positional rule this branch replaced could not produce it
+    // — `slice(prior.length)` never re-selected a message that was already in
+    // the snapshot — so pinning it here is what stops a later "fix" dropping
+    // the finalized card instead.
+    useSessions.setState({
+      activeSessionId: "s1",
+      sessions: [
+        {
+          sessionId: "s1",
+          cwd: "/x",
+          capabilities: { loadSession: true },
+          archived: false,
+        },
+      ],
+      messages: {
+        s1: [
+          { kind: "user", text: "one", at: 1 },
+          { kind: "agent-text", messageId: "a3f9c1:m1", text: "two", at: 2 },
+          {
+            kind: "tool-call",
+            id: "t1",
+            title: "Read file",
+            status: "pending",
+            at: 2,
+          },
+        ],
+      },
+    });
+    let resolveRows: (rows: MessageRow[]) => void = () => {};
+    vi.mocked(loadHistory).mockImplementationOnce(
+      () => new Promise<MessageRow[]>((r) => (resolveRows = r)),
+    );
+    await useSessions.getState().resumeSession("s1");
+    // Pause/Close INSIDE the window: the pending card becomes a failed one.
+    useSessions.getState().handleSessionClosed("s1", "user");
+    // The reload settles with the persisted rows — the tool-call row still
+    // reads `pending`, because nothing about a frontend close is persisted.
+    resolveRows([
+      {
+        id: 1,
+        sessionId: "s1",
+        kind: "user",
+        messageKey: null,
+        payloadJson: JSON.stringify({ text: "one" }),
+        createdAt: 1,
+      },
+      {
+        id: 2,
+        sessionId: "s1",
+        kind: "agent-text",
+        messageKey: "a3f9c1:m1",
+        payloadJson: JSON.stringify({ text: "two" }),
+        createdAt: 2,
+      },
+      {
+        id: 3,
+        sessionId: "s1",
+        kind: "tool-call",
+        messageKey: "t1",
+        payloadJson: JSON.stringify({
+          toolCallId: "t1",
+          title: "Read file",
+          status: "pending",
+        }),
+        createdAt: 2,
+      },
+    ]);
+    await new Promise((r) => setTimeout(r, 0));
+    // TWO cards for one tool call: the reloaded row first, the finalized live
+    // copy appended after. Nothing else changed, and nothing was lost.
+    expect(useSessions.getState().messages.s1).toEqual([
+      { kind: "user", text: "one", at: 1 },
+      { kind: "agent-text", messageId: "a3f9c1:m1", text: "two", at: 2 },
+      { kind: "tool-call", id: "t1", title: "Read file", status: "pending", at: 2 },
+      { kind: "tool-call", id: "t1", title: "Read file", status: "failed", at: 2 },
+    ]);
+  });
+
+  it("keeps a tool call that ARRIVES in the window exactly once when the close finalizes it (the duplicate needs a lagging row, not the close alone)", async () => {
+    // The control for the test above: `finalizeSessionMessages` on its own
+    // duplicates nothing. A tool call whose `tool_call` frame arrives DURING
+    // the window has no persisted row at all (the query read before it), so
+    // there is no reloaded key to mismatch — it is kept once, as the finalized
+    // (`failed`) card. The duplicate above is therefore the status change
+    // against a row that LAGS it, not a close inside the window per se.
+    useSessions.setState({
+      activeSessionId: "s1",
+      sessions: [
+        {
+          sessionId: "s1",
+          cwd: "/x",
+          capabilities: { loadSession: true },
+          archived: false,
+        },
+      ],
+      messages: { s1: [{ kind: "user", text: "one", at: 1 }] },
+    });
+    let resolveRows: (rows: MessageRow[]) => void = () => {};
+    vi.mocked(loadHistory).mockImplementationOnce(
+      () => new Promise<MessageRow[]>((r) => (resolveRows = r)),
+    );
+    await useSessions.getState().resumeSession("s1");
+    useSessions.getState().applySessionUpdate("s1", {
+      sessionUpdate: "tool_call",
+      toolCallId: "t9",
+      title: "Run command",
+      status: "pending",
+    });
+    useSessions.getState().handleSessionClosed("s1", "user");
+    resolveRows([
+      {
+        id: 1,
+        sessionId: "s1",
+        kind: "user",
+        messageKey: null,
+        payloadJson: JSON.stringify({ text: "one" }),
+        createdAt: 1,
+      },
+    ]);
+    await new Promise((r) => setTimeout(r, 0));
+    const msgs = useSessions.getState().messages.s1;
+    expect(msgs).toHaveLength(2);
+    expect(msgs[1]).toMatchObject({
+      kind: "tool-call",
+      id: "t9",
+      status: "failed",
+    });
+  });
 });
 
 describe("archivedSessions (sticky, ADR 0016)", () => {
