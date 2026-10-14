@@ -10,7 +10,7 @@ NOT fixed by it. §3 was found in review of the PR that shipped it, and is not
 fixed there either — for the reason stated in it. None is a blocker; all are
 recorded so the next reader finds a decision rather than an oversight.
 
-**Disposition (2026-10-14).** §1 is folded into `session-incarnation.md` (ADR 0050) and §3 is RETIRED by ADR 0049 — resolved before it was ever planned as its own change. §2 stays open. §4 is the stalled tail and §5 `openSession`'s reload race, both written down while planning that spec (the latter found reviewing its plan). §6 (the bare `default` fallback key) and §7 (`tool-call` rows are the one display-key family ADR 0049 does not scope) are the two residues the review of that branch named: both are **recorded on purpose, not open work** — §6 deliberately left bare on both sides, §7 a pre-existing hazard rather than an incarnation one.
+**Disposition (2026-10-14).** §1 is folded into `session-incarnation.md` (ADR 0050) and §3 is RETIRED by ADR 0049 — resolved before it was ever planned as its own change. §2 stays open. §4 is the stalled tail and §5 `openSession`'s reload race, both written down while planning that spec (the latter found reviewing its plan). §6 (the bare `default` fallback key) and §7 (`tool-call` rows are the one display-key family ADR 0049 does not scope) are the two residues the review of that branch named: both are **recorded on purpose, not open work** — §6 deliberately left bare on both sides, §7 a pre-existing hazard rather than an incarnation one. §8 is the third mutator ADR 0050's merge accepts, named in review of the same branch: also **accepted, not open work**, with its alternative recorded.
 
 Citations in this document name **symbols, not line numbers** — `applySessionUpdate`'s chunk arms, the pump's `Lagged` arm — because line numbers re-drift on every commit and a stale one points a reader at the wrong code, which this document did once.
 
@@ -249,3 +249,47 @@ but that splits the two sides exactly the way §6 refuses to, because the live
 reducer keys the card on the frame's `toolCallId`. The honest fix is the same
 both-sides rule: get the stamp (or any per-life token) to the Client, then key
 AND match with it.
+
+## 8. A Close inside `resumeSession`'s load window duplicates a tool card — the third mutator ADR 0050 accepts
+
+**Problem.** `handleSessionClosed` runs `finalizeSessionMessages`, which maps
+every still-`pending` tool call to `failed`. **Resume** a session and then
+**Pause**/Close it before `loadHistory` resolves, and that card's
+`mergeDedupeKey` (`tool-call|<id>|<title>|<status>` — `status` is part of the
+identity) changes INSIDE the window: the card is no longer "in the snapshot",
+it re-enters `added`, and the `reloadedKeys` gate does not catch it either,
+because the persisted row still carries the status the WORKER last wrote
+(`finalizeSessionMessages` is a frontend-only map — nothing about a close ever
+reaches the display store). The merged transcript holds TWO cards for one tool
+call: the reloaded row at `pending` — an open spinner for a session the user
+just closed — and the finalized live copy at `failed`. Verified on the store
+before being recorded, and pinned by `sessions.test.ts`'s "duplicates a tool
+card when a session close finalizes it inside the load window (the third
+mutator ADR 0050 accepts)".
+
+**Why deferred — this is ADR 0050's decision APPLIED, not an oversight.**
+Where identity cannot decide, the merge KEEPS the message: a duplicated card is
+annoying, a lost message is data loss, and this window is exactly the case the
+ADR chose duplication for. The positional rule the branch replaced could not
+produce this duplicate (it never re-selected a message that was already in the
+snapshot), but on the same window it produced the opposite error — silently
+truncating the streamed tail — so removing the duplicate by going back to
+position, or by dropping the finalized copy, re-opens the worse half of the
+trade. The scope is also narrow in a way the other two mutators are not: it
+needs a Close in the load window AND a persisted row that LAGS the live card.
+A tool call whose `tool_call` frame merely arrives during the window is kept
+exactly once (the control test, in the same `describe`), because with no
+reloaded row there is no key to mismatch.
+
+**Sketch — the alternative, if the duplicate ever proves unacceptable.** Gate
+`fresh` on ID-EXISTENCE rather than whole-key existence for the id-bearing
+kinds: drop an added `tool-call` when a reloaded row carries the same `id`,
+whatever its `title` / `status`. That removes this duplicate and every
+`tool_call_update` duplicate in the window — by CHOOSING loss over duplication
+for precisely those kinds (the kept copy is the lagging persisted one), which
+is a decision wanting its own ADR rather than a comment to edit. It must NOT
+reach `user` messages (no id at all, so nothing to gate on) or
+`agent-text` / `agent-thought`, whose same-`messageId` append during the window
+is the streamed tail ADR 0050 refuses to truncate. The change is not silent:
+the pinned test above reddens the moment `fresh` is gated on the tool-call id
+(verified by mutation — that gate reddens it and nothing else in the suite).

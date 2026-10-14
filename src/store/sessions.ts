@@ -165,9 +165,9 @@ export function applySessionUpdate(
       // (ADR 0048) The attempt behind this messageId was abandoned and its
       // reply retried under the SAME id (one message_start per message), so the
       // partial text must not weld onto the retry. Live thought messages carry
-      // this bare id too (the `#n` suffix is a persistence detail), so this
-      // clears thoughts with the text. Bookkeeping lines are never the
-      // abandoned id, so they survive: since ADR 0049 they read
+      // this id WITHOUT its `#seg` suffix too (the `#seg` is a persistence
+      // detail), so this clears thoughts with the text. Bookkeeping lines are
+      // never the abandoned id, so they survive: since ADR 0049 they read
       // `{stamp}:system` / `{stamp}:retract:N`, and the bare `system` /
       // `retract:N` shape is what a transcript written BEFORE ADR 0049 still
       // carries — both shapes reach this filter, which compares ids verbatim
@@ -283,14 +283,24 @@ export function discardSessionMessages(sessionId: string): void {
 }
 
 /**
- * A stable key for deduping a merge of reloaded history rows with locally
- * added messages (the resume race above): an id when one exists on both
- * sides (`agent-text`/`agent-thought` `messageId`, `tool-call` `id`),
- * otherwise role + content equality. A `user` message has NO id on either
- * side (the local copy and the `record_message`d row), so it matches on
- * text + images; the image entries are compared field-by-field in a FIXED
- * order so key-order differences in the two constructions never break the
- * match. A `diff` matches on path + patch.
+ * THE identity rule for a transcript message — the key BOTH halves of
+ * `resumeSession`'s merge match on, and it is CONTENT-INCLUSIVE, never a bare
+ * id lookup. Composition, per kind:
+ *
+ * - `user` → `user|<text>|<images>` — an image contributes
+ *   `name/mimeType/sizeBytes/data` and the entries are joined by NUL: there is
+ *   NO id on either side (the local copy and the `record_message`d row), so it
+ *   matches on text + images; the image entries are compared field-by-field in
+ *   a FIXED order so key-order differences in the two constructions never
+ *   break the match.
+ * - `agent-text` / `agent-thought` → `<kind>|<messageId>|<text>`
+ * - `tool-call` → `tool-call|<id>|<title>|<status>`
+ * - `diff` → `diff|<path>|<patch>`
+ *
+ * So two messages are "the same message" only while their CONTENT agrees: a
+ * `title`, `status` or `text` change makes a NEW key. That is the fact the
+ * merge comments lean on (ADR 0050) — a message a mutator changes during the
+ * load window is no longer "in the snapshot" and re-enters the additions.
  *
  * NOTE: for a `user` message this key is content ONLY and is therefore
  * ambiguous — the merge must additionally require the matching reloaded
@@ -1239,12 +1249,16 @@ export const useSessions = create<SessionsState>((set, get) => ({
         // the message's own `at`, COUNTED: two identical messages in the same
         // millisecond are two messages, and the second is the new one. Where
         // identity cannot decide we KEEP the message — a duplicated bubble
-        // beats a lost prompt. Two duplications are accepted: a live thought
-        // (its persisted key is `{stamp}:m1#1`, so it can never match its own
-        // row), and a pre-existing message the reducer MUTATES in place during
-        // the window (`mergeDedupeKey` is content-based, so a changed message
-        // is no longer "in the snapshot") — both replace the old rule's silent
-        // truncation of the streamed tail.
+        // beats a lost prompt. Three duplications are accepted, one per mutator
+        // of the window: a live thought (its persisted key is `{stamp}:m1#1`, so
+        // it can never match its own row), a pre-existing message the reducer
+        // MUTATES in place (`applySessionUpdate`'s same-`messageId` append, or a
+        // `tool_call_update` rewriting a card), and a `pending` tool call that
+        // `handleSessionClosed`'s `finalizeSessionMessages` flips to `failed`
+        // mid-window. `mergeDedupeKey` is content-inclusive — `|<text>` for
+        // text, `|<title>|<status>` for a tool card — so a changed message is
+        // simply no longer "in the snapshot"; all three replace the old rule's
+        // silent truncation of the streamed tail.
         const current = get().messages[sessionId] ?? [];
         let added: Message[];
         if (current === prior) {
@@ -1253,12 +1267,18 @@ export const useSessions = create<SessionsState>((set, get) => ({
           // array (the reducer's arms spread, `addUserMessage` spreads,
           // `finalizeSessionMessages` maps, and the batch reducer stores only
           // what the pure reducer returned — nothing pushes or pops in place),
-          // so reference equality proves it. This is the O(1) fast path, and it
-          // exists for the identity pass below: `mergeDedupeKey`'s `user` case
-          // concatenates every attachment's FULL base64 `data`, so running it
-          // over the whole live snapshot of an attachment-heavy session on
-          // every resume allocates a copy of every attachment to conclude that
-          // nothing changed. A no-op write keeps the SAME array (its own
+          // so reference equality proves it. This fast path skips the identity
+          // pass and its multiset counting over the LIVE snapshot, and that is
+          // all it skips: `mergeDedupeKey`'s `user` case concatenates every
+          // attachment's FULL base64 `data`, so keying the live snapshot of an
+          // attachment-heavy session on every resume would allocate a copy of
+          // every attachment to conclude that nothing changed. The RELOADED
+          // side is untouched by this branch — the dedupe pass below still keys
+          // every reloaded row, and `rowToMessages` has already hydrated each
+          // persisted `user` row with its full base64 `data`, so an
+          // attachment-heavy resume still allocates a copy of every attachment,
+          // just from the other side: that O(n) allocation lives there, not
+          // here. A no-op write keeps the SAME array (its own
           // changed-sentinel), so silence never trips this branch.
           added = [];
         } else {
@@ -1280,10 +1300,11 @@ export const useSessions = create<SessionsState>((set, get) => ({
         // reloaded rows INCLUDE it while `added` still holds its local
         // copy, and appending verbatim would render the prompt TWICE
         // (attachments included). Drop an `added` message already present
-        // in the reloaded rows: by id when one exists on both sides
-        // (agent-text/agent-thought `messageId`, tool-call `id`), and for
-        // a `user` message (NO id on either side) by text + images — but
-        // ONLY when the matching reloaded row is NEWER-OR-EQUAL by
+        // in the reloaded rows on the SAME `mergeDedupeKey` the identity pass
+        // above uses — so the match is id AND content together
+        // (`tool-call|<id>|<title>|<status>`, `agent-text|<messageId>|<text>`),
+        // and for a `user` message (NO id on either side) `user|<text>|<images>`
+        // — but ONLY when the matching reloaded row is NEWER-OR-EQUAL by
         // timestamp. Content alone is ambiguous because user messages have
         // no stable id: the matching reloaded row is either the SAME
         // message committed after the local copy was created (committed-

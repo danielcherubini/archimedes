@@ -277,7 +277,9 @@ To make the stamp observable across a process boundary, the fixture echoes it th
 
 1. `fake_worker.rs`'s Start arm: add `"incarnation": env.incarnation,` to the `session_info` `update` object, with a one-line comment naming ADR 0049 (the two-incarnation assertion). Nothing else in the fixture changes.
 
-2. `two_incarnations_of_one_session_never_share_a_display_row` in `mod normalize_tests`. That module does not yet import the storage types, so start by copying the sibling module's fixture VERBATIM (`compute_display_rows_tests::temp_db`, `normalize.rs:1250-1269` — a private fn in a sibling `mod` is not importable) into `normalize_tests`, with its imports:
+2. `two_incarnations_of_one_session_never_share_a_display_row` in `mod normalize_tests`. That module does not yet import the storage types, so it needs the sibling suite's `temp_db()` fixture.
+
+   **SUPERSEDED as executed (`a0e610b`, shape finalized by `6a6f39e`): the tree does NOT copy it.** One `temp_db()` was HOISTED into the PARENT module (`normalize.rs`, above both `mod normalize_tests` and `mod compute_display_rows_tests`) and each suite reaches it with `use super::temp_db;` — a private fn in a sibling `mod` is not importable, one in the parent is. So the duplicate this step asked to create was instead removed, and `temp_db()` now returns `(Arc<Db>, tempfile::TempDir)` with the caller holding the guard (`let (db, _dir) = temp_db();`): it used to hand-roll `temp_dir()/harness-display-test-<uuid>` that NOTHING removed, so every run of either suite left two directories behind. `Arc` / `Db` / `SessionInfo` consequently live with the hoisted fixture, not in `normalize_tests`' import list — which is now `use super::temp_db; use super::{compute_display_rows, is_bookkeeping_message_id, normalize, ThoughtState, TurnState};` plus `crate::agent::events::RpcEvent`, `crate::agent::harness::store::{SessionStore, Store}`, `HashMap` and `Mutex as StdMutex`. The step AS PLANNED read: "start by copying the sibling module's fixture VERBATIM (`compute_display_rows_tests::temp_db`, `normalize.rs:1250-1269` — a private fn in a sibling `mod` is not importable) into `normalize_tests`, with its imports:" — the block below is that step's import list, kept for the record; the tree's is the one named above:
 
 ```rust
     use crate::agent::harness::store::SessionStore;   // + `Store` for the trait
@@ -329,14 +331,14 @@ To make the stamp observable across a process boundary, the fixture echoes it th
      ```
    - Immediately after `resume_session` returns and BEFORE the existing `drain(&mut sink_rx)`, capture the second stamp the same way (`session_info` arrives when the resumed Worker attaches; `wait_for_update` skips turn 1's leftovers) and `assert_ne!(stamp_a, stamp_b, "a resumed Worker is a NEW incarnation and must not inherit the stamp")`.
    - After the resumed turn settles, re-read `db.messages_for(&sid)` and assert every `(key, payload)` pair in `before` is still present verbatim — the first incarnation's rows survived the second one's arrival.
-   - Do NOT assert that any display key gained a stamp here (the fixture writes literal `m1`; see Context).
+   - Do NOT assert that any display key gained a stamp here (the fixture writes literal `m1`; see Context). *(Superseded by `a0e610b`: the fixture's canned key is stamp-derived, so the e2e DOES read stamped display keys — see the Context note and Execution-log item 1.)*
 
 **Steps:**
-- [ ] Write the seam test first (step 2), including the `temp_db()` copy and its imports.
+- [ ] Write the seam test first (step 2), including the `temp_db()` copy and its imports. *(Superseded: the seam test was written against the HOISTED parent-module `temp_db()` — see step 2 — so no copy was made.)*
 - [ ] `cd src-tauri && cargo test --lib agent::normalize::normalize_tests::two_incarnations_of_one_session_never_share_a_display_row` — the full test path, because a filter matching nothing exits 0. It must PASS (Task 2 shipped the behaviour). If it FAILS, Task 2 is incomplete — finish Task 2; do not adjust this test's expectations.
 - [ ] Add the `incarnation` echo to `fake_worker.rs`, then the three additions to `native_session_end_to_end`.
 - [ ] `cargo test --test session_native` — green. A `session_info` timeout means the wait was placed after `drain` (which discards it) — move the wait, do not lengthen the timeout.
-- [ ] Mutation check, and put it back: drop the stamp from `TurnState::id` (make it return `suffix.to_string()`) and confirm BOTH new tests fail; restore. If either survives, that test has no teeth.
+- [ ] **SUPERSEDED as executed** — Mutation check, and put it back: drop the stamp from `TurnState::id` (make it return `suffix.to_string()`) and confirm BOTH new tests fail; restore. If either survives, that test has no teeth. **It cannot hold for the two-process e2e: `fake_worker` never runs `normalize`, so nothing in `native_session_end_to_end` reads `TurnState::id`, and it stays green under that mutation — as it must. What actually falsifies the e2e is (a) making `types::mint_incarnation` return a CONSTANT (both lives then share one key: the two-row assertion counts 1, not 2) and (b) the fixture writing an UNSTAMPED key (`message_key: "m1"`), which UPSERTs life A's row away and fires the "life A's row is gone" assertion. `TurnState::id` remains the falsifier for the SEAM test only.** See Execution-log item 1 and both its amendments.
 - [ ] `cargo test` (all targets) — green.
 - [ ] `cargo clippy --all-targets -- -D warnings`, `cargo fmt`, `cargo fmt --check`.
 - [ ] Commit: `test: two incarnations of one session never share a display row`
@@ -344,7 +346,7 @@ To make the stamp observable across a process boundary, the fixture echoes it th
 **Acceptance criteria:**
 - [ ] One test proves a Retraction in incarnation B leaves incarnation A's text, thought AND system rows intact.
 - [ ] A real two-process resume gives the two Workers different 6-hex stamps, and leaves the first incarnation's `agent-text` rows byte-identical.
-- [ ] Both new tests fail when the stamp is removed from `TurnState::id`.
+- [ ] **SUPERSEDED** Both new tests fail when the stamp is removed from `TurnState::id` — true of the SEAM test only. The two-process e2e is falsified by a constant `mint_incarnation` and by the fixture writing an unstamped key (see the mutation step above).
 
 ---
 
@@ -437,10 +439,76 @@ All four tasks landed on `feature/session-incarnation`, one commit each, TDD
 (red confirmed before green) throughout: `602502c` (T1) · `ce5b450` (T2) ·
 `e2a19ff` (T3) · `d1cf155` (T4).
 
-Whole-branch validation (sequential): `cargo fmt --check` clean · `cargo test
+**Validation snapshot at `8c880a8`** (the commit that recorded this log — the
+numbers below are THAT moment's; the current totals are the dated line after the
+review section): `cargo fmt --check` clean · `cargo test
 --no-fail-fast` 885 lib tests + every integration target, **0 failures** ·
 `cargo clippy --all-targets -- -D warnings` **zero warnings** · `pnpm test`
 **1846 passed (82 files)** · `pnpm build` clean.
+
+### Review iterations — four execution steps after the four tasks
+
+The branch then took four review-fix commits, two review iterations:
+
+- **`a0e610b` — `test: pin the two-incarnation guarantee where it can actually
+  fail`.** The two-process e2e got teeth it did not have: `fake_worker` threads
+  its `StartEnv.incarnation` into `emit_canned_turn` so the canned
+  `DisplayUpsert` writes `message_key: format!("{incarnation}:m1")`, and
+  `native_session_end_to_end` polls `db.messages_for` (100 × 50 ms) for BOTH
+  `{stamp_a}:m1` and `{stamp_b}:m1`. `normalize.rs` **HOISTED one `temp_db()`
+  into the parent module** for both suites (`use super::temp_db;`) rather than
+  copying it into `normalize_tests` — Task 3 step 2 is superseded accordingly,
+  and this line is where that hoist is recorded (the commit message and the
+  amended step both pointed at a copy that does not exist). Also: the
+  loop-level pin for the counter-less id family (every compaction one-liner
+  rides `{stamp}:system`, `tests/harness_loop.rs`), the second-`Start` /
+  fresh-stamp invariant note at `WorkerCore::handle`'s `Start` arm, and the
+  bookkeeping-word rationale in `types.rs` / `worker/manager.rs`.
+- **`390141f` — `docs: correct the id-shape claims and pin cross-life
+  retraction in the store`.** Frontend: `applySessionUpdate`'s `message_retracted`
+  comment now names both id shapes and states that the filter compares verbatim
+  and normalises nothing; the resume merge gained the `current === prior`
+  **O(1) fast path** (reference equality proves nothing landed in the window, so
+  the live snapshot is never keyed — `mergeDedupeKey`'s `user` case concatenates
+  full base64); two store tests added — a Retraction naming one incarnation's
+  `m1` leaves the other life's reply, and the fast path selects nothing.
+  Docs: ADR 0049, `docs/features/thinking-display.md`, follow-ups §6/§7 and this
+  plan.
+- **`fb9b2f5` — `docs: state the hex-alphabet argument for the bookkeeping
+  words correctly`.** `normalize.rs` + `types.rs`: the argument for "a stamp can
+  never BE or hide a bookkeeping word" was stated as "neither word contains a
+  hex character", which is simply false — `system` contains `e` and `retract`
+  contains `e`/`a`/`c`, all hex digits. The correct form is that neither word is
+  spelled ENTIRELY from the hex alphabet (`system` carries `s`/`y`/`t`/`m`;
+  `retract` carries `r`/`t` and is seven chars besides, so it cannot even be a
+  six-char stamp).
+- **`6a6f39e` — `fix: keep the per-token path lazy and pin the stamp shape
+  exactly`.** `normalize.rs`: the `{stamp}:default` fallback id is built LAZILY
+  in the `message_update` and `message_retracted` arms — that arm runs for every
+  streamed token, so hoisting the `format!` would pay one allocation per token
+  for a single edge case; `temp_db()` now returns `(Arc<Db>,
+  tempfile::TempDir)` so the temp dirs stop leaking (callers bind
+  `let (db, _dir) = temp_db();`), and the seam test's payload `assert_ne!` was
+  removed as a claim the row KEYS already make. `test_support::is_incarnation_stamp`
+  (six LOWERCASE hex) is now the shared shape predicate for the `protocol` unit
+  test and the e2e, because `len() == 6` + a radix parse also accepts
+  `A3F9C1`; the e2e compares an EXACT sorted pair of `agent-text` keys instead
+  of counting `ends_with(":m1")`.
+
+**Validation re-run 2026-10-14 on this document's tree** (`6a6f39e` plus this
+iteration's documentation/comment corrections and two new tool-card window
+tests): `cargo test --no-fail-fast` **886 lib tests + every integration target,
+0 failures — 998 passing across all 23 targets** · `pnpm test` **1850 passed
+(82 files)** · `pnpm build` clean. No `src-tauri/` source changed in this pass,
+so `cargo fmt --check` and `cargo clippy` were not re-run here; the Rust numbers
+are that untouched tree's. (The Rust lib count moved 885 → 886 and the frontend
+1846 → 1850 across the four review commits and this one, which each added
+tests.)
+
+**One leak knowingly left behind:** `tests/session_native.rs`'s
+`temp_config_dir()` hand-rolls its temp dir exactly the way `temp_db()` used to
+and nothing removes it. `6a6f39e` closed the `normalize.rs` fixture only; this
+helper was deliberately left alone rather than widening that Rust iteration.
 
 Six things the plan got wrong, corrected during execution (the code is right,
 the plan text above is not):

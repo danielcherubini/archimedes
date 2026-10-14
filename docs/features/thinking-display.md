@@ -24,10 +24,10 @@ The Rust `ThoughtState` deliberately **mirrors the frontend reducer's segmentati
 - a **non-empty** `agent_message_chunk` intervenes (the clear sits AFTER the empty-text guard, INSIDE the `if let ContentBlock::Text` — an empty or non-text chunk does NOT segment);
 - a `tool_call` intervenes (a new tool call always adds a message);
 - a `tool_call_update` **is for a tool call the `tool_call_state` map has never seen** (the reducer's "never saw it → treat as new" case adds the tool-call message). A plain in-place update (known id) does NOT segment. (The first-generation ACP `ToolCallContent[]` diff channel — "a `tool_call_update` carries a diff also segments" — has no native RPC input, so `persist_update`'s `has_diff` branch is gone with the crate types, ADR 0022.)
-- a **prompt boundary** intervenes. This is INVISIBLE to `persist_update` (user rows are recorded by the `send_prompt` path, not the event pipeline) — so `SessionManager::begin_user_turn` (called in `send_prompt_with_images`, the SOLE write path — `send_prompt` delegates to it) resets `open_key = None`. Without it, a turn that ends mid-thinking (user hits Stop) followed by a next turn starting with thinking would append to the SAME row.
+- a **prompt boundary** intervenes. This is INVISIBLE to `compute_display_rows` (user rows are recorded by the `send_prompt` path, not the event pipeline — `compute_display_rows` never sees a user frame) — so `SessionManager::begin_user_turn` (called in `send_prompt_with_images`, the SOLE write path — `send_prompt` delegates to it) resets `open_key = None`. Without it, a turn that ends mid-thinking (user hits Stop) followed by a next turn starting with thinking would append to the SAME row.
 - `config_option_update` and all other unknown types are ignored (the reducer has no arm for `user_message_chunk` either — deliberately).
 
-Segment numbering is monotonic per session (`#1`, `#2`, …); a closed segment is never re-appended.
+Segment numbering is monotonic per **incarnation**, not per session (`#1`, `#2`, …): `ThoughtState` lives for one Worker life, so a **Resume** restarts the counter under a fresh stamp and both lives emit `#1` — which is exactly what makes the row keys unique (`{stampA}:m1#1` and `{stampB}:m1#1` are two rows, ADR 0049), not a collision. A closed segment is never re-appended.
 
 ## Known limitations (documented, not fixed)
 

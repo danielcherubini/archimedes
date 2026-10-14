@@ -29,7 +29,7 @@ A **Session** — the desktop's own Rust runtime is the **only** **Agent harness
 _Avoid_: In-process session, local session, built-in session
 
 **Session incarnation**:
-One **Worker**'s life within a **Session**'s transcript. A **Session** keeps its id across a **Resume**, but every `messageId` the harness mints is stamped with the incarnation that minted it (`a3f9c1:m1`, `a3f9c1:system`) — so two Workers of one Session can never write the same display row, constants included, and a **Retraction** can only ever name rows its own Worker wrote (ADR 0049). The stamp arrives on the start envelope, minted per `Start` by the **Supervisor**: the Worker is told its own boundary rather than inventing it.
+One **Worker**'s life within a **Session**'s transcript. A **Session** keeps its id across a **Resume**, but every `messageId` the harness mints is stamped with the incarnation that minted it (`a3f9c1:m1`, `a3f9c1:system`) — so two Workers of one Session can never write the same display row, constants included, and a **Retraction** can only ever name rows its own Worker wrote (ADR 0049) — with ONE recorded residue: the no-`messageId` fallback key `default` stays BARE on both sides, so it is the single display key still able to be shared by two lives (ADR 0049 records it as a residue rather than a defect; `compaction-recovery-hardening-follow-ups.md` §6). The stamp arrives on the start envelope, minted per `Start` by the **Supervisor**: the Worker is told its own boundary rather than inventing it.
 _Avoid_: generation, epoch, version, nonce, salt (the stamp is not a security value), new session (a Resume keeps the Session's id — that is the whole problem)
 
 **Anchor** (the context snapshot's):

@@ -2233,6 +2233,152 @@ describe("resumeSession (history reload race)", () => {
       { kind: "agent-thought", messageId: "a3f9c1:m1#1", text: "think", at: 2 },
     ]);
   });
+
+  it("duplicates a tool card when a session close finalizes it inside the load window (the third mutator ADR 0050 accepts)", async () => {
+    // The third mutator of the load window (ADR 0050's second consequence):
+    // `handleSessionClosed` runs `finalizeSessionMessages`, which maps every
+    // still-`pending` tool call to `failed`. Resume and then Pause/Close
+    // before `loadHistory` resolves, and that card's `mergeDedupeKey`
+    // (`tool-call|<id>|<title>|<status>` — content-inclusive, so `status` IS
+    // part of the identity) changes in the window: the card is no longer "in
+    // the snapshot", it re-enters `added`, and the `reloadedKeys` gate cannot
+    // catch it either, because the persisted row still carries the status the
+    // WORKER last wrote (`pending` — the close is a frontend-only map, it
+    // never reaches the display store). So the same tool call lands TWICE.
+    //
+    // This is ADR 0050's decision APPLIED, not a defect to fix here: where
+    // identity cannot decide the merge KEEPS the message, because duplication
+    // beats loss. Verified before being pinned — the transcript below is what
+    // the merge actually produced (both cards present, one `pending` from the
+    // reloaded row and one `failed` from the finalized live copy; nothing
+    // dropped). The positional rule this branch replaced could not produce it
+    // — `slice(prior.length)` never re-selected a message that was already in
+    // the snapshot — so pinning it here is what stops a later "fix" dropping
+    // the finalized card instead.
+    useSessions.setState({
+      activeSessionId: "s1",
+      sessions: [
+        {
+          sessionId: "s1",
+          cwd: "/x",
+          capabilities: { loadSession: true },
+          archived: false,
+        },
+      ],
+      messages: {
+        s1: [
+          { kind: "user", text: "one", at: 1 },
+          { kind: "agent-text", messageId: "a3f9c1:m1", text: "two", at: 2 },
+          {
+            kind: "tool-call",
+            id: "t1",
+            title: "Read file",
+            status: "pending",
+            at: 2,
+          },
+        ],
+      },
+    });
+    let resolveRows: (rows: MessageRow[]) => void = () => {};
+    vi.mocked(loadHistory).mockImplementationOnce(
+      () => new Promise<MessageRow[]>((r) => (resolveRows = r)),
+    );
+    await useSessions.getState().resumeSession("s1");
+    // Pause/Close INSIDE the window: the pending card becomes a failed one.
+    useSessions.getState().handleSessionClosed("s1", "user");
+    // The reload settles with the persisted rows — the tool-call row still
+    // reads `pending`, because nothing about a frontend close is persisted.
+    resolveRows([
+      {
+        id: 1,
+        sessionId: "s1",
+        kind: "user",
+        messageKey: null,
+        payloadJson: JSON.stringify({ text: "one" }),
+        createdAt: 1,
+      },
+      {
+        id: 2,
+        sessionId: "s1",
+        kind: "agent-text",
+        messageKey: "a3f9c1:m1",
+        payloadJson: JSON.stringify({ text: "two" }),
+        createdAt: 2,
+      },
+      {
+        id: 3,
+        sessionId: "s1",
+        kind: "tool-call",
+        messageKey: "t1",
+        payloadJson: JSON.stringify({
+          toolCallId: "t1",
+          title: "Read file",
+          status: "pending",
+        }),
+        createdAt: 2,
+      },
+    ]);
+    await new Promise((r) => setTimeout(r, 0));
+    // TWO cards for one tool call: the reloaded row first, the finalized live
+    // copy appended after. Nothing else changed, and nothing was lost.
+    expect(useSessions.getState().messages.s1).toEqual([
+      { kind: "user", text: "one", at: 1 },
+      { kind: "agent-text", messageId: "a3f9c1:m1", text: "two", at: 2 },
+      { kind: "tool-call", id: "t1", title: "Read file", status: "pending", at: 2 },
+      { kind: "tool-call", id: "t1", title: "Read file", status: "failed", at: 2 },
+    ]);
+  });
+
+  it("keeps a tool call that ARRIVES in the window exactly once when the close finalizes it (the duplicate needs a lagging row, not the close alone)", async () => {
+    // The control for the test above: `finalizeSessionMessages` on its own
+    // duplicates nothing. A tool call whose `tool_call` frame arrives DURING
+    // the window has no persisted row at all (the query read before it), so
+    // there is no reloaded key to mismatch — it is kept once, as the finalized
+    // (`failed`) card. The duplicate above is therefore the status change
+    // against a row that LAGS it, not a close inside the window per se.
+    useSessions.setState({
+      activeSessionId: "s1",
+      sessions: [
+        {
+          sessionId: "s1",
+          cwd: "/x",
+          capabilities: { loadSession: true },
+          archived: false,
+        },
+      ],
+      messages: { s1: [{ kind: "user", text: "one", at: 1 }] },
+    });
+    let resolveRows: (rows: MessageRow[]) => void = () => {};
+    vi.mocked(loadHistory).mockImplementationOnce(
+      () => new Promise<MessageRow[]>((r) => (resolveRows = r)),
+    );
+    await useSessions.getState().resumeSession("s1");
+    useSessions.getState().applySessionUpdate("s1", {
+      sessionUpdate: "tool_call",
+      toolCallId: "t9",
+      title: "Run command",
+      status: "pending",
+    });
+    useSessions.getState().handleSessionClosed("s1", "user");
+    resolveRows([
+      {
+        id: 1,
+        sessionId: "s1",
+        kind: "user",
+        messageKey: null,
+        payloadJson: JSON.stringify({ text: "one" }),
+        createdAt: 1,
+      },
+    ]);
+    await new Promise((r) => setTimeout(r, 0));
+    const msgs = useSessions.getState().messages.s1;
+    expect(msgs).toHaveLength(2);
+    expect(msgs[1]).toMatchObject({
+      kind: "tool-call",
+      id: "t9",
+      status: "failed",
+    });
+  });
 });
 
 describe("archivedSessions (sticky, ADR 0016)", () => {
