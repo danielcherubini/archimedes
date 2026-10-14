@@ -453,9 +453,9 @@ review section): `cargo fmt --check` clean · `cargo test
 `cargo clippy --all-targets -- -D warnings` **zero warnings** · `pnpm test`
 **1846 passed (82 files)** · `pnpm build` clean.
 
-### Review iterations — six execution steps after the four tasks
+### Review iterations — seven execution steps after the four tasks
 
-The branch then took six review-fix commits across three review iterations:
+The branch then took seven review-fix commits across four review iterations:
 
 - **`a0e610b` — `test: pin the two-incarnation guarantee where it can actually
   fail`.** The two-process e2e got teeth it did not have: `fake_worker` threads
@@ -544,8 +544,7 @@ The branch then took six review-fix commits across three review iterations:
   the `from_parts` call-site count 15 → 14 with only the 2 production sites
   mattering, the protocol module's test count).
 
-**Validation re-run 2026-10-14 on this document's tree** (through `cdb5a81` plus
-this iteration's documentation/comment corrections and the e2e's exact-set wait):
+**Validation re-run 2026-10-14 on this document's tree** (through `31786d3`, the last of the four review iterations):
 `cargo fmt --check` clean · `cargo test --no-fail-fast` **886 lib tests + every
 integration target, 0 failures — 998 passing across the 22 test binaries plus the
 (empty) doc-test target** · `cargo clippy --all-targets -- -D warnings` silent ·
@@ -556,7 +555,9 @@ each added tests.)
 **One leak knowingly left behind:** `tests/session_native.rs`'s
 `temp_config_dir()` hand-rolls its temp dir exactly the way `temp_db()` used to
 and nothing removes it. `6a6f39e` closed the `normalize.rs` fixture only; this
-helper was deliberately left alone rather than widening that Rust iteration.
+helper was deliberately left alone rather than widening that Rust iteration. It
+is recorded as **§9 of `compaction-recovery-hardening-follow-ups.md`**, which
+survives this document's deletion on ship.
 
 Six things the plan got wrong, corrected during execution (the code is right,
 the plan text above is not):

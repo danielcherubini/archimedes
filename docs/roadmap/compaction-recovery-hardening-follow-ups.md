@@ -10,7 +10,7 @@ NOT fixed by it. §3 was found in review of the PR that shipped it, and is not
 fixed there either — for the reason stated in it. None is a blocker; all are
 recorded so the next reader finds a decision rather than an oversight.
 
-**Disposition (2026-10-14).** §1 is folded into `session-incarnation.md` (ADR 0050) and §3 is RETIRED by ADR 0049 — resolved before it was ever planned as its own change. §2 stays open. §4 is the stalled tail and §5 `openSession`'s reload race, both written down while planning that spec (the latter found reviewing its plan). §6 (the bare `default` fallback key) and §7 (`tool-call` rows are the one display-key family ADR 0049 does not scope) are the two residues the review of that branch named: both are **recorded on purpose, not open work** — §6 deliberately left bare on both sides, §7 a pre-existing hazard rather than an incarnation one. §8 is the third mutator ADR 0050's merge accepts, named in review of the same branch: also **accepted, not open work**, with its alternative recorded.
+**Disposition (2026-10-14).** §1 is folded into `session-incarnation.md` (ADR 0050) and §3 is RETIRED by ADR 0049 — resolved before it was ever planned as its own change. §2 stays open. §4 is the stalled tail and §5 `openSession`'s reload race, both written down while planning that spec (the latter found reviewing its plan). §6 (the bare `default` fallback key) and §7 (`tool-call` rows are the one display-key family ADR 0049 does not scope) are the two residues the review of that branch named: both are **recorded on purpose, not open work** — §6 deliberately left bare on both sides, §7 a pre-existing hazard rather than an incarnation one. §8 is the third mutator ADR 0050's merge accepts, named in review of the same branch: also **accepted, not open work**, with its alternative recorded. §9 is test-hygiene only (a leaked temp dir), recorded here because the plan that found it is deleted on ship.
 
 Citations in this document name **symbols, not line numbers** — `applySessionUpdate`'s chunk arms, the pump's `Lagged` arm — because line numbers re-drift on every commit and a stale one points a reader at the wrong code, which this document did once.
 
@@ -293,3 +293,25 @@ reach `user` messages (no id at all, so nothing to gate on) or
 is the streamed tail ADR 0050 refuses to truncate. The change is not silent:
 the pinned test above reddens the moment `fresh` is gated on the tool-call id
 (verified by mutation — that gate reddens it and nothing else in the suite).
+
+## 9. `tests/session_native.rs`'s `temp_config_dir()` leaks its directory
+
+**Problem.** The e2e's `temp_config_dir()` hand-rolls a directory under
+`temp_dir()` and removes it only on the success path, so a failing run leaves it
+behind permanently — and the passing path's `remove_dir_all` silently ignores
+every error. Hundreds of these accumulated on one development machine before
+anyone looked.
+
+**Why deferred — out of scope, and it is a two-line fix whenever it is wanted.**
+The session-incarnation branch fixed the *other* copy of this defect
+(`normalize.rs`'s `temp_db()` now returns a `tempfile::TempDir` guard and the
+caller holds it) and deliberately did not widen that Rust iteration into the
+integration fixtures. Nothing depends on the leak; it just fills `/tmp` and
+eventually confuses a disk-space investigation.
+
+**Sketch.** Return the guard, exactly as `temp_db()` does now: make
+`temp_config_dir()` return `(PathBuf, tempfile::TempDir)` (or
+`tempfile::TempDir` plus a path into it) and bind both at each call site. The
+dev-dependency is already in `Cargo.toml`, used this way by `agent/mcp`'s tool
+tests. Grep for `env::temp_dir()` across `src-tauri/` when doing it — that is
+the shape this defect leaves behind.
