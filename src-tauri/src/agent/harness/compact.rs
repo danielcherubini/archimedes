@@ -412,11 +412,36 @@ pub(crate) async fn run_compaction(
     if older.is_empty() {
         return CompactionOutcome::Skipped;
     }
-    match summarize(ctx, &older, turn).await {
+    // (ADR 0047) The summary's own call is bounded: the summarized range is
+    // trimmed to the budget this window affords, and the trim is RECORDED —
+    // an unmarked summary would be a fabricated memory.
+    let budget = ctx.compactor.summary_input_budget();
+    let (summarized, dropped) = trim_for_summary_budget(&older, budget);
+    if summarized.is_empty() {
+        // The budget fits nothing, so there is no honest summary to ask for
+        // and NO call is worth sending. `Skipped` is the honest outcome: the
+        // transcript is unchanged and the caller says so. (For a window this
+        // small this repeats every turn — no request is sent, so it costs the
+        // provider nothing.)
+        return CompactionOutcome::Skipped;
+    }
+    match summarize(ctx, &summarized, dropped, turn).await {
         Ok(summary) => {
+            // The record of the trim travels IN the summary (ADR 0047): the
+            // harness knows the exact count, so the stored row states it —
+            // and so does the model, because this same message is replayed.
+            let record = if dropped > 0 {
+                format!(
+                    "\n\n[Note: this summary is not complete. The oldest \
+                     {dropped} message(s) of the summarized range were dropped \
+                     to fit the summary's own context window.]"
+                )
+            } else {
+                String::new()
+            };
             let summary_msg = ChatMessage {
                 role: ChatRole::System,
-                content: MessageContent::Text(format!("{SUMMARY_PREFIX}\n{summary}")),
+                content: MessageContent::Text(format!("{SUMMARY_PREFIX}\n{summary}{record}")),
                 tool_call_id: None,
                 tool_calls: None,
             };
@@ -468,16 +493,30 @@ pub(crate) async fn run_compaction(
 /// unchanged either way (pinned by the `summarize_*` prompt tests): the
 /// automatic paths (the threshold check, an overflow recovery) pass `None`,
 /// and args that are only whitespace are no instructions at all.
-fn summary_system_prompt(instructions: Option<&str>) -> String {
+///
+/// `dropped` is the trim's count (ADR 0047): only a range that LOST messages
+/// to the Summary input budget gains the extra "this is not the whole story"
+/// line, so `dropped == 0` leaves the prompt byte-identical.
+fn summary_system_prompt(instructions: Option<&str>, dropped: usize) -> String {
     let base = "Summarize these messages concisely, preserving decisions, \
                 file paths, and open tasks. Respond with the summary only."
         .to_string();
-    match instructions {
+    let mut prompt = match instructions {
         Some(s) if !s.trim().is_empty() => {
             format!("{base}\nAdditional instructions for this summary: {s}")
         }
         _ => base,
+    };
+    // (ADR 0047) A trimmed range is not the whole story, and a summary that
+    // does not know it is incomplete writes a summary that reads as complete.
+    if dropped > 0 {
+        prompt.push_str(&format!(
+            "\nThe oldest {dropped} message(s) of this range were dropped to fit \
+             this request. Summarize what is here, and say in the summary that it \
+             is not complete."
+        ));
     }
+    prompt
 }
 
 /// The summary model call (a "summarize these messages" system prompt
@@ -490,14 +529,21 @@ fn summary_system_prompt(instructions: Option<&str>) -> String {
 /// without a `Done` at all is a retryable `Err` — a truncated summary
 /// must NEVER rewrite the transcript (finding 4: the `run_compaction`
 /// error path keeps the transcript intact).
+///
+/// (ADR 0047) `older` is the range ALREADY TRIMMED to the Summary input
+/// budget by the caller, and `dropped` is how many messages that trim
+/// removed — the model is told, so it does not present a partial summary as
+/// the whole history, and the call carries its OWN output cap rather than
+/// riding the provider's default.
 pub(crate) async fn summarize(
     ctx: &CompactionCtx<'_>,
     older: &[ChatMessage],
+    dropped: usize,
     turn: &CancellationToken,
 ) -> Result<String, ProviderError> {
     let system = ChatMessage {
         role: ChatRole::System,
-        content: MessageContent::Text(summary_system_prompt(ctx.instructions.as_deref())),
+        content: MessageContent::Text(summary_system_prompt(ctx.instructions.as_deref(), dropped)),
         tool_call_id: None,
         tool_calls: None,
     };
@@ -509,7 +555,12 @@ pub(crate) async fn summarize(
         tools: Vec::new(),
         options: ModelOptions {
             temperature: Some(0.0),
-            max_tokens: None,
+            // (ADR 0047) The summary's OWN output budget. Uncapped, an
+            // ambitious summary runs to the provider's own default and comes
+            // back `Done(Length)` — which the tail of this function correctly
+            // rejects as a truncated summary. `.max(1)` because a reserve of
+            // 0 must not produce a request that cannot answer with a byte.
+            max_tokens: Some(ctx.compactor.summary_output_cap().max(1)),
             reasoning_effort: None,
             stream: true,
         },
@@ -656,6 +707,31 @@ mod tests {
         }
     }
 
+    /// Records the WHOLE summary `ModelRequest` — the input size and the output
+    /// cap are what ADR 0047 pins.
+    struct RequestRecordingProvider {
+        recorded: Arc<std::sync::Mutex<Vec<crate::agent::harness::provider::ModelRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for RequestRecordingProvider {
+        async fn complete(
+            &self,
+            req: &ModelRequest,
+        ) -> Result<futures_util::stream::BoxStream<'static, ProviderEvent>, ProviderError>
+        {
+            self.recorded
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(req.clone());
+            Ok(futures_util::stream::iter(vec![
+                ProviderEvent::TextDelta("ok".to_string()),
+                ProviderEvent::Done(FinishReason::Stop),
+            ])
+            .boxed())
+        }
+    }
+
     /// A `Model` for a given bare id (the `loop.rs` test fixture, copied).
     fn fake_model(id: &str) -> Model {
         Model {
@@ -734,7 +810,7 @@ mod tests {
                 instructions,
                 compactor: &mut compactor,
             };
-            summarize(&ctx, &older, &CancellationToken::new())
+            summarize(&ctx, &older, 0, &CancellationToken::new())
                 .await
                 .expect("summarize succeeds")
         };
@@ -1714,6 +1790,93 @@ mod tests {
         assert_eq!(sessions[0], Some("s1".to_string()));
     }
 
+    /// (ADR 0047) The summary is a call with an output budget: `max_tokens` is
+    /// the cap the Compactor derived, not the provider's own default.
+    #[tokio::test]
+    async fn the_summary_call_carries_its_own_output_cap() {
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = RequestRecordingProvider {
+            recorded: recorded.clone(),
+        };
+        let summary = call_summarize(&provider, &[text_msg("history")])
+            .await
+            .expect("summarize succeeds");
+        assert_eq!(summary, "ok");
+        let reqs = recorded.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        assert_eq!(reqs.len(), 1);
+        // `call_summarize` builds its Compactor with `CompactionConfig::default()`
+        // (reserve 16 384) → min(floor(0.8 × 16 384), 8 192).
+        assert_eq!(reqs[0].options.max_tokens, Some(8_192));
+    }
+
+    /// A trimmed summary SAYS it is trimmed: the model is told the range is
+    /// incomplete, and the stored record carries the harness's exact count.
+    #[tokio::test]
+    async fn a_trimmed_summary_records_what_it_dropped() {
+        let (provider, _calls) = ScriptedProvider::new(vec![Some(vec![
+            ProviderEvent::TextDelta("the summary".to_string()),
+            ProviderEvent::Done(FinishReason::Stop),
+        ])]);
+        let (_db, store) = temp_store();
+        let mut harness = Harness::new(&provider, store.clone());
+        // The budget is the binding constraint: 16 384 − 8 192 output − 4 096
+        // headroom = 4 096.
+        harness.compactor = Compactor::new(CompactionConfig::default(), 16_384);
+        harness.keep = Some(1);
+        // 8 × (4 000 chars / 4 + 1) = 8 × 1_001 tokens. A keep-budget of 1 keeps
+        // ONLY the last message, so `older` is 7 (7 007 tokens) — and 4 096
+        // carries four of them (4 004), not five (5 005): 3 are dropped.
+        harness.messages = (0..8).map(|_| text_msg(&"y".repeat(4_000))).collect();
+        let outcome = harness.run().await;
+        assert!(
+            matches!(outcome, CompactionOutcome::Compacted { .. }),
+            "four messages still fit the budget, so the compaction proceeds"
+        );
+        let rows = store.load_messages("s1").expect("rows load");
+        let summary = rows
+            .iter()
+            .find(|m| is_compaction_summary(m))
+            .expect("the summary is in the rewritten transcript");
+        let MessageContent::Text(text) = &summary.content else {
+            panic!("the summary is a text message");
+        };
+        assert!(
+            text.contains(
+                "[Note: this summary is not complete. The oldest 3 message(s) of the \
+                 summarized range were dropped"
+            ),
+            "the stored summary records its own trim verbatim, got {text}"
+        );
+    }
+
+    /// A budget that fits NOTHING is an honest `Skipped` — and NO call is sent.
+    /// The doomed request is exactly what ADR 0047 exists to stop.
+    #[tokio::test]
+    async fn a_summary_budget_that_fits_nothing_skips_without_a_call() {
+        let (provider, calls) = ScriptedProvider::new(vec![Some(vec![
+            ProviderEvent::TextDelta("never called".to_string()),
+            ProviderEvent::Done(FinishReason::Stop),
+        ])]);
+        let (_db, store) = temp_store();
+        let mut harness = Harness::new(&provider, store);
+        // The window is already inside its own reserve: budget 0.
+        harness.compactor = Compactor::new(
+            CompactionConfig {
+                reserve_tokens: 16_384,
+                ..Default::default()
+            },
+            12_000,
+        );
+        harness.keep = Some(0);
+        harness.messages = vec![text_msg("one"), text_msg("two")];
+        assert!(matches!(harness.run().await, CompactionOutcome::Skipped));
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no summary call is sent when the budget fits nothing"
+        );
+    }
+
     // ── test harness helpers ──
 
     /// Call [`summarize`] with the harness's fixtures (the moved tests'
@@ -1734,7 +1897,7 @@ mod tests {
             instructions: None,
             compactor: &mut compactor,
         };
-        summarize(&ctx, older, &CancellationToken::new()).await
+        summarize(&ctx, older, 0, &CancellationToken::new()).await
     }
 
     /// The moved tests' fixture: the ctx's inputs + the mutable transcript
