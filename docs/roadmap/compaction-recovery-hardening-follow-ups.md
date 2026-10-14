@@ -10,7 +10,7 @@ NOT fixed by it. §3 was found in review of the PR that shipped it, and is not
 fixed there either — for the reason stated in it. None is a blocker; all are
 recorded so the next reader finds a decision rather than an oversight.
 
-**Disposition (2026-10-14).** §1 is folded into `session-incarnation.md` (ADR 0050) and §3 is RETIRED by ADR 0049 — resolved before it was ever planned as its own change. §2 stays open. §4 is the stalled tail, written down when §3 was retired.
+**Disposition (2026-10-14).** §1 is folded into `session-incarnation.md` (ADR 0050) and §3 is RETIRED by ADR 0049 — resolved before it was ever planned as its own change. §2 stays open. §4 is the stalled tail and §5 `openSession`'s reload race, both written down while planning that spec (the latter found reviewing its plan).
 
 ## 1. `resumeSession`'s merge counts array positions, and the reducer can now shrink the array
 
@@ -36,11 +36,11 @@ added in that window can be silently dropped from the merge.
 The window is narrow — a session that is resuming is not usually mid-stream —
 which is why it is a follow-up and not part of the Retraction's own work.
 
-**What would fix it:** stop expressing "what arrived while we were loading" as an
-index. The same file already has the right idea in the close/reload merge
-(`sessions.ts:1237-1248`), which dedupes by `mergeDedupeKey` instead of by
-position; `resumeSession` should select on that key (or on `at > priorAt`)
-rather than on `slice(prior.length)`.
+**What would fix it:** stop expressing "what arrived while we were loading" as
+an index. Select on `mergeDedupeKey` (+ the message's own `at`) exactly like the
+dedupe pass INSIDE that same merge already does (`sessions.ts:1246-1266` — the
+only identity-based selection in the file; an earlier revision of this document
+pointed at a separate "close/reload merge" there, which does not exist).
 
 **Test to write first:** drive `resumeSession` with a `message_retracted`
 arriving after the history `loadHistory` promise resolves but before the merge
@@ -158,3 +158,28 @@ Erasing and keeping are both defensible and they optimise for different readers,
 so the decision is a product one. Not fixed by the incarnation work, which is
 about ids that cannot collide — not about who owns the last word of a dead
 Worker's reply.
+
+## 5. `openSession` applies a history reload verbatim, so it can drop live messages too
+
+Found while fixing §1. `openSession` (`sessions.ts:1128-1160`) is the OTHER
+history reload in the store, and it has no merge at all:
+
+```ts
+const rows = await loadHistory(sessionId);   // ← an await
+if (get().activeSessionId !== sessionId) return;
+set({ messages: { ...st.messages, [sessionId]: rows.flatMap(rowToMessages) } });
+```
+
+Anything the Client added to that session's transcript while the fetch was in
+flight — a **Composer command**'s system line, a `Client`-side notice, a queued
+user message — is overwritten, not merged. The guard only protects against the
+user having switched AWAY; it says nothing about what landed in between.
+
+Why it is separate from ADR 0050: `resumeSession` had an index-based merge to
+replace, and this one has no merge to replace, so the fix is a decision (adopt
+the same identity-based merge, or make the open path read-before-write once and
+block writes until it settles) rather than a correction.
+
+**Test to write first:** open a stored session whose `loadHistory` resolves
+late, add a message to it during the window, and assert the message is still
+there afterwards.
