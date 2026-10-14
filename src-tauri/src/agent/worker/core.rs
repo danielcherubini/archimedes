@@ -367,6 +367,19 @@ impl WorkerCore {
     pub async fn handle(&mut self, msg: Inbound) -> Vec<Outbound> {
         match msg {
             Inbound::Start(env) => {
+                // THE INVARIANT a second `Start` leans on (ADR 0049): a SECOND
+                // `Start` REPLACES the loop — `build_loop` runs again and the
+                // `loop_control` / `pump` fields are OVERWRITTEN, abandoning the
+                // first loop's handles. So the new envelope MUST carry a FRESH
+                // `incarnation`; reusing the previous one would have the new
+                // life re-mint its predecessor's ids and UPSERT over its
+                // predecessor's display rows (the exact defect the stamp
+                // exists to stop). NOT policed here, and no test covers it: a
+                // second `Start` on one Worker is TEST-ONLY today — every real
+                // resume spawns a NEW process through `WorkerManager::attach`,
+                // and each `StartEnv` mints its own stamp at construction
+                // (`StartEnv::from_parts`) — ADR 0049 deliberately declined to
+                // guard this path.
                 self.session_id = Some(env.session_id.clone());
                 // The `StaticTrustSource` flag SET (the source is shared
                 // with the `Start`-built loop — a replace would orphan

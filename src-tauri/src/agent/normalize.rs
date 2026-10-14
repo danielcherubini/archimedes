@@ -71,8 +71,8 @@ pub struct TurnState {
     pub toolcall_args: HashMap<String, String>,
     pub announced_tool_calls: HashSet<String>,
     /// How many Retractions this turn has announced. The discard line needs a
-    /// messageId UNIQUE per discard (ADR 0048) — two lines sharing `"system"`
-    /// would weld into one bubble.
+    /// messageId UNIQUE per discard (ADR 0048) — two lines on the shared
+    /// `system` key (today `{stamp}:system`) would weld into one bubble.
     pub retract_seq: u64,
     /// The stamp for this Worker's life (ADR 0049), prefixed onto every id
     /// this state mints. An EMPTY stamp is a test artifact — production can
@@ -97,7 +97,8 @@ impl TurnState {
 
 /// A one-line `agent_message_chunk` carrying a UNIQUE messageId — for a line
 /// that must survive being adjacent to another line. `system_chunk`'s shared
-/// key APPENDS (that is its point), so a second line on it welds.
+/// key (the stamped `system` key, `{stamp}:system`) APPENDS (that is its
+/// point), so a second line on it welds.
 fn unique_system_chunk(message_id: &str, text: impl Into<String>) -> Value {
     let text = text.into();
     json!({
@@ -108,11 +109,17 @@ fn unique_system_chunk(message_id: &str, text: impl Into<String>) -> Value {
 }
 
 /// Is this messageId a harness bookkeeping line rather than model output?
-/// The bookkeeping ids are `system` (the shared one-liner key) and
-/// `retract:N` (a discard line, ADR 0048) — either bare, or after the
-/// incarnation stamp (ADR 0049), because a pre-change database still carries
-/// bare keys. A stamp is SIX HEX CHARS (`types::mint_incarnation`), so it can
-/// never BE one of these words. `default` is deliberately NOT here: it is the
+/// The bookkeeping WORDS are `system` (the shared one-liner key) and `retract`
+/// (a discard line, ADR 0048). The predicate matches either as a `:`-separated
+/// word ANYWHERE in the id — deliberately a word-set, not a position: the id
+/// `normalize` mints today is `{stamp}:system` / `{stamp}:retract:N` (ADR
+/// 0049), and the BARE shape (`system`, `retract:1`) is accepted as well
+/// because that is the id shape WITH NO stamp — the test fixtures that
+/// hand-write these ids, and `TurnState::default()`, whose EMPTY stamp mints
+/// `:system` / `:retract:1` (a "strip a leading 6-hex field, then match" rule
+/// would misclassify those). A stamp is SIX HEX CHARS
+/// (`types::mint_incarnation`) and neither word contains a hex character, so a
+/// stamp can never BE one of them. `default` is deliberately NOT here: it is the
 /// no-id-open fallback over REAL model text, and the subagent capture must
 /// still hand it to the parent. Anything that must capture ONLY what the model
 /// said — the subagent capture, whose text becomes the PARENT's tool result —
@@ -721,42 +728,48 @@ pub(crate) fn now_ms() -> i64 {
 }
 
 #[cfg(test)]
+use std::sync::Arc;
+
+#[cfg(test)]
+use crate::storage::Db;
+
+/// A temp-dir `Db` with a recorded `sessions` row (the `messages` rows FK to
+/// `sessions`) — the fixture BOTH of this module's test suites need (one
+/// `session_id`, one table, the display rows written through `SessionStore`).
+#[cfg(test)]
+fn temp_db() -> Arc<Db> {
+    let dir = std::env::temp_dir().join(format!("harness-display-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = Arc::new(Db::open(&dir.join("t.db")).expect("db should open"));
+    db.record_session(&crate::types::SessionInfo {
+        session_id: "s1".to_string(),
+        cwd: std::path::PathBuf::from("/tmp"),
+        capabilities: serde_json::json!({}),
+        config_options: None,
+        archived: false,
+        title: None,
+        context_usage: None,
+        is_subagent: false,
+    })
+    .expect("record_session");
+    db
+}
+
+#[cfg(test)]
 mod normalize_tests {
     use serde_json::{json, Value};
 
+    use super::temp_db;
     use super::{
         compute_display_rows, is_bookkeeping_message_id, normalize, ThoughtState, TurnState,
     };
     use crate::agent::events::RpcEvent;
     use crate::agent::harness::store::{SessionStore, Store};
-    use crate::storage::Db;
-    use crate::types::SessionInfo;
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex as StdMutex};
+    use std::sync::Mutex as StdMutex;
 
     fn ev(v: serde_json::Value) -> RpcEvent {
         serde_json::from_value(v).expect("event should parse")
-    }
-
-    /// A temp-dir `Db` with a recorded `sessions` row (the `messages`
-    /// rows FK to `sessions`).
-    fn temp_db() -> Arc<Db> {
-        let dir =
-            std::env::temp_dir().join(format!("harness-display-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let db = Arc::new(Db::open(&dir.join("t.db")).expect("db should open"));
-        db.record_session(&SessionInfo {
-            session_id: "s1".to_string(),
-            cwd: std::path::PathBuf::from("/tmp"),
-            capabilities: serde_json::json!({}),
-            config_options: None,
-            archived: false,
-            title: None,
-            context_usage: None,
-            is_subagent: false,
-        })
-        .expect("record_session");
-        db
     }
 
     /// One frame's whole downstream pipeline: `compute_display_rows` + the
@@ -1513,15 +1526,28 @@ mod normalize_tests {
             );
         }
 
-        // The two first-assistant-message rows COEXIST as two rows: both
-        // incarnations counted to `m1` for one `session_id`, so the stamp is
-        // the only thing keeping them apart. Drop the stamp from the id and
-        // this is the first assertion to fail.
+        // The two first-assistant-message rows COEXIST as TWO rows holding
+        // TWO payloads: both incarnations counted to `m1` for one
+        // `session_id`, so the stamp is the only thing keeping them apart.
+        // The EXACT TOTAL is what an overwrite reddens — drop the stamp and
+        // `m1` / `m1#1` collapse into one row each, leaving FOUR rows
+        // (`m1`, `m1#1`, `system`, `retract:1`) where these SIX live
+        // side by side. Order of failure when the stamp is dropped: the
+        // `row("agent-text", "aaaaaa:m1")` LOOKUP above is the FIRST thing to
+        // fail (`row` panics on an absent key), this count is the second.
+        assert_eq!(
+            rows.len(),
+            6,
+            "A's `m1` + `m1#1` + `system` PLUS B's `m1` + `m1#1` + `retract:1` \
+             — six coexisting rows, two Worker lives that never touched each \
+             other's keys; the table is {rows:?}"
+        );
         let a_m1 = row("agent-text", "aaaaaa:m1");
         let b_m1 = row("agent-text", "bbbbbb:m1");
         assert_ne!(
-            a_m1.1, b_m1.1,
-            "the same counter value in two incarnations must be two rows, not one"
+            a_m1.2, b_m1.2,
+            "the same counter value in two incarnations is two rows with two \
+             payloads, not one overwritten row: A is {a_m1:?}, B is {b_m1:?}"
         );
     }
 
@@ -1540,6 +1566,27 @@ mod normalize_tests {
                 "{id} carries model output, not bookkeeping"
             );
         }
+        // The LOOSENESS is chosen, not accidental: the predicate scans the id's
+        // `:`-separated fields for a WORD, it does not decode a POSITION. No
+        // reachable id tells the two readings apart (`normalize` is the only
+        // `messageId` writer and every id it mints is `{6 hex}:…`, and a stamp
+        // can never BE one of the words — they contain non-hex characters), and
+        // a stricter "strip a leading 6-hex field, then match" rule would
+        // MISCLASSIFY the EMPTY-stamp ids `TurnState::default()` still mints
+        // (`:system`, `:retract:1`). The pins below say so.
+        assert!(
+            is_bookkeeping_message_id("retract"),
+            "the bare pre-stamp discard id is bookkeeping"
+        );
+        assert!(
+            is_bookkeeping_message_id("anything:retract:9"),
+            "the predicate matches a WORD, not a position"
+        );
+        assert!(
+            is_bookkeeping_message_id(":retract:1"),
+            "the EMPTY-stamp shape (`TurnState::default()`) is bookkeeping too \
+             — a position-based rule would miss it"
+        );
     }
 }
 
@@ -1547,33 +1594,11 @@ mod normalize_tests {
 mod compute_display_rows_tests {
     use serde_json::json;
 
+    use super::temp_db;
     use super::{compute_display_rows, ThoughtState};
     use crate::agent::harness::store::{SessionStore, Store};
-    use crate::storage::Db;
-    use crate::types::SessionInfo;
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex as StdMutex};
-
-    /// A temp-dir `Db` with a recorded `sessions` row (the `messages`
-    /// rows FK to `sessions`).
-    fn temp_db() -> Arc<Db> {
-        let dir =
-            std::env::temp_dir().join(format!("harness-display-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let db = Arc::new(Db::open(&dir.join("t.db")).expect("db should open"));
-        db.record_session(&SessionInfo {
-            session_id: "s1".to_string(),
-            cwd: std::path::PathBuf::from("/tmp"),
-            capabilities: serde_json::json!({}),
-            config_options: None,
-            archived: false,
-            title: None,
-            context_usage: None,
-            is_subagent: false,
-        })
-        .expect("record_session");
-        db
-    }
+    use std::sync::Mutex as StdMutex;
 
     /// The `persist_update` split (ADR 0025) GOLDEN test:
     /// `compute_display_rows` on a canned normalized update + canned

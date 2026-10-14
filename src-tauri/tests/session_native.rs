@@ -166,7 +166,9 @@ async fn drain(rx: &mut mpsc::UnboundedReceiver<(String, Value)>) {
 /// store frames are persisted (the `native_messages` transcript + the
 /// `messages` display rows) → `resume_session` (the native branch — NOT
 /// `NotResumable` — the `native_messages` re-read) → the resumed session
-/// operates normally (a fresh `fake_worker` + re-hydrate).
+/// operates normally (a fresh `fake_worker` + re-hydrate) → and the TWO
+/// incarnations' `agent-text` display rows COEXIST, one per Worker life
+/// (ADR 0049).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_session_end_to_end() {
     let dir = temp_config_dir();
@@ -290,19 +292,11 @@ async fn native_session_end_to_end() {
     // (5) Close + RESUME (the native branch — the `native_messages`
     // re-read: NOT `NotResumable`).
     //
-    // The display rows the FIRST incarnation wrote (ADR 0049): the second
-    // Worker's arrival must leave them verbatim. Captured before the close.
-    let before: Vec<(String, String)> = db
-        .messages_for(&sid)
-        .unwrap()
-        .into_iter()
-        .filter(|m| m.kind == "agent-text")
-        .map(|m| (m.message_key.unwrap(), m.payload_json))
-        .collect();
-    assert!(
-        !before.is_empty(),
-        "the first incarnation persisted a display row"
-    );
+    // `stamp_a` is the FIRST Worker's stamp; the resume below spawns a SECOND
+    // Worker (life B) which re-reads the transcript and starts its counters
+    // from zero — so both lives mint `:m1` for one `session_id`. What keeps
+    // them apart is the stamp, and the assertion at the END of this test is
+    // what proves it (one display row per incarnation, coexisting).
 
     manager.close_session(&sid).await.expect("close works");
     let resumed = manager
@@ -313,9 +307,11 @@ async fn native_session_end_to_end() {
     // The RESUMED Worker's own stamp (ADR 0049) — two Worker processes
     // spawned for one Session are two incarnations. Read BEFORE the `drain`
     // below (which discards everything pending — this frame is already in the
-    // channel). NOTE: the display KEYS are not asserted stamped here — the
-    // `fake_worker` fixture hardcodes its `DisplayUpsert` keys and never runs
-    // `normalize`; `normalize_tests`' seam test is what proves the key rule.
+    // channel). The display KEYS carry this stamp: the `fake_worker` fixture
+    // namespaces its canned `DisplayUpsert` key with the stamp its `StartEnv`
+    // carried, exactly as `normalize` namespaces every id the real harness
+    // mints — so the coexistence assertion at the end of the test is the row-
+    // level counterpart of `normalize_tests`' seam test.
     let second_env = wait_for_update(&mut sink_rx, "session_info").await;
     let stamp_b = second_env["incarnation"]
         .as_str()
@@ -357,22 +353,57 @@ async fn native_session_end_to_end() {
         "the resumed turn's first canned chunk"
     );
 
-    // (ADR 0049) The first incarnation's `agent-text` rows are still there,
-    // byte-identical: the second Worker never wrote into the first one's rows.
-    let after: Vec<(String, String)> = db
-        .messages_for(&sid)
-        .unwrap()
-        .into_iter()
-        .filter(|m| m.kind == "agent-text")
-        .map(|m| (m.message_key.unwrap(), m.payload_json))
-        .collect();
-    for row in &before {
-        assert!(
-            after.contains(row),
-            "the first incarnation's row {row:?} did not survive the resumed \
-             Worker; the table now holds {after:?}"
-        );
+    // (ADR 0049) TWO INCARNATIONS COEXIST in one display table. Life A (the
+    // first Worker) and life B (the resumed Worker) BOTH counted to `m1` for
+    // the SAME `session_id`, so the display store's
+    // `UNIQUE(session_id, kind, message_key)` sees two DIFFERENT keys and
+    // keeps one row per life. This is what gives the assertion its teeth:
+    // drop the stamp from the key the id-minter builds and life A's
+    // `{stamp_a}:m1` is simply GONE (life B UPSERTs over the one shared row);
+    // make `mint_incarnation` constant and the two lives share one key, so the
+    // row count below is 1 instead of 2.
+    //
+    // The poll is the house bounded wait (100 × 50 ms — `tests/worker_e2e.rs`):
+    // the resumed turn's `DisplayUpsert` is persisted ASYNCHRONOUSLY, so a
+    // single read could land before life B has written anything.
+    let key_life_a = format!("{stamp_a}:m1");
+    let key_life_b = format!("{stamp_b}:m1");
+    let mut agent_text_keys: Vec<String> = Vec::new();
+    for _ in 0..100 {
+        agent_text_keys = db
+            .messages_for(&sid)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.kind == "agent-text")
+            .map(|m| m.message_key.unwrap_or_default())
+            .collect();
+        if agent_text_keys.contains(&key_life_a) && agent_text_keys.contains(&key_life_b) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    assert!(
+        agent_text_keys.contains(&key_life_a),
+        "life A's display row ({key_life_a}) is gone — life B wrote into its \
+         key, so the ids are not namespaced by incarnation; the agent-text \
+         keys are {agent_text_keys:?}"
+    );
+    assert!(
+        agent_text_keys.contains(&key_life_b),
+        "life B's display row ({key_life_b}) never appeared — the resumed \
+         Worker wrote no row of its own; the agent-text keys are \
+         {agent_text_keys:?}"
+    );
+    assert_eq!(
+        agent_text_keys
+            .iter()
+            .filter(|key| key.ends_with(":m1"))
+            .count(),
+        2,
+        "two incarnations of one session must hold TWO agent-text rows for \
+         the same counter value, not one shared row; the agent-text keys are \
+         {agent_text_keys:?}"
+    );
 
     let _ = manager.close_session(&sid).await;
     let _ = std::fs::remove_dir_all(&dir);
