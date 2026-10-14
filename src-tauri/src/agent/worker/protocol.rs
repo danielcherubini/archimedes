@@ -205,6 +205,11 @@ pub struct StartEnv {
     pub config_dir: String,
     pub subagent_enabled: bool,
     pub system_prompt: Option<String>,
+    /// The stamp for THIS Worker's life within the Session (ADR 0049). Every
+    /// `messageId` the harness mints carries it, so two incarnations of one
+    /// Session cannot write the same display row. Minted per envelope — ONE
+    /// stamp per `Start`.
+    pub incarnation: String,
 }
 
 impl StartEnv {
@@ -237,6 +242,7 @@ impl StartEnv {
             config_dir,
             subagent_enabled,
             system_prompt,
+            incarnation: crate::agent::types::mint_incarnation(),
         }
     }
 }
@@ -428,7 +434,7 @@ mod tests {
         )
     }
 
-    /// The `start` envelope as the `Inbound::Start` variant (all 12
+    /// The `start` envelope as the `Inbound::Start` variant (all 13
     /// fields, the harness `enabled_tools` convention verbatim).
     fn start_inbound() -> Inbound {
         Inbound::Start(Box::new(StartEnv {
@@ -459,6 +465,7 @@ mod tests {
             config_dir: "/tmp/config".to_string(),
             subagent_enabled: false,
             system_prompt: Some("child prompt".to_string()),
+            incarnation: "a3f9c1".to_string(),
         }))
     }
 
@@ -761,8 +768,31 @@ mod tests {
                 assert_eq!(env_dec.config_dir, env.config_dir);
                 assert_eq!(env_dec.subagent_enabled, env.subagent_enabled);
                 assert_eq!(env_dec.system_prompt, env.system_prompt);
+                assert_eq!(env_dec.incarnation, env.incarnation);
             }
             other => panic!("expected `Start`, got {other:?}"),
         }
+    }
+
+    /// Every `Start` mints its OWN incarnation stamp: the token is what keeps
+    /// a resumed Worker out of its predecessor's display rows, so two `Start`s
+    /// sharing one token would reproduce the collision ADR 0049 removes. The
+    /// stamp is 6 lowercase hex chars — a namespace, never a decoded value.
+    #[test]
+    fn every_start_env_gets_its_own_incarnation_stamp() {
+        let a = test_env();
+        let b = test_env();
+        for env in [&a, &b] {
+            assert_eq!(env.incarnation.len(), 6, "the stamp is 6 chars");
+            assert!(
+                u32::from_str_radix(&env.incarnation, 16).is_ok(),
+                "the stamp is hex: {}",
+                env.incarnation
+            );
+        }
+        assert_ne!(
+            a.incarnation, b.incarnation,
+            "two `Start`s must not share one stamp"
+        );
     }
 }

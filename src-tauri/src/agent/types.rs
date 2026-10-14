@@ -10,3 +10,13 @@
 pub fn mint_session_id() -> String {
     format!("arch_{}", uuid::Uuid::new_v4())
 }
+
+/// Mint the id stamp for ONE Worker's life within a Session (a **Session
+/// incarnation**, ADR 0049). SIX lowercase hex chars, opaque: it is a
+/// namespace, not a value anyone decodes — and being hex-only is what lets
+/// `normalize::is_bookkeeping_message_id` read an id's fields positionally
+/// without ever mistaking a stamp for one of them.
+pub fn mint_incarnation() -> String {
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    id[..6].to_string()
+}
