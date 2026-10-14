@@ -148,6 +148,32 @@ impl Compactor {
         u64::from(self.config.keep_recent_tokens).min(affordable) as u32
     }
 
+    /// The summary's OWN output cap (ADR 0047): `min(floor(0.8 ×
+    /// reserve_tokens), 8_192)`. The summary is a model CALL, and a call needs
+    /// an output budget it can afford — pi's rule, same shape. The harness's
+    /// own model calls stay uncapped: their output is the point.
+    pub fn summary_output_cap(&self) -> u32 {
+        const SUMMARY_OUTPUT_CAP: u32 = 8_192;
+        let reserve = u64::from(self.config.reserve_tokens);
+        (reserve * 8 / 10).min(u64::from(SUMMARY_OUTPUT_CAP)) as u32
+    }
+
+    /// The Summary input budget (ADR 0047): what the summary call may CARRY —
+    /// the window minus its own output cap minus the same headroom
+    /// [`Compactor::keep_budget`] charges a small window. A summary built from
+    /// the WHOLE summarized range is a call that overflows on its own way in,
+    /// and the mechanism that fixes an overflow must not need fixing itself.
+    ///
+    /// Zero is a real answer (a window already spent on its reserve), and the
+    /// caller reads it as "no summary is possible", not as "unbounded".
+    pub fn summary_input_budget(&self) -> u32 {
+        const SUMMARY_HEADROOM_CAP: u32 = 4_096;
+        let headroom = self.config.reserve_tokens.min(SUMMARY_HEADROOM_CAP);
+        u64::from(self.context_window)
+            .saturating_sub(u64::from(self.summary_output_cap()))
+            .saturating_sub(u64::from(headroom)) as u32
+    }
+
     /// Re-estimate the context from the (post-compaction) messages — the
     /// RESET path (after a compaction the transcript genuinely shrank, and
     /// a resume has no provider anchor to keep, so the estimate
@@ -1151,6 +1177,59 @@ mod tests {
             1,
             "a configured budget below what the window affords is left alone"
         );
+    }
+
+    /// (ADR 0047) The summary's two numbers: an output cap of
+    /// `min(floor(0.8 × reserve), 8_192)` and an input budget of the window
+    /// minus that cap minus the headroom `keep_budget` charges.
+    #[test]
+    fn the_summary_budget_is_the_window_minus_its_own_output_and_headroom() {
+        // reserve 16 384 → cap min(13 107, 8 192) = 8 192; headroom min(16 384, 4 096).
+        let c = Compactor::new(
+            CompactionConfig {
+                reserve_tokens: 16_384,
+                ..Default::default()
+            },
+            32_000,
+        );
+        assert_eq!(c.summary_output_cap(), 8_192);
+        assert_eq!(c.summary_input_budget(), 32_000 - 8_192 - 4_096);
+    }
+
+    /// A reserve below the ceiling caps the summary at 80% of itself — pi's rule.
+    #[test]
+    fn a_small_reserve_caps_the_summary_output_at_eighty_percent() {
+        let c = Compactor::new(
+            CompactionConfig {
+                reserve_tokens: 1_000,
+                ..Default::default()
+            },
+            32_000,
+        );
+        assert_eq!(c.summary_output_cap(), 800);
+    }
+
+    /// A window already spent on its own reserve has NOTHING left for a
+    /// summary, and `saturating_*` makes that ZERO rather than a wrap-around
+    /// that reads as a huge budget. A reserve of 0 affords no output at all.
+    #[test]
+    fn a_window_below_its_own_reserve_has_no_summary_budget() {
+        let c = Compactor::new(
+            CompactionConfig {
+                reserve_tokens: 16_384,
+                ..Default::default()
+            },
+            12_000,
+        );
+        assert_eq!(c.summary_input_budget(), 0);
+        let none = Compactor::new(
+            CompactionConfig {
+                reserve_tokens: 0,
+                ..Default::default()
+            },
+            128_000,
+        );
+        assert_eq!(none.summary_output_cap(), 0);
     }
 
     #[test]
