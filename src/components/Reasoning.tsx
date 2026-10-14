@@ -10,6 +10,7 @@ import { cn } from "@/components/lib/utils";
 import { TRANSCRIPT_ROW } from "@/components/lib/transcriptRow";
 import { BrainIcon, ChevronRightIcon } from "lucide-react";
 import { QueuedSummaryContent } from "./QueuedSummaryContent";
+import { linkifyText } from "../lib/linkify";
 import type { ComponentProps, CSSProperties, ReactNode } from "react";
 import {
   EMPTY_SCROLL_MASK_STATE,
@@ -446,7 +447,7 @@ export type ReasoningContentProps = ComponentProps<typeof CollapsibleContent> & 
 
 export const ReasoningContent = memo(
   ({ className, children, forceMount, variant = "default", ...props }: ReasoningContentProps) => {
-    const { isOpen, shouldRenderContent } = useReasoning();
+    const { isOpen, isStreaming, shouldRenderContent } = useReasoning();
     const shouldRenderChildren = isOpen || shouldRenderContent || Boolean(forceMount);
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const contentRef = useRef<HTMLDivElement | null>(null);
@@ -578,11 +579,15 @@ export const ReasoningContent = memo(
                   间距放在动画内容内部，避免 closed 动画结束时父级 gap/padding 被移除造成末帧跳动。
                   性能修复：thought 内容可能非常长且会流式追加，展开后如果继续走 MessageResponse/Streamdown，
                   每次 chunk 都会重跑 Markdown 解析和插件渲染，字数越多越卡；这里按纯文本展示并保留换行。 */}
+              {/* Same reason the URL scan is gated on settling: `linkifyText` is a
+                  regex over the WHOLE body, so running it while streaming would
+                  re-scan the growing text on every chunk. While the run is live the
+                  body is the raw string; once it SETTLES the URLs become anchors. */}
               <div
                 ref={contentRef}
                 className="min-w-0 whitespace-pre-wrap break-words text-foreground-subtlest"
               >
-                {children}
+                {isStreaming ? children : linkifyText(children)}
               </div>
             </div>
           </div>

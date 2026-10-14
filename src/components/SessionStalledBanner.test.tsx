@@ -1,8 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import SessionStalledBanner from "./SessionStalledBanner";
-import { resumeSession } from "../lib/tauri";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { externalOpen, resumeSession } from "../lib/tauri";
 import { useSessions } from "../store/sessions";
 
 // Mock the Tauri IPC layer (the `resume_session` command — the store's
@@ -18,14 +17,14 @@ vi.mock("../lib/tauri", async () => {
       archived: false,
     }),
     loadHistory: vi.fn().mockResolvedValue([]),
+    // The External-open seam (ADR 0051) behind the crash-log line. Mocked
+    // rather than left as the real spread export because the real wrapper
+    // never rejects (it swallows a refusal into `console.warn`), so the click
+    // could never be asserted on; the real module would also `invoke` Tauri,
+    // which doesn't exist in jsdom.
+    externalOpen: vi.fn(),
   };
 });
-
-// The `tauri-plugin-opener` `openPath` (the crash-log link — the real
-// module would `invoke` Tauri, which doesn't exist in jsdom).
-vi.mock("@tauri-apps/plugin-opener", () => ({
-  openPath: vi.fn().mockResolvedValue(undefined),
-}));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -80,7 +79,7 @@ describe("SessionStalledBanner", () => {
     );
   });
 
-  it("the crash-log line renders the path and calls openPath when present", () => {
+  it("the crash-log line renders the path and external-opens it when present", () => {
     useSessions.setState({
       stalled: {
         s1: { at: 1700000000000, crashLog: "/data/crash-123-worker.log" },
@@ -90,7 +89,7 @@ describe("SessionStalledBanner", () => {
     const link = screen.getByTestId("stalled-crash-log");
     expect(link.textContent).toContain("/data/crash-123-worker.log");
     fireEvent.click(link);
-    expect(openPath).toHaveBeenCalledWith("/data/crash-123-worker.log");
+    expect(externalOpen).toHaveBeenCalledWith("/data/crash-123-worker.log");
   });
 
   it("is hidden when the session is not stalled", () => {

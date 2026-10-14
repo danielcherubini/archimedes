@@ -3,6 +3,8 @@ pub mod agents;
 pub mod attention;
 pub mod commands;
 pub mod config;
+pub mod navigation_guard;
+pub mod open;
 pub mod skills;
 pub mod storage;
 #[doc(hidden)]
@@ -237,7 +239,26 @@ pub fn run() {
     // unset).
     crashlog::install_panic_hook("supervisor");
     debuglog::init_from_env();
+    // The navigation guard (ADR 0051 Task 3): a navigation to anything that is
+    // not the app's OWN page is refused, so an anchor nobody wrote a handler
+    // for cannot replace this frameless window (no back, no reload). It is a
+    // `plugin::Builder` hook rather than a window-builder one because the app
+    // window is declared in `tauri.conf.json`, and a plugin's hook IS consulted
+    // for a config-created webview; any plugin that says no wins
+    // (`tauri-2.12.2/src/plugin.rs:953-962`). `TAURI_DEV_HOST` is read ONCE
+    // here so the predicate itself stays pure — see `crate::navigation_guard`
+    // for what is allowed, and why (the app's own url, and IPC, must not be
+    // refused).
+    let dev_host = std::env::var("TAURI_DEV_HOST").ok();
+    // The turbofish is load-bearing: nothing else pins the plugin's `R` (the
+    // webview argument is unused) nor the config type `C`, so inference gives up.
+    let navigation_guard = tauri::plugin::Builder::<tauri::Wry>::new("navigation-guard")
+        .on_navigation(move |_webview, url| {
+            crate::navigation_guard::is_app_url(url, dev_host.as_deref())
+        })
+        .build();
     let app = tauri::Builder::default()
+        .plugin(navigation_guard)
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
@@ -282,7 +303,8 @@ pub fn run() {
             commands::files::list_space_files,
             commands::files::list_completion_entries,
             commands::attention::attention_arm,
-            commands::attention::attention_disarm
+            commands::attention::attention_disarm,
+            commands::open::external_open
         ])
         .setup(|app| {
             // The on-disk dirs are named `archimedes` (NOT the bundle

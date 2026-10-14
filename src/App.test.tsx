@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import App from "./App";
-import { listenSessionTitled, listenSubagentClosed } from "./lib/tauri";
+import { externalOpen, listenSessionTitled, listenSubagentClosed } from "./lib/tauri";
 import { useSessions } from "./store/sessions";
 import { useSubagents } from "./store/subagents";
 import { useInteractive } from "./store/interactive";
@@ -95,6 +95,10 @@ vi.mock("./lib/tauri", async () => {
     // `attention alert failed:` — stderr noise instead of a green-and-silent run.
     attentionArm: vi.fn().mockResolvedValue(undefined),
     attentionDisarm: vi.fn().mockResolvedValue(undefined),
+    // The **External open** command (ADR 0051): `OpenAnchor`'s click handler
+    // calls it, and the real one reaches `invoke` — mocked so the two
+    // `SpaceCwdProvider` tests below can assert the cwd it is handed.
+    externalOpen: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -976,5 +980,116 @@ describe("App (the accepted settings-view hole for an inline gate)", () => {
     // Back to the workspace and the card is answerable again (no leak, no dup).
     fireEvent.click(screen.getByRole("button", { name: "Back" }));
     expect(screen.getAllByText("Which color?")).toHaveLength(1);
+  });
+});
+
+describe("App (the SpaceCwdProvider that gives a transcript anchor its Space)", () => {
+  // The provider's PLACEMENT is the design decision here (ADR 0051): it mounts
+  // in `App`, OUTSIDE `ChatStream`, because the surfaces that External-open a
+  // relative path are not all inside the chat — the subagent transcript sheet is
+  // a SIBLING of the workspace view (`SubagentDetailHost`), and the gate overlay
+  // is a sibling of the whole view ternary. Only `App` mounts the transcript AND
+  // the sheet, so only a test in THIS file can see a provider that was moved back
+  // down into `ChatStream`: the sheet's anchors would then resolve NO cwd, and
+  // `external_open` refuses a relative path without one — a dead click that stays
+  // green in every other file.
+  // (What these two cases do NOT pin is the outermost wrap — nothing renders an
+  // anchor inside `SubagentModals` yet, so the overlay half rests on the comment
+  // in `App` until a consumer appears there.)
+  const childEntry = {
+    sessionId: "sub1",
+    parentSessionId: "main1",
+    agentName: "reviewer",
+    task: "review the diff",
+    status: "running" as const,
+  };
+  const clearStores = () => {
+    for (const id of Object.keys(useSubagents.getState().entries)) {
+      useSubagents.getState().dismiss(id);
+    }
+    useSubagentSelection.getState().select(null);
+    useSessions.setState({
+      activeSessionId: null,
+      sessions: [],
+      historySessions: [],
+      archivedSessions: [],
+      spaces: [],
+      messages: {},
+    });
+    vi.mocked(externalOpen).mockClear();
+  };
+  beforeEach(clearStores);
+  afterEach(clearStores);
+
+  /** A live ACTIVE parent, and a child with one line of transcript each — both
+   * carrying a RELATIVE link, which is the only shape that needs the cwd. */
+  const seedTranscripts = () =>
+    useSessions.setState({
+      activeSessionId: "main1",
+      sessions: [
+        {
+          sessionId: "main1",
+          cwd: "/tmp/alpha",
+          capabilities: {},
+          archived: false,
+        },
+      ],
+      historySessions: [],
+      archivedSessions: [],
+      spaces: [
+        { path: "/tmp/alpha", createdAt: 1, lastOpenedAt: 1, trusted: false },
+      ],
+      messages: {
+        main1: [
+          {
+            kind: "agent-text",
+            messageId: "m1",
+            text: "[main.rs](src/main.rs)",
+            at: 1,
+          },
+        ],
+        sub1: [
+          {
+            kind: "agent-text",
+            messageId: "m2",
+            text: "[notes](docs/notes.md)",
+            at: 1,
+          },
+        ],
+      },
+    });
+
+  it("a transcript anchor's click External-opens with the ACTIVE Session's cwd, and navigates nothing", () => {
+    seedTranscripts();
+    render(<App />);
+    const scroll = document.querySelector('[data-testid="transcript-scroll"]')!;
+    const a = scroll.querySelector("a")!;
+    expect(a.textContent).toBe("main.rs");
+    // `false` = the click was CANCELLED, i.e. the webview was never asked to
+    // navigate — the bug the user reported (a link in a reply replaced the app).
+    expect(fireEvent.click(a)).toBe(false);
+    expect(vi.mocked(externalOpen).mock.calls).toEqual([
+      ["src/main.rs", "/tmp/alpha"],
+    ]);
+  });
+
+  it("an anchor in the subagent transcript SHEET gets the parent's cwd too (the provider is outside the view ternary)", () => {
+    // The child's Worker runs with `cwd = parent_cwd`, so the active **Space** is
+    // the right base for its transcript — but that only reaches the sheet because
+    // the provider is mounted in `App` around BOTH branches of the ternary. Move
+    // it into `ChatStream` and this is the first test to go red.
+    seedTranscripts();
+    useSubagents.getState().addSession(childEntry);
+    render(<App />);
+    act(() => {
+      useSubagentSelection.getState().select("sub1");
+    });
+    const sheet = screen.getByRole("dialog", { name: /transcript/ });
+    const a = sheet.querySelector("a")!;
+    expect(a.textContent).toBe("notes");
+    expect(fireEvent.click(a)).toBe(false);
+    expect(vi.mocked(externalOpen).mock.calls).toEqual([
+      ["docs/notes.md", "/tmp/alpha"],
+    ]);
   });
 });

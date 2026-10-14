@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { X } from "lucide-react";
-import { openPath } from "@tauri-apps/plugin-opener";
 import { useSessions } from "../store/sessions";
+import { externalOpen } from "../lib/tauri";
 import { Button } from "./ui/button";
 
 /**
@@ -14,8 +14,8 @@ import { Button } from "./ui/button";
  * - `[Resume]` calls the store's `resumeSession` (the `resume_session`
  *   command — the Supervisor re-spawns the Worker; a success clears the
  *   `stalled` entry, which hides the banner).
- * - The secondary line (a clickable file path — the `tauri-plugin-opener`
- *   `openPath`) shows the crash log when `crashLog` is non-null.
+ * - The secondary line (a clickable file path — the External-open seam,
+ *   ADR 0051) shows the crash log when `crashLog` is non-null.
  * - Dismissible (a LOCAL `useState` — the session stays stalled in the
  *   store; the banner reappears on re-open, when the component remounts
  *   with a fresh dismiss state).
@@ -43,7 +43,7 @@ export default function SessionStalledBanner({
           <button
             type="button"
             data-testid="stalled-crash-log"
-            onClick={() => void openPath(stalled.crashLog!)}
+            onClick={() => void externalOpen(stalled.crashLog!)}
             className="mt-0.5 block max-w-full truncate font-mono text-ui-sm text-foreground-subtle underline-offset-2 hover:underline"
             title={stalled.crashLog}
           >

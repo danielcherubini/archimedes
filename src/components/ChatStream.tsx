@@ -38,6 +38,7 @@ import { usePermissions } from "../store/permissions";
 import { useInteractive } from "../store/interactive";
 import { useSettings } from "../store/settings";
 import { useHasPendingRequest } from "../hooks/useHasPendingRequest";
+import { useActiveSpaceCwd } from "../hooks/useActiveSpaceCwd";
 import { useChildGates, isInlineChildGate } from "../hooks/useChildGates";
 import { useSpinQuip } from "../hooks/useSpinQuip";
 import { useMentionCatalogs, useCompletionDir } from "../hooks/useMentionCatalogs";
@@ -482,12 +483,15 @@ export default function ChatStream() {
   // are placement-flexible (the file's own comment says so for the attachment
   // handlers) and live with the other handlers below.
   // The Space path is the active session's `cwd` (CONTEXT.md: a Session's
-  // `cwd` IS the Space's folder) — derivation UNCHANGED from the `$`-only
-  // picker: live first, then stored (the same derivation as Task 4's
-  // `SpacesList`). `useMentionCatalogs` caches per Space, so the composer and
+  // `cwd` IS the Space's folder) — the derivation now lives in
+  // `useActiveSpaceCwd` (live first, then stored, BOTH stored lists), shared
+  // with `App`'s `SpaceCwdProvider` so the composer's Space and the Space a
+  // relative External-open resolves against cannot disagree. Called ABOVE the
+  // `!activeSessionId` early return with every other hook (see the hook-count
+  // note below). `useMentionCatalogs` caches per Space, so the composer and
   // the left pane share ONE skills fetch (same key — the skills row reuses
   // `useSkillCatalog` verbatim).
-  const spacePath = liveSession?.cwd ?? historySession?.cwd ?? null;
+  const spacePath = useActiveSpaceCwd();
   // The MCP catalog FETCH is deliberately NOT gated on `mcpMentionsEnabled`
   // (a cheap config read; gating it would make a live toggle need a remount).
   const { skills, agents, mcpServers, files } = useMentionCatalogs(spacePath);

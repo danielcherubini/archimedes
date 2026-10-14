@@ -148,6 +148,41 @@ describe("Reasoning component", () => {
     expect(screen.getByText("2 seconds")).toBeDefined();
     expect(screen.queryByText("3 seconds")).toBeNull();
   });
+
+  // A thinking body is PLAIN TEXT on purpose (`Reasoning.tsx` documents the
+  // markdown-per-chunk perf bug), so a URL in it was inert. It is linkified
+  // only once the run SETTLES: the scan would otherwise re-run over the whole
+  // growing text on every streamed chunk.
+  it("linkifies the body only after the thought settles", () => {
+    const body = "see https://x.test/a now";
+    const { rerender } = render(
+      <Reasoning defaultOpen isStreaming={true} autoCollapseKey={null}>
+        <ReasoningTrigger />
+        <ReasoningContent>{body}</ReasoningContent>
+      </Reasoning>,
+    );
+
+    // Streaming: the URL is there as text, but no anchor exists to click.
+    const streaming = screen.getByTestId("reasoning-content");
+    expect(streaming.textContent).toContain("https://x.test/a");
+    expect(streaming.querySelectorAll("a")).toHaveLength(0);
+
+    rerender(
+      <Reasoning defaultOpen isStreaming={false} autoCollapseKey={null}>
+        <ReasoningTrigger />
+        <ReasoningContent>{body}</ReasoningContent>
+      </Reasoning>,
+    );
+
+    // Settled: exactly ONE anchor for that URL.
+    const settled = screen.getByTestId("reasoning-content");
+    const anchors = settled.querySelectorAll("a");
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0].getAttribute("href")).toBe("https://x.test/a");
+    expect(anchors[0].textContent).toBe("https://x.test/a");
+    // Still plain text around it — no markdown was introduced.
+    expect(settled.textContent).toBe("see https://x.test/a now");
+  });
 });
 
 describe("resolveReasoningStreamingSummary", () => {

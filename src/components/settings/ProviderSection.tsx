@@ -8,6 +8,7 @@ import type {
   ProviderConfig,
   WireApi,
 } from "@/lib/tauri";
+import { externalOpen } from "@/lib/tauri";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -159,11 +160,18 @@ function ProviderRow({
               </Button>
             </div>
             {provider.keyUrl ? (
+              // An External open (ADR 0051), NOT a `_blank` target: this app
+              // installs no `on_new_window` handler, so wry denies the
+              // new-window request and the link is a dead control. No cwd is
+              // passed — a `keyUrl` is always absolute (the known-provider
+              // catalog stores absolute base URLs).
               <a
                 href={provider.keyUrl}
-                target="_blank"
-                rel="noreferrer"
                 className="text-ui-base text-foreground-subtle hover:underline"
+                onClick={(e) => {
+                  e.preventDefault();
+                  void externalOpen(provider.keyUrl!);
+                }}
               >
                 Get key
               </a>

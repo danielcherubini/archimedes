@@ -18,6 +18,7 @@ import { fileIconFor } from "../lib/fileIcons";
 import ToolCallCard from "./ToolCallCard";
 import SubagentDelegatingCard from "./SubagentDelegatingCard";
 import DiffBlock from "./DiffBlock";
+import OpenAnchor from "./OpenAnchor";
 import { Reasoning, ReasoningTrigger, ReasoningContent } from "./Reasoning";
 
 /**
@@ -332,6 +333,36 @@ function CodeBlock({ code, lang }: { code: string; lang?: string }) {
   );
 }
 
+/** ADR 0051: the External-open policy is Rust-side; this ONLY stops
+ * react-markdown blanking the schemes we ALLOW (its default filter is
+ * `http|https|irc|ircs|mailto|xmpp`), and keeps refusing the executable ones so
+ * no script-bearing href is ever in the DOM. Deliberately NOT percent-encoding —
+ * the href goes to the OS verbatim. NOTE this transform governs `img src` too:
+ * `data` stays denied, so a markdown `data:` image stays blanked exactly as it
+ * is today — do not "widen" DENIED later. */
+const DENIED = ["javascript", "data", "vbscript", "blob", "filesystem"];
+const SCHEME = /^[a-z][a-z0-9+.-]*$/i;
+export function safeUrlTransform(url: string): string {
+  const colon = url.indexOf(":");
+  const slash = url.indexOf("/");
+  const q = url.indexOf("?");
+  const hash = url.indexOf("#");
+  const relative =
+    colon === -1 ||
+    (slash !== -1 && colon > slash) ||
+    (q !== -1 && colon > q) ||
+    (hash !== -1 && colon > hash);
+  if (relative) return url;
+  const scheme = url.slice(0, colon);
+  // The token before `:` must be a LEGAL scheme: micromark hands us an
+  // already-percent-encoded destination, so `java&#9;script:` arrives as
+  // `java%09script:alert(1)`. A `%` is illegal in a scheme; without this test
+  // the override would let through a class the DEFAULT filter refused.
+  return SCHEME.test(scheme) && !DENIED.includes(scheme.toLowerCase())
+    ? url
+    : "";
+}
+
 /**
  * The ZCode markdown scale, ported from `zcode/packages/ui/src/components/ai-elements/`
  * (`@tailwindcss/typography` `prose*` classes are NOT used — the component
@@ -350,7 +381,8 @@ function CodeBlock({ code, lang }: { code: string; lang?: string }) {
  *   `my-4` on a `border border-border` panel at 14px mono — a file-type header
  *   (`bg-panel`) above the body, which keeps Shiki's own paper;
  * - links `text-ui-base font-medium` in the icon-blue token, dotted underline
- *   shown on hover;
+ *   shown on hover — and an activation is an **External open** (`OpenAnchor`),
+ *   never a navigation of the Client's own webview;
  * - tables (the ZCode `markdown-table` scale): a `my-3` frame that is
  *   `overflow-x-auto rounded-xl border border-border` (wide tables scroll
  *   instead of breaking the bubble), the table itself `w-max min-w-full`,
@@ -439,12 +471,17 @@ function AgentMarkdown({ text }: { text: string }) {
         children?: ReactNode;
         href?: string;
       }) => (
-        <a
-          href={href}
+        // An **External open**, not a navigation: a bare `<a href>` here handed
+        // the click to the webview, which replaced the Client's own page (the
+        // navigation guard refuses that, so the click used to do NOTHING).
+        // `OpenAnchor` reads the Space cwd from the context itself, which is why
+        // this `useMemo` may keep `[]` deps — see below.
+        <OpenAnchor
+          href={href ?? ""}
           className="text-ui-base font-medium text-icon-blue no-underline decoration-dotted underline-offset-4 hover:underline"
         >
           {children}
-        </a>
+        </OpenAnchor>
       ),
       code({ className, children }: { className?: string; children?: ReactNode }) {
         const codeText = String(children ?? "").replace(/\n$/, "");
@@ -459,6 +496,11 @@ function AgentMarkdown({ text }: { text: string }) {
         );
       },
     }),
+    // `[]` is correct even though the anchor now depends on the Space cwd: the
+    // cwd is read by `OpenAnchor` from `SpaceCwdContext`, so the element created
+    // here holds no cwd value and the map never goes stale. Adding `cwd` (or a
+    // `useSpaceCwd()` call in this component) would rebuild the whole map — and
+    // re-parse the markdown — on every Space change for nothing.
     [],
   );
 
@@ -467,7 +509,11 @@ function AgentMarkdown({ text }: { text: string }) {
       {/* `remark-gfm` is NOT included by default in react-markdown v10 —
        * without it GFM tables (and strikethrough / task lists) fall back to
        * raw pipe text, which is what made tables look broken in the chat. */}
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={components}
+        urlTransform={safeUrlTransform}
+      >
         {text}
       </ReactMarkdown>
     </div>

@@ -10,6 +10,9 @@ import FileChip from "./FileChip";
 import DiffCount from "./DiffCount";
 import DiffBlock from "./DiffBlock";
 import { ToolCallCardHeader } from "./ToolCallCardHeader";
+import { linkifyText } from "../lib/linkify";
+import { useSpaceCwd } from "./SpaceCwd";
+import { externalOpen } from "../lib/tauri";
 
 const SHELL_TOOLS = new Set(["bash", "powershell", "sudo_exec"]);
 
@@ -21,11 +24,13 @@ const SHELL_TOOLS = new Set(["bash", "powershell", "sudo_exec"]);
  * for shell tools, the `summarizeToolCall` summary otherwise) + a
  * `+N -M` change stat (edit only) + a red `Failed` word with a
  * dotted-underline tooltip (error text + copy) on failure + a hover
- * chevron. Expandable body: the diff via `DiffBlock` when present,
- * else a `rounded-xl bg-panel` panel — a `$` prompt + mono
- * command for shell tools, the file chip + stat for file tools —
- * then the normalized `rawOutput` (scrollable, capped at 20k chars)
- * or a muted "No output."
+ * chevron. Expandable body: the diff via `DiffBlock` when present — the
+ * edit view is deliberately INERT, no anchor — else a `rounded-xl bg-panel`
+ * panel: a `$` prompt + mono command for shell tools, the file chip + stat
+ * for file tools (the ONLY clickable `FileChip` — the row sits outside the
+ * header button), then the normalized `rawOutput` (scrollable, capped at 20k
+ * chars) run through `linkifyText` so a URL the tool printed is openable, or
+ * the muted `No output.` line.
  */
 export default function ToolCallCard({
   title,
@@ -41,6 +46,9 @@ export default function ToolCallCard({
   rawOutput?: unknown;
 }) {
   const [open, setOpen] = useState(false);
+  // The Space folder to resolve a relative file path against (hoisted — a hook
+  // may not sit inside the conditional JSX branch that renders the chip).
+  const cwd = useSpaceCwd();
   // Auto-open a single file edit once when it finishes (ZCode's
   // one-shot `autoOpen`): the user sees the result without clicking;
   // they can close it, and it never re-opens on later updates.
@@ -103,7 +111,7 @@ export default function ToolCallCard({
                     <div className="flex items-start gap-2 font-sans text-ui-base text-foreground">
                       <span className="shrink-0 text-foreground-subtle">$</span>
                       <pre className="block min-w-0 max-h-15 flex-1 overflow-auto whitespace-pre-wrap break-words font-mono">
-                        {command}
+                        {linkifyText(command)}
                       </pre>
                     </div>
                   )}
@@ -112,7 +120,10 @@ export default function ToolCallCard({
                       data-testid="tool-call-file-row"
                       className="flex min-w-0 overflow-hidden items-center gap-2"
                     >
-                      <FileChip path={files[0].path} />
+                      <FileChip
+                        path={files[0].path}
+                        onOpen={() => void externalOpen(files[0].path, cwd)}
+                      />
                       {range && (
                         <span className="shrink-0 text-ui-sm text-foreground-subtlest">
                           {range}
@@ -125,10 +136,17 @@ export default function ToolCallCard({
               )}
               {output !== undefined ? (
                 <div>
+                  {/* Linkified AFTER the cap, so the truncation the tests pin
+                      is unchanged (and a URL cut in half by the cap does not
+                      become a wrong link). No `useMemo`: re-splitting a
+                      ≤ 20 000-char string on a status change is not a cost
+                      worth the wrong-deps risk. */}
                   <pre className="font-mono max-h-80 overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] text-ui-sm">
-                    {output.length > 20000
-                      ? output.slice(0, 20000) + "…"
-                      : output}
+                    {linkifyText(
+                      output.length > 20000
+                        ? output.slice(0, 20000) + "…"
+                        : output,
+                    )}
                   </pre>
                   {output.length > 20000 && (
                     <p className="text-ui-sm text-foreground-subtlest">

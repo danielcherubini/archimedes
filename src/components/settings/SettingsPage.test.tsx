@@ -10,6 +10,7 @@ import {
 import SettingsPage from "./SettingsPage";
 import {
   authMcpServer,
+  externalOpen,
   getSettings,
   listAgentDefinitions,
   listModels,
@@ -40,7 +41,11 @@ const baseSettings: AppSettings = {
       baseUrl: "https://tama.wizards.town/v1",
       apiKey: "k",
       api: "openai-completions",
-      keyUrl: null,
+      // The same value as the inlined `getSettings` fixture below: the two
+      // copies ARE one document (duplicated only because the mock factory is
+      // hoisted above this const's initializer), and the save-assertions that
+      // spread `baseSettings` compare against what that fixture loads.
+      keyUrl: "https://keys.test/get",
     },
   ],
   mcpServers: {
@@ -73,6 +78,11 @@ vi.mock("../../lib/tauri", async () => {
     await vi.importActual<Record<string, unknown>>("../../lib/tauri");
   return {
     ...actual,
+    // The External-open seam (ADR 0051). Mocked here — NOT left as the real
+    // `importActual` spread — because the real `externalOpen` wrapper never
+    // rejects (it swallows a refusal into `console.warn`), so a test could
+    // never observe the click having reached it.
+    externalOpen: vi.fn(),
     // Inlined (NOT the `baseSettings` const): the factory is hoisted above
     // the const's initializer (a TDZ reference would throw at import time).
     getSettings: vi.fn().mockResolvedValue({
@@ -90,7 +100,9 @@ vi.mock("../../lib/tauri", async () => {
           baseUrl: "https://tama.wizards.town/v1",
           apiKey: "k",
           api: "openai-completions",
-          keyUrl: null,
+          // A key-management page (the known-provider catalog always stores an
+          // ABSOLUTE base URL) — the row's "Get key" link is an External open.
+          keyUrl: "https://keys.test/get",
         },
       ],
       mcpServers: {
@@ -2128,6 +2140,26 @@ describe("SettingsPage (the known-providers picker + the provider api field — 
     // The row is rendered (the name field) — and there is no "Get key" link.
     await screen.findByDisplayValue("Tama");
     expect(screen.queryByRole("link", { name: "Get key" })).toBeNull();
+  });
+
+  it("provider_row_get_key_link_external_opens_instead_of_opening_a_window", async () => {
+    // No per-test override: the fixture's provider already carries
+    // `keyUrl: "https://keys.test/get"` (both copies of the `getSettings`
+    // fixture — the inlined one the page loads and the `baseSettings` the
+    // save-assertions spread).
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    await go("Providers");
+    const link = await screen.findByRole("link", { name: "Get key" });
+    // A `_blank` target is a DEAD control here: this app installs no
+    // `on_new_window` handler, so wry denies the new-window request — which is
+    // why the activation is routed to `external_open` instead.
+    expect(link.hasAttribute("target")).toBe(false);
+    expect(link.hasAttribute("rel")).toBe(false);
+    fireEvent.click(link);
+    // One argument only: a `keyUrl` is always absolute (the known-provider
+    // catalog stores absolute base URLs), so there is no cwd to resolve.
+    expect(externalOpen).toHaveBeenCalledWith("https://keys.test/get");
   });
 });
 

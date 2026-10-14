@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 // Mock the Tauri IPC core (the `version.test.ts` pattern): the wrappers in
 // this module are ONE-LINE `invoke` calls, so the only thing worth pinning is
@@ -17,6 +17,7 @@ import {
   attentionArm,
   attentionDisarm,
   compactSession,
+  externalOpen,
   listCompletionEntries,
   listSpaceFiles,
 } from "./tauri";
@@ -204,5 +205,85 @@ describe("attention arm/disarm (the ADR 0039 IPC boundary)", () => {
     // one place that drift could be caught.
     expect(mockedInvoke).toHaveBeenCalledWith("attention_disarm");
     expect(mockedInvoke).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("externalOpen (the External-open IPC boundary, ADR 0051)", () => {
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    mockedInvoke.mockReset();
+    // The refusal path logs; a test that left the spy in place would print a
+    // wall of warnings for every later case in this file.
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  it("invokes `external_open` with the `href`/`cwd` argument keys", async () => {
+    mockedInvoke.mockResolvedValue(undefined);
+    await externalOpen("https://x.test", "/home/u/proj");
+    // Same trap as `list_space_files` above: Tauri maps these arg KEYS to the
+    // `commands::open::external_open` parameters (`href`, `cwd` — both single
+    // words, so no casing alias is involved and a typo is pure silence), and a
+    // typo in the command NAME or in either KEY is a runtime-only failure no
+    // Rust test can see (the Rust tests call `external_open` DIRECTLY — nothing
+    // in this repo goes over IPC in a test) and no component test can see
+    // (Task 4+ mock THIS wrapper, so they cannot observe the wire at all).
+    expect(mockedInvoke).toHaveBeenCalledWith("external_open", {
+      href: "https://x.test",
+      cwd: "/home/u/proj",
+    });
+  });
+
+  it("sends `cwd: null` for an omitted/undefined/null cwd — NEVER an absent key or undefined", async () => {
+    mockedInvoke.mockResolvedValue(undefined);
+    await externalOpen("README.md");
+    await externalOpen("README.md", undefined);
+    await externalOpen("README.md", null);
+    // `cwd` is `Option<String>` on the Rust side, so an ABSENT key would also
+    // deserialize to `None` — which is exactly why `null` is asserted here as
+    // a CONTRACT rather than as a necessity: the wrapper promises one explicit
+    // shape on the wire, and a future `cwd ? { cwd } : {}`-style conditional
+    // spread (or dropping `?? null`) is a silent change of shape. `toHaveBeenCalledWith`
+    // already distinguishes `null` from `undefined`/absent; the `in` check below
+    // says the same thing out loud.
+    for (const call of mockedInvoke.mock.calls) {
+      const args = call[1] as Record<string, unknown>;
+      expect(call[0]).toBe("external_open");
+      expect("cwd" in args).toBe(true);
+      expect(args.cwd).toBeNull();
+    }
+    expect(mockedInvoke).toHaveBeenLastCalledWith("external_open", {
+      href: "README.md",
+      cwd: null,
+    });
+  });
+
+  it("RESOLVES and warns when the command rejects (a refusal is not an unhandled rejection)", async () => {
+    // The Rust side returns the typed refusal code (`Refusal::code()`, e.g.
+    // `denied-scheme:javascript`) or `os-error:…`. Neither may become a
+    // rejected promise: every caller is a click handler with no `catch`, so a
+    // rejection here is an unhandled rejection in the webview console and zero
+    // diagnostics for the user-visible "nothing happened".
+    mockedInvoke.mockRejectedValue("denied-scheme:javascript");
+    await expect(
+      externalOpen("javascript:alert(1)", "/home/u/proj"),
+    ).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    // The refusal reason travels in the first argument (the wire string), the
+    // href the user clicked in the second — both are needed to tell "refused by
+    // policy" apart from "the OS handler failed" when reading a bug report.
+    expect(warn.mock.calls[0][0]).toContain("denied-scheme:javascript");
+    expect(warn.mock.calls[0][1]).toBe("javascript:alert(1)");
+  });
+
+  it("RESOLVES when the OS handler fails (`os-error:…` is a warn too)", async () => {
+    mockedInvoke.mockRejectedValue(new Error("os-error:no handler"));
+    await expect(externalOpen("/home/u/proj/notes.md", null)).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("os-error:no handler");
   });
 });

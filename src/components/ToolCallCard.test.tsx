@@ -1,11 +1,27 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, it, expect, vi } from "vitest";
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 import ToolCallCard from "./ToolCallCard";
+import { SpaceCwdProvider } from "./SpaceCwd";
+import { externalOpen } from "../lib/tauri";
 import {
   summarizeToolCall,
   normalizeToolOutput,
 } from "../lib/toolOutput";
 import * as toolOutput from "../lib/toolOutput";
+
+// The IPC boundary: `externalOpen` is what a clickable chip and a linkified
+// output URL call, and the real one would `invoke` Tauri, which does not exist
+// in jsdom. The `importActual` SPREAD is required, not a factory-only mock:
+// this component reaches `../lib/tauri` transitively through the stores, and a
+// factory would blank the exports they need.
+vi.mock("../lib/tauri", async () => {
+  const actual = await vi.importActual<Record<string, unknown>>("../lib/tauri");
+  return { ...actual, externalOpen: vi.fn() };
+});
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 describe("summarizeToolCall", () => {
   it("summarizes bash by its command", () => {
@@ -327,8 +343,12 @@ describe("ToolCallCard (rendering)", () => {
     );
     expect(container.querySelector(".bg-panel")).not.toBeNull();
     expect(screen.getByText("done")).toBeTruthy();
-    // The user closes it → a later status change never re-opens it.
-    fireEvent.click(screen.getByRole("button"));
+    // The user closes it → a later status change never re-opens it. The
+    // auto-opened body carries its own buttons (the file chip is one), so the
+    // toggle is picked by name. NOTE the optional space: the header's
+    // accessible name is its inline spans concatenated WITHOUT a separator
+    // ("Editedc.ts+1-1"), so an exact "Edited c.ts" phrase never matches.
+    fireEvent.click(screen.getByRole("button", { name: /^Edited\s?c\.ts/ }));
     rerender(
       <ToolCallCard
         title="edit"
@@ -373,5 +393,187 @@ describe("ToolCallCard (rendering)", () => {
     expect(chipRow.className).toContain("min-w-0");
     expect(chipRow.className).toContain("overflow-hidden");
     expect(chipRow.className).not.toContain("truncate");
+  });
+});
+
+// --- External open: the tool-output surfaces. A `<pre>` is one settled text
+// node, so a URL printed by `bash` needs `linkifyText` to become clickable; the
+// file chip is a FILE (not a URL), so it is a `<button>`, and only where it is
+// not nested in the header's toggle `<button>`.
+//
+// Every header-row filter below is a prefix regex with an OPTIONAL space: the
+// toggle button's accessible name is its inline spans concatenated verbatim
+// ("Ranls", "Readc.ts"), so a natural-phrase name would not match.
+describe("ToolCallCard (External open)", () => {
+  it("linkifies a URL in the expanded output and External-opens it with the Space cwd", () => {
+    render(
+      <SpaceCwdProvider cwd="/home/u/proj">
+        <ToolCallCard
+          title="bash"
+          status="completed"
+          rawInput={{ command: "ls" }}
+          rawOutput={{
+            content: [{ type: "text", text: "docs: https://x.test/a done" }],
+          }}
+        />
+      </SpaceCwdProvider>,
+    );
+    // Collapsed: nothing is linkified (the body is the only linkified surface).
+    expect(screen.queryByRole("link")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /^Ran\s?ls$/ }));
+    const anchor = screen.getByRole("link", { name: "https://x.test/a" });
+    expect(anchor.getAttribute("href")).toBe("https://x.test/a");
+    fireEvent.click(anchor);
+    expect(externalOpen).toHaveBeenCalledTimes(1);
+    expect(externalOpen).toHaveBeenCalledWith(
+      "https://x.test/a",
+      "/home/u/proj",
+    );
+  });
+
+  it("passes a null cwd when no SpaceCwdProvider is mounted", () => {
+    render(
+      <ToolCallCard
+        title="bash"
+        status="completed"
+        rawOutput={{ content: [{ type: "text", text: "https://x.test/a" }] }}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^Ran$/ }));
+    fireEvent.click(screen.getByRole("link", { name: "https://x.test/a" }));
+    expect(externalOpen).toHaveBeenCalledWith("https://x.test/a", null);
+  });
+
+  it("preserves the output's whitespace byte-for-byte around the link", () => {
+    // `textContent` — not `getByText` — because the assertion IS the raw
+    // whitespace: linkifyText must add no box and drop no character.
+    const text = "line1\n  line2\thttps://x.test/a\nline4";
+    const { container } = render(
+      <ToolCallCard title="bash" status="completed" rawOutput={text} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^Ran$/ }));
+    const pre = container.querySelector("pre");
+    expect(pre?.textContent).toBe(text);
+    expect(pre?.contains(screen.getByRole("link"))).toBe(true);
+  });
+
+  it("keeps the 20k cap (ellipsis + note) and linkifies only the shown text", () => {
+    // The URL sits PAST the cut, so the truncation still happens first: the
+    // shown text ends in the ellipsis and carries no anchor.
+    const huge = `${"x".repeat(20000)}https://x.test/a`;
+    const { container } = render(
+      <ToolCallCard title="bash" status="completed" rawOutput={huge} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^Ran$/ }));
+    expect(container.querySelector("pre")?.textContent).toBe(
+      `${"x".repeat(20000)}…`,
+    );
+    expect(screen.getByText(/truncated — 20016 chars total/)).toBeTruthy();
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it("linkifies a URL in the shell command line (the commonest printed URL)", () => {
+    const { container } = render(
+      <SpaceCwdProvider cwd="/home/u/proj">
+        <ToolCallCard
+          title="bash"
+          status="completed"
+          rawInput={{ command: "curl https://x.test/api" }}
+          rawOutput="ok"
+        />
+      </SpaceCwdProvider>,
+    );
+    const header = screen.getByRole("button", {
+      name: /^Ran\s?curl/,
+    });
+    // The header summary sits inside the toggle button, so it stays inert.
+    expect(within(header).queryByRole("link")).toBeNull();
+    fireEvent.click(header);
+    // The body's command `<pre>` (the first `<pre>` in the panel) carries the
+    // link, and its text is unchanged byte-for-byte.
+    const commandPre = container.querySelector(".bg-panel pre");
+    expect(commandPre?.textContent).toBe("curl https://x.test/api");
+    expect(commandPre?.querySelector("a")?.getAttribute("href")).toBe(
+      "https://x.test/api",
+    );
+  });
+
+  it("makes the expanded body's file chip a button that External-opens the path with the Space cwd", () => {
+    render(
+      <SpaceCwdProvider cwd="/home/u/proj">
+        <ToolCallCard
+          title="read"
+          status="completed"
+          rawInput={{ path: "/a/b/c.ts" }}
+          rawOutput="data"
+        />
+      </SpaceCwdProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^Read\s?c\.ts$/ }));
+    const chip = screen.getByRole("button", { name: "c.ts" });
+    // It is the BODY chip, and it carries the full path as its tooltip (the
+    // inert variant keeps that `title` on its own `<span>`).
+    expect(chip.closest('[data-testid="tool-call-file-row"]')).not.toBeNull();
+    expect(chip.getAttribute("title")).toBe("/a/b/c.ts");
+    // Not nested in any other interactive element.
+    expect(chip.closest("button")).toBe(chip);
+    fireEvent.click(chip);
+    expect(externalOpen).toHaveBeenCalledTimes(1);
+    expect(externalOpen).toHaveBeenCalledWith("/a/b/c.ts", "/home/u/proj");
+  });
+
+  it("leaves the header's file chip inert — no element nested inside the toggle button", () => {
+    const { container } = render(
+      <SpaceCwdProvider cwd="/home/u/proj">
+        <ToolCallCard
+          title="read"
+          status="completed"
+          rawInput={{ path: "/a/b/c.ts" }}
+          rawOutput="data"
+        />
+      </SpaceCwdProvider>,
+    );
+    const header = screen.getByRole("button", { name: /^Read\s?c\.ts$/ });
+    // The nesting pin: the header row is itself a `<button>` (four of
+    // `FileChip`'s five call sites render inside one), so its chip must not be
+    // interactive — a nested `<button>` is invalid HTML whose click would also
+    // toggle the card.
+    expect(within(header).queryByRole("button", { name: "c.ts" })).toBeNull();
+    expect(within(header).getByText("c.ts").tagName).toBe("SPAN");
+    expect(
+      within(header)
+        .getByText("c.ts")
+        .closest("span[title]")
+        ?.getAttribute("title"),
+    ).toBe("/a/b/c.ts");
+    // Expanded: the header row stays inert, and nothing interactive ends up
+    // inside any button anywhere in the card.
+    fireEvent.click(header);
+    expect(within(header).queryByRole("button")).toBeNull();
+    expect(within(header).queryByRole("link")).toBeNull();
+    expect(
+      container.querySelectorAll("button button, button a, button input"),
+    ).toHaveLength(0);
+  });
+
+  it("keeps the diff/edit view inert — no anchor in the DiffBlock", () => {
+    render(
+      <SpaceCwdProvider cwd="/home/u/proj">
+        <ToolCallCard
+          title="edit"
+          status="completed"
+          rawInput={{
+            path: "/a/b/c.ts",
+            edits: [{ oldText: "a", newText: "b" }],
+          }}
+          diff={{ path: "/a/b/c.ts", patch: "+go to https://x.test/a" }}
+        />
+      </SpaceCwdProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^Edited\s?c\.ts/ }));
+    // The patch line renders as plain text — the user asked for links in the
+    // main text, not in the edit view.
+    expect(screen.getByText("+go to https://x.test/a")).toBeTruthy();
+    expect(screen.queryAllByRole("link")).toHaveLength(0);
   });
 });

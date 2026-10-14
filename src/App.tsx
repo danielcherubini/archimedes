@@ -32,7 +32,9 @@ import WindowControls from "./components/WindowControls";
 import SubagentDetailHost from "./components/SubagentDetailHost";
 import { SubagentModals } from "./components/SubagentModals";
 import SettingsPage from "./components/settings/SettingsPage";
+import { SpaceCwdProvider } from "./components/SpaceCwd";
 import { useAttentionAlert } from "./hooks/useAttentionAlert";
+import { useActiveSpaceCwd } from "./hooks/useActiveSpaceCwd";
 
 function App() {
   // Attention alerts (ADR 0038/0039): arm the OS notification when a Session
@@ -273,6 +275,21 @@ function App() {
       );
   }, []);
 
+  // The active **Session**'s `cwd` (= its **Space**'s folder), read through the
+  // ONE module that owns that derivation — `ChatStream`'s `spacePath` (the
+  // picker catalogs) reads the same hook, so the Space the composer completes
+  // against and the Space a relative External-open resolves against cannot
+  // disagree.
+  // This is `App`'s FIRST subscription to the SESSIONS store (the collapsed
+  // flag above is the separate `leftPaneState` module, via
+  // `useSyncExternalStore`), so `App` now re-renders when the session list or
+  // the active session changes. Accepted deliberately — `applySessionUpdates`
+  // rewrites `messages`, not the lists, so streaming does not re-render the app
+  // shell — and do NOT "optimise" it with a memo wrapper: that would trade a
+  // render that does not happen for a second store subscription, plus a
+  // component that cannot see the context it exists to provide.
+  const spaceCwd = useActiveSpaceCwd();
+
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden rounded-xl bg-frame text-foreground">
       {/* Frameless window chrome (the window is `decorations: false` in
@@ -335,43 +352,58 @@ function App() {
         <WindowControls />
       </div>
       <div className="flex min-h-0 flex-1" data-testid="content-row">
-        {view === "settings" ? (
-          // Full width — the `SpacesList` is NOT rendered in the settings
-          // view (the `SettingsPage`'s own 268px section sidebar is the
-          // left edge).
-          <SettingsPage onBack={() => setView("workspace")} />
-        ) : (
-          <>
-            <SpacesList onOpenSettings={() => setView("settings")} />
-            {/* The center column: the chat (the Spaces are the chrome
-                bar's TABS — the old top row is gone). */}
-            <div className="flex min-w-0 flex-1 flex-col">
-              <ChatStream />
-            </div>
-            <SidePane />
-            {/* The subagent transcript sheet: the `fixed` right-side panel
-                holding the SELECTED subagent's transcript (a child gate is
-                never rendered here — `SubagentModals` below and `MessageList`
-                own every gate). A `fixed` overlay, so its position in the flex
-                row does not affect layout. */}
-            <SubagentDetailHost />
-          </>
-        )}
-        {/* The child-gate overlay host: the half of every child's gates that
-            the transcript structurally cannot render — every `confirm`/
-            `password` `Dialog`, and the `ask`/permission of a child whose
-            parent is NOT the active session (the active parent's half renders
-            inline in `ChatStream`'s transcript). A SIBLING of the whole
-            settings ternary, not a child of `SidePane`/`SubagentDetailHost`:
-            those live in the else-branch and render NOTHING while Settings is
-            open, which would strand the gates it owns. A `fixed` overlay, so
-            its position in this flex row does not affect layout.
-            `sheetMounted` is the one fact that split gives it: the sheet above
-            unmounts with this ternary while the overlay does not, so the overlay
-            is told which view is up instead of inferring it from the sheet's
-            selection store (which survives the transition, so the user's open
-            transcript survives it too). */}
-        <SubagentModals sheetMounted={view === "workspace"} />
+        {/* The active **Space**'s folder for every **External open** of a
+            relative path (ADR 0051), provided HERE rather than inside
+            `ChatStream` because the surfaces that need it are NOT all inside
+            the workspace view: the subagent transcript sheet
+            (`SubagentDetailHost`) lives in the else-branch of the ternary below
+            and `SubagentModals` is a sibling of that whole ternary, so only a
+            provider OUTSIDE the ternary covers both — and while Settings is
+            open the surfaces that remain (the overlay's cards) are still
+            covered. A `Subagent session`'s Worker runs with `cwd =
+            parent_cwd`, so the active Space is the right value for its
+            transcript too. Without a provider `useSpaceCwd()` is `null` and
+            `external_open` refuses a relative path — the safe direction, but a
+            dead surface. */}
+        <SpaceCwdProvider cwd={spaceCwd}>
+          {view === "settings" ? (
+            // Full width — the `SpacesList` is NOT rendered in the settings
+            // view (the `SettingsPage`'s own 268px section sidebar is the
+            // left edge).
+            <SettingsPage onBack={() => setView("workspace")} />
+          ) : (
+            <>
+              <SpacesList onOpenSettings={() => setView("settings")} />
+              {/* The center column: the chat (the Spaces are the chrome
+                  bar's TABS — the old top row is gone). */}
+              <div className="flex min-w-0 flex-1 flex-col">
+                <ChatStream />
+              </div>
+              <SidePane />
+              {/* The subagent transcript sheet: the `fixed` right-side panel
+                  holding the SELECTED subagent's transcript (a child gate is
+                  never rendered here — `SubagentModals` below and `MessageList`
+                  own every gate). A `fixed` overlay, so its position in the flex
+                  row does not affect layout. */}
+              <SubagentDetailHost />
+            </>
+          )}
+          {/* The child-gate overlay host: the half of every child's gates that
+              the transcript structurally cannot render — every `confirm`/
+              `password` `Dialog`, and the `ask`/permission of a child whose
+              parent is NOT the active session (the active parent's half renders
+              inline in `ChatStream`'s transcript). A SIBLING of the whole
+              settings ternary, not a child of `SidePane`/`SubagentDetailHost`:
+              those live in the else-branch and render NOTHING while Settings is
+              open, which would strand the gates it owns. A `fixed` overlay, so
+              its position in this flex row does not affect layout.
+              `sheetMounted` is the one fact that split gives it: the sheet above
+              unmounts with this ternary while the overlay does not, so the
+              overlay is told which view is up instead of inferring it from the
+              sheet's selection store (which survives the transition, so the
+              user's open transcript survives it too). */}
+          <SubagentModals sheetMounted={view === "workspace"} />
+        </SpaceCwdProvider>
       </div>
     </div>
   );

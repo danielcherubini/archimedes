@@ -4,6 +4,7 @@ pub mod clipboard;
 pub mod files;
 pub mod history;
 pub mod mcp;
+pub mod open;
 pub mod sessions;
 pub mod settings;
 pub mod skills;
