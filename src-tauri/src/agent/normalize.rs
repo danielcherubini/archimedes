@@ -118,8 +118,9 @@ fn unique_system_chunk(message_id: &str, text: impl Into<String>) -> Value {
 /// hand-write these ids, and `TurnState::default()`, whose EMPTY stamp mints
 /// `:system` / `:retract:1` (a "strip a leading 6-hex field, then match" rule
 /// would misclassify those). A stamp is SIX HEX CHARS
-/// (`types::mint_incarnation`) and neither word contains a hex character, so a
-/// stamp can never BE one of them. `default` is deliberately NOT here: it is the
+/// (`types::mint_incarnation`), and neither word is spelled from the hex
+/// alphabet (`system` carries `s`/`y`/`t`/`m`; `retract` is seven chars and
+/// carries `r`/`t`), so a stamp can never EQUAL one. `default` is deliberately NOT here: it is the
 /// no-id-open fallback over REAL model text, and the subagent capture must
 /// still hand it to the parent. Anything that must capture ONLY what the model
 /// said — the subagent capture, whose text becomes the PARENT's tool result —
