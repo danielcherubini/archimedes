@@ -1278,8 +1278,14 @@ export const useSessions = create<SessionsState>((set, get) => ({
           // persisted `user` row with its full base64 `data`, so an
           // attachment-heavy resume still allocates a copy of every attachment,
           // just from the other side: that O(n) allocation lives there, not
-          // here. A no-op write keeps the SAME array (its own
-          // changed-sentinel), so silence never trips this branch.
+          // here.
+          //
+          // The premise is that no write mutates a transcript in place, so
+          // `current === prior` proves nothing landed — which is exactly what
+          // SILENCE takes, and why it is cheap rather than what it avoids. One
+          // write shape breaks it: a `tool_call_update` whose content changes
+          // nothing still returns a fresh array, so it re-keys the slow path.
+          // Correct (the identity pass selects nothing) but not O(1).
           added = [];
         } else {
           const priorCount = new Map<string, number>();

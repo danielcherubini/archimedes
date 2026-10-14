@@ -93,12 +93,15 @@ pub async fn raw_json_server(
 /// The shared pin for the `protocol` unit test and the two-process e2e, because
 /// the obvious check is half blind: `len() == 6` + `u32::from_str_radix(s, 16)`
 /// also accepts `A3F9C1` (and a radix parse accepts a leading `+`, so it is not
-/// even an alphabet check on its own). LOWERCASE is part of the contract, not a
-/// rendering preference — ADR 0049 and `types::mint_incarnation` both state it,
-/// and it is part of why a stamp can never equal one of
-/// `normalize::is_bookkeeping_message_id`'s bookkeeping words. The byte set is
-/// the load-bearing half (it implies lowercase); the `to_lowercase` clause
-/// states the ADR's own word at the seam.
+/// even an alphabet check on its own). The BYTE SET is the whole argument: a
+/// stamp made only of `[0-9a-f]` is lowercase by construction, which is what
+/// makes the `to_lowercase` clause implied rather than load-bearing — it is kept
+/// because ADR 0049 names lowercase at the seam, and because it is the clause
+/// that fails LOUDEST (`A3F9C1` trips it first) when a stamp source ever grows
+/// upper-case letters. Case is not what keeps a stamp from equaling a
+/// bookkeeping word, either: `system` and `retract` are already lowercase, and
+/// what they are not is hex-spelled (`system` carries `s`/`y`/`t`/`m`, `retract`
+/// is seven chars and carries `r`/`t`) — see `normalize::is_bookkeeping_message_id`.
 pub fn is_incarnation_stamp(s: &str) -> bool {
     let lower_hex = |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b);
     s.len() == 6 && s == s.to_lowercase() && s.bytes().all(lower_hex)
@@ -108,10 +111,12 @@ pub fn is_incarnation_stamp(s: &str) -> bool {
 mod tests {
     use super::is_incarnation_stamp;
 
-    /// The predicate's NEGATIVE cases are the whole point: each is something
-    /// the `len() == 6` + `u32::from_str_radix(_, 16)` check it replaces was
-    /// blind to, so a future "simplify it back" reddens here instead of
-    /// silently re-opening the shape ADR 0049 pins.
+    /// The negative cases are the point, though only `A3F9C1` is a case the
+    /// `len() == 6` + `u32::from_str_radix(_, 16)` check this replaces was
+    /// actually BLIND to — the length clause already caught the 7-char, 5-char
+    /// and empty ones, and the radix parse already rejected `abcdefg`. The rest
+    /// are kept so that a future "simplify it back" that drops EITHER half of
+    /// this predicate reddens something here.
     #[test]
     fn the_stamp_shape_rejects_everything_a_radix_parse_admits() {
         for ok in ["a3f9c1", "000000", "ffffff", "dead01"] {

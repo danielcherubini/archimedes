@@ -166,11 +166,18 @@ impl TurnState {
      let fallback = st.id("default");
      let mid = st.current_message_id.clone().unwrap_or_else(|| fallback.clone());
      ```
+     **SUPERSEDED as executed (`6a6f39e`): the tree is LAZY instead.** That form runs `st.id("default")` — a `format!` — on every `message_update` frame, i.e. once per streamed token, which is the same cost this very step refuses two bullets below when it declines to hoist `st.id("system")`. What shipped keeps both laziness and borrow-cleanliness (the `None` arm is evaluated only when the id is actually needed, and `st.id(..)` borrows `st` after the clone completes):
+     ```rust
+     let mid = match st.current_message_id.clone() {
+         Some(id) => id,
+         None => st.id("default"),
+     };
+     ```
    - `message_retracted`'s line: keep `st.retract_seq += 1;` where it is, then pass the stamped id to the unchanged helper (it already takes `(message_id, text)`): `unique_system_chunk(&st.id(&format!("retract:{}", st.retract_seq)), "Discarded an incomplete reply")`.
    - `system_chunk` gains a leading id parameter — `fn system_chunk(message_id: &str, text: impl Into<String>) -> Value` with `"messageId": message_id` — and each of the SEVEN call sites (`:383`, `:404`, `:405`, `:437`, `:442`, `:444`, `:448`) passes `&st.id("system")` inline. Do NOT hoist it above the `match`: `normalize` runs per streamed token, and a hoisted `format!` would allocate on every frame for the seven arms that need it. None of those seven arms mutates `st`, so an immutable `st.id(..)` call inside them is borrow-clean.
    - Update `TurnState`'s doc comment (`:45-52`): `current_message_id` is `{incarnation}:m{n}`.
 
-3. The predicate keeps its meaning and gains shape tolerance:
+3. The predicate keeps its meaning and gains shape tolerance (**SUPERSEDED as executed — the doc comment below is the AS-PLANNED text and its rationale is FALSE: nothing on this path re-reads a pre-change database, because `SubagentCapture::observe_sink_frame` reads LIVE frames off the Worker's stdout and never touches the `messages` table. The bare shape is accepted for an id carrying NO stamp — the hand-written fixtures, and `TurnState::default()`'s EMPTY stamp minting `:system` / `:retract:1`. Corrected in `390141f`, its hex argument in `fb9b2f5`; `normalize.rs` carries the shipped text.**):
 
 ```rust
 /// Is this messageId a harness bookkeeping line rather than model output?
@@ -446,9 +453,9 @@ review section): `cargo fmt --check` clean · `cargo test
 `cargo clippy --all-targets -- -D warnings` **zero warnings** · `pnpm test`
 **1846 passed (82 files)** · `pnpm build` clean.
 
-### Review iterations — four execution steps after the four tasks
+### Review iterations — six execution steps after the four tasks
 
-The branch then took four review-fix commits, two review iterations:
+The branch then took six review-fix commits across three review iterations:
 
 - **`a0e610b` — `test: pin the two-incarnation guarantee where it can actually
   fail`.** The two-process e2e got teeth it did not have: `fake_worker` threads
@@ -494,16 +501,47 @@ The branch then took four review-fix commits, two review iterations:
   test and the e2e, because `len() == 6` + a radix parse also accepts
   `A3F9C1`; the e2e compares an EXACT sorted pair of `agent-text` keys instead
   of counting `ends_with(":m1")`.
+- **`cdb5a81` — `docs: state the merge's identity terms and pin the third
+  load-window mutator`.** Frontend: the two comments that made `mergeDedupeKey`
+  THE identity rule now state its real, content-inclusive composition per kind
+  (`tool-call|<id>|<title>|<status>`, `<kind>|<messageId>|<text>`, …), so a
+  reader can see which mutations re-enter `added`; the fast path's claim is
+  scoped to the LIVE snapshot (the dedupe pass still keys every reloaded row);
+  `bare` is used in one sense only. Two tests pin the THIRD reload-window
+  mutator — `handleSessionClosed` → `finalizeSessionMessages` flipping a
+  `pending` tool call to `failed` inside the window duplicates that card (the
+  accepted direction of last resort, ADR 0050 / follow-ups §8), while a tool
+  call that merely ARRIVES in the window is kept once. Behaviour was measured
+  before it was asserted, and the merge's semantics are untouched (the commit
+  is comment-only in `sessions.ts`). Docs: ADR 0050's mutation bullet, `§8`,
+  `CONTEXT.md`'s residue clause, `thinking-display.md`'s per-incarnation
+  numbering.
+- **`docs: keep the residue count and the stamp-shape argument true` (this
+  pass, iteration 3).** Three claims the fixes left inconsistent, all caught by
+  reading the code rather than the diff: `tool_call` / `tool_call_update` frames
+  carry NO `messageId` yet land `tool-call` display rows (ADR 0049, `CONTEXT.md`
+  and this plan each said every frame that lands a display row carries one, and
+  each counted ONE residue while the follow-ups counted two — §6 `default` and
+  §7 `tool-call`), so every such claim is now scoped to the keys this change
+  STAMPS and points at §7 for the family it never scoped; `test_support`'s claim
+  that lowercase is what keeps a stamp from equaling a bookkeeping word is wrong
+  (those words are already lowercase — what they are not is hex-spelled) and its
+  "every negative case was a blind spot" comment was wrong in five of six cases
+  (only `A3F9C1` was blind; the length clause caught the rest); the fast path's
+  "silence never trips this branch" read backwards, and a content-free
+  `tool_call_update` really does take the slow path. The e2e now waits for the
+  EXACT key set rather than for both keys to appear, so a hypothetical third
+  `agent-text` row fails deterministically after the bounded wait instead of
+  depending on what had been persisted at that instant.
 
-**Validation re-run 2026-10-14 on this document's tree** (`6a6f39e` plus this
-iteration's documentation/comment corrections and two new tool-card window
-tests): `cargo test --no-fail-fast` **886 lib tests + every integration target,
-0 failures — 998 passing across all 23 targets** · `pnpm test` **1850 passed
-(82 files)** · `pnpm build` clean. No `src-tauri/` source changed in this pass,
-so `cargo fmt --check` and `cargo clippy` were not re-run here; the Rust numbers
-are that untouched tree's. (The Rust lib count moved 885 → 886 and the frontend
-1846 → 1850 across the four review commits and this one, which each added
-tests.)
+**Validation re-run 2026-10-14 on this document's tree** (through `cdb5a81` plus
+this iteration's documentation/comment corrections and the e2e's exact-set wait):
+`cargo fmt --check` clean · `cargo test --no-fail-fast` **886 lib tests + every
+integration target, 0 failures — 998 passing across the 22 test binaries plus the
+(empty) doc-test target** · `cargo clippy --all-targets -- -D warnings` silent ·
+`pnpm test` **1850 passed (82 files)** · `pnpm build` clean. (The Rust lib count
+moved 885 → 886 and the frontend 1846 → 1850 across the review commits, which
+each added tests.)
 
 **One leak knowingly left behind:** `tests/session_native.rs`'s
 `temp_config_dir()` hand-rolls its temp dir exactly the way `temp_db()` used to
@@ -577,15 +615,18 @@ the plan text above is not):
    grep hit is a doc comment), and `pnpm test -- FILE` runs all 82 files rather
    than one — the filter goes without `--`.
 
-Two decisions the plan did not predict, recorded here (and in ADR 0049):
+Three things the plan did not predict, recorded here (and in ADR 0049):
 
 - `compute_display_rows` keeps its `unwrap_or("default")` fallback **unstamped**
   and unchanged on purpose: it is a reader of ids off frames, and that fallback
   only fires if a frame arrives with no `messageId` at all, which the stamped
   `normalize` never produces. The CLIENT keeps its mirror of the same fallback
   bare too (`applySessionUpdate`'s `update.messageId ?? "default"`), and that is
-  the change's one recorded RESIDUE: `default` is the only display key still
-  able to collide across incarnations. It stays bare on BOTH sides deliberately,
+  the change's one recorded RESIDUE **among the keys it stamps**: `default` is
+  the only stamped-shape key still able to collide across incarnations (the
+  `tool-call` family is outside the change entirely — it is keyed by the
+  provider's `toolCallId`, which no stamp of ours can scope, recorded beside it
+  as §7). It stays bare on BOTH sides deliberately,
   because the Worker's stamp never crosses to the Client (the production
   `session_info_update` carries the title alone — the `incarnation` field the
   two-incarnation e2e reads is a fixture addition, not a wire promise), so

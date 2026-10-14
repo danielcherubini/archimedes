@@ -369,6 +369,8 @@ async fn native_session_end_to_end() {
     // single read could land before life B has written anything.
     let key_life_a = format!("{stamp_a}:m1");
     let key_life_b = format!("{stamp_b}:m1");
+    let mut expected_keys = vec![key_life_a.clone(), key_life_b.clone()];
+    expected_keys.sort();
     let mut agent_text_keys: Vec<String> = Vec::new();
     for _ in 0..100 {
         agent_text_keys = db
@@ -378,7 +380,15 @@ async fn native_session_end_to_end() {
             .filter(|m| m.kind == "agent-text")
             .map(|m| m.message_key.unwrap_or_default())
             .collect();
-        if agent_text_keys.contains(&key_life_a) && agent_text_keys.contains(&key_life_b) {
+        // Wait for the EXACT set, not just for both keys to appear. Breaking on
+        // the two membership checks would let the compare below run at whatever
+        // instant the second key landed, so a hypothetical third `agent-text`
+        // row would pass or fail depending on whether it had been persisted
+        // yet. Waiting for the whole set makes an extra row fail DETERMINISTICALLY,
+        // after the bounded wait, with the keys printed.
+        let mut seen = agent_text_keys.clone();
+        seen.sort();
+        if seen == expected_keys {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -406,8 +416,6 @@ async fn native_session_end_to_end() {
     // `:m1` at all (the repo rule: an id assertion changes to a different
     // EXACT value, never to `contains` / `ends_with`).
     agent_text_keys.sort();
-    let mut expected_keys = vec![key_life_a, key_life_b];
-    expected_keys.sort();
     assert_eq!(
         agent_text_keys, expected_keys,
         "two incarnations of one session must hold EXACTLY two `agent-text` \
