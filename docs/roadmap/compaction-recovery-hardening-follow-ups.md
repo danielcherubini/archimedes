@@ -193,7 +193,7 @@ block writes until it settles) rather than a correction.
 late, add a message to it during the window, and assert the message is still
 there afterwards.
 
-## 6. The bare `default` fallback key is the one display key still able to collide across incarnations
+## 6. The bare `default` fallback key is the one STAMPED-SHAPE display key still able to collide across incarnations
 
 **Problem.** ADR 0049 stamps every id the harness MINTS, but the no-`messageId`
 fallback key stays bare on BOTH sides: `compute_display_rows`'s

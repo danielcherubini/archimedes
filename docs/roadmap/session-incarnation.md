@@ -93,15 +93,15 @@ with `incarnation: crate::agent::types::mint_incarnation(),` in the constructor.
 
 4. In `start_env_from_parts_matches_the_inbound_start_variant` (`:745`), add `assert_eq!(env_dec.incarnation, env.incarnation);` after the `system_prompt` assertion.
 
-5. New test in the same module — `every_start_env_gets_its_own_incarnation_stamp`: build two envs from the module's `test_env()` helper and assert each stamp is 6 chars, parses as `u32::from_str_radix(&s, 16)` (i.e. hex), and that the two differ. Doc comment: the token is what keeps a resumed Worker out of its predecessor's rows, so two `Start`s sharing one token would reproduce the collision.
+5. New test in the same module — `every_start_env_gets_its_own_incarnation_stamp`: build two envs from the module's `test_env()` helper and assert each stamp is 6 chars, parses as `u32::from_str_radix(&s, 16)` (i.e. hex), and that the two differ. Doc comment: the token is what keeps a resumed Worker out of its predecessor's rows, so two `Start`s sharing one token would reproduce the collision. **SUPERSEDED as executed (`6a6f39e`): that shape check is half blind — `len() == 6` + a radix parse also accepts `A3F9C1` — so both this test and the e2e call `test_support::is_incarnation_stamp` (six LOWERCASE hex) instead.**
 
-**What NOT to change:** `session/mod.rs:924`, `worker/manager.rs:968`, `worker/core.rs`, and every other `from_parts` call site — all 15 keep compiling because the mint lives inside `from_parts`.
+**What NOT to change:** `session/mod.rs:924`, `worker/manager.rs:968`, `worker/core.rs`, and every other `from_parts` call site — all of them (14 in the tree, 2 of them production: `session/mod.rs` and `worker/manager.rs`) keep compiling because the mint lives inside `from_parts`. The plan said 15; the count drifted, and only the two production sites matter.
 
 **Steps:**
 - [ ] Write `every_start_env_gets_its_own_incarnation_stamp` + the round-trip assertion.
 - [ ] `cd src-tauri && cargo test --lib agent::worker::protocol` — must fail to compile with `no field 'incarnation'`. If it compiles, stop and check whether the field already exists.
 - [ ] Implement 1–4.
-- [ ] `cargo test --lib agent::worker::protocol` — green (the module's 7 tests).
+- [ ] `cargo test --lib agent::worker::protocol` — green (the module's tests, 8 of them once this one lands).
 - [ ] `cargo test --lib` — green (nothing reads the field yet).
 - [ ] `cargo clippy --all-targets -- -D warnings` — silent (`mint_incarnation` has a non-test caller already).
 - [ ] `cargo fmt` then `cargo fmt --check`.
@@ -110,7 +110,7 @@ with `incarnation: crate::agent::types::mint_incarnation(),` in the constructor.
 **Acceptance criteria:**
 - [ ] `StartEnv.incarnation` is a required `String` (never `Option`), serialized as `incarnation`.
 - [ ] Two envs from `from_parts` never share a stamp; the token is 6 lowercase hex chars.
-- [ ] All 15 existing `StartEnv::from_parts` call sites are untouched.
+- [ ] Every existing `StartEnv::from_parts` call site is untouched.
 
 ---
 
@@ -324,7 +324,7 @@ To make the stamp observable across a process boundary, the fixture echoes it th
      `let first_env = wait_for_update(&mut sink_rx, "session_info").await;`
      `let stamp_a = first_env["incarnation"].as_str().expect("the start envelope echoes its incarnation stamp").to_string();`
      `assert_eq!(stamp_a.len(), 6, "the stamp is six hex chars, got {stamp_a}");`
-     `u32::from_str_radix(&stamp_a, 16).expect("the stamp is hex");`
+     `u32::from_str_radix(&stamp_a, 16).expect("the stamp is hex");` — **SUPERSEDED as executed (`6a6f39e`): the test calls `archimedes_lib::test_support::is_incarnation_stamp(&stamp_a)` for the same reason as Task 1 step 5.**
    - Just before the close/resume (step (5)), capture the pre-resume display rows with NO `?` (the test returns `()`) and NO `.to_string()` (it trips `clippy::implicit_clone`):
      ```rust
      let before: Vec<(String, String)> = db
@@ -533,6 +533,16 @@ The branch then took six review-fix commits across three review iterations:
   EXACT key set rather than for both keys to appear, so a hypothetical third
   `agent-text` row fails deterministically after the bounded wait instead of
   depending on what had been persisted at that instant.
+- **`docs: scope the residue claims the last pass left over` (iteration 4).** Two
+  sentences that outlive this plan and were false: follow-ups §6's heading
+  ("the one display key still able to collide") contradicted its own §7 and its
+  own Disposition line — now "the one STAMPED-SHAPE display key"; and the e2e
+  comment credited the row-count assertion with falsifying a constant
+  `mint_incarnation`, when the measured first failure is `assert_ne!(stamp_a,
+  stamp_b)` (verified by mutation: 0.01 s, `left: "a3f9c1" right: "a3f9c1"`).
+  Plus the plan's last unmarked drifts (the half-blind shape check in two steps,
+  the `from_parts` call-site count 15 → 14 with only the 2 production sites
+  mattering, the protocol module's test count).
 
 **Validation re-run 2026-10-14 on this document's tree** (through `cdb5a81` plus
 this iteration's documentation/comment corrections and the e2e's exact-set wait):
@@ -661,4 +671,4 @@ pnpm test
 pnpm build
 ```
 
-All green, clippy silent. Then update `docs/roadmap/compaction-recovery-hardening-follow-ups.md`: §3 stays retired (ADR 0049), §4 (the stalled tail) and §5 (`openSession` applies a reload verbatim — the same race class Task 4 closes for `resumeSession`) remain open — done, and that document now also carries **§6** (the bare `default` fallback key, the change's one recorded residue) and **§7** (`tool-call` rows are the one display-key family ADR 0049 does not scope), both added by the review that produced this branch's documentation corrections.
+All green, clippy silent. Then update `docs/roadmap/compaction-recovery-hardening-follow-ups.md`: §3 stays retired (ADR 0049), §4 (the stalled tail) and §5 (`openSession` applies a reload verbatim — the same race class Task 4 closes for `resumeSession`) remain open — done, and that document now also carries **§6** (the bare `default` fallback key, the change's one recorded residue among the keys it stamps) and **§7** (`tool-call` rows are the one display-key family ADR 0049 does not scope), both added by the review that produced this branch's documentation corrections.

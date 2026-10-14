@@ -361,8 +361,9 @@ async fn native_session_end_to_end() {
     // keeps one row per life. This is what gives the assertion its teeth:
     // drop the stamp from the key the id-minter builds and life A's
     // `{stamp_a}:m1` is simply GONE (life B UPSERTs over the one shared row);
-    // make `mint_incarnation` constant and the two lives share one key, so the
-    // row count below is 1 instead of 2.
+    // make `mint_incarnation` constant and the two lives share one stamp — the
+    // `assert_ne!(stamp_a, stamp_b)` above is what fires first, and the shared
+    // key (hence a 1-row table instead of 2) is what that inequality protects.
     //
     // The poll is the house bounded wait (100 × 50 ms — `tests/worker_e2e.rs`):
     // the resumed turn's `DisplayUpsert` is persisted ASYNCHRONOUSLY, so a
