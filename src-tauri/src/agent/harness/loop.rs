@@ -257,6 +257,14 @@ pub struct AgentLoop {
     /// and carrying the `reason` / `will_retry` that recovery has to report.
     /// A hand-triggered `/compact` does NOT use it — a command is an IDLE
     /// action (`ControlCmd::Compact`).
+    ///
+    /// Its lifetime is ONE TURN, and `handle_turn` ENFORCES that by clearing it
+    /// on entry: both producers set it and `continue` straight to the loop top,
+    /// where the cancellation check runs FIRST, so a Stop that lands as the
+    /// overflow is handled settles the turn (`settle_cancelled`) without ever
+    /// taking the trigger — leaving it armed would make the NEXT prompt run the
+    /// canceled turn's overflow recovery (and, when that compaction shrinks
+    /// nothing, end the new turn as an error before its own model call).
     force_compact: Option<CompactionTrigger>,
     /// The session's current context size in tokens (the `context_usage_
     /// update` frame source — the frontend's context-percentage display).
@@ -682,6 +690,13 @@ impl AgentLoop {
     /// `ask` / `subagent` / `summarize` flows all race it — a cancel
     /// stops the turn, it is never waited out).
     async fn handle_turn(&mut self, turn: &CancellationToken, text: &str, images: &[ImageRef]) {
+        // A queued compaction belongs to the turn that queued it, and this turn
+        // has queued none: drop whatever a PREVIOUS turn left behind (see the
+        // field — a Stop racing an overflow recovery exits BEFORE the trigger is
+        // consumed). Without this the fresh prompt inherits the dead turn's
+        // `overflow` trigger, compacts for a reason it never hit, and — `run_compaction`
+        // having shrunk nothing — settles as an error without a model call.
+        self.force_compact = None;
         // The display `user` row is written SOLELY by the manager's
         // `send_prompt_with_images` (`record_message` — the command
         // delegates to it and adds no persistence of its own): the loop
@@ -3802,6 +3817,55 @@ mod tests {
         assert!(
             kinds.iter().any(|k| k == "turn_end"),
             "the failed turn's timeline still closes, got {kinds:?}"
+        );
+    }
+
+    /// The queued overflow trigger belongs to the turn that queued it. A Stop
+    /// that lands while an overflow is being handled ends the turn at the
+    /// cancellation check at the TOP of the loop — which runs BEFORE the
+    /// trigger the overflow just queued is taken — so a trigger set on the
+    /// LOOP survived the settle. The next prompt then took it: the fresh turn
+    /// compacted under the PREVIOUS turn's `overflow` reason and, that
+    /// compaction having nothing to shrink, settled as an error WITHOUT ever
+    /// calling the model — the user's new prompt died for an overflow it never
+    /// had.
+    #[tokio::test]
+    async fn a_stale_overflow_trigger_does_not_hijack_the_next_turn() {
+        let (provider, calls) = ScriptedProvider::new(vec![Some(vec![
+            ProviderEvent::TextDelta("hi".to_string()),
+            ProviderEvent::Done(FinishReason::Stop),
+        ])]);
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let mut loop_ = build_loop(
+            Box::new(provider),
+            events_tx,
+            Arc::new(StdMutex::new(CancellationToken::new())),
+            watch::channel(0u64).0,
+            RetryPolicy::new_with(5, Duration::from_millis(1)),
+        );
+        // The leak, spelled out: the PREVIOUS turn was cancelled after its
+        // overflow queued this trigger, so it is still armed on the loop.
+        loop_.force_compact = Some(CompactionTrigger {
+            reason: "overflow",
+            will_retry: true,
+        });
+        loop_.handle_prompt(&text_prompt("hello")).await;
+        let events =
+            collect_events_until(&mut events_rx, |e| matches!(e, RpcEvent::agent_settled)).await;
+        let kinds: Vec<String> = events.iter().map(|e| e.kind().to_string()).collect();
+
+        assert!(
+            !kinds.iter().any(|k| k == "compaction_start"),
+            "a trigger a PREVIOUS turn queued compacts nothing on this one, got {kinds:?}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the new prompt made its OWN model call instead of dying on the stale trigger"
+        );
+        assert!(
+            kinds.iter().any(|k| k == "agent_end"),
+            "the new turn ran to completion, got {kinds:?}"
         );
     }
 
