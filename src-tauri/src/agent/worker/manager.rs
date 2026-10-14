@@ -113,10 +113,12 @@ pub struct SubagentCapture {
     /// The LAST `messageId` with a non-empty capture (updated on every
     /// non-empty capture of a chunk that is NOT harness bookkeeping — the
     /// final-output source; the bookkeeping chunks (`normalize::
-    /// is_bookkeeping_message_id`: the shared `"system"` one-liner key, and
-    /// the `"retract:N"` discard line) are NEVER captured: a failed child
-    /// turn must not settle with a one-liner as its output, and a parent
-    /// must never read a discard line as its child's answer).
+    /// is_bookkeeping_message_id`: the shared one-liner key and the
+    /// `retract:N` discard line, each EITHER bare or after the incarnation
+    /// stamp — `{stamp}:system` / `{stamp}:retract:N`, ADR 0049, since a
+    /// pre-change database still carries the bare keys) are NEVER captured: a
+    /// failed child turn must not settle with a one-liner as its output, and a
+    /// parent must never read a discard line as its child's answer).
     last_message_id: StdMutex<Option<String>>,
     /// The `message_update` `usage` accumulation (the `inputTokens` /
     /// `outputTokens` fields — the MAX across the frames: a turn's

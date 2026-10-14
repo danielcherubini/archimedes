@@ -224,6 +224,7 @@ async fn build_harness_with_settings(
         SudoDeps::default(),
         retry,
         config_dir.clone(),
+        "t".to_string(),
     );
     let task = tokio::spawn(loop_.run());
     (
@@ -343,7 +344,10 @@ async fn text_response_emits_normalized_events_and_persists_transcript() {
         .map(|(_, p)| p.clone())
         .expect("an agent_message_chunk frame");
     assert_eq!(chunk["update"]["content"]["text"], "Hello");
-    assert_eq!(chunk["update"]["messageId"], "m1");
+    // The stamp is the loop's own (`"t"` — the `AgentLoop::new` arg): the
+    // counter restarts at 1 every incarnation, so the id is only unique WITH
+    // the prefix (ADR 0049).
+    assert_eq!(chunk["update"]["messageId"], "t:m1");
 
     // (3) The provider transcript (the `native_messages` table): the
     // user + assistant messages.

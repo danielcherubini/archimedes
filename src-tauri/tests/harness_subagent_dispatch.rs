@@ -182,6 +182,7 @@ async fn build_harness(
         SudoDeps::default(),
         RetryPolicy::default(),
         None, // config_dir (no desktop MCP layer in the test)
+        "t".to_string(),
     );
     let task = tokio::spawn(loop_.run());
     // Reap the task on drop (the tests don't await it — the `events`

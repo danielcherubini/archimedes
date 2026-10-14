@@ -195,6 +195,9 @@ pub fn default_build_loop(
             sudo,
             RetryPolicy::new(),
             Some(std::path::PathBuf::from(&env.config_dir)),
+            // The envelope's stamp (ADR 0049) — THE line that makes the fix
+            // real: a Resume's loop mints ids its predecessor never used.
+            env.incarnation.clone(),
         );
         // (3) The wire field IS the harness convention (`None` = all,
         // `Some(v)` = exactly `v`, `Some(vec![])` = NO tools) — applied
@@ -645,6 +648,7 @@ mod tests {
             SudoDeps::default(),
             RetryPolicy::new(),
             None,
+            "t".to_string(),
         );
         // The session initialization (the seam stub mirrors the
         // `build_loop` default's init steps).
