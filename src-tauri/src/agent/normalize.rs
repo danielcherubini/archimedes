@@ -61,6 +61,31 @@ pub struct TurnState {
     pub current_message_id: Option<String>,
     pub toolcall_args: HashMap<String, String>,
     pub announced_tool_calls: HashSet<String>,
+    /// How many Retractions this turn has announced. The discard line needs a
+    /// messageId UNIQUE per discard (ADR 0048) — two lines sharing `"system"`
+    /// would weld into one bubble.
+    pub retract_seq: u64,
+}
+
+/// A one-line `agent_message_chunk` carrying a UNIQUE messageId — for a line
+/// that must survive being adjacent to another line. `system_chunk`'s shared
+/// `"system"` key APPENDS (that is its point), so a second line on it welds.
+fn unique_system_chunk(message_id: &str, text: impl Into<String>) -> Value {
+    let text = text.into();
+    json!({
+        "sessionUpdate": "agent_message_chunk",
+        "content": { "type": "text", "text": text },
+        "messageId": message_id,
+    })
+}
+
+/// Is this messageId a harness bookkeeping line rather than model output?
+/// `"system"` is the shared one-liner key; `"retract:N"` is a discard line
+/// (ADR 0048). Anything that must capture ONLY what the model said — the
+/// subagent capture, whose text becomes the PARENT's tool result — asks this
+/// instead of re-deciding the convention.
+pub fn is_bookkeeping_message_id(id: &str) -> bool {
+    id == "system" || id.starts_with("retract:")
 }
 
 /// A one-line `agent_message_chunk` with the dedicated `"system"` messageId
@@ -378,6 +403,26 @@ pub(crate) fn normalize(e: &RpcEvent, st: &mut TurnState) -> Vec<Value> {
                 "reason": reason,
             }),
         ],
+        // (ADR 0048) An Abandoned attempt's reply is retracted. The id is the one
+        // the harness is ON — the retried call REUSES it (`message_start` fires
+        // once per assistant message), which is precisely why the discard is a
+        // protocol event and not something the reader may infer. Then the line
+        // says so, on its own id: reusing `"system"` would weld it onto the
+        // "Retrying (attempt 1/3…)" line this path emits immediately before.
+        RpcEvent::message_retracted => {
+            let mid = st
+                .current_message_id
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
+            st.retract_seq += 1;
+            vec![
+                json!({ "sessionUpdate": "message_retracted", "messageId": mid }),
+                unique_system_chunk(
+                    &format!("retract:{}", st.retract_seq),
+                    "Discarded an incomplete reply",
+                ),
+            ]
+        }
         RpcEvent::auto_retry_start {
             attempt,
             max_attempts,
@@ -1077,6 +1122,65 @@ mod normalize_tests {
             "an aborted compaction prints its error too, got {:?}",
             aborted[0]["content"]["text"]
         );
+    }
+
+    /// (ADR 0048) A real discard is both the erase AND a line saying so, and
+    /// the line carries its OWN messageId — the shared `"system"` key would weld
+    /// it onto the retry line emitted immediately before it.
+    #[test]
+    fn a_retraction_erases_the_current_message_and_says_so() {
+        let mut st = TurnState::default();
+        normalize(
+            &RpcEvent::message_start {
+                message: json!({ "role": "assistant" }),
+            },
+            &mut st,
+        );
+        let frames = normalize(&RpcEvent::message_retracted, &mut st);
+        assert_eq!(
+            frames,
+            vec![
+                json!({ "sessionUpdate": "message_retracted", "messageId": "m1" }),
+                json!({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": "Discarded an incomplete reply" },
+                    "messageId": "retract:1",
+                }),
+            ]
+        );
+        assert_eq!(
+            st.current_message_id.as_deref(),
+            Some("m1"),
+            "the retried call REUSES the id: a Retraction is not a new message"
+        );
+    }
+
+    /// Two discards in one turn must not weld (ADR 0048), so the line's id
+    /// increments per Retraction — the ids are unique, not shared.
+    #[test]
+    fn a_second_retraction_gets_its_own_line_id() {
+        let mut st = TurnState::default();
+        normalize(
+            &RpcEvent::message_start {
+                message: json!({ "role": "assistant" }),
+            },
+            &mut st,
+        );
+        let first = normalize(&RpcEvent::message_retracted, &mut st);
+        let second = normalize(&RpcEvent::message_retracted, &mut st);
+        assert_eq!(first[1]["messageId"], "retract:1");
+        assert_eq!(second[1]["messageId"], "retract:2");
+    }
+
+    /// A Retraction with no message announced yet is still well-formed (the
+    /// `default` id every other chunk falls back to).
+    #[test]
+    fn a_retraction_before_any_message_start_says_default() {
+        let mut st = TurnState::default();
+        let frames = normalize(&RpcEvent::message_retracted, &mut st);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0]["sessionUpdate"], "message_retracted");
+        assert_eq!(frames[0]["messageId"], "default");
     }
 }
 
