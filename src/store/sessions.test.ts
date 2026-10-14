@@ -1086,6 +1086,37 @@ describe("compacting (the working indicator's compaction state)", () => {
     expect(useSessions.getState().compacting["s1"]).toBeUndefined();
   });
 
+  it("an active frame that was still in flight when the Worker crashed does NOT re-lock it", () => {
+    // The race: `App.tsx` coalesces `session-update` frames into ONE store
+    // write per animation frame, while the `session-stalled` event is applied
+    // immediately. So a frame that arrived BEFORE the crash is applied AFTER
+    // `markStalled` cleared the entry — and with a dead Worker there is no
+    // closing frame coming, so the indicator spins on and the composer stays
+    // locked on a session that can never compact again. An ACTIVE frame for a
+    // stalled session is therefore stale by construction.
+    useSessions.getState().markStalled("s1", 123, "boom");
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s1", update: active("manual") }]);
+    expect(useSessions.getState().compacting["s1"]).toBeUndefined();
+    // The single-frame form takes the same rule (every frame reaches the
+    // frontend through one of the two).
+    useSessions.getState().applySessionUpdate("s1", active("manual"));
+    expect(useSessions.getState().compacting["s1"]).toBeUndefined();
+    // Clearing is never harmful, so an INACTIVE frame is still applied.
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s1", update: settled("manual") }]);
+    expect(useSessions.getState().compacting["s1"]).toBeUndefined();
+    // A RESUMED session (the stall cleared) compacts normally again — the guard
+    // is about the crash, not about the reason.
+    useSessions.setState({ stalled: { s1: undefined } });
+    useSessions
+      .getState()
+      .applySessionUpdates([{ sessionId: "s1", update: active("manual") }]);
+    expect(useSessions.getState().compacting["s1"]).toBe("manual");
+  });
+
   it("handleSessionClosed clears it, but KEEPS the context usage (unchanged invariant)", () => {
     useSessions.getState().applySessionUpdates([
       { sessionId: "s1", update: active("manual") },

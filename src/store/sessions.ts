@@ -88,6 +88,26 @@ function diffMessages(diffs: DiffRef[], at: number): Message[] {
 }
 
 /**
+ * Whether a `compaction_update` frame is a STALE "a compaction is running" — an
+ * ACTIVE one for a session whose Worker has already crashed.
+ *
+ * Why the reducers ask: `App.tsx` coalesces session-update frames into ONE
+ * store write per animation frame, while `session-stalled` is applied
+ * immediately. An active frame that arrived just BEFORE the crash is therefore
+ * applied AFTER `markStalled` cleared the entry, and a dead Worker never emits
+ * the closing frame — honouring it would leave the indicator spinning and the
+ * composer locked on a session that can never compact again. Only the CLEAR
+ * (`active: false`) is trusted past a stall: it locks nothing, and a resumed
+ * session (a `resumeSession` clears `stalled`) compacts normally again.
+ */
+function isStaleCompactionStart(
+  update: AcpSessionUpdate,
+  stalledHere: boolean,
+): boolean {
+  return update.sessionUpdate === "compaction_update" && update.active && stalledHere;
+}
+
+/**
  * Pure reducer for `session-update` events: returns a NEW message array.
  *
  * - `agent_message_chunk`: appended to the trailing agent-text message with
@@ -561,7 +581,9 @@ interface SessionsState {
    * `inTurn` nor `agentState` says "working"), and the composer locks on it
    * — hence the clears: a lingering entry would pin the composer locked on
    * a session that can no longer compact (its Worker is closed, or crashed,
-   * and will never emit the closing frame).
+   * and will never emit the closing frame). A stalled session also IGNORES an
+   * `active` frame that was still in the rAF batch when it crashed — see
+   * `isStaleCompactionStart`, or the lock would come straight back.
    */
   compacting: Record<string, string | undefined>;
   /** Whether a prompt turn is in flight for a session. */
@@ -1287,10 +1309,15 @@ export const useSessions = create<SessionsState>((set, get) => ({
       // (see `stalled`), and cheap: the key keeps its slot.
       let compacting = state.compacting;
       if (update.sessionUpdate === "compaction_update") {
-        compacting = {
-          ...state.compacting,
-          [sessionId]: update.active ? update.reason : undefined,
-        };
+        // The stall guard (see `isStaleCompactionStart`): a frame that was in
+        // flight when the Worker crashed must not undo the clear `markStalled`
+        // already made.
+        if (!isStaleCompactionStart(update, state.stalled[sessionId] !== undefined)) {
+          compacting = {
+            ...state.compacting,
+            [sessionId]: update.active ? update.reason : undefined,
+          };
+        }
       }
 
       return {
@@ -1363,7 +1390,12 @@ export const useSessions = create<SessionsState>((set, get) => ({
           // appear. Last-wins within the batch, which is what makes a
           // `Skipped` compaction's two frames (active, then inactive — they
           // can coalesce into ONE rAF batch) end cleared rather than stuck on.
-          if (update.sessionUpdate === "compaction_update") {
+          // An ACTIVE frame for a session that is already STALLED is dropped —
+          // see `isStaleCompactionStart`.
+          if (
+            update.sessionUpdate === "compaction_update" &&
+            !isStaleCompactionStart(update, state.stalled[sessionId] !== undefined)
+          ) {
             compacting = {
               ...compacting,
               [sessionId]: update.active ? update.reason : undefined,
