@@ -44,8 +44,10 @@ impl SessionManager {
                 // DOUBLE-DELIVER every `session-update` the loop emits both as an
                 // `RpcEvent` and as a `session-update` `SinkFrame`): the
                 // `agent_settled` settle detection (the session's "busy" state) + the
-                // `pending_turn` resolution.
-                if matches!(e, RpcEvent::agent_settled) {
+                // `pending_turn` resolution. MAIN sessions only: a child subagent's
+                // `agent_settled` arrives under the parent's delivery id with
+                // `is_subagent: true` and must NEVER settle the parent turn early.
+                if !is_subagent && matches!(e, RpcEvent::agent_settled) {
                     self.resolve_turn(session_id);
                 }
                 // Session naming: `agent_end` is the turn's last frame
@@ -82,9 +84,13 @@ impl SessionManager {
                 // `session-closed` cleanup. UNEXPECTED (a crash — the `WorkerManager`
                 // fired `on_crash`) → `is_exit_expected` is `false` → no-op (the
                 // `on_crash` path handles the stalled marking + the same cleanup).
-                if let Some(wm) = self.worker_manager.get() {
-                    if wm.is_exit_expected(session_id) {
-                        self.on_session_exited_expected(session_id);
+                // MAIN sessions only: a child subagent's exit is managed by the
+                // drive task and must never close the parent session.
+                if !is_subagent {
+                    if let Some(wm) = self.worker_manager.get() {
+                        if wm.is_exit_expected(session_id) {
+                            self.on_session_exited_expected(session_id);
+                        }
                     }
                 }
                 let _ = code;
@@ -341,4 +347,78 @@ fn find_newest_crash_log() -> Option<PathBuf> {
         }
     }
     newest.map(|(_, p)| p)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::oneshot;
+
+    use super::*;
+    use crate::agent::events::RpcEvent;
+    use crate::agent::session::LiveWorkerSession;
+
+    #[test]
+    fn subagent_agent_settled_does_not_resolve_parent_turn() {
+        let manager = SessionManager::new(PathBuf::from("/tmp"));
+        let (tx, mut rx) = oneshot::channel();
+        let sid = "main-session";
+        manager.live.lock().unwrap().insert(
+            sid.to_string(),
+            LiveWorkerSession {
+                cwd: PathBuf::from("/tmp"),
+                close_kind: Arc::new(StdMutex::new(None)),
+                pending_turn: Arc::new(StdMutex::new(Some(tx))),
+                cancel_requested: Arc::new(StdMutex::new(false)),
+                pending_modal_ids: StdMutex::new(HashSet::new()),
+            },
+        );
+
+        // A subagent settles under the parent's delivery id (`is_subagent: true`).
+        manager.route_event(
+            sid,
+            true,
+            WorkerInboundEvent::Event(RpcEvent::agent_settled),
+        );
+
+        // The parent's turn MUST NOT be resolved!
+        assert!(
+            rx.try_recv().is_err(),
+            "parent turn must still be in flight"
+        );
+
+        // When the parent itself settles (`is_subagent: false`), the turn resolves.
+        manager.route_event(
+            sid,
+            false,
+            WorkerInboundEvent::Event(RpcEvent::agent_settled),
+        );
+        assert_eq!(rx.try_recv().unwrap(), StopReason::EndTurn);
+    }
+
+    #[test]
+    fn subagent_exited_does_not_close_parent_session() {
+        let manager = SessionManager::new(PathBuf::from("/tmp"));
+        let (tx, mut rx) = oneshot::channel();
+        let sid = "main-session";
+        manager.live.lock().unwrap().insert(
+            sid.to_string(),
+            LiveWorkerSession {
+                cwd: PathBuf::from("/tmp"),
+                close_kind: Arc::new(StdMutex::new(None)),
+                pending_turn: Arc::new(StdMutex::new(Some(tx))),
+                cancel_requested: Arc::new(StdMutex::new(false)),
+                pending_modal_ids: StdMutex::new(HashSet::new()),
+            },
+        );
+
+        // A subagent exits under the parent's delivery id (`is_subagent: true`).
+        manager.route_event(sid, true, WorkerInboundEvent::Exited(Some(0)));
+
+        // The parent's session must still be live and pending turn untouched!
+        assert!(manager.live.lock().unwrap().contains_key(sid));
+        assert!(rx.try_recv().is_err());
+    }
 }
