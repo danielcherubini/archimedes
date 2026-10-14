@@ -1371,6 +1371,43 @@ text would break ADR 0048's silence rule.
 
 ---
 
+## Execution log
+
+All nine tasks landed on `feature/compaction-recovery-hardening`, one commit
+each, TDD (red confirmed before green) throughout:
+`a5139e5` (T1) · `68fa05c` (T2) · `6270b53` (T3) · `52b047e` (T4) · `c52661d`
+(T5) · `f9276ae` (T6) · `89744cd` (T9) · `82d39d6` (T8) · `7c63e12` (T7).
+
+Whole-branch validation (sequential): `cargo fmt --check` clean · `cargo test`
+880 lib tests + every integration target, **0 failures** · `cargo clippy
+--all-targets -- -D warnings` **zero warnings** · `pnpm test` **1844 passed
+(82 files)** · `pnpm build` clean.
+
+Four things the plan got wrong, corrected during execution (the code is right,
+the plan text above is not):
+
+1. **`is_bookkeeping_message_id` needed a re-export to exist at all.** Task 4
+   declared it `pub(crate)`, but its first production caller is Task 8 — and
+   `mod normalize` is PRIVATE (`agent/mod.rs:14`), so a plain `pub` would not
+   have escaped the module either. It is now re-exported
+   (`agent/mod.rs:33`, beside `normalize_capabilities`), which is what satisfies
+   `dead_code` under `-D warnings`. Task 8's path is therefore
+   `crate::agent::is_bookkeeping_message_id`, not `crate::agent::normalize::…`.
+2. **The Rust module is `harness::r#loop`, not `harness::loop`** (`loop` is a
+   keyword), so every `cargo test --lib harness::loop` command in this plan
+   matches zero tests. Use `cargo test --lib "harness::r#loop"`.
+3. **Task 5's segment recording does not compile as written** —
+   `.push(state.next)` inside `state.segments.entry(…)` is an `E0502` double
+   borrow; read `let segment = state.next;` first.
+4. **Task 7's hydration fixture** — the module-level `row(…)` helper is the
+   `SpaceRow` positional one; the `MessageRow` fixture to use from a new
+   `describe` is `msgRow({…})`.
+
+Behaviour recorded for reviewers: `rowToMessages` now drops ANY empty
+`agent-text` / `agent-thought` row, so a pre-existing empty row disappears from
+history. That is intended (the live path already refuses empty chunks, so only a
+Retraction can write one) and is stated in `7c63e12`.
+
 ## Final validation (whole branch)
 
 Run from the two roots, **sequentially**:
