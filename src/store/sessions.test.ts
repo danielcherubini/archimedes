@@ -2001,6 +2001,125 @@ describe("resumeSession (history reload race)", () => {
         msgs.filter((m) => m.kind === "user" && m.text === expanded),
       ).toHaveLength(1);
     });
+
+  it("keeps a user message added while the reload is in flight when a retraction shrinks the transcript (ADR 0050)", async () => {
+    useSessions.setState({
+      activeSessionId: "s1",
+      historySessions: [
+        {
+          sessionId: "s1",
+          cwd: "/x",
+          capabilities: { loadSession: true },
+          archived: false,
+        },
+      ],
+      messages: {
+        s1: [
+          { kind: "user", text: "one", at: 1 },
+          { kind: "agent-text", messageId: "a3f9c1:m1", text: "two", at: 2 },
+        ],
+      },
+    });
+    // The history reload is slow (the resume IPC spawns the agent): it is
+    // still in flight while the Retraction AND the new prompt land.
+    let resolveRows: (rows: MessageRow[]) => void = () => {};
+    vi.mocked(loadHistory).mockImplementationOnce(
+      () => new Promise<MessageRow[]>((r) => (resolveRows = r)),
+    );
+    await useSessions.getState().resumeSession("s1");
+    // The abandoned attempt is retracted (ADR 0048): the transcript SHRINKS
+    // 2 → 1, so every index shifts LEFT.
+    useSessions.getState().applySessionUpdate("s1", {
+      sessionUpdate: "message_retracted",
+      messageId: "a3f9c1:m1",
+    });
+    expect(useSessions.getState().messages.s1).toHaveLength(1);
+    // And the user's next prompt arrives in the SAME window: the array is 2
+    // again — the length alone says "nothing happened", which is exactly the
+    // blind spot of `slice(prior.length)`.
+    useSessions.getState().addUserMessage("s1", "three");
+    expect(useSessions.getState().messages.s1).toHaveLength(2);
+    // The reload settles with ONLY the persisted user row (the retracted
+    // reply was never persisted, and the new prompt postdates the query).
+    resolveRows([
+      {
+        id: 1,
+        sessionId: "s1",
+        kind: "user",
+        messageKey: null,
+        payloadJson: JSON.stringify({ text: "one" }),
+        createdAt: 1,
+      },
+    ]);
+    // Let the fire-and-forget reload's continuation run.
+    await new Promise((r) => setTimeout(r, 0));
+    // The prompt SURVIVES: the merge selects its additions by identity, so a
+    // shrink-then-grow across the await cannot hide the new message (ADR 0050).
+    expect(
+      useSessions
+        .getState()
+        .messages.s1.some((m) => m.kind === "user" && m.text === "three"),
+    ).toBe(true);
+  });
+
+  it("counts an added message that is identical to one already in the snapshot (identity is a COUNTED multiset, not a Set)", async () => {
+    useSessions.setState({
+      activeSessionId: "s1",
+      historySessions: [
+        {
+          sessionId: "s1",
+          cwd: "/x",
+          capabilities: { loadSession: true },
+          archived: false,
+        },
+      ],
+      messages: {
+        s1: [{ kind: "user", text: "again", at: 5 }],
+      },
+    });
+    let resolveRows: (rows: MessageRow[]) => void = () => {};
+    vi.mocked(loadHistory).mockImplementationOnce(
+      () => new Promise<MessageRow[]>((r) => (resolveRows = r)),
+    );
+    await useSessions.getState().resumeSession("s1");
+    // A SECOND `again` with the SAME content AND the same `at` — pushed
+    // directly into the store so `at` is exact (a real `addUserMessage` would
+    // stamp `Date.now()`). Identity (`mergeDedupeKey` + `at`) cannot tell the
+    // two apart, so it is COUNTED: the snapshot has one, the second occurrence
+    // is the new one. A Set-based identity would treat it as "already in the
+    // snapshot" and drop it (verified: degrading the count to a Set reddens
+    // THIS test and only this test).
+    useSessions.setState((s) => ({
+      messages: {
+        ...s.messages,
+        s1: [...s.messages.s1!, { kind: "user", text: "again", at: 5 }],
+      },
+    }));
+    // The persisted `again` is STRICTLY OLDER (`createdAt: 4`, NOT 5) on
+    // purpose: this test is about the IDENTITY selection, and the second gate
+    // — the dedupe against the reloaded rows, which is NOT what is under test
+    // and is unchanged by ADR 0050 — dedupes a `user` message whenever the
+    // matching reloaded row is newer-OR-EQUAL (`reloadedAt < m.at` keeps it).
+    // At `createdAt: 5` that gate would legitimately collapse the pair to one
+    // and this assertion would say nothing about counting.
+    resolveRows([
+      {
+        id: 1,
+        sessionId: "s1",
+        kind: "user",
+        messageKey: null,
+        payloadJson: JSON.stringify({ text: "again" }),
+        createdAt: 4,
+      },
+    ]);
+    await new Promise((r) => setTimeout(r, 0));
+    // BOTH `again` messages survive: the reloaded older one, and the one the
+    // counted identity selected out of the window.
+    const again = useSessions
+      .getState()
+      .messages.s1.filter((m) => m.kind === "user" && m.text === "again");
+    expect(again).toHaveLength(2);
+  });
 });
 
 describe("archivedSessions (sticky, ADR 0016)", () => {

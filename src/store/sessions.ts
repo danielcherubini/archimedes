@@ -1225,7 +1225,33 @@ export const useSessions = create<SessionsState>((set, get) => ({
         // The user may have switched away while the fetch was in flight.
         if (get().activeSessionId !== sessionId) return;
         const reloaded = rows.flatMap(rowToMessages);
-        const added = (get().messages[sessionId] ?? []).slice(prior.length);
+        // WHAT ARRIVED WHILE WE WERE LOADING — selected by IDENTITY, never by
+        // position (ADR 0050). `slice(prior.length)` assumed the array could
+        // only grow across the await; a Retraction (ADR 0048) REMOVES a
+        // message, which shifts every index left and silently dropped a prompt
+        // the user sent in the window — and dropped the retry that reused a
+        // retracted id, and anything prepended. Identity is `mergeDedupeKey` +
+        // the message's own `at`, COUNTED: two identical messages in the same
+        // millisecond are two messages, and the second is the new one. Where
+        // identity cannot decide we KEEP the message — a duplicated bubble
+        // beats a lost prompt. Two duplications are accepted: a live thought
+        // (its persisted key is `{stamp}:m1#1`, so it can never match its own
+        // row), and a pre-existing message the reducer MUTATES in place during
+        // the window (`mergeDedupeKey` is content-based, so a changed message
+        // is no longer "in the snapshot") — both replace the old rule's silent
+        // truncation of the streamed tail.
+        const priorCount = new Map<string, number>();
+        for (const m of prior) {
+          const k = `${mergeDedupeKey(m)}|${m.at}`;
+          priorCount.set(k, (priorCount.get(k) ?? 0) + 1);
+        }
+        const seenNow = new Map<string, number>();
+        const added = (get().messages[sessionId] ?? []).filter((m) => {
+          const k = `${mergeDedupeKey(m)}|${m.at}`;
+          const nth = (seenNow.get(k) ?? 0) + 1;
+          seenNow.set(k, nth);
+          return nth > (priorCount.get(k) ?? 0);
+        });
         // DEDUPE the merge: `send_prompt`'s `record_message` can commit
         // the new user message BEFORE the history query reads — then the
         // reloaded rows INCLUDE it while `added` still holds its local
