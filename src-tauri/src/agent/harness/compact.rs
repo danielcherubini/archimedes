@@ -233,6 +233,34 @@ fn estimate_message_tokens(m: &ChatMessage) -> u32 {
     (text / 4) as u32 + tools as u32 + 1
 }
 
+/// What one message actually COSTS the summary call (ADR 0047): the shared
+/// [`estimate_message_tokens`] PLUS the serialized tool-call `arguments`.
+///
+/// The two estimates differ ON PURPOSE. `estimate_message_tokens` backs the
+/// context COUNT, which is anchored by the provider's own reported usage
+/// (ADR 0028): a call's arguments are already inside the request the provider
+/// just charged for, so the flat per-call charge is a rounding detail. The
+/// summary budget has NO such anchor — it is the only thing standing between
+/// the call and the window compaction is recovering, and [`summarize`] sends
+/// the summarized messages verbatim, `arguments` included. A file-writing call
+/// costs the shared estimate ~20 tokens and the wire thousands, so measuring
+/// the budget with it green-lights the exact overflow ADR 0047 exists to end.
+fn estimate_summary_payload(m: &ChatMessage) -> u32 {
+    let arguments = m
+        .tool_calls
+        .as_ref()
+        .map(|calls| {
+            calls
+                .iter()
+                .map(|c| c.arguments.to_string().len())
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
+    // The per-call flat cost in `estimate_message_tokens` stays (it covers the
+    // call's id/name framing); the arguments are ADDED to it.
+    estimate_message_tokens(m).saturating_add((arguments / 4) as u32)
+}
+
 /// Split the transcript for compaction: keep the most recent
 /// `keep_recent_tokens` worth of messages (ALWAYS at least the last
 /// message — a zero budget must not drop the latest user message),
@@ -279,6 +307,11 @@ pub fn split_for_compaction(
 /// lose — and report how many messages were dropped, which the harness
 /// writes into the summary it stores.
 ///
+/// The budget is measured against [`estimate_summary_payload`], i.e. what the
+/// call actually carries, NOT the context-count estimate: a summarized tool
+/// call ships its full `arguments`, and undercounting them would let the very
+/// call that caused the overflow through the budget meant to contain it.
+///
 /// Like [`split_for_compaction`] the kept slice never STARTS on a `tool`
 /// message, but here the boundary snaps FORWARD (an orphaned `tool` result
 /// 400s on conformant APIs) and the snapped-past messages count as dropped.
@@ -289,7 +322,7 @@ pub fn trim_for_summary_budget(older: &[ChatMessage], budget: u32) -> (Vec<ChatM
     let mut keep_from = older.len();
     let mut acc = 0u32;
     while keep_from > 0 {
-        let next = acc.saturating_add(estimate_message_tokens(&older[keep_from - 1]));
+        let next = acc.saturating_add(estimate_summary_payload(&older[keep_from - 1]));
         if next > budget {
             break;
         }
@@ -1462,6 +1495,48 @@ mod tests {
             !matches!(kept[0].role, ChatRole::Tool),
             "the summarized slice does not start on an orphaned tool result"
         );
+    }
+
+    /// (ADR 0047) The budget measures the request `summarize` ACTUALLY sends,
+    /// and that request carries the tool-call `arguments` IN FULL. The shared
+    /// context estimate charges a flat ~20 per call and ignores them, so a
+    /// file-writing call — thousands of tokens of `content` — passes a budget
+    /// it cannot fit, and the summary overflows the very window compaction
+    /// exists to recover (the failure ADR 0047 was written to end).
+    #[test]
+    fn the_trim_charges_the_tool_call_arguments_the_summary_sends() {
+        use crate::agent::harness::provider::ToolCall;
+        // ~10 000 tokens of argument — a large `write`, the call that drives
+        // compaction in the first place.
+        let big = "x".repeat(40_000);
+        let writer = ChatMessage {
+            role: ChatRole::Assistant,
+            content: MessageContent::Text(String::new()),
+            tool_call_id: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "t1".to_string(),
+                name: "write".to_string(),
+                arguments: serde_json::json!({ "path": "a.rs", "content": big }),
+            }]),
+        };
+        // The shared estimate sees ONE tool call here: 21 tokens, which fits
+        // 500. The serialized arguments alone are ~10 000, so nothing fits.
+        let (kept, dropped) = trim_for_summary_budget(std::slice::from_ref(&writer), 500);
+        assert!(
+            kept.is_empty(),
+            "a call whose arguments alone dwarf the budget is not summarized"
+        );
+        assert_eq!(dropped, 1, "the unaffordable call counts as dropped");
+
+        // A budget that DOES afford the arguments still keeps the call: the
+        // trim measures the payload, it does not veto tool calls.
+        let (kept, dropped) = trim_for_summary_budget(&[writer], 20_000);
+        assert_eq!(
+            kept.len(),
+            1,
+            "a budget that affords the arguments keeps the call"
+        );
+        assert_eq!(dropped, 0);
     }
 
     /// A budget that fits nothing summarizes nothing: the caller must NOT send
