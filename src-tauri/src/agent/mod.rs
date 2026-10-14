@@ -30,7 +30,7 @@ pub use interactive::{
     interactive_key, CachedPassword, PendingInteractive, PendingSudo, RealSudoRunner, SudoRun,
     SudoRunner,
 };
-pub use normalize::normalize_capabilities;
+pub use normalize::{is_bookkeeping_message_id, normalize_capabilities};
 pub use permission::{permission_key, PendingPermissions, PermissionOutcome};
 pub use persist::TranscriptPersister;
 pub use session::{

@@ -120,6 +120,9 @@ function isStaleCompactionStart(
  * - `tool_call` / `tool_call_update`: create/update the tool-call message;
  *   diffs inside the content are extracted into standalone diff messages
  *   (there is no dedicated file-edit update type).
+ * - `message_retracted`: DROP every agent-text / agent-thought message that
+ *   carries the retracted `messageId` (ADR 0048) — the only update that can
+ *   SHRINK the array, and it returns the SAME reference when nothing matched.
  * - unknown update types: ignored (forward-compat).
  */
 export function applySessionUpdate(
@@ -156,6 +159,22 @@ export function applySessionUpdate(
         return [...messages.slice(0, -1), { ...last, text: last.text + text }];
       }
       return [...messages, { kind: "agent-thought", messageId, text, at }];
+    }
+
+    case "message_retracted": {
+      // (ADR 0048) The attempt behind this messageId was abandoned and its
+      // reply retried under the SAME id (one message_start per message), so the
+      // partial text must not weld onto the retry. Live thought messages carry
+      // this bare id too (the `#n` suffix is a persistence detail), so this
+      // clears thoughts with the text. Bookkeeping lines (`system`, `retract:N`)
+      // are never the abandoned id, so they survive.
+      const kept = messages.filter(
+        (m) =>
+          (m.kind !== "agent-text" && m.kind !== "agent-thought") ||
+          m.messageId !== update.messageId,
+      );
+      // Same reference when nothing matched: silence must not read as a change.
+      return kept.length === messages.length ? messages : kept;
     }
 
     case "tool_call": {
@@ -332,7 +351,9 @@ export function rowToMessages(row: MessageRow): Message[] {
       ];
     }
     case "agent-text":
-      return typeof payload.text === "string"
+      // An empty text is a Retraction's overwrite (the display store has no
+      // DELETE), never a real bubble — so an empty row hydrates as nothing.
+      return typeof payload.text === "string" && payload.text !== ""
         ? [
             {
               kind: "agent-text",
@@ -343,7 +364,8 @@ export function rowToMessages(row: MessageRow): Message[] {
           ]
         : [];
     case "agent-thought":
-      return typeof payload.text === "string"
+      // Empty for the same reason as `agent-text` above (ADR 0048).
+      return typeof payload.text === "string" && payload.text !== ""
         ? [
             {
               kind: "agent-thought",

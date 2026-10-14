@@ -136,7 +136,7 @@ export type ToolCallContent =
   | { type: "diff"; path: string; oldText?: string | null; newText: string };
 
 /**
- * A `session/update` notification body. The seven update types the desktop
+ * A `session/update` notification body. The eight update types the desktop
  * handles are modelled; anything else (unknown/future types) falls through
  * to the reducer's `default` branch and is ignored (forward-compat).
  *
@@ -186,6 +186,14 @@ export type AcpSessionUpdate =
       active: boolean;
       /** "manual" | "threshold" | "overflow" (ADR 0045's vocabulary). */
       reason: string;
+    }
+  | {
+      /** (ADR 0048) An Abandoned attempt's reply is RetRACTED: every
+       * agent-text / agent-thought message with this `messageId` is dropped.
+       * Silent when nothing was streamed under it. The discard line arrives
+       * separately as a `retract:N` chunk, so it survives. */
+      sessionUpdate: "message_retracted";
+      messageId: string;
     };
 
 export interface SessionUpdatePayload {
