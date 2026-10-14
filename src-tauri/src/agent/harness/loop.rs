@@ -1023,6 +1023,14 @@ impl AgentLoop {
                     // `watermark > len` guard makes it a no-op if the reply did
                     // land (it cannot here — the push happens only on the clean
                     // path).
+                    // (ADR 0048) The partial reply this attempt streamed is
+                    // RETRACTED before the retry reuses its message id. `acc` is
+                    // this call's own accumulator — the exact bytes it streamed,
+                    // and the exact reason the renderer would otherwise weld
+                    // `parti` onto `done`. Nothing streamed → silent.
+                    if !acc.text.is_empty() || !acc.thinking.is_empty() {
+                        self.emit(RpcEvent::message_retracted);
+                    }
                     self.compactor.turn_abandoned(&self.messages);
                     continue;
                 }
@@ -1047,6 +1055,15 @@ impl AgentLoop {
             if let Some(ProviderError::ContextOverflow(_)) = &mid_stream_error {
                 if !overflow_recovered {
                     overflow_recovered = true;
+                    // (ADR 0048) The same Retraction as the retryable retry
+                    // above — the sibling site, same guard on this call's own
+                    // `acc`: the abandoned attempt streamed text under the id
+                    // the retried call REUSES, and the discard must precede it.
+                    // A mid-stream overflow that streamed nothing stays silent
+                    // (and the PRE-STREAM arm above never can have streamed).
+                    if !acc.text.is_empty() || !acc.thinking.is_empty() {
+                        self.emit(RpcEvent::message_retracted);
+                    }
                     self.compactor.turn_abandoned(&self.messages);
                     self.force_compact = Some(CompactionTrigger {
                         reason: "overflow",
@@ -3629,6 +3646,205 @@ mod tests {
         assert!(
             kinds.iter().any(|k| k == "agent_end"),
             "no error settle — the turn completed, got {kinds:?}"
+        );
+    }
+
+    /// (ADR 0048) The retryable retry reuses the message id, so the partial
+    /// reply it abandons is RETRACTED — otherwise `parti` welds onto `done` in
+    /// every consumer that appends same-`messageId` text. The retraction is the
+    /// ONLY way the discard can be seen: one `message_start` per assistant
+    /// message means the retry announces nothing new.
+    #[tokio::test]
+    async fn a_retried_reply_is_retracted_before_the_retry() {
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let (provider, _calls) = ScriptedProvider::new(vec![
+            // The attempt that dies mid-stream, after partial text.
+            Some(vec![
+                ProviderEvent::TextDelta("part".to_string()),
+                ProviderEvent::Error(ProviderError::Retryable("transient".to_string())),
+            ]),
+            // The retry, which REUSES the announced `messageId`.
+            Some(vec![
+                ProviderEvent::TextDelta("done".to_string()),
+                ProviderEvent::Done(FinishReason::Stop),
+            ]),
+        ]);
+        let mut loop_ = build_loop(
+            Box::new(provider),
+            events_tx,
+            Arc::new(StdMutex::new(CancellationToken::new())),
+            watch::channel(0u64).0,
+            RetryPolicy::new_with(5, Duration::from_millis(1)),
+        );
+        loop_.handle_prompt(&text_prompt("hello")).await;
+        let events =
+            collect_events_until(&mut events_rx, |e| matches!(e, RpcEvent::agent_settled)).await;
+        let kinds: Vec<String> = events.iter().map(|e| e.kind().to_string()).collect();
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, RpcEvent::auto_retry_start { .. })),
+            "this is the retryable retry path, got {kinds:?}"
+        );
+        assert_eq!(
+            kinds.iter().filter(|k| *k == "message_retracted").count(),
+            1,
+            "exactly one Retraction for the one abandoned attempt, got {kinds:?}"
+        );
+        let retracted = kinds.iter().position(|k| k == "message_retracted");
+        let agent_end = kinds.iter().position(|k| k == "agent_end");
+        assert!(
+            matches!((retracted, agent_end), (Some(r), Some(e)) if r < e),
+            "the Retraction precedes the turn's end (the retry must not weld \
+             onto text that is already discarded), got {kinds:?}"
+        );
+        // The invariant this whole task exists to protect: a Retraction is NOT
+        // expressed as "the next message starts".
+        assert_eq!(
+            kinds.iter().filter(|k| *k == "message_start").count(),
+            1,
+            "ONE message_start for the retried message — the invariant holds, got {kinds:?}"
+        );
+    }
+
+    /// (ADR 0048) The overflow recovery retracts too — the SECOND retry path,
+    /// and the ADR says the rule is general ("any third retry path must emit
+    /// the retraction too"). Same reuse of the announced id, same weld.
+    #[tokio::test]
+    async fn a_mid_stream_overflow_retracts_the_partial_reply() {
+        // The exact script of
+        // `a_mid_stream_context_overflow_compacts_and_retries_the_turn`.
+        let (provider, _calls) = ScriptedProvider::new(vec![
+            Some(vec![
+                ProviderEvent::TextDelta("parti".to_string()),
+                ProviderEvent::Error(ProviderError::ContextOverflow(
+                    "invalid_request_error: prompt is too long: 213462 tokens > 200000 maximum"
+                        .to_string(),
+                )),
+            ]),
+            Some(vec![
+                ProviderEvent::TextDelta("summary".to_string()),
+                ProviderEvent::Done(FinishReason::Stop),
+            ]),
+            Some(vec![
+                ProviderEvent::TextDelta("recovered".to_string()),
+                ProviderEvent::Done(FinishReason::Stop),
+            ]),
+        ]);
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let mut loop_ = build_loop(
+            Box::new(provider),
+            events_tx,
+            Arc::new(StdMutex::new(CancellationToken::new())),
+            watch::channel(0u64).0,
+            RetryPolicy::new_with(5, Duration::from_millis(1)),
+        );
+        loop_.messages = large_transcript(3);
+        loop_.handle_prompt(&text_prompt("hello")).await;
+        let events =
+            collect_events_until(&mut events_rx, |e| matches!(e, RpcEvent::agent_settled)).await;
+        let kinds: Vec<String> = events.iter().map(|e| e.kind().to_string()).collect();
+
+        assert_eq!(
+            kinds.iter().filter(|k| *k == "message_retracted").count(),
+            1,
+            "the mid-stream overflow retracts its partial reply, got {kinds:?}"
+        );
+        assert_eq!(
+            kinds.iter().filter(|k| *k == "message_start").count(),
+            1,
+            "ONE message_start for the retried message — the invariant holds, got {kinds:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                RpcEvent::compaction_start { reason } if reason == "overflow"
+            )),
+            "the overflow recovery still fires its own compaction, got {kinds:?}"
+        );
+        let retracted = kinds.iter().position(|k| k == "message_retracted");
+        let compacted = kinds.iter().position(|k| k == "compaction_start");
+        assert!(
+            matches!((retracted, compacted), (Some(r), Some(c)) if r < c),
+            "the dead attempt is retracted before the recovery starts, got {kinds:?}"
+        );
+    }
+
+    /// The gate is "streamed something", not "the attempt was abandoned": a
+    /// PRE-STREAM overflow streams nothing, so there is no partial reply to
+    /// discard and a Retraction would erase nothing while saying so (ADR 0048's
+    /// silence rule). Pinned for the arm where `acc` does not even exist yet.
+    #[tokio::test]
+    async fn a_pre_stream_overflow_retracts_nothing() {
+        let (provider, _calls) = OverflowingProvider::new(
+            &[0],
+            vec![vec![
+                ProviderEvent::TextDelta("ok".to_string()),
+                ProviderEvent::Done(FinishReason::Stop),
+            ]],
+        );
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let mut loop_ = build_loop(
+            Box::new(provider),
+            events_tx,
+            Arc::new(StdMutex::new(CancellationToken::new())),
+            watch::channel(0u64).0,
+            RetryPolicy::new_with(5, Duration::from_millis(1)),
+        );
+        loop_.messages = large_transcript(3);
+        loop_.handle_prompt(&text_prompt("hello")).await;
+        let events =
+            collect_events_until(&mut events_rx, |e| matches!(e, RpcEvent::agent_settled)).await;
+        let kinds: Vec<String> = events.iter().map(|e| e.kind().to_string()).collect();
+
+        assert!(
+            events.iter().any(|e| matches!(e, RpcEvent::agent_settled)),
+            "the recovery still ran to the end of the turn, got {kinds:?}"
+        );
+        assert!(
+            !kinds.iter().any(|k| k == "message_retracted"),
+            "an attempt that streamed nothing is not a Retraction, got {kinds:?}"
+        );
+    }
+
+    /// Same rule on the other path: a retryable error that arrives BEFORE any
+    /// text emits no Retraction — the common pre-stream retry stays exactly as
+    /// quiet as it was before ADR 0048.
+    #[tokio::test]
+    async fn an_abandoned_attempt_that_streamed_nothing_is_silent() {
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let (provider, _calls) = ScriptedProvider::new(vec![
+            Some(vec![ProviderEvent::Error(ProviderError::Retryable(
+                "boom".to_string(),
+            ))]),
+            Some(vec![
+                ProviderEvent::TextDelta("done".to_string()),
+                ProviderEvent::Done(FinishReason::Stop),
+            ]),
+        ]);
+        let mut loop_ = build_loop(
+            Box::new(provider),
+            events_tx,
+            Arc::new(StdMutex::new(CancellationToken::new())),
+            watch::channel(0u64).0,
+            RetryPolicy::new_with(5, Duration::from_millis(1)),
+        );
+        loop_.handle_prompt(&text_prompt("hello")).await;
+        let events =
+            collect_events_until(&mut events_rx, |e| matches!(e, RpcEvent::agent_settled)).await;
+        let kinds: Vec<String> = events.iter().map(|e| e.kind().to_string()).collect();
+
+        // Without this the test would pass vacuously on a path never taken.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, RpcEvent::auto_retry_start { .. })),
+            "the abandon-and-retry path WAS walked, got {kinds:?}"
+        );
+        assert!(
+            !kinds.iter().any(|k| k == "message_retracted"),
+            "nothing streamed, so nothing is retracted, got {kinds:?}"
         );
     }
 
