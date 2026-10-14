@@ -1,5 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { closeSession, deleteSpace } from "../lib/tauri";
 import { useSessions } from "../store/sessions";
 import { usePermissions } from "../store/permissions";
@@ -86,6 +86,71 @@ describe("SpaceTabs (the Spaces as browser-style tabs at the top of the chat)", 
     const beta = screen.getByRole("tab", { name: "beta" });
     expect(alpha.getAttribute("aria-selected")).toBe("false");
     expect(beta.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("renders a spinner on the tab when a space has an active running session", () => {
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta")],
+      activeSpacePath: "/w/alpha",
+      sessions: [
+        info("s-alpha", "/w/alpha"),
+        info("s-beta", "/w/beta"),
+      ],
+      inTurn: {
+        "s-beta": true,
+      },
+    });
+    render(<SpaceTabs />);
+
+    const alphaTab = screen.getByRole("tab", { name: "alpha" });
+    const betaTab = screen.getByRole("tab", { name: "beta" });
+
+    // alpha has no running session -> no spinner
+    expect(alphaTab.querySelector('[data-testid="space-tab-spinner"]')).toBeNull();
+
+    // beta has a running session -> spinner rendered
+    expect(betaTab.querySelector('[data-testid="space-tab-spinner"]')).toBeTruthy();
+
+    // When beta's turn ends, the spinner disappears
+    act(() => {
+      useSessions.setState({ inTurn: { "s-beta": false } });
+    });
+    expect(betaTab.querySelector('[data-testid="space-tab-spinner"]')).toBeNull();
+  });
+
+  it("does not render running spinner on tab when session is waiting for user prompt", () => {
+    useSessions.setState({
+      spaces: [space("/w/alpha")],
+      activeSpacePath: "/w/alpha",
+      sessions: [info("s-alpha", "/w/alpha")],
+      inTurn: { "s-alpha": true },
+    });
+    usePermissions.setState({
+      prompts: {
+        "s-alpha": [
+          {
+            requestId: "p1",
+            toolTitle: "bash",
+            options: [{ optionId: "allow", name: "Allow" }],
+          },
+        ],
+      },
+    });
+    render(<SpaceTabs />);
+    const tab = screen.getByRole("tab", { name: "alpha" });
+    expect(tab.querySelector('[data-testid="space-tab-spinner"]')).toBeNull();
+  });
+
+  it("renders spinner if any of multiple live sessions in the space is running", () => {
+    useSessions.setState({
+      spaces: [space("/w/alpha")],
+      activeSpacePath: "/w/alpha",
+      sessions: [info("s1", "/w/alpha"), info("s2", "/w/alpha")],
+      inTurn: { "s1": false, "s2": true },
+    });
+    render(<SpaceTabs />);
+    const tab = screen.getByRole("tab", { name: "alpha" });
+    expect(tab.querySelector('[data-testid="space-tab-spinner"]')).toBeTruthy();
   });
 
   it("clicking a tab selects the space (the store's `selectSpace`)", () => {

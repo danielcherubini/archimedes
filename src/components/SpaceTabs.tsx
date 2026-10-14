@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { PlusIcon, XIcon } from "lucide-react";
 import { basenameOfPath } from "../lib/paths";
 import { titleFor } from "../lib/sessionTitle";
 import { useSessions } from "../store/sessions";
+import { useSessionStatuses } from "../hooks/useSessionStatus";
+import { Spinner } from "./ui/spinner";
 import CloseSpaceDialog from "./CloseSpaceDialog";
 import NewSpaceDialog from "./NewSpaceDialog";
 
@@ -46,6 +48,11 @@ export default function SpaceTabs() {
   const selectSpace = useSessions((s) => s.selectSpace);
   const closeSpace = useSessions((s) => s.closeSpace);
   const [newSpaceOpen, setNewSpaceOpen] = useState(false);
+  const liveSessionIds = useMemo(
+    () => sessions.map((s) => s.sessionId),
+    [sessions],
+  );
+  const statuses = useSessionStatuses(liveSessionIds);
   // The tab awaiting confirmation: a Space with live Sessions cannot be
   // closed silently (see the header note). `null` = no dialog. The Sessions are
   // SNAPSHOTTED at request time — the dialog must not lose its subject if the
@@ -107,6 +114,9 @@ export default function SpaceTabs() {
       {spaces.map((s) => {
         const name = basenameOfPath(s.path) || s.path;
         const active = s.path === activeSpacePath;
+        const isRunning = sessions.some(
+          (sess) => sess.cwd === s.path && statuses[sess.sessionId] === "running",
+        );
         // ALL TABS ARE INSET PILLS — active and inactive share the pill
         // geometry (`h-8` inside the `h-10` bar, `rounded-md`). The active one
         // is the same pill lifted: a stronger fill (`bg-surface-hover` over
@@ -177,7 +187,7 @@ export default function SpaceTabs() {
               role="tab"
               aria-selected={active}
               onClick={() => selectSpace(s.path)}
-              title={s.path}
+              title={isRunning ? `${s.path} (working)` : s.path}
               // `self-stretch` + `flex items-center`: the label owns the
               // pill's height and centres its own line (the wrapper centres the
               // OTHER child, not this one). `pl-3` is the pill's leading inset
@@ -188,12 +198,19 @@ export default function SpaceTabs() {
               // content, and a flex container's bare text child is an anonymous
               // BLOCK item, so `truncate` here would clip long folder names
               // without ever showing the `…`.
-              className={`flex min-w-0 self-stretch items-center pl-3 text-ui-base ${
+              className={`flex min-w-0 self-stretch items-center gap-1.5 pl-3 text-ui-base ${
                 active
                   ? "font-medium text-foreground"
                   : "text-foreground-subtle"
               }`}
             >
+              {isRunning && (
+                <Spinner
+                  className="size-3.5 shrink-0 text-foreground-subtle"
+                  aria-hidden="true"
+                  data-testid="space-tab-spinner"
+                />
+              )}
               <span className="truncate">{name}</span>
             </button>
             <button
