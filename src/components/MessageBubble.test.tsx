@@ -130,9 +130,12 @@ describe("MessageBubble", () => {
 
   it("renders a plain user message (no images) without an <img>", () => {
     const message: Message = { kind: "user", text: "hello", at: 1 };
-    render(<MessageBubble message={message} />);
+    const { container } = render(<MessageBubble message={message} />);
     expect(screen.getByText("hello")).toBeTruthy();
     expect(screen.queryByRole("img")).toBeNull();
+    const userContainer = container.firstElementChild as HTMLElement;
+    expect(userContainer.className).toContain("[overflow-wrap:anywhere]");
+    expect(userContainer.className).not.toContain("break-words");
   });
 
   it("skips re-rendering when the message reference is unchanged (streaming perf)", () => {

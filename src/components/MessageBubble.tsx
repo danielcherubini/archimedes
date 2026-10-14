@@ -51,7 +51,7 @@ function SkillBlockCard({ block }: { block: SkillBlock }) {
         />
       </button>
       {open && (
-        <div className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-ui-sm text-foreground-subtle">
+        <div className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-ui-sm text-foreground-subtle">
           {block.body}
         </div>
       )}
@@ -453,7 +453,7 @@ function AgentMarkdown({ text }: { text: string }) {
           return <CodeBlock code={codeText} lang={lang} />;
         }
         return (
-          <code className="rounded-md bg-markdown-inline-code/50 mx-0.5 px-1.5 py-0.5 font-mono text-ui-sm">
+          <code className="rounded-md bg-markdown-inline-code/50 mx-0.5 px-1.5 py-0.5 font-mono text-ui-sm [overflow-wrap:anywhere]">
             {children}
           </code>
         );
@@ -463,7 +463,7 @@ function AgentMarkdown({ text }: { text: string }) {
   );
 
   return (
-    <div className="break-words text-ui-base leading-[1.75] tracking-wide [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+    <div className="[overflow-wrap:anywhere] min-w-0 max-w-full text-ui-base leading-[1.75] tracking-wide [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
       {/* `remark-gfm` is NOT included by default in react-markdown v10 —
        * without it GFM tables (and strikethrough / task lists) fall back to
        * raw pipe text, which is what made tables look broken in the chat. */}
@@ -506,7 +506,7 @@ export default memo(
         // `data:` URLs are safe here: the transcript is local.
         const { text, blocks } = splitMentionBlocks(message.text);
         return (
-          <div className="whitespace-pre-wrap text-ui-base text-foreground">
+          <div className="whitespace-pre-wrap [overflow-wrap:anywhere] text-ui-base text-foreground">
             {text}
             {blocks.length > 0 && (
               <div className="mt-2 flex flex-col gap-2">

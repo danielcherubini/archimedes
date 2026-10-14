@@ -4,6 +4,8 @@ import {
   autoSelectActive,
   discardSessionMessages,
   finalizeSessionMessages,
+  liveSessionsInSpace,
+  mostRecentLiveInSpace,
   rowToMessages,
   spaceViewFor,
   useSessions,
@@ -618,6 +620,7 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
     expect(view).toEqual({
       path: "/workspaces/alpha",
       title: "alpha",
+      liveSessionIds: ["live-alpha"],
       liveSessionId: "live-alpha",
       storedSessionIds: ["stored-alpha"],
       archivedSessionIds: [],
@@ -634,6 +637,7 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
     expect(view).toEqual({
       path: "/workspaces/bravo",
       title: "bravo",
+      liveSessionIds: [],
       liveSessionId: null,
       storedSessionIds: ["idX", "idY"],
       archivedSessionIds: [],
@@ -648,6 +652,7 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
     expect(view).toEqual({
       path: "/workspaces/charlie",
       title: "charlie",
+      liveSessionIds: [],
       liveSessionId: null,
       storedSessionIds: [],
       archivedSessionIds: [],
@@ -666,7 +671,9 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
       info("second", "/workspaces/alpha"),
     ];
     const view = spaceViewFor(spaces[0], twoLive, historySessions, closeReasons, []);
+    expect(view.liveSessionIds).toEqual(["second", "first"]);
     expect(view.liveSessionId).toBe("second");
+    expect(view.liveSessionId).toBe(view.liveSessionIds[0] ?? null);
     expect(view.storedSessionIds).toEqual(["stored-alpha"]);
   });
 
@@ -676,6 +683,58 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
       info("second", "/workspaces/alpha"),
     ];
     expect(autoSelectActive(spaces, twoLive, historySessions)).toBe("second");
+  });
+
+  it("a space with three or more live sessions orders them newest-first", () => {
+    const threeLive = [
+      info("s1", "/workspaces/alpha"),
+      info("s2", "/workspaces/alpha"),
+      info("s3", "/workspaces/alpha"),
+    ];
+    const view = spaceViewFor(spaces[0], threeLive, historySessions, closeReasons, []);
+    expect(view.liveSessionIds).toEqual(["s3", "s2", "s1"]);
+    expect(view.liveSessionId).toBe("s3");
+  });
+
+  it("handles live sessions from multiple different spaces interleaved", () => {
+    const interleavedLive = [
+      info("alpha-1", "/workspaces/alpha"),
+      info("bravo-1", "/workspaces/bravo"),
+      info("alpha-2", "/workspaces/alpha"),
+      info("bravo-2", "/workspaces/bravo"),
+      info("alpha-3", "/workspaces/alpha"),
+    ];
+    const alphaView = spaceViewFor(spaces[0], interleavedLive, historySessions, closeReasons, []);
+    expect(alphaView.liveSessionIds).toEqual(["alpha-3", "alpha-2", "alpha-1"]);
+    expect(alphaView.liveSessionId).toBe("alpha-3");
+
+    const bravoView = spaceViewFor(spaces[1], interleavedLive, historySessions, closeReasons, []);
+    expect(bravoView.liveSessionIds).toEqual(["bravo-2", "bravo-1"]);
+    expect(bravoView.liveSessionId).toBe("bravo-2");
+  });
+});
+
+describe("liveSessionsInSpace (pure ordering and filtering)", () => {
+  it("returns session IDs for matching cwd in reverse insertion order (newest first)", () => {
+    const s = [
+      info("a1", "/space/a"),
+      info("b1", "/space/b"),
+      info("a2", "/space/a"),
+      info("c1", "/space/c"),
+      info("a3", "/space/a"),
+    ];
+    expect(liveSessionsInSpace(s, "/space/a")).toEqual(["a3", "a2", "a1"]);
+    expect(liveSessionsInSpace(s, "/space/b")).toEqual(["b1"]);
+    expect(liveSessionsInSpace(s, "/space/empty")).toEqual([]);
+  });
+
+  it("mostRecentLiveInSpace returns the newest session ID or null", () => {
+    const s = [
+      info("a1", "/space/a"),
+      info("a2", "/space/a"),
+    ];
+    expect(mostRecentLiveInSpace(s, "/space/a")).toBe("a2");
+    expect(mostRecentLiveInSpace(s, "/space/none")).toBeNull();
   });
 });
 
@@ -2760,5 +2819,49 @@ describe("titleSession (the `session-titled` push writes the row's title)", () =
     expect(st.archivedSessions).toEqual([]);
     expect(st.historySessions).toEqual([info("h1", "/x")]);
     expect(st.historySessions).toHaveLength(1);
+  });
+});
+
+describe("views (store integration for space views)", () => {
+  beforeEach(() => {
+    useSessions.setState({
+      sessions: [],
+      historySessions: [],
+      archivedSessions: [],
+      activeSessionId: null,
+      spaces: [],
+      activeSpacePath: null,
+      closeReasons: {},
+      messages: {},
+      configOptions: {},
+    });
+  });
+
+  const space = (path: string): SpaceRow => ({
+    path,
+    createdAt: 0,
+    lastOpenedAt: 0,
+    trusted: false,
+  });
+
+  it("adding multiple sessions sequentially via addSession in the same space produces newest-first liveSessionIds in views()", () => {
+    useSessions.setState({
+      spaces: [space("/workspaces/alpha")],
+    });
+
+    useSessions.getState().addSession(info("s1", "/workspaces/alpha"));
+    useSessions.getState().addSession(info("s2", "/workspaces/alpha"));
+    useSessions.getState().addSession(info("s3", "/workspaces/alpha"));
+
+    const s = useSessions.getState();
+    const view = spaceViewFor(
+      s.spaces[0],
+      s.sessions,
+      s.historySessions,
+      s.closeReasons,
+      s.archivedSessions,
+    );
+    expect(view.liveSessionIds).toEqual(["s3", "s2", "s1"]);
+    expect(view.liveSessionId).toBe("s3");
   });
 });

@@ -123,7 +123,7 @@ export default function SpacesList({
     () =>
       activeView
         ? [
-            ...(activeView.liveSessionId ? [activeView.liveSessionId] : []),
+            ...activeView.liveSessionIds,
             ...activeView.storedSessionIds,
           ]
         : [],
@@ -354,18 +354,19 @@ export default function SpacesList({
         {/* The ACTIVE space's sessions (the Spaces are the top TABS —
             the sidebar is sessions-only: no group headers, no folder
             icons, no `+`, no trust shield, no collapse chevrons — the
-            list just scrolls). Live session first, then stored (input
-            order — do NOT re-sort). */}
+            list just scrolls). Live sessions first (newest-first), then stored
+            (input order — do NOT re-sort). */}
         {activeView && (
           <div className="flex flex-col gap-0.5">
-            {activeView.liveSessionId !== null && (
+            {activeView.liveSessionIds.map((id) => (
               <SessionRow
-                sessionId={activeView.liveSessionId}
+                key={id}
+                sessionId={id}
                 spaceName={activeView.title !== "" ? activeView.title : activeView.path}
-                active={activeSessionId === activeView.liveSessionId}
+                active={activeSessionId === id}
                 onOpen={openSession}
               />
-            )}
+            ))}
             {activeView.storedSessionIds.map((id) => (
               <SessionRow
                 key={id}
@@ -515,7 +516,7 @@ function SessionRow({
   const isLive = useSessions((s) => s.sessions.some((x) => x.sessionId === sessionId));
   const archiveSession = useSessions((s) => s.archiveSession);
   // The row's generated title, read by id: `SessionRow` is given an id (by
-  // design — its parent holds `liveSessionId` / `storedSessionIds`, never the
+  // design — its parent holds `liveSessionIds` / `storedSessionIds`, never the
   // rows), so no `SessionInfo` is threaded through `SpaceView` for it. The
   // selector returns a PRIMITIVE over the three-list walk (a `sessions` /
   // history / archived row): zustand v5 re-runs a selector that yields a

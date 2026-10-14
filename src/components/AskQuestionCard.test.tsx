@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import AskQuestionCard from "./AskQuestionCard";
 import { useInteractive } from "../store/interactive";
@@ -31,10 +31,22 @@ const singleRequest = {
   },
 };
 
+const originalScrollIntoView = Element.prototype.scrollIntoView;
+
 beforeEach(() => {
   useInteractive.getState().dismissSession("s1");
   mockedRespond.mockReset();
   mockedRespond.mockResolvedValue(undefined);
+  Element.prototype.scrollIntoView = vi.fn();
+});
+
+afterEach(() => {
+  if (originalScrollIntoView === undefined) {
+    Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+  } else {
+    Element.prototype.scrollIntoView = originalScrollIntoView;
+  }
+  vi.restoreAllMocks();
 });
 
 describe("AskQuestionCard", () => {
@@ -282,5 +294,55 @@ describe("AskQuestionCard", () => {
         ],
       }),
     );
+  });
+
+  it("scrolls footer into view when an option is selected", async () => {
+    useInteractive.getState().addRequest("s1", singleRequest);
+    render(<AskQuestionCard sessionId="s1" requestId="r1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Red" }));
+    const footer = screen.getByTestId("ask-footer");
+    await waitFor(() => {
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({
+        block: "nearest",
+        behavior: "smooth",
+      });
+      const scrollMock = vi.mocked(Element.prototype.scrollIntoView);
+      expect(scrollMock.mock.contexts).toContain(footer);
+    });
+  });
+
+  it("scrolls footer into view when 'Other (type your own)' is selected", async () => {
+    useInteractive.getState().addRequest("s1", singleRequest);
+    render(<AskQuestionCard sessionId="s1" requestId="r1" />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Other (type your own)" }),
+    );
+    const footer = screen.getByTestId("ask-footer");
+    await waitFor(() => {
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({
+        block: "nearest",
+        behavior: "smooth",
+      });
+      const scrollMock = vi.mocked(Element.prototype.scrollIntoView);
+      expect(scrollMock.mock.contexts).toContain(footer);
+    });
+  });
+
+  it("does not trigger scrollIntoView when typing into the note input", async () => {
+    useInteractive.getState().addRequest("s1", singleRequest);
+    render(<AskQuestionCard sessionId="s1" requestId="r1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Red" }));
+    await waitFor(() => {
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+    });
+    vi.mocked(Element.prototype.scrollIntoView).mockClear();
+
+    const noteInput = screen.getByPlaceholderText("note (optional)");
+    fireEvent.change(noteInput, { target: { value: "some note" } });
+
+    await new Promise((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve)),
+    );
+    expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
   });
 });

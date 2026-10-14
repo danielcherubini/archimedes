@@ -358,4 +358,20 @@ describe("ToolCallCard (rendering)", () => {
     // Manual expand only.
     expect(container.querySelector(".bg-panel")).toBeNull();
   });
+
+  it("renders file chip row with min-w-0 overflow-hidden when expanded", () => {
+    render(
+      <ToolCallCard
+        title="read"
+        status="completed"
+        rawInput={{ path: "very/long/path/to/some/nested/file/here.ts" }}
+        rawOutput="data"
+      />,
+    );
+    fireEvent.click(screen.getByRole("button"));
+    const chipRow = screen.getByTestId("tool-call-file-row");
+    expect(chipRow.className).toContain("min-w-0");
+    expect(chipRow.className).toContain("overflow-hidden");
+    expect(chipRow.className).not.toContain("truncate");
+  });
 });

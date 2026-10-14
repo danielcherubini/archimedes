@@ -113,7 +113,7 @@ export default function MessageList({
     <div
       ref={scrollRef}
       data-testid="transcript-scroll"
-      className="flex-1 flex flex-col gap-3 overflow-y-auto p-4"
+      className="flex-1 flex flex-col gap-3 overflow-y-auto overflow-x-hidden min-w-0 max-w-full p-4"
     >
       {/* The request cards and the working/blocked/stop-reason lines
           render UNCONDITIONALLY (regardless of the transcript's
@@ -142,8 +142,8 @@ export default function MessageList({
             key={`${activeSessionId}:${i}`}
             className={
               breathes
-                ? `flex flex-col ${TRANSCRIPT_BREATHING_GAP}`
-                : "flex flex-col"
+                ? `flex min-w-0 max-w-full flex-col ${TRANSCRIPT_BREATHING_GAP}`
+                : "flex min-w-0 max-w-full flex-col"
             }
           >
             {child}

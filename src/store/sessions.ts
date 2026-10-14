@@ -427,27 +427,38 @@ export function rowToMessages(row: MessageRow): Message[] {
  */
 
 /**
- * The live session a space "points at" (for the space row's live dot and
- * boot auto-select).
+ * All live session IDs belonging to a space, ordered newest-first (most
+ * recently started at index 0).
+ *
+ * `sessions` is in insertion order (appended by `addSession` / `resumeSession`),
+ * so reversing the filtered slice yields newest-first.
+ */
+export function liveSessionsInSpace(
+  sessions: SessionInfo[],
+  spacePath: string,
+): string[] {
+  return sessions
+    .filter((s) => s.cwd === spacePath)
+    .reverse()
+    .map((s) => s.sessionId);
+}
+
+/**
+ * The ID of the most recent live session a space "points at" (for the space row's
+ * live dot and boot auto-select), or `null`.
  *
  * **Multi-live (the one-live cap is lifted):** a space may hold
  * MORE than one live session (a second `start_session` / `resume_session`
- * no longer supersedes the first). `sessions` is in INSERTION order —
- * `addSession` / `resumeSession` APPEND — so this returns the
- * MOST-RECENTLY-STARTED live session in the space (the one `addSession`
- * made `activeSessionId`). That keeps the space row's live dot coherent
- * with the active chat. With a single live session (the common case) it is
+ * no longer supersedes the first). Returns the most-recently-started live session
+ * in the space (the head of `liveSessionsInSpace`), keeping the space row's live dot
+ * coherent with the active chat. With a single live session (the common case) it is
  * just that session.
  */
-function mostRecentLiveInSpace(
+export function mostRecentLiveInSpace(
   sessions: SessionInfo[],
   path: string,
-): SessionInfo | undefined {
-  let found: SessionInfo | undefined;
-  for (const s of sessions) {
-    if (s.cwd === path) found = s; // keep the LAST (most recent) match
-  }
-  return found;
+): string | null {
+  return liveSessionsInSpace(sessions, path)[0] ?? null;
 }
 
 export function autoSelectActive(
@@ -460,7 +471,7 @@ export function autoSelectActive(
     // lifted): `mostRecentLiveInSpace` picks the
     // most-recently-started one (coherent with `activeSessionId`).
     const live = mostRecentLiveInSpace(sessions, space.path);
-    if (live) return live.sessionId;
+    if (live) return live;
     // No re-sort: input order IS newest-first (see the ordering note).
     const stored = historySessions
       .filter((s) => s.cwd === space.path)
@@ -474,6 +485,10 @@ export function autoSelectActive(
  * One per-space group for the UI (used by both this store and the Task 6
  * components). Built with the same input-order rule as `autoSelectActive`.
  *
+ * Supports multiple coexisting live sessions per space: `liveSessionIds`
+ * contains all active live sessions ordered newest-first, while `liveSessionId`
+ * points to the most recently started live session (or `null`).
+ *
  * Note: a session without a space is NOT a case here by design — a space is
  * born at the same time as a session (the `record_session → upsert_space`
  * hook), and it references a space row on boot after backfill. So there is
@@ -483,12 +498,11 @@ export interface SpaceView {
   path: string;
   /** Display label (base name; `""` if the base name is empty — the UI falls back to `path`). */
   title: string;
-  /**
-   * The space's live session (the most-recently-started one when a space
-   * holds more than one — the one-live cap is lifted), or `null`.
-   */
+  /** All live sessions in this space, newest-first (most recently started at index 0). */
+  liveSessionIds: string[];
+  /** The most recent live session in this space, or `null`. */
   liveSessionId: string | null;
-  /** Stored sessions of this space, in `historySessions` order (newest-first as delivered by `list_sessions` — do NOT re-sort). */
+  /** Stored sessions of this space, in history order (newest-first). Do NOT re-sort. */
   storedSessionIds: string[];
   /**
    * Archived sessions of this space (NOT rendered in the Space group —
@@ -509,11 +523,8 @@ export function spaceViewFor(
   closeReasons: Record<string, CloseReasonStr>,
   archivedSessions: SessionInfo[],
 ): SpaceView {
-  // A space may hold MORE than one live session (the one-live cap is
-  // lifted): show the most-recently-started one (coherent with
-  // `activeSessionId`), not just the first.
-  const liveSessionId =
-    mostRecentLiveInSpace(sessions, space.path)?.sessionId ?? null;
+  const liveSessionIds = liveSessionsInSpace(sessions, space.path);
+  const liveSessionId = liveSessionIds[0] ?? null;
   // Input order = newest-first from `list_sessions`; NOT re-sorted.
   const storedSessionIds = historySessions
     .filter((s) => s.cwd === space.path)
@@ -533,6 +544,7 @@ export function spaceViewFor(
   return {
     path: space.path,
     title: basenameOfPath(space.path),
+    liveSessionIds,
     liveSessionId,
     storedSessionIds,
     archivedSessionIds,
@@ -885,7 +897,7 @@ export const useSessions = create<SessionsState>((set, get) => ({
     // Live first (the most-recently-started one — the one-live-cap-lifted
     // rule), then the newest stored (input order — do NOT re-sort), then
     // nothing (an empty space → the chat's empty state).
-    const live = mostRecentLiveInSpace(state.sessions, path)?.sessionId ?? null;
+    const live = mostRecentLiveInSpace(state.sessions, path);
     const stored =
       state.historySessions.find((s) => s.cwd === path)?.sessionId ?? null;
     const id = live ?? stored;

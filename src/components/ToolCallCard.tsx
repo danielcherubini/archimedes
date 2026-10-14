@@ -108,7 +108,10 @@ export default function ToolCallCard({
                     </div>
                   )}
                   {files.length > 0 && (
-                    <div className="flex items-center gap-2">
+                    <div
+                      data-testid="tool-call-file-row"
+                      className="flex min-w-0 overflow-hidden items-center gap-2"
+                    >
                       <FileChip path={files[0].path} />
                       {range && (
                         <span className="shrink-0 text-ui-sm text-foreground-subtlest">
@@ -122,7 +125,7 @@ export default function ToolCallCard({
               )}
               {output !== undefined ? (
                 <div>
-                  <pre className="font-mono max-h-80 overflow-auto whitespace-pre-wrap text-ui-sm">
+                  <pre className="font-mono max-h-80 overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] text-ui-sm">
                     {output.length > 20000
                       ? output.slice(0, 20000) + "…"
                       : output}

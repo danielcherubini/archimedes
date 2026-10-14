@@ -48,11 +48,14 @@ export default function PermissionPrompt({
   return (
     <div className="overflow-hidden rounded-xl border border-border">
       <div className="bg-interaction-confirmation-surface px-3 py-2">
-        <p className="text-ui-base font-medium text-interaction-confirmation-foreground">
+        <p className="text-ui-base font-medium [overflow-wrap:anywhere] text-interaction-confirmation-foreground">
           {prompt.toolTitle}
         </p>
       </div>
-      <div className="flex flex-wrap items-center gap-2 p-3">
+      <div
+        data-testid="permission-options-row"
+        className="flex min-w-0 flex-wrap items-center gap-2 p-3"
+      >
         {prompt.options.map((option, i) => (
           <Button
             key={option.optionId}
@@ -60,6 +63,7 @@ export default function PermissionPrompt({
             size="sm"
             disabled={busy}
             onClick={() => respond({ selected: { option_id: option.optionId } })}
+            className="min-w-0 [overflow-wrap:anywhere]"
           >
             {option.name}
           </Button>

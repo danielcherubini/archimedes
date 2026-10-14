@@ -152,4 +152,15 @@ describe("PermissionPrompt", () => {
       expect(usePermissions.getState().prompts["s1"]).toHaveLength(0),
     );
   });
+
+  it("applies min-w-0 and [overflow-wrap:anywhere] to option buttons / container to handle long text gracefully", () => {
+    usePermissions.getState().addPrompt("s1", "r1", request);
+    render(<PermissionPrompt sessionId="s1" requestId="r1" />);
+    const buttonGroup = screen.getByTestId("permission-options-row");
+    expect(buttonGroup.className).toContain("min-w-0");
+    const optionButton = screen.getByRole("button", { name: "Allow" });
+    expect(optionButton.className).toContain("min-w-0");
+    expect(optionButton.className).toContain("[overflow-wrap:anywhere]");
+    expect(optionButton.className).not.toContain("break-words");
+  });
 });

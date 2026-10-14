@@ -270,6 +270,44 @@ describe("SpacesList", () => {
     expect(row!.className).toContain("bg-selected");
   });
 
+  it("renders multiple live sessions in the active space (newest-first) above stored sessions and allows switching", () => {
+    const now = Date.now();
+    const s1 = { sessionId: "s1", cwd: "/tmp/alpha", capabilities: {}, archived: false };
+    const s2 = { sessionId: "s2", cwd: "/tmp/alpha", capabilities: {}, archived: false };
+    useSessions.setState({
+      sessions: [s1, s2],
+      activeSpacePath: "/tmp/alpha",
+      activeSessionId: "s2",
+      messages: {
+        s1: [{ kind: "user", text: "Task 1", at: now - 20_000 }],
+        s2: [{ kind: "user", text: "Task 2", at: now - 10_000 }],
+        h1: [{ kind: "user", text: "Refactor the parser", at: now - 3_600_000 }],
+      },
+    });
+
+    render(<SpacesList />);
+
+    const task2El = screen.getByText("Task 2");
+    const task1El = screen.getByText("Task 1");
+    const storedEl = screen.getByText("Refactor the parser");
+
+    expect(task2El).toBeTruthy();
+    expect(task1El).toBeTruthy();
+    expect(storedEl).toBeTruthy();
+
+    // Check DOM order: Task 2 above Task 1, Task 1 above stored row
+    expect(
+      task2El.compareDocumentPosition(task1El) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      task1El.compareDocumentPosition(storedEl) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    // Clicking Task 1 switches activeSessionId to s1
+    fireEvent.click(task1El);
+    expect(useSessions.getState().activeSessionId).toBe("s1");
+  });
+
   it("truncates a long title on a single line (the fade mask is the sole cue)", () => {
     // A 120-char first user message → `titleFor` slices it to 80 chars; the
     // title span must carry the truncation classes so it overflows under the

@@ -121,6 +121,9 @@ describe("the transcript's vertical rhythm", () => {
     const tokens = scroll.className.split(/\s+/);
     expect(tokens).toContain("gap-3");
     expect(tokens).not.toContain("space-y-3");
+    expect(tokens).toContain("overflow-x-hidden");
+    expect(tokens).toContain("min-w-0");
+    expect(tokens).toContain("max-w-full");
   });
 
   it("prose → tool: the tool row gets the breathing gap", () => {
@@ -170,7 +173,7 @@ describe("the transcript's vertical rhythm", () => {
   it("every row is wrapped in a flex column so the row keeps its exact height (a block wrapper re-adds the line box's descender space)", () => {
     const [row] = rows([single(thought("th"))]);
     expect(row!.className.split(/\s+/)).toEqual(
-      expect.arrayContaining(["flex", "flex-col"]),
+      expect.arrayContaining(["flex", "flex-col", "min-w-0", "max-w-full"]),
     );
   });
 

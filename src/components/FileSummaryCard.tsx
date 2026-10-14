@@ -44,9 +44,9 @@ export default function FileSummaryCard({
       </div>
       <div className="border-t border-border">
         {stats.map((f) => (
-          <div key={f.path} className="flex h-8 items-center gap-2 px-2">
+          <div key={f.path} className="flex h-8 min-w-0 items-center gap-2 px-2">
             <FileCodeIcon className="size-4 shrink-0 text-foreground-subtle" />
-            <span className="flex-1 truncate font-mono text-ui-base">
+            <span className="flex-1 min-w-0 truncate font-mono text-ui-base">
               {f.path}
             </span>
             <span className="text-ui-base tabular-nums text-diff-added">

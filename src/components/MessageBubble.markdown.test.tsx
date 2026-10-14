@@ -47,8 +47,19 @@ describe("AgentMarkdown (the ZCode markdown scale)", () => {
     expect(root.className).toContain("text-ui-base");
     expect(root.className).toContain("leading-[1.75]");
     expect(root.className).toContain("tracking-wide");
+    expect(root.className).toContain("[overflow-wrap:anywhere]");
+    expect(root.className).not.toContain("break-words");
+    expect(root.className).toContain("min-w-0");
+    expect(root.className).toContain("max-w-full");
     expect(root.className).toContain("[&>*:first-child]:mt-0");
     expect(root.className).toContain("[&>*:last-child]:mb-0");
+  });
+
+  it("renders inline code with [overflow-wrap:anywhere]", () => {
+    const { container } = renderAgentText("here is `some_code` text");
+    const code = container.querySelector("code");
+    expect(code?.className).toContain("[overflow-wrap:anywhere]");
+    expect(code?.className).not.toContain("break-words");
   });
 
   it("renders h1 on the ZCode heading scale (mt-6 mb-4 text-ui-xl font-semibold)", () => {
