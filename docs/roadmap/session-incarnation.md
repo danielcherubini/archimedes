@@ -41,7 +41,7 @@ Facts the plan depends on, each verified against the code:
 - **Introduce a helper together with its non-test caller.** `mod normalize` is private (`agent/mod.rs:17`), so a helper called only from `mod tests` is dead in the `--lib` build that `--all-targets` lints — `pub` alone does not save it. This is why Task 2 lands `TurnState::stamped` in the same commit as its `AgentLoop::new` caller.
 - Do not weaken an assertion into `str::contains` / `ends_with`. Where an id assertion changes, it changes to a *different exact value*. The reason this defect shipped is that nothing asserted strongly enough across two Worker lives.
 - `src/bin/fake_worker.rs` emits literal `"m1"` frames and hardcoded `DisplayUpsert` keys, and it must keep doing so — no task depends on it running `normalize`. Its ONE permitted edit is Task 3's addition of `"incarnation"` to the `session_info` envelope echo (Task 3 names it explicitly).
-- Known load-flaky tests (re-run the single file to confirm before believing a failure): `SettingsPage.test.tsx`, `ModelPicker.test.tsx`, `App.test.tsx`, `SkillsDialog`, `SpacesList`; Rust `agent::mcp::http::tests::http_a_slow_sse_stream_completes`.
+- Known load-flaky tests (re-run the single file to confirm before believing a failure): `SettingsPage.test.tsx`, `ModelPicker.test.tsx`, `App.test.tsx`, `SkillsDialog`, `SpacesList`; and the `agent::mcp::http::tests::` timing trio `http_a_slow_sse_stream_completes` / `http_session_id_is_resent` / `http_sse_response_round_trip` (all three starve under CPU load and pass in isolation).
 
 Tasks 1→2→3 are strictly ordered. **Task 4 is independent** (different language, different files) and may run in parallel.
 
@@ -428,6 +428,70 @@ Accepted consequences, to be written into the code comment (ADR 0050):
 - [ ] A retraction during `resumeSession`'s load cannot drop a user message.
 - [ ] No `slice(` remains in `resumeSession`'s merge block (`sessions.ts:1213-1273`) — it legitimately remains at `:144` and `:159`, which are the reducer's append arms.
 - [ ] The pre-existing "does not wipe a user message added while the history reload is in flight" and "does not render a resumed prompt twice" tests pass UNMODIFIED.
+
+---
+
+## Execution log
+
+All four tasks landed on `feature/session-incarnation`, one commit each, TDD
+(red confirmed before green) throughout: `602502c` (T1) · `ce5b450` (T2) ·
+`e2a19ff` (T3) · `d1cf155` (T4).
+
+Whole-branch validation (sequential): `cargo fmt --check` clean · `cargo test
+--no-fail-fast` 885 lib tests + every integration target, **0 failures** ·
+`cargo clippy --all-targets -- -D warnings` **zero warnings** · `pnpm test`
+**1846 passed (82 files)** · `pnpm build` clean.
+
+Six things the plan got wrong, corrected during execution (the code is right,
+the plan text above is not):
+
+1. **Task 3's mutation check was unachievable as written.** "Drop the stamp from
+   `TurnState::id` and confirm BOTH new tests fail" cannot hold: the resume e2e
+   drives the `fake_worker` fixture, which never runs `normalize`, so nothing in
+   that test reads `TurnState::id` — it stayed green under that mutation, as it
+   must. Its invariant is minted in `types::mint_incarnation`, and that is where
+   its teeth were proven instead (a constant stamp reddens it with
+   `left: "a3f9c1" right: "a3f9c1"`). The general lesson: **a fixture-driven
+   integration test cannot observe harness ids at all**, so no mutation of the
+   harness's minting can be its falsifier.
+2. **Task 4's counted-multiset test cannot use `createdAt === at`.** The dedupe
+   pass below — untouched by this plan — dedups a `user` message on an EQUAL
+   timestamp ("equal timestamps dedup: the safe direction"), so the persisted
+   row must be *strictly older* (`createdAt: 4`) for the second copy to survive.
+   The plan's phrase "the snapshot's copy and the new one" also misdescribed the
+   mechanism: the merge emits `[...reloaded, ...fresh]`, so the snapshot's copy
+   is never re-emitted — the two survivors are the older reloaded row and the new
+   local one.
+3. **An acceptance criterion that defeated itself.** "No `slice(` remains in the
+   merge block" is unsatisfiable because the block's own mandated comment quotes
+   `slice(prior.length)`. The real criterion is: no `slice` **call** remains
+   there.
+4. **"Confirm red by watching the test count move" is impossible when the API
+   does not exist yet** — a missing `TurnState::stamped` is a compile error, so
+   zero tests run and no count moves. Both reds are worth having: the compile
+   failure, then a behavioural one obtained by landing the dead plumbing
+   (field + constructor) before the minting change.
+5. **`cargo test` without `--no-fail-fast` under-runs the branch** — it stops at
+   the first failing target, which reads as "only the lib failed". Use
+   `--no-fail-fast`, and note the flake list is wider than recorded: the
+   load-sensitive timing tests are `agent::mcp::http::tests::`**`http_a_slow_sse_stream_completes`**,
+   **`http_session_id_is_resent`** and **`http_sse_response_round_trip`** (a 50 ms
+   dribble against a 200 ms read timeout starves under CPU contention; which one
+   loses is non-deterministic, all three pass in isolation).
+6. **Small numeric drift:** `StartEnv::from_parts` has **14** call sites (the 15th
+   grep hit is a doc comment), and `pnpm test -- FILE` runs all 82 files rather
+   than one — the filter goes without `--`.
+
+Two things worth knowing that the plan did not predict:
+
+- `compute_display_rows` keeps its `unwrap_or("default")` fallbacks **unstamped**
+  and unchanged on purpose: it is a reader of ids off frames, and those fallbacks
+  only fire if a frame arrives with no `messageId` at all, which the stamped
+  `normalize` never produces.
+- The vocabulary was already in the codebase: `agent/todo.rs:84` clears a
+  Worker's todo board so a resumed session "must not read the previous
+  incarnation's todos" — the same boundary, named the same way, six months
+  before the word reached `CONTEXT.md`.
 
 ---
 
