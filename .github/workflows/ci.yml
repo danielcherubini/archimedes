@@ -73,3 +73,26 @@ jobs:
 
       - name: pnpm build
         run: pnpm build
+
+  # The version lives in three files (package.json, src-tauri/Cargo.toml,
+  # src-tauri/tauri.conf.json) and no build step ties them together, so the
+  # disagreement this job catches would otherwise surface as a shipped bundle
+  # announcing the wrong number. Separate job, not a step in the one above: it
+  # needs jq and nothing else, so it owes no toolchain install and stays fast
+  # enough to be the first red light on the PR that introduced the drift.
+  scripts:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # jq is preinstalled on the ubuntu runners — asserting it here would be
+      # the job testing its own runner image.
+      - name: Test the version check
+        run: bash scripts/check-versions.test.sh
+
+      # The same check on the real checkout, so the guard runs even when the
+      # test script above is what changed.
+      - name: Check the three version fields agree
+        run: bash scripts/check-versions.sh
