@@ -43,6 +43,7 @@ use crate::agent::events::RpcEvent;
 use crate::agent::harness::prompt::build_child_system_message;
 use crate::agent::harness::r#loop::tool_specs;
 use crate::agent::harness::{ModelKey, ModelRef};
+use crate::agent::is_bookkeeping_message_id;
 use crate::agent::session::resolve_composed_model;
 use crate::agent::subagent::{SubagentMetrics, SubagentOutcome};
 use crate::agent::types::mint_session_id;
@@ -110,10 +111,12 @@ pub struct SubagentCapture {
     /// order — the LAST id is tracked separately).
     text: StdMutex<HashMap<String, String>>,
     /// The LAST `messageId` with a non-empty capture (updated on every
-    /// non-empty capture of a NON-`system` chunk — the final-output
-    /// source; the `system` bookkeeping chunks — "Retry failed",
-    /// "Compacting context…" — are NEVER captured: a failed child
-    /// turn must not settle with a one-liner as its output).
+    /// non-empty capture of a chunk that is NOT harness bookkeeping — the
+    /// final-output source; the bookkeeping chunks (`normalize::
+    /// is_bookkeeping_message_id`: the shared `"system"` one-liner key, and
+    /// the `"retract:N"` discard line) are NEVER captured: a failed child
+    /// turn must not settle with a one-liner as its output, and a parent
+    /// must never read a discard line as its child's answer).
     last_message_id: StdMutex<Option<String>>,
     /// The `message_update` `usage` accumulation (the `inputTokens` /
     /// `outputTokens` fields — the MAX across the frames: a turn's
@@ -139,12 +142,40 @@ impl SubagentCapture {
     /// Observe one `SinkFrame` (the `session-update`
     /// `agent_message_chunk` frames — the ENVELOPED shape:
     /// `{ sessionId, update }`; the `update`'s `sessionUpdate`
-    /// discriminator is `agent_message_chunk`).
+    /// discriminator is `agent_message_chunk`). A `session-update`
+    /// `message_retracted` frame (ADR 0048) ERASES the Abandoned
+    /// attempt's text for the `messageId` it names.
     pub fn observe_sink_frame(&self, event: &str, payload: &Value) {
         if event != "session-update" {
             return;
         }
         let update = payload.get("update");
+        // (ADR 0048) A Retraction discards the abandoned attempt's text HERE too.
+        // This map is what `captured_text()` hands the PARENT as the subagent tool
+        // result, so a retried child would otherwise feed the parent `partdone`.
+        if update
+            .and_then(|u| u.get("sessionUpdate"))
+            .and_then(Value::as_str)
+            == Some("message_retracted")
+        {
+            if let Some(id) = update
+                .and_then(|u| u.get("messageId"))
+                .and_then(Value::as_str)
+            {
+                self.text
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(id);
+                let mut last = self
+                    .last_message_id
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                if last.as_deref() == Some(id) {
+                    *last = None;
+                }
+            }
+            return;
+        }
         if update
             .and_then(|u| u.get("sessionUpdate"))
             .and_then(Value::as_str)
@@ -160,7 +191,7 @@ impl SubagentCapture {
             .and_then(|c| c.get("text"))
             .and_then(Value::as_str);
         if let (Some(mid), Some(delta)) = (mid, delta) {
-            if !delta.is_empty() && mid != "system" {
+            if !delta.is_empty() && !is_bookkeeping_message_id(mid) {
                 let mut text = self.text.lock().unwrap_or_else(|p| p.into_inner());
                 text.entry(mid.to_string()).or_default().push_str(delta);
                 *self
@@ -1796,6 +1827,41 @@ mod tests {
         });
         assert_eq!(capture.input_tokens(), 10);
         assert_eq!(capture.output_tokens(), 5);
+    }
+
+    /// (ADR 0048) The capture is what the PARENT reads. A child that retried
+    /// must hand back the retry's text alone, never `part` + `done`.
+    #[test]
+    fn a_retraction_clears_the_captured_child_text() {
+        let capture = SubagentCapture::new();
+        let chunk = |id: &str, t: &str| {
+            serde_json::json!({ "sessionId": "s", "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": t }, "messageId": id } })
+        };
+        capture.observe_sink_frame("session-update", &chunk("m1", "part"));
+        capture.observe_sink_frame(
+            "session-update",
+            &serde_json::json!({ "sessionId": "s", "update": {
+                "sessionUpdate": "message_retracted", "messageId": "m1" } }),
+        );
+        capture.observe_sink_frame("session-update", &chunk("m1", "done"));
+        assert_eq!(capture.captured_text(), "done");
+    }
+
+    /// The discard line is harness bookkeeping, not the child's output (ADR 0048
+    /// gives it a unique id precisely so it can be told apart).
+    #[test]
+    fn a_discard_line_is_not_captured_as_child_output() {
+        let capture = SubagentCapture::new();
+        capture.observe_sink_frame(
+            "session-update",
+            &serde_json::json!({ "sessionId": "s", "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "Discarded an incomplete reply" },
+                "messageId": "retract:1" } }),
+        );
+        assert_eq!(capture.captured_text(), "");
     }
 
     /// A `"__slow__"` subagent (a 10 s settle) hits the `settle_timeout`
