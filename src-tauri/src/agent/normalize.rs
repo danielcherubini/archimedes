@@ -186,11 +186,15 @@ pub(crate) fn normalize(e: &RpcEvent, st: &mut TurnState) -> Vec<Value> {
             assistant_message_event: ev,
             ..
         } => {
-            let fallback = st.id("default");
-            let mid = st
-                .current_message_id
-                .clone()
-                .unwrap_or_else(|| fallback.clone());
+            // LAZY on purpose (ADR 0049's id stamp makes the fallback a
+            // `format!`): this arm runs for EVERY streamed token, and the
+            // `default` id is built ONLY when no assistant `message_start` has
+            // opened a message yet — hoisting it above the `match` would pay
+            // one allocation per token for the id of that one edge case.
+            let mid = match st.current_message_id.clone() {
+                Some(id) => id,
+                None => st.id("default"),
+            };
             match ev.get("type").and_then(Value::as_str) {
                 Some("text_delta") => vec![json!({
                     "sessionUpdate": "agent_message_chunk",
@@ -456,11 +460,12 @@ pub(crate) fn normalize(e: &RpcEvent, st: &mut TurnState) -> Vec<Value> {
         // onto the "Retrying (attempt 1/3…)" line this path emits immediately
         // before.
         RpcEvent::message_retracted => {
-            let fallback = st.id("default");
-            let mid = st
-                .current_message_id
-                .clone()
-                .unwrap_or_else(|| fallback.clone());
+            // The SAME lazy form as the `message_update` arm (symmetry, not a
+            // hot path — this runs once per discarded attempt).
+            let mid = match st.current_message_id.clone() {
+                Some(id) => id,
+                None => st.id("default"),
+            };
             st.retract_seq += 1;
             vec![
                 json!({ "sessionUpdate": "message_retracted", "messageId": mid }),
@@ -737,11 +742,17 @@ use crate::storage::Db;
 /// A temp-dir `Db` with a recorded `sessions` row (the `messages` rows FK to
 /// `sessions`) — the fixture BOTH of this module's test suites need (one
 /// `session_id`, one table, the display rows written through `SessionStore`).
+///
+/// The `TempDir` GUARD travels back with the `Db` and the caller keeps it
+/// alive for the whole test (`let (db, _dir) = temp_db();` — the `mcp` tool
+/// tests' `(T, tempfile::TempDir)` pattern). It used to be a hand-rolled
+/// `temp_dir()/harness-display-test-<uuid>` that NOTHING ever removed, so every
+/// run of either suite left two directories behind; `TempDir` deletes its dir on
+/// drop, which only happens if a binding still holds it when the test ends.
 #[cfg(test)]
-fn temp_db() -> Arc<Db> {
-    let dir = std::env::temp_dir().join(format!("harness-display-test-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let db = Arc::new(Db::open(&dir.join("t.db")).expect("db should open"));
+fn temp_db() -> (Arc<Db>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let db = Arc::new(Db::open(&dir.path().join("t.db")).expect("db should open"));
     db.record_session(&crate::types::SessionInfo {
         session_id: "s1".to_string(),
         cwd: std::path::PathBuf::from("/tmp"),
@@ -753,7 +764,7 @@ fn temp_db() -> Arc<Db> {
         is_subagent: false,
     })
     .expect("record_session");
-    db
+    (db, dir)
 }
 
 #[cfg(test)]
@@ -1387,7 +1398,7 @@ mod normalize_tests {
     /// one session id, one database.
     #[test]
     fn two_incarnations_of_one_session_never_share_a_display_row() {
-        let db = temp_db();
+        let (db, _dir) = temp_db();
         let store = SessionStore::new(db.clone());
 
         // ── incarnation A: the first Worker ────────────────────────────────
@@ -1527,28 +1538,32 @@ mod normalize_tests {
             );
         }
 
-        // The two first-assistant-message rows COEXIST as TWO rows holding
-        // TWO payloads: both incarnations counted to `m1` for one
-        // `session_id`, so the stamp is the only thing keeping them apart.
-        // The EXACT TOTAL is what an overwrite reddens — drop the stamp and
-        // `m1` / `m1#1` collapse into one row each, leaving FOUR rows
-        // (`m1`, `m1#1`, `system`, `retract:1`) where these SIX live
-        // side by side. Order of failure when the stamp is dropped: the
+        // The two first-assistant-message rows COEXIST as TWO rows: both
+        // incarnations counted to `m1` for one `session_id`, so the stamp is
+        // the only thing keeping them apart.
+        //
+        // The EXACT TOTAL is the proof. Drop the stamp and `m1` / `m1#1`
+        // collapse into ONE row each, leaving FOUR rows (`m1`, `m1#1`,
+        // `system`, `retract:1`) where these SIX live side by side. Order of
+        // failure when the stamp is dropped: the
         // `row("agent-text", "aaaaaa:m1")` LOOKUP above is the FIRST thing to
         // fail (`row` panics on an absent key), this count is the second.
+        //
+        // And deliberately NO `assert_ne!(A's payload, B's payload)` beside
+        // it: rows are keyed by `(kind, message_key)`, so two rows carrying
+        // `aaaaaa:m1` and `bbbbbb:m1` CANNOT be one overwritten row — the
+        // count already states that claim — and these two payloads differ
+        // only incidentally (A streamed `history`; B streamed `parti` and then
+        // erased itself), so the assertion could not fire for the overwrite it
+        // advertises. What each life's payload has to BE is asserted per key
+        // ABOVE (`aaaaaa:m1` holds A's text, `bbbbbb:m1` is emptied by B's own
+        // Retraction), which is the assertion that can actually fail.
         assert_eq!(
             rows.len(),
             6,
             "A's `m1` + `m1#1` + `system` PLUS B's `m1` + `m1#1` + `retract:1` \
              — six coexisting rows, two Worker lives that never touched each \
              other's keys; the table is {rows:?}"
-        );
-        let a_m1 = row("agent-text", "aaaaaa:m1");
-        let b_m1 = row("agent-text", "bbbbbb:m1");
-        assert_ne!(
-            a_m1.2, b_m1.2,
-            "the same counter value in two incarnations is two rows with two \
-             payloads, not one overwritten row: A is {a_m1:?}, B is {b_m1:?}"
         );
     }
 
@@ -1609,7 +1624,7 @@ mod compute_display_rows_tests {
     /// `db.record_message`, so the `messages` rows are identical).
     #[test]
     fn compute_display_rows_matches_the_legacy_persist_update_writes() {
-        let db = temp_db();
+        let (db, _dir) = temp_db();
         let store = SessionStore::new(db.clone());
         let text_acc = StdMutex::new(HashMap::new());
         let tool_state = StdMutex::new(HashMap::new());

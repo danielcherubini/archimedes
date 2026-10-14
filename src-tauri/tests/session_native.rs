@@ -18,6 +18,7 @@ use archimedes_lib::agent::worker::client::WorkerHandle;
 use archimedes_lib::agent::worker::manager::{WorkerFactory, WorkerManager};
 use archimedes_lib::agent::{EventSink, SessionInfo, SessionManager, StopReason};
 use archimedes_lib::storage::Db;
+use archimedes_lib::test_support::is_incarnation_stamp;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
@@ -247,12 +248,14 @@ async fn native_session_end_to_end() {
         .as_str()
         .expect("the start envelope echoes its incarnation stamp")
         .to_string();
-    assert_eq!(
-        stamp_a.len(),
-        6,
-        "the stamp is six hex chars, got {stamp_a}"
+    // The shape is pinned by the SAME predicate the `protocol` unit test uses
+    // (`test_support::is_incarnation_stamp` — six chars, LOWERCASE, and the
+    // `[0-9a-f]` byte set): `len() == 6` + a radix parse also accepts
+    // `A3F9C1`, and lowercase is part of ADR 0049's contract.
+    assert!(
+        is_incarnation_stamp(&stamp_a),
+        "the stamp is six LOWERCASE hex chars, got {stamp_a:?}"
     );
-    u32::from_str_radix(&stamp_a, 16).expect("the stamp is hex");
 
     let reason = manager
         .send_prompt(&sid, "hi".to_string())
@@ -317,12 +320,10 @@ async fn native_session_end_to_end() {
         .as_str()
         .expect("the resumed start envelope echoes its incarnation stamp")
         .to_string();
-    assert_eq!(
-        stamp_b.len(),
-        6,
-        "the stamp is six hex chars, got {stamp_b}"
+    assert!(
+        is_incarnation_stamp(&stamp_b),
+        "the resumed stamp is six LOWERCASE hex chars, got {stamp_b:?}"
     );
-    u32::from_str_radix(&stamp_b, 16).expect("the stamp is hex");
     assert_ne!(
         stamp_a, stamp_b,
         "a resumed Worker is a NEW incarnation and must not inherit the stamp"
@@ -382,6 +383,9 @@ async fn native_session_end_to_end() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    // The two membership checks FIRST, and named per life: when the pair is
+    // not both present, the message has to say WHICH life vanished — A's key
+    // was overwritten and B never wrote are different bugs.
     assert!(
         agent_text_keys.contains(&key_life_a),
         "life A's display row ({key_life_a}) is gone — life B wrote into its \
@@ -394,15 +398,21 @@ async fn native_session_end_to_end() {
          Worker wrote no row of its own; the agent-text keys are \
          {agent_text_keys:?}"
     );
+    // And EXACTLY these two rows, nothing else in the `agent-text` family.
+    // Sorted so the comparison is read-order-independent, and an EXACT value
+    // rather than a suffix matcher: `filter(|k| k.ends_with(":m1")).count()
+    // == 2` passed while a THIRD unstamped row (`m1`) sat in the table, and
+    // it could not see an extra `agent-text` row whose key does not end in
+    // `:m1` at all (the repo rule: an id assertion changes to a different
+    // EXACT value, never to `contains` / `ends_with`).
+    agent_text_keys.sort();
+    let mut expected_keys = vec![key_life_a, key_life_b];
+    expected_keys.sort();
     assert_eq!(
-        agent_text_keys
-            .iter()
-            .filter(|key| key.ends_with(":m1"))
-            .count(),
-        2,
-        "two incarnations of one session must hold TWO agent-text rows for \
-         the same counter value, not one shared row; the agent-text keys are \
-         {agent_text_keys:?}"
+        agent_text_keys, expected_keys,
+        "two incarnations of one session must hold EXACTLY two `agent-text` \
+         rows — one per Worker life, and no other `agent-text` row in the \
+         table; the agent-text keys are {agent_text_keys:?}"
     );
 
     let _ = manager.close_session(&sid).await;

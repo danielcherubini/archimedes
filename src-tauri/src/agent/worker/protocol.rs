@@ -777,16 +777,18 @@ mod tests {
     /// Every `Start` mints its OWN incarnation stamp: the token is what keeps
     /// a resumed Worker out of its predecessor's display rows, so two `Start`s
     /// sharing one token would reproduce the collision ADR 0049 removes. The
-    /// stamp is 6 lowercase hex chars — a namespace, never a decoded value.
+    /// stamp is 6 LOWERCASE hex chars — a namespace, never a decoded value
+    /// (the shape predicate is `test_support::is_incarnation_stamp`, shared
+    /// with the two-process e2e, because `len() == 6` + a radix parse also
+    /// accepts `A3F9C1`).
     #[test]
     fn every_start_env_gets_its_own_incarnation_stamp() {
         let a = test_env();
         let b = test_env();
         for env in [&a, &b] {
-            assert_eq!(env.incarnation.len(), 6, "the stamp is 6 chars");
             assert!(
-                u32::from_str_radix(&env.incarnation, 16).is_ok(),
-                "the stamp is hex: {}",
+                crate::test_support::is_incarnation_stamp(&env.incarnation),
+                "the stamp is six LOWERCASE hex chars, got {:?}",
                 env.incarnation
             );
         }
