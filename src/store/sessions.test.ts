@@ -498,6 +498,100 @@ describe("applySessionUpdate — tool calls", () => {
   });
 });
 
+// (ADR 0048) An Abandoned attempt's reply is RetRACTED by protocol, so the
+// Client must erase it. The live reducer APPENDS same-`messageId` chunks (that
+// is the welding hazard), so the Retraction removes instead — and it removes
+// thought as well as text, because a live thought message carries the bare
+// message id (the `#n` suffix exists only in the persisted row key).
+describe("applySessionUpdate — message_retracted (ADR 0048)", () => {
+  it("removes every message carrying the retracted messageId", () => {
+    const before: Message[] = [
+      { kind: "user", text: "go", at: 1 },
+      { kind: "agent-thought", messageId: "m1", text: "th", at: 2 },
+      { kind: "agent-text", messageId: "m1", text: "parti", at: 3 },
+    ];
+    expect(
+      applySessionUpdate(
+        before,
+        { sessionUpdate: "message_retracted", messageId: "m1" },
+        4,
+      ),
+    ).toEqual([{ kind: "user", text: "go", at: 1 }]);
+  });
+
+  it("is silent when nothing was streamed under that messageId", () => {
+    // The common pre-stream retry emits a Retraction that matches nothing.
+    // SAME reference back, or the batch reducer's `next !== sessionMessages`
+    // changed-sentinel would read silence as a change and re-render.
+    const before: Message[] = [
+      { kind: "agent-text", messageId: "m1", text: "kept", at: 1 },
+    ];
+    expect(
+      applySessionUpdate(
+        before,
+        { sessionUpdate: "message_retracted", messageId: "m9" },
+        2,
+      ),
+    ).toBe(before);
+  });
+
+  it("leaves the discard line and the tool cards alone", () => {
+    // The bookkeeping ids are never the abandoned id: `system` is the harness's
+    // own line key, `retract:N` is the discard line's unique id (the Retraction
+    // frame and its line are separate frames, so the line survives its own
+    // erasure), and a tool card is keyed by `toolCallId`, not `messageId`.
+    const before: Message[] = [
+      {
+        kind: "agent-text",
+        messageId: "system",
+        text: "Retrying (attempt 1/3…)",
+        at: 1,
+      },
+      {
+        kind: "agent-text",
+        messageId: "retract:1",
+        text: "Discarded an incomplete reply",
+        at: 2,
+      },
+      { kind: "tool-call", id: "tc1", title: "bash", status: "pending", at: 3 },
+      { kind: "agent-text", messageId: "m1", text: "parti", at: 4 },
+    ];
+    expect(
+      applySessionUpdate(
+        before,
+        { sessionUpdate: "message_retracted", messageId: "m1" },
+        5,
+      ),
+    ).toEqual([before[0], before[1], before[2]]);
+  });
+});
+
+// A Retraction has no row kind of its own: the display store has no DELETE, so
+// it OVERWRITES the abandoned rows with empty text (ADR 0048). History must
+// therefore hydrate an empty text row as nothing, or the erased reply returns
+// as an empty bubble.
+describe("rowToMessages — an empty retraction row (ADR 0048)", () => {
+  it("hydrates an empty agent-text row as nothing", () => {
+    expect(
+      rowToMessages(
+        msgRow({ kind: "agent-text", messageKey: "m1", payloadJson: '{"text":""}' }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("hydrates an empty agent-thought row as nothing", () => {
+    expect(
+      rowToMessages(
+        msgRow({
+          kind: "agent-thought",
+          messageKey: "m1#1",
+          payloadJson: '{"text":""}',
+        }),
+      ),
+    ).toEqual([]);
+  });
+});
+
 describe("spaceViewFor (per-space grouping, pure)", () => {
   // Spaces arrive `lastOpenedAt`-desc from `list_spaces`; `historySessions`
   // newest-first from `list_sessions` — input order is the semantics.
