@@ -10,19 +10,25 @@ NOT fixed by it. §3 was found in review of the PR that shipped it, and is not
 fixed there either — for the reason stated in it. None is a blocker; all are
 recorded so the next reader finds a decision rather than an oversight.
 
-**Disposition (2026-10-14).** §1 is folded into `session-incarnation.md` (ADR 0050) and §3 is RETIRED by ADR 0049 — resolved before it was ever planned as its own change. §2 stays open. §4 is the stalled tail and §5 `openSession`'s reload race, both written down while planning that spec (the latter found reviewing its plan).
+**Disposition (2026-10-14).** §1 is folded into `session-incarnation.md` (ADR 0050) and §3 is RETIRED by ADR 0049 — resolved before it was ever planned as its own change. §2 stays open. §4 is the stalled tail and §5 `openSession`'s reload race, both written down while planning that spec (the latter found reviewing its plan). §6 (the bare `default` fallback key) and §7 (`tool-call` rows are the one display-key family ADR 0049 does not scope) are the two residues the review of that branch named: both are **recorded on purpose, not open work** — §6 deliberately left bare on both sides, §7 a pre-existing hazard rather than an incarnation one.
+
+Citations in this document name **symbols, not line numbers** — `applySessionUpdate`'s chunk arms, the pump's `Lagged` arm — because line numbers re-drift on every commit and a stale one points a reader at the wrong code, which this document did once.
 
 ## 1. `resumeSession`'s merge counts array positions, and the reducer can now shrink the array
 
 **Status: folded into `session-incarnation.md` (ADR 0050).** The analysis below stands as written; the fix is the merge rule that spec selects.
 
 `applySessionUpdate` could previously only ever APPEND or REPLACE-LAST
-(`sessions.ts:131-159`). The Retraction makes it able to **remove**
+(`applySessionUpdate`'s chunk arms). The Retraction makes it able to **remove**
 (`message_retracted` filters by `messageId`). `resumeSession` does not survive
 that pattern by construction:
 
+**HISTORICAL — this code no longer exists.** It is `resumeSession`'s merge as it
+stood before ADR 0050 replaced it with the identity selection; quoted because
+the analysis below is about that rule.
+
 ```ts
-// sessions.ts:1207-1215 (shape)
+// resumeSession's merge as it stood before ADR 0050 (shape)
 const prior = <current messages>;
 const rows = await loadHistory(sessionId);   // ← an await
 const reloaded = rows.flatMap(rowToMessages);
@@ -38,9 +44,12 @@ which is why it is a follow-up and not part of the Retraction's own work.
 
 **What would fix it:** stop expressing "what arrived while we were loading" as
 an index. Select on `mergeDedupeKey` (+ the message's own `at`) exactly like the
-dedupe pass INSIDE that same merge already does (`sessions.ts:1246-1266` — the
-only identity-based selection in the file; an earlier revision of this document
-pointed at a separate "close/reload merge" there, which does not exist).
+dedupe pass INSIDE that same merge already does — `resumeSession`'s dedupe pass
+(`reloadedKeys` / `reloadedUserAt`), long the only identity-based selection in
+the file; an earlier revision of this document pointed at a separate
+"close/reload merge" there, which does not exist, and a line-number range for
+this spot is now actively misleading, because that range holds the NEW counted-
+multiset selection ADR 0050 landed rather than the dedupe pass it described.
 
 **Test to write first:** drive `resumeSession` with a `message_retracted`
 arriving after the history `loadHistory` promise resolves but before the merge
@@ -50,11 +59,11 @@ runs, and assert the user message added in that window is still present.
 
 The Retraction is a frame on the same `tokio::sync::broadcast` (capacity 256) as
 the text chunks it erases (`worker/client.rs:160`, `:324`), and the pump
-**discards the lagged messages** rather than recovering them
-(`worker/manager.rs:626-636`, the `Lagged` arm). So a subscriber that falls
-behind can keep the retry's chunks and lose the erasure between them — which
-reproduces the exact weld (`partirecovered`) in both the live store and the
-persisted rows.
+**discards the lagged messages** rather than recovering them (the pump's
+`Lagged` arm in `worker/manager.rs`, which `continue`s). So a subscriber that
+falls behind can keep the retry's chunks and lose the erasure between them —
+which reproduces the exact weld (`partirecovered`) in both the live store and
+the persisted rows.
 
 This is not new: the same hole already applies to every frame the harness
 emits, and ADR 0048 does not claim otherwise. It is listed here because the
@@ -161,8 +170,8 @@ Worker's reply.
 
 ## 5. `openSession` applies a history reload verbatim, so it can drop live messages too
 
-Found while fixing §1. `openSession` (`sessions.ts:1128-1160`) is the OTHER
-history reload in the store, and it has no merge at all:
+Found while fixing §1. `openSession` is the OTHER history reload in the store,
+and it has no merge at all (abridged):
 
 ```ts
 const rows = await loadHistory(sessionId);   // ← an await
@@ -183,3 +192,60 @@ block writes until it settles) rather than a correction.
 **Test to write first:** open a stored session whose `loadHistory` resolves
 late, add a message to it during the window, and assert the message is still
 there afterwards.
+
+## 6. The bare `default` fallback key is the one display key still able to collide across incarnations
+
+**Problem.** ADR 0049 stamps every id the harness MINTS, but the no-`messageId`
+fallback key stays bare on BOTH sides: `compute_display_rows`'s
+`.unwrap_or("default")` on the persisted side and `applySessionUpdate`'s
+`update.messageId ?? "default"` in the live store. Two lives of one Session that
+ever reached those fallbacks would share the `default` key, which is precisely
+the collision class ADR 0049 exists to remove.
+
+**Why deferred — it is unreachable, and closing it on one side only is worse
+than leaving it.** The fallback fires only for a frame carrying no `messageId`
+at all where one was expected, and `normalize` never produces one: every
+`agent_message_chunk` / `agent_thought_chunk` it emits is stamped. And it is
+bare on both sides DELIBERATELY: the Worker's stamp never crosses to the Client
+(the only frame in the stream that could carry it is `session_info_update`,
+whose production shape is the title alone — the `incarnation` field the
+two-incarnation e2e reads is a `fake_worker` fixture addition, not a wire
+promise), so stamping only the persisted side would desync a reloaded row from
+the live row the Client already rendered for the same frame — a duplicate
+bubble per resume instead of a theoretical collision. ADR 0049 records this as
+a residue rather than a defect.
+
+**Sketch.** If a frame ever ships without a `messageId`, the fix belongs on
+BOTH sides in the same commit: either the frame carries the stamp (which means
+the Client learns the Worker's stamp — a protocol change, since
+`StartEnv.incarnation` is Worker-side today), or the fallback key is derived
+from something both sides compute identically WITHOUT the stamp. There is no
+such field on the wire today — no `turn_id`, no sequence number on a
+`session-update` frame — which is exactly why the fallback is a bare constant.
+
+## 7. `tool-call` rows are the one display-key family ADR 0049 does not scope — and the live reducer already resolves their duplicates by first-match
+
+**Problem.** A `tool-call` display row is keyed by `toolCallId`, which the
+PROVIDER mints, not the harness — so it is the one display-key family that
+carries no incarnation stamp (ADR 0049's five families are the ids `normalize`
+mints: `m{n}`, `m{n}#{seg}`, `retract:{n}`, `system`, `default`). A resumed
+Worker whose provider reused a `toolCallId` would UPSERT over the earlier
+life's card.
+
+**Why this is tolerable today (the sharper reason).** Stamping it is not
+available — the harness does not own the id — and the reuse it would protect
+against is already a frontend hazard that predates the incarnation work: the
+live reducer resolves a duplicate `toolCallId` to the FIRST match
+(`applySessionUpdate`'s tool arms — `tool_call_update` locates its card with
+`findIndex`, so an update naming an id two lives both used lands on the OLDER
+card). Tool-id reuse across lives is therefore a **pre-existing frontend hazard,
+not an incarnation one**: the store already cannot tell two same-`toolCallId`
+cards apart, stamping the persisted key would change nothing about that, and
+ADR 0049's row-level guarantee was never what keeps tool cards apart.
+
+**Sketch.** If it ever needs closing, the harness could key its `tool-call`
+display row `{stamp}:{toolCallId}` while the frame keeps the bare provider id —
+but that splits the two sides exactly the way §6 refuses to, because the live
+reducer keys the card on the frame's `toolCallId`. The honest fix is the same
+both-sides rule: get the stamp (or any per-life token) to the Client, then key
+AND match with it.

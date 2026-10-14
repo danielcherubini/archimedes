@@ -1,6 +1,6 @@
 ---
 status: committed
-done-when: a resumed Worker's ids carry a stamp its predecessor never had, a Retraction in the new incarnation provably leaves every row of the old one intact (asserted at the display-row seam and across a real two-process resume), `resumeSession` cannot drop a user message to a Retraction racing its history load, and no test still asserts a bare `m1` that would hide a regression to the old shape.
+done-when: a resumed Worker's ids carry a stamp its predecessor never had; a Retraction in the new incarnation provably leaves every row of the old one intact AT THE DISPLAY-ROW SEAM (`normalize_tests` — the Retraction half is proven there and only there, because the `fake_worker` fixture never runs `normalize`); across a real two-process resume the start envelope's stamp provably reaches the PERSISTED DISPLAY KEY, so the two Worker lives hold TWO coexisting `agent-text` rows for the same counter value (`native_session_end_to_end`); `resumeSession` cannot drop a user message to a Retraction racing its history load; and no test still asserts a bare `m1` that would hide a regression to the old shape.
 ---
 
 # Session incarnation Plan
@@ -40,7 +40,7 @@ Facts the plan depends on, each verified against the code:
 - **Single-file runs:** vitest filters go WITHOUT `--` — `pnpm test src/store/sessions.test.ts` runs 1 file; `pnpm test -- src/store/sessions.test.ts` runs all 82. Rust: `cargo test --lib <module::path>` (the real module paths here are `agent::normalize::normalize_tests::…` and `agent::normalize::compute_display_rows_tests::…` — there is no `normalize::tests`, and a filter that matches nothing exits 0, which is how a gate silently passes).
 - **Introduce a helper together with its non-test caller.** `mod normalize` is private (`agent/mod.rs:17`), so a helper called only from `mod tests` is dead in the `--lib` build that `--all-targets` lints — `pub` alone does not save it. This is why Task 2 lands `TurnState::stamped` in the same commit as its `AgentLoop::new` caller.
 - Do not weaken an assertion into `str::contains` / `ends_with`. Where an id assertion changes, it changes to a *different exact value*. The reason this defect shipped is that nothing asserted strongly enough across two Worker lives.
-- `src/bin/fake_worker.rs` emits literal `"m1"` frames and hardcoded `DisplayUpsert` keys, and it must keep doing so — no task depends on it running `normalize`. Its ONE permitted edit is Task 3's addition of `"incarnation"` to the `session_info` envelope echo (Task 3 names it explicitly).
+- `src/bin/fake_worker.rs` emits literal `"m1"` `SinkFrame` `messageId`s and must keep doing so — no task depends on it running `normalize`. Its permitted edits are TWO, both now landed: Task 3's addition of `"incarnation"` to the `session_info` envelope echo (Task 3 names it explicitly), and the Execution log's SECOND amendment — the canned `DisplayUpsert` `message_key` is stamp-derived (`format!("{incarnation}:m1")`) rather than the hardcoded `"m1"`, which is what lets the two-process test read a stamped display key. The literal `m1` frames stay: they are the `SubagentCapture` fixtures, which key on the frame's id, not on a display row's.
 - Known load-flaky tests (re-run the single file to confirm before believing a failure): `SettingsPage.test.tsx`, `ModelPicker.test.tsx`, `App.test.tsx`, `SkillsDialog`, `SpacesList`; and the `agent::mcp::http::tests::` timing trio `http_a_slow_sse_stream_completes` / `http_session_id_is_resent` / `http_sse_response_round_trip` (all three starve under CPU load and pass in isolation).
 
 Tasks 1→2→3 are strictly ordered. **Task 4 is independent** (different language, different files) and may run in parallel.
@@ -264,9 +264,9 @@ True: `system`, `retract:1`, `a3f9c1:system`, `a3f9c1:retract:1`. False: `a3f9c1
 Nothing in the suite spans two incarnations today: the resume tests assert only that `session_id` survives (`tests/session_native.rs:277-281`, `tests/ipc.rs:475`), which is exactly why the collision shipped. Task 2 makes the behaviour correct; this task makes it falsifiable, at two levels, and the two levels prove DIFFERENT things — do not confuse them:
 
 - **The seam test** (`mod normalize_tests`) proves the display-key claim exhaustively: two `TurnState`s with different stamps, two fresh accumulator sets, ONE `session_id`, ONE `Db` — which is precisely what two Worker lives do. All five id families are visible here, and this is where a dropped stamp is caught.
-- **The integration test** (`tests/session_native.rs::native_session_end_to_end`) drives the `fake_worker` FIXTURE through a real two-process resume. The fixture does NOT run `normalize` and hardcodes `message_key: "m1"` on its `DisplayUpsert` (`src/bin/fake_worker.rs:184-192`, applied verbatim at `agent/persist.rs:128`), so this test can NEVER show a stamped display key — do not go looking for one and do not change the fixture's ids. What it CAN prove, and the only thing it should claim, is that two Worker processes spawned for one Session receive **different stamps** — which is the invariant the seam test then acts on.
+- **The integration test** (`tests/session_native.rs::native_session_end_to_end`) drives the `fake_worker` FIXTURE through a real two-process resume. The fixture does NOT run `normalize` and hardcodes `message_key: "m1"` on its `DisplayUpsert` (`src/bin/fake_worker.rs:184-192`, applied verbatim at `agent/persist.rs:128`), so this test can NEVER show a stamped display key — do not go looking for one and do not change the fixture's ids. What it CAN prove, and the only thing it should claim, is that two Worker processes spawned for one Session receive **different stamps** — which is the invariant the seam test then acts on. (**Superseded by the second Execution-log amendment, `a0e610b`: the fixture's `DisplayUpsert` key is stamp-derived, so the e2e DOES read stamped display keys — the two lives' rows coexist, exactly two of them ending `:m1`. It still cannot show an id the HARNESS mints, so the Retraction half stays at the seam.**)
 
-To make the stamp observable across a process boundary, the fixture echoes it the way it already echoes `enabledTools` / `systemPrompt` / `trusted` off the decoded envelope (`src/bin/fake_worker.rs:344-352`). This is the ONE sanctioned edit to `fake_worker.rs`; the literal `m1` frames stay.
+To make the stamp observable across a process boundary, the fixture echoes it the way it already echoes `enabledTools` / `systemPrompt` / `trusted` off the decoded envelope (`src/bin/fake_worker.rs:344-352`). This was the ONE sanctioned edit to `fake_worker.rs`; the literal `m1` frames stay. (Superseded: the Execution log records a SECOND sanctioned edit — the canned `DisplayUpsert` key is stamp-derived. The literal `m1` `SinkFrame` ids still stay.)
 
 **Files:**
 - Test: `src-tauri/src/agent/normalize.rs` (`mod normalize_tests`, `:688`)
@@ -454,6 +454,33 @@ the plan text above is not):
    `left: "a3f9c1" right: "a3f9c1"`). The general lesson: **a fixture-driven
    integration test cannot observe harness ids at all**, so no mutation of the
    harness's minting can be its falsifier.
+
+   **This item is the FIRST of two amendments to that fixture, and its claim
+   about the fixture's keys no longer describes the tree.** The second amendment
+   (`a0e610b`, `test: pin the two-incarnation guarantee where it can actually
+   fail`) threads the Worker's `StartEnv.incarnation` into
+   `fake_worker::emit_canned_turn` so its canned `DisplayUpsert` writes
+   `message_key: format!("{incarnation}:m1")` — the stamp the envelope carried
+   becomes the persisted display key inside the fixture, exactly as `normalize`
+   does for every id the real harness mints. `native_session_end_to_end` then
+   polls `db.messages_for` (100 × 50 ms, the house bounded wait — the resumed
+   turn's `DisplayUpsert` lands asynchronously) for BOTH `{stamp_a}:m1` AND
+   `{stamp_b}:m1`, and asserts exactly TWO `agent-text` rows ending `:m1` — one
+   per Worker life, for the same counter value, under one `session_id`. So the
+   two-process claim now has teeth it did not have: drop the stamp from the key
+   the minter builds and life A's row is UPSERTed away (the "life A's row is
+   gone" assertion fails); make `mint_incarnation` constant and both lives share
+   one key (the count says 1, not 2). **What the e2e now proves: start-envelope
+   stamp → persisted display key, with two coexisting rows.** What it still does
+   NOT prove, and structurally cannot: the **Retraction** half. `fake_worker`
+   never runs `normalize`, so no Retraction frame is ever minted there — that
+   guarantee is seam-only (`normalize_tests`), and the `done-when` line says so.
+   The fixture's `SinkFrame` `messageId`s also stay the literal `m1`, on purpose:
+   those frames are the `SubagentCapture` fixtures, which key on the frame's id
+   rather than on a display row's. The original lesson therefore stands,
+   narrowed rather than withdrawn: a fixture cannot observe ids the HARNESS
+   mints, so it can falsify stamp PLUMBING (envelope → persisted key) but never
+   stamp MINTING (`normalize`).
 2. **Task 4's counted-multiset test cannot use `createdAt === at`.** The dedupe
    pass below — untouched by this plan — dedups a `user` message on an EQUAL
    timestamp ("equal timestamps dedup: the safe direction"), so the persisted
@@ -482,12 +509,32 @@ the plan text above is not):
    grep hit is a doc comment), and `pnpm test -- FILE` runs all 82 files rather
    than one — the filter goes without `--`.
 
-Two things worth knowing that the plan did not predict:
+Two decisions the plan did not predict, recorded here (and in ADR 0049):
 
-- `compute_display_rows` keeps its `unwrap_or("default")` fallbacks **unstamped**
-  and unchanged on purpose: it is a reader of ids off frames, and those fallbacks
-  only fire if a frame arrives with no `messageId` at all, which the stamped
-  `normalize` never produces.
+- `compute_display_rows` keeps its `unwrap_or("default")` fallback **unstamped**
+  and unchanged on purpose: it is a reader of ids off frames, and that fallback
+  only fires if a frame arrives with no `messageId` at all, which the stamped
+  `normalize` never produces. The CLIENT keeps its mirror of the same fallback
+  bare too (`applySessionUpdate`'s `update.messageId ?? "default"`), and that is
+  the change's one recorded RESIDUE: `default` is the only display key still
+  able to collide across incarnations. It stays bare on BOTH sides deliberately,
+  because the Worker's stamp never crosses to the Client (the production
+  `session_info_update` carries the title alone — the `incarnation` field the
+  two-incarnation e2e reads is a fixture addition, not a wire promise), so
+  stamping only the persisted side would desync a row from its own live row.
+  Recorded as §6 of `compaction-recovery-hardening-follow-ups.md`.
+- `is_bookkeeping_message_id` matches the bookkeeping **WORD across the id's
+  colon fields** (`id.split(':').any(|f| f == "system" || f == "retract")`) — a
+  word-set by choice, not a position. A positional rule ("read the field after
+  the stamp", or "strip a leading 6-hex field, then match") misclassifies the
+  ids `TurnState::default()` mints: its stamp is EMPTY, so it produces
+  `:system` / `:retract:1`, where there is no leading field to strip and the
+  word sits behind a leading colon. Those ids are test artifacts (production
+  builds a `TurnState` only through `AgentLoop::new`, which requires a stamp),
+  but a predicate that misreads them would misread any future unstamped writer
+  too. The word-set is safe because a stamp is SIX HEX CHARS and neither
+  `system` nor `retract` is one — so a stamp can never BE a bookkeeping word,
+  and a real reply (`{stamp}:m1`) stays capturable by the subagent capture.
 - The vocabulary was already in the codebase: `agent/todo.rs:84` clears a
   Worker's todo board so a resumed session "must not read the previous
   incarnation's todos" — the same boundary, named the same way, six months
@@ -505,4 +552,4 @@ pnpm test
 pnpm build
 ```
 
-All green, clippy silent. Then update `docs/roadmap/compaction-recovery-hardening-follow-ups.md`: §3 stays retired (ADR 0049), §4 (the stalled tail) and §5 (`openSession` applies a reload verbatim — the same race class Task 4 closes for `resumeSession`) remain open.
+All green, clippy silent. Then update `docs/roadmap/compaction-recovery-hardening-follow-ups.md`: §3 stays retired (ADR 0049), §4 (the stalled tail) and §5 (`openSession` applies a reload verbatim — the same race class Task 4 closes for `resumeSession`) remain open — done, and that document now also carries **§6** (the bare `default` fallback key, the change's one recorded residue) and **§7** (`tool-call` rows are the one display-key family ADR 0049 does not scope), both added by the review that produced this branch's documentation corrections.

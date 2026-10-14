@@ -6339,9 +6339,11 @@ describe("ChatStream — the /compact Composer command (ADR 0044)", () => {
       kind: "agent-text",
       text: "Nothing to compact — this session is not open.",
     });
-    // Its OWN id (`client:<n>`), never the harness's `"system"` key: the store
-    // appends a same-id chunk onto the trailing agent-text with no separator, so
-    // a shared key would weld two local lines into one bubble.
+    // Its OWN id (`client:<n>`), never the harness's `{stamp}:system` key (ADR
+    // 0049 stamps the harness's bookkeeping ids; a pre-0049 transcript still
+    // carries the bare `system`): the store appends a same-id chunk onto the
+    // trailing agent-text with no separator, so a shared key would weld two
+    // local lines into one bubble.
     const id = messages[0]!.kind === "agent-text" ? messages[0]!.messageId : "";
     expect(id.startsWith("client:")).toBe(true);
     expect(messages.some((m) => m.kind === "user")).toBe(false);

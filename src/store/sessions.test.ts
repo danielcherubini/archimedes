@@ -564,6 +564,29 @@ describe("applySessionUpdate — message_retracted (ADR 0048)", () => {
       ),
     ).toEqual([before[0], before[1], before[2]]);
   });
+
+  it("drops only the reply of the incarnation the Retraction names (two lives, the same counter value — ADR 0049)", () => {
+    // WHY THIS EXISTS: every other case in this block uses BARE ids, so none of
+    // them could tell an exact comparison from a NORMALISED one. Stripping an
+    // id's `{stamp}:` prefix (or its `#seg` suffix) before comparing looks
+    // harmless against bare ids and is exactly the defect ADR 0049 removes:
+    // two Worker lives of one Session both mint `m1`, so a normalising filter
+    // erases the PREVIOUS incarnation's answer along with the abandoned reply.
+    // ADR 0050 weighed that normalisation and rejected it for the same reason.
+    // So: red for any future change that touches an id before comparing it
+    // (verified — stripping the stamp in the comparison reddens THIS test).
+    const before: Message[] = [
+      { kind: "agent-text", messageId: "a3f9c1:m1", text: "old", at: 1 },
+      { kind: "agent-text", messageId: "bbbbbb:m1", text: "new", at: 2 },
+    ];
+    expect(
+      applySessionUpdate(
+        before,
+        { sessionUpdate: "message_retracted", messageId: "bbbbbb:m1" },
+        3,
+      ),
+    ).toEqual([{ kind: "agent-text", messageId: "a3f9c1:m1", text: "old", at: 1 }]);
+  });
 });
 
 // A Retraction has no row kind of its own: the display store has no DELETE, so
@@ -2119,6 +2142,96 @@ describe("resumeSession (history reload race)", () => {
       .getState()
       .messages.s1.filter((m) => m.kind === "user" && m.text === "again");
     expect(again).toHaveLength(2);
+  });
+
+  it("merges to exactly the reloaded rows when nothing landed during the load (the O(1) fast path)", async () => {
+    // The fast path: `current === prior` proves nothing arrived in the window,
+    // so NO addition is selected and `mergeDedupeKey` is never called. That
+    // matters because its `user` case concatenates every attachment's full
+    // base64 `data` — running it over the WHOLE live snapshot of an
+    // attachment-heavy session on every resume allocates a copy of every
+    // attachment to conclude nothing changed.
+    //
+    // Reference equality is a sound change-detector here because every write
+    // path that adds or removes a message builds a NEW array (the reducer's
+    // arms spread, `addUserMessage` spreads, `finalizeSessionMessages` maps,
+    // and the batch reducer stores only what the pure reducer returned) —
+    // nothing pushes or pops in place. The no-match Retraction below pins that
+    // premise at its source: a store write that changes nothing leaves the
+    // SAME array, so it must not trip the fast path.
+    //
+    // What is pinned: the fast path selects NOTHING. The snapshot holds a live
+    // thought (`a3f9c1:m1`) whose persisted key is `a3f9c1:m1#1`, so content
+    // can never dedupe it — a fast path that handed back the whole snapshot
+    // instead of `[]` would re-append it as a FOURTH message (verified by
+    // mutation: `current === prior ? current : …` reddens HERE and only here).
+    useSessions.setState({
+      activeSessionId: "s1",
+      historySessions: [
+        {
+          sessionId: "s1",
+          cwd: "/x",
+          capabilities: { loadSession: true },
+          archived: false,
+        },
+      ],
+      messages: {
+        s1: [
+          { kind: "user", text: "one", at: 1 },
+          { kind: "agent-text", messageId: "a3f9c1:m1", text: "two", at: 2 },
+          { kind: "agent-thought", messageId: "a3f9c1:m1", text: "think", at: 2 },
+        ],
+      },
+    });
+    let resolveRows: (rows: MessageRow[]) => void = () => {};
+    vi.mocked(loadHistory).mockImplementationOnce(
+      () => new Promise<MessageRow[]>((r) => (resolveRows = r)),
+    );
+    await useSessions.getState().resumeSession("s1");
+    const snapshot = useSessions.getState().messages.s1;
+    // Silence in the window: a Retraction that matches nothing changes neither
+    // the content NOR the array reference.
+    useSessions.getState().applySessionUpdate("s1", {
+      sessionUpdate: "message_retracted",
+      messageId: "deadbe:m9",
+    });
+    expect(useSessions.getState().messages.s1).toBe(snapshot);
+    // The reload settles with the persisted rows for exactly that transcript —
+    // the thought row carries the `#1` segment suffix the live row never had.
+    resolveRows([
+      {
+        id: 1,
+        sessionId: "s1",
+        kind: "user",
+        messageKey: null,
+        payloadJson: JSON.stringify({ text: "one" }),
+        createdAt: 1,
+      },
+      {
+        id: 2,
+        sessionId: "s1",
+        kind: "agent-text",
+        messageKey: "a3f9c1:m1",
+        payloadJson: JSON.stringify({ text: "two" }),
+        createdAt: 2,
+      },
+      {
+        id: 3,
+        sessionId: "s1",
+        kind: "agent-thought",
+        messageKey: "a3f9c1:m1#1",
+        payloadJson: JSON.stringify({ text: "think" }),
+        createdAt: 2,
+      },
+    ]);
+    await new Promise((r) => setTimeout(r, 0));
+    // The transcript is the reloaded rows and nothing else — unchanged in
+    // content, no snapshot message re-appended behind them.
+    expect(useSessions.getState().messages.s1).toEqual([
+      { kind: "user", text: "one", at: 1 },
+      { kind: "agent-text", messageId: "a3f9c1:m1", text: "two", at: 2 },
+      { kind: "agent-thought", messageId: "a3f9c1:m1#1", text: "think", at: 2 },
+    ]);
   });
 });
 

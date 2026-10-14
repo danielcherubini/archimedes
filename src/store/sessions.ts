@@ -166,8 +166,13 @@ export function applySessionUpdate(
       // reply retried under the SAME id (one message_start per message), so the
       // partial text must not weld onto the retry. Live thought messages carry
       // this bare id too (the `#n` suffix is a persistence detail), so this
-      // clears thoughts with the text. Bookkeeping lines (`system`, `retract:N`)
-      // are never the abandoned id, so they survive.
+      // clears thoughts with the text. Bookkeeping lines are never the
+      // abandoned id, so they survive: since ADR 0049 they read
+      // `{stamp}:system` / `{stamp}:retract:N`, and the bare `system` /
+      // `retract:N` shape is what a transcript written BEFORE ADR 0049 still
+      // carries — both shapes reach this filter, which compares ids verbatim
+      // and normalises nothing (a stamped reply is a different row from a bare
+      // one, and from another incarnation's same-counter reply).
       const kept = messages.filter(
         (m) =>
           (m.kind !== "agent-text" && m.kind !== "agent-thought") ||
@@ -1240,18 +1245,36 @@ export const useSessions = create<SessionsState>((set, get) => ({
         // the window (`mergeDedupeKey` is content-based, so a changed message
         // is no longer "in the snapshot") — both replace the old rule's silent
         // truncation of the streamed tail.
-        const priorCount = new Map<string, number>();
-        for (const m of prior) {
-          const k = `${mergeDedupeKey(m)}|${m.at}`;
-          priorCount.set(k, (priorCount.get(k) ?? 0) + 1);
+        const current = get().messages[sessionId] ?? [];
+        let added: Message[];
+        if (current === prior) {
+          // Nothing landed during the window — the overwhelmingly common case.
+          // Every store write that adds or removes a message REPLACES the
+          // array (the reducer's arms spread, `addUserMessage` spreads,
+          // `finalizeSessionMessages` maps, and the batch reducer stores only
+          // what the pure reducer returned — nothing pushes or pops in place),
+          // so reference equality proves it. This is the O(1) fast path, and it
+          // exists for the identity pass below: `mergeDedupeKey`'s `user` case
+          // concatenates every attachment's FULL base64 `data`, so running it
+          // over the whole live snapshot of an attachment-heavy session on
+          // every resume allocates a copy of every attachment to conclude that
+          // nothing changed. A no-op write keeps the SAME array (its own
+          // changed-sentinel), so silence never trips this branch.
+          added = [];
+        } else {
+          const priorCount = new Map<string, number>();
+          for (const m of prior) {
+            const k = `${mergeDedupeKey(m)}|${m.at}`;
+            priorCount.set(k, (priorCount.get(k) ?? 0) + 1);
+          }
+          const seenNow = new Map<string, number>();
+          added = current.filter((m) => {
+            const k = `${mergeDedupeKey(m)}|${m.at}`;
+            const nth = (seenNow.get(k) ?? 0) + 1;
+            seenNow.set(k, nth);
+            return nth > (priorCount.get(k) ?? 0);
+          });
         }
-        const seenNow = new Map<string, number>();
-        const added = (get().messages[sessionId] ?? []).filter((m) => {
-          const k = `${mergeDedupeKey(m)}|${m.at}`;
-          const nth = (seenNow.get(k) ?? 0) + 1;
-          seenNow.set(k, nth);
-          return nth > (priorCount.get(k) ?? 0);
-        });
         // DEDUPE the merge: `send_prompt`'s `record_message` can commit
         // the new user message BEFORE the history query reads — then the
         // reloaded rows INCLUDE it while `added` still holds its local

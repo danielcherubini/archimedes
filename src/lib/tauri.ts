@@ -191,7 +191,8 @@ export type AcpSessionUpdate =
       /** (ADR 0048) An Abandoned attempt's reply is RetRACTED: every
        * agent-text / agent-thought message with this `messageId` is dropped.
        * Silent when nothing was streamed under it. The discard line arrives
-       * separately as a `retract:N` chunk, so it survives. */
+       * separately as a `{stamp}:retract:N` chunk (ADR 0049 stamps it), so it
+       * survives. */
       sessionUpdate: "message_retracted";
       messageId: string;
     };
