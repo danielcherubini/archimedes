@@ -16,6 +16,7 @@ import {
   listCompletionEntries,
   respondInteractiveRequest,
   respondPermission,
+  type StopReason,
 } from "../lib/tauri";
 import { open as openFilePicker } from "@tauri-apps/plugin-dialog";
 import { clearSkillCatalogCache } from "../hooks/useSkillCatalog";
@@ -1099,6 +1100,72 @@ describe("ChatStream", () => {
     fireEvent.change(textarea, { target: { value: "hello" } });
     fireEvent.keyDown(textarea, { key: "Enter" });
     expect(sendPrompt).toHaveBeenCalledWith("s1", "hello");
+  });
+
+  it("sending in one session does not block sending in another session (concurrent sessions)", async () => {
+    let resolveS1!: (reason: StopReason) => void;
+    vi.mocked(sendPrompt).mockImplementation((sessionId: string) => {
+      if (sessionId === "s1") {
+        return new Promise<StopReason>((resolve) => {
+          resolveS1 = resolve;
+        });
+      }
+      return Promise.resolve("end_turn");
+    });
+
+    try {
+      useSessions.setState({
+        activeSessionId: "s1",
+        sessions: [
+          { sessionId: "s1", cwd: "/home/u/proj1", capabilities: {}, archived: false },
+          { sessionId: "s2", cwd: "/home/u/proj2", capabilities: {}, archived: false },
+        ],
+        spaces: [
+          { path: "/home/u/proj1", createdAt: 1, lastOpenedAt: 1, trusted: false },
+          { path: "/home/u/proj2", createdAt: 2, lastOpenedAt: 2, trusted: false },
+        ],
+        historySessions: [],
+        messages: { s1: [], s2: [] },
+        inTurn: {},
+        stopReasons: {},
+        closeReasons: {},
+        configOptions: {},
+        compacting: {},
+      });
+
+      render(<ChatStream />);
+
+      // Send in s1
+      const textarea = screen.getByRole("textbox");
+      fireEvent.change(textarea, { target: { value: "hello from s1" } });
+      fireEvent.keyDown(textarea, { key: "Enter" });
+
+      expect(sendPrompt).toHaveBeenCalledWith("s1", "hello from s1");
+      expect(useSessions.getState().inTurn.s1).toBe(true);
+
+      // Switch to s2 while s1 is still in flight (working)
+      await act(async () => {
+        useSessions.setState({ activeSessionId: "s2" });
+      });
+
+      // In s2, user types and presses Enter
+      const textareaS2 = screen.getByRole("textbox");
+      fireEvent.change(textareaS2, { target: { value: "hello from s2" } });
+      fireEvent.keyDown(textareaS2, { key: "Enter" });
+
+      // s2 must NOT be blocked by s1's in-flight turn!
+      await waitFor(() => {
+        expect(sendPrompt).toHaveBeenCalledWith("s2", "hello from s2");
+      });
+
+      // Clean up pending s1 turn
+      await act(async () => {
+        resolveS1("end_turn");
+      });
+    } finally {
+      vi.mocked(sendPrompt).mockReset();
+      vi.mocked(sendPrompt).mockResolvedValue("end_turn");
+    }
   });
 
   // --- Empty transcript + pending request (the request cards must NOT be

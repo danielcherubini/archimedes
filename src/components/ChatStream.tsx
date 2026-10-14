@@ -363,8 +363,9 @@ export default function ChatStream() {
   // Task 5's double-send guard (a hook — must live here, not in `send`):
   // `beginTurn` runs AFTER an `await` (the base64 read), so the composer is
   // not locked until then and a second Enter/click during the read would
-  // otherwise double-send.
-  const sendingRef = useRef(false);
+  // otherwise double-send. Keyed by session ID (a `Set`) so an in-flight
+  // turn in session A never blocks sending in session B (concurrent sessions).
+  const sendingSessionsRef = useRef<Set<string>>(new Set());
   // Re-sync every render (the same pattern as `attachmentsRef` above): `send()`
   // is async and reads the attachment via a FileReader `await` BEFORE
   // `beginTurn`, so the composer is unlocked during the read. If the session
@@ -931,10 +932,12 @@ export default function ChatStream() {
   let hasImages = attachments.length > 0 && imageCapable;
 
   const send = async () => {
+    const targetSessionId = activeSessionId;
+    if (!targetSessionId) return;
     const rawText = draft.trim();
     if ((!rawText && !hasImages) || composerLocked) return;
-    if (sendingRef.current) return; // guard: see the ref's comment above
-    sendingRef.current = true;
+    if (sendingSessionsRef.current.has(targetSessionId)) return; // guard: see the ref's comment above
+    sendingSessionsRef.current.add(targetSessionId);
     try {
       setError(null);
       // ── A **Composer command** is consumed HERE and goes no further (ADR
@@ -945,8 +948,8 @@ export default function ChatStream() {
       //
       // TWO PLACEMENT RULES, both load-bearing:
       //  • INSIDE the `try`, not before it. `send()` ends in a
-      //    `finally { sendingRef.current = false }`, so an early `return` above
-      //    the `try` would leave the ref stuck `true` and silently break EVERY
+      //    `finally { sendingSessionsRef.current.delete(targetSessionId) }`, so an early `return` above
+      //    the `try` would leave the session stuck in the set and silently break EVERY
       //    later send — the composer would look alive and never fire.
       //  • BEFORE the `if (!isLive)` auto-resume block below. A command that
       //    fell through it would RESUME a stored session purely to compact it —
@@ -964,12 +967,12 @@ export default function ChatStream() {
           // not-live answer, not an error, and this line is its only feedback —
           // a silent no-op would look like a dead button.
           const live = await compactSession(
-            activeSessionId,
+            targetSessionId,
             command.args || null,
           );
           if (!live) {
             addSystemLine(
-              activeSessionId,
+              targetSessionId,
               "Nothing to compact — this session is not open.",
             );
           }
@@ -991,7 +994,7 @@ export default function ChatStream() {
         // advertise images, include them.
         const fresh = useSessions
           .getState()
-          .sessions.find((x) => x.sessionId === activeSessionId);
+          .sessions.find((x) => x.sessionId === targetSessionId);
         hasImages =
           attachments.length > 0 && agentSupportsImages(fresh?.capabilities);
         if (!hasImages && rawText === "") return;
@@ -1015,14 +1018,16 @@ export default function ChatStream() {
           const liveIds = new Set(attachmentsRef.current.map((a) => a.id));
           images = read.filter((i) => liveIds.has(i.id));
         } catch {
-          setError("Failed to read an attached image");
-          return; // attachments stay staged; `sendingRef` resets in `finally`
+          if (activeSessionIdRef.current === targetSessionId) {
+            setError("Failed to read an attached image");
+          }
+          return; // attachments stay staged; `sendingSessionsRef` resets in `finally`
         }
       }
       // Session switched during the read (the composer isn't locked until
       // beginTurn): the closure's `activeSessionId` is stale — abort without
       // sending, without wiping the draft, without completing a turn.
-      if (activeSessionIdRef.current !== activeSessionId) return;
+      if (activeSessionIdRef.current !== targetSessionId) return;
       // Draft edited during the read (the composer isn't locked until
       // `beginTurn`): sending the stale text and wiping the new draft is a
       // silent data loss — abort without sending, without wiping the draft,
@@ -1068,27 +1073,31 @@ export default function ChatStream() {
       // `ImageRef` has no `id` field — strip it before use.
       const imageRefs = images?.map(({ id, ...ref }) => ref); // ImageRef[] | undefined
       setDraft("");
-      addUserMessage(activeSessionId, text, imageRefs); // EXPANDED
-      beginTurn(activeSessionId);
+      addUserMessage(targetSessionId, text, imageRefs); // EXPANDED
+      beginTurn(targetSessionId);
       // Pass the third arg ONLY when there are images: a text-only send (and
       // an all-images-removed send, normalized above) calls
       // `sendPrompt(id, text)` — the pre-existing 2-arg call the existing tests
       // assert (`toHaveBeenCalledWith("s1", "hello")`; vitest compares arg
       // arrays by length, so an explicit `undefined` third arg would break it).
       const stopReason = imageRefs
-        ? await sendPrompt(activeSessionId, text, imageRefs) // EXPANDED
-        : await sendPrompt(activeSessionId, text); // EXPANDED
+        ? await sendPrompt(targetSessionId, text, imageRefs) // EXPANDED
+        : await sendPrompt(targetSessionId, text); // EXPANDED
       // Release/clear ONLY the sent attachments, OUTSIDE the state updater
-      // (updaters must be pure — StrictMode runs them twice).
-      const still = attachmentsRef.current.filter((a) => !sentIds.has(a.id));
-      attachmentsRef.current
-        .filter((a) => sentIds.has(a.id))
-        .forEach(releaseAttachment);
-      attachmentsRef.current = still;
-      setAttachments(still);
-      turnCompleted(activeSessionId, stopReason);
+      // (updaters must be pure — StrictMode runs them twice), and ONLY if this
+      // session is still the active view (otherwise the other session's staged
+      // attachments would be mutated).
+      if (activeSessionIdRef.current === targetSessionId) {
+        const still = attachmentsRef.current.filter((a) => !sentIds.has(a.id));
+        attachmentsRef.current
+          .filter((a) => sentIds.has(a.id))
+          .forEach(releaseAttachment);
+        attachmentsRef.current = still;
+        setAttachments(still);
+      }
+      turnCompleted(targetSessionId, stopReason);
     } catch (err) {
-      turnCompleted(activeSessionId, "end_turn");
+      turnCompleted(targetSessionId, "end_turn");
       // Tauri IPC errors are plain objects (`{ kind, message }`), not `Error`
       // instances — `String(err)` would show `[object Object]` (a pre-existing
       // gap the new `InvalidPrompt` validation error would hit; fix it here).
@@ -1098,12 +1107,14 @@ export default function ChatStream() {
           : err && typeof err === "object" && "message" in err
             ? String((err as { message: unknown }).message)
             : String(err);
-      setError(msg);
+      if (activeSessionIdRef.current === targetSessionId) {
+        setError(msg);
+      }
       // Attachments deliberately stay staged (a failed send keeps them — a
       // re-pasted image is costly, a re-typed draft is not). The draft is
       // lost on failure (pre-existing behavior, unchanged).
     } finally {
-      sendingRef.current = false;
+      sendingSessionsRef.current.delete(targetSessionId);
     }
   };
 
