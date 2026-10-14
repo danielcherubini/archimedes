@@ -722,13 +722,60 @@ pub(crate) fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod normalize_tests {
-    use serde_json::json;
+    use serde_json::{json, Value};
 
-    use super::{is_bookkeeping_message_id, normalize, TurnState};
+    use super::{
+        compute_display_rows, is_bookkeeping_message_id, normalize, ThoughtState, TurnState,
+    };
     use crate::agent::events::RpcEvent;
+    use crate::agent::harness::store::{SessionStore, Store};
+    use crate::storage::Db;
+    use crate::types::SessionInfo;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex as StdMutex};
 
     fn ev(v: serde_json::Value) -> RpcEvent {
         serde_json::from_value(v).expect("event should parse")
+    }
+
+    /// A temp-dir `Db` with a recorded `sessions` row (the `messages`
+    /// rows FK to `sessions`).
+    fn temp_db() -> Arc<Db> {
+        let dir =
+            std::env::temp_dir().join(format!("harness-display-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Arc::new(Db::open(&dir.join("t.db")).expect("db should open"));
+        db.record_session(&SessionInfo {
+            session_id: "s1".to_string(),
+            cwd: std::path::PathBuf::from("/tmp"),
+            capabilities: serde_json::json!({}),
+            config_options: None,
+            archived: false,
+            title: None,
+            context_usage: None,
+            is_subagent: false,
+        })
+        .expect("record_session");
+        db
+    }
+
+    /// One frame's whole downstream pipeline: `compute_display_rows` + the
+    /// write half (`SessionStore::persist_display` → `db.record_message`) —
+    /// what the loop's driver does per frame (ADR 0025's split).
+    fn persist_frames(
+        store: &SessionStore,
+        session_id: &str,
+        frames: Vec<Value>,
+        text_acc: &StdMutex<HashMap<String, String>>,
+        tool_state: &StdMutex<HashMap<String, Value>>,
+        thought_state: &StdMutex<ThoughtState>,
+    ) {
+        for frame in frames {
+            let rows = compute_display_rows(&frame, text_acc, tool_state, thought_state);
+            store
+                .persist_display(session_id, &rows)
+                .expect("display rows persist");
+        }
     }
 
     /// The `messageId` role rule: a USER `message_start` does NOT advance
@@ -1302,6 +1349,179 @@ mod normalize_tests {
         assert_ne!(
             st_a.current_message_id, st_b.current_message_id,
             "the same counter value in two incarnations must not collide"
+        );
+    }
+
+    /// (ADR 0049) TWO Worker lives for ONE session — the Resume case, and the
+    /// defect this exists to stop. A Resume spawns a new Worker with a new
+    /// `AgentLoop`, so `TurnState`'s counters restart at 0 and the resumed
+    /// session's first reply is the `m1` its first Worker already used. The
+    /// display store UPSERTs on `UNIQUE(session_id, kind, message_key)` and has
+    /// no DELETE, so an unstamped second `m1` silently overwrote the first
+    /// incarnation's rows, and ADR 0048's Retraction — which erases BY
+    /// `messageId` — could erase history that is not its own.
+    ///
+    /// The claim, in words: for ONE `session_id` and ONE `Db`, every id the
+    /// harness mints is namespaced by its incarnation stamp, so the same
+    /// counter value in two incarnations is two display rows. A Retraction in
+    /// incarnation B erases B's OWN text and thought rows and leaves
+    /// incarnation A's text, thought AND system rows untouched — and nothing
+    /// unstamped (`m1`, `m1#1`, `system`) is ever written.
+    ///
+    /// This is the seam where two Worker lives meet: two `TurnState`s with
+    /// different stamps, two FRESH accumulator sets (a new Worker has new ones),
+    /// one session id, one database.
+    #[test]
+    fn two_incarnations_of_one_session_never_share_a_display_row() {
+        let db = temp_db();
+        let store = SessionStore::new(db.clone());
+
+        // ── incarnation A: the first Worker ────────────────────────────────
+        let mut st_a = TurnState::stamped("aaaaaa");
+        let a_text = StdMutex::new(HashMap::new());
+        let a_tools = StdMutex::new(HashMap::new());
+        let a_thoughts = StdMutex::new(ThoughtState::default());
+        let events_a = [
+            // Opens `aaaaaa:m1` (the counter's FIRST value).
+            ev(json!({
+                "type": "message_start",
+                "message": { "role": "assistant", "content": [] },
+            })),
+            ev(json!({
+                "type": "message_update",
+                "usage": null,
+                "assistantMessageEvent": { "type": "text_delta", "contentIndex": 0, "delta": "history" },
+            })),
+            ev(json!({
+                "type": "message_update",
+                "usage": null,
+                "assistantMessageEvent": { "type": "thinking_delta", "contentIndex": 0, "delta": "think" },
+            })),
+            // The retry one-liner — the id family with NO counter to seed
+            // (`system`), which a counter-seeding design would have left
+            // unstamped and therefore shared.
+            ev(json!({
+                "type": "auto_retry_start",
+                "attempt": 1,
+                "maxAttempts": 3,
+                "delayMs": 100,
+                "errorMessage": "boom",
+            })),
+        ];
+        for e in &events_a {
+            persist_frames(
+                &store,
+                "s1",
+                normalize(e, &mut st_a),
+                &a_text,
+                &a_tools,
+                &a_thoughts,
+            );
+        }
+
+        // ── incarnation B: the resumed Worker ──────────────────────────────
+        // A SECOND, FRESH set of accumulators (what a new process has), the
+        // SAME session id, the SAME database.
+        let mut st_b = TurnState::stamped("bbbbbb");
+        let b_text = StdMutex::new(HashMap::new());
+        let b_tools = StdMutex::new(HashMap::new());
+        let b_thoughts = StdMutex::new(ThoughtState::default());
+        let events_b = [
+            // The SAME counter value A used — the collision is the point.
+            ev(json!({
+                "type": "message_start",
+                "message": { "role": "assistant", "content": [] },
+            })),
+            ev(json!({
+                "type": "message_update",
+                "usage": null,
+                "assistantMessageEvent": { "type": "text_delta", "contentIndex": 0, "delta": "parti" },
+            })),
+            // REQUIRED: the retraction arm erases only the segments recorded in
+            // `ThoughtState.segments`, so without a thought there is no
+            // `bbbbbb:m1#1` row to assert.
+            ev(json!({
+                "type": "message_update",
+                "usage": null,
+                "assistantMessageEvent": { "type": "thinking_delta", "contentIndex": 0, "delta": "partthink" },
+            })),
+            ev(json!({ "type": "message_retracted" })),
+        ];
+        for e in &events_b {
+            persist_frames(
+                &store,
+                "s1",
+                normalize(e, &mut st_b),
+                &b_text,
+                &b_tools,
+                &b_thoughts,
+            );
+        }
+
+        // ── what the one table actually holds ─────────────────────────────
+        let rows: Vec<(String, String, String)> = db
+            .messages_for("s1")
+            .unwrap()
+            .into_iter()
+            .map(|m| (m.kind, m.message_key.unwrap_or_default(), m.payload_json))
+            .collect();
+        let row = |kind: &str, key: &str| -> (String, String, String) {
+            rows.iter()
+                .find(|(k, m, _)| k == kind && m == key)
+                .cloned()
+                .unwrap_or_else(|| panic!("no ({kind}, {key}) display row; the table is {rows:?}"))
+        };
+
+        // A's rows survived B's arrival entirely.
+        assert!(
+            row("agent-text", "aaaaaa:m1").2.contains("history")
+                && row("agent-thought", "aaaaaa:m1#1").2.contains("think"),
+            "incarnation A's text and thought rows are intact, the table is {rows:?}"
+        );
+        assert!(
+            row("agent-text", "aaaaaa:system").2.contains("Retrying"),
+            "the shared one-liner key is stamped too (it has no counter to \
+             seed, so it is the family a counter-only design would leave \
+             shared), the table is {rows:?}"
+        );
+
+        // B erased its OWN rows — and nothing else.
+        assert_eq!(
+            row("agent-text", "bbbbbb:m1").2,
+            r#"{"text":""}"#,
+            "B's Retraction emptied B's own text row"
+        );
+        assert_eq!(
+            row("agent-thought", "bbbbbb:m1#1").2,
+            r#"{"text":""}"#,
+            "B's Retraction emptied B's own thought row"
+        );
+        // The discard line is a display row too — asserted so nobody later
+        // "cleans it up".
+        assert!(
+            row("agent-text", "bbbbbb:retract:1")
+                .2
+                .contains("Discarded"),
+            "the discard line is persisted under B's own stamp, the table is {rows:?}"
+        );
+
+        // Nothing unstamped was ever written.
+        for unstamped in ["m1", "m1#1", "system"] {
+            assert!(
+                !rows.iter().any(|(_, k, _)| k == unstamped),
+                "an unstamped id reached the display store: {unstamped}"
+            );
+        }
+
+        // The two first-assistant-message rows COEXIST as two rows: both
+        // incarnations counted to `m1` for one `session_id`, so the stamp is
+        // the only thing keeping them apart. Drop the stamp from the id and
+        // this is the first assertion to fail.
+        let a_m1 = row("agent-text", "aaaaaa:m1");
+        let b_m1 = row("agent-text", "bbbbbb:m1");
+        assert_ne!(
+            a_m1.1, b_m1.1,
+            "the same counter value in two incarnations must be two rows, not one"
         );
     }
 

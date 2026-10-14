@@ -347,7 +347,12 @@ fn main() {
                     "sessionUpdate": "session_info",
                     "enabledTools": env.enabled_tools,
                     "systemPrompt": serde_json::to_value(&env.system_prompt).unwrap(),
-                    "trusted": env.trusted
+                    "trusted": env.trusted,
+                    // The stamp the Worker mints its ids with (ADR 0049) — the
+                    // two-incarnation assertion: the e2e resume test reads the
+                    // echo to prove two Workers for one Session get
+                    // DIFFERENT stamps.
+                    "incarnation": env.incarnation
                 });
                 emit(
                     &mut stdout,

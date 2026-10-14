@@ -236,6 +236,22 @@ async fn native_session_end_to_end() {
     // (3) The turn: `send_prompt` → the `session-update` `SinkFrame`s flow
     // (re-emitted VERBATIM — the SAME frozen shapes) + `EndTurn` (the
     // `agent_settled` settle).
+    //
+    // Before the turn: the FIRST incarnation's stamp, read off the start
+    // envelope echo (ADR 0049). The resume below spawns a NEW Worker, which
+    // must carry a DIFFERENT stamp.
+    let first_env = wait_for_update(&mut sink_rx, "session_info").await;
+    let stamp_a = first_env["incarnation"]
+        .as_str()
+        .expect("the start envelope echoes its incarnation stamp")
+        .to_string();
+    assert_eq!(
+        stamp_a.len(),
+        6,
+        "the stamp is six hex chars, got {stamp_a}"
+    );
+    u32::from_str_radix(&stamp_a, 16).expect("the stamp is hex");
+
     let reason = manager
         .send_prompt(&sid, "hi".to_string())
         .await
@@ -273,11 +289,49 @@ async fn native_session_end_to_end() {
 
     // (5) Close + RESUME (the native branch — the `native_messages`
     // re-read: NOT `NotResumable`).
+    //
+    // The display rows the FIRST incarnation wrote (ADR 0049): the second
+    // Worker's arrival must leave them verbatim. Captured before the close.
+    let before: Vec<(String, String)> = db
+        .messages_for(&sid)
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.kind == "agent-text")
+        .map(|m| (m.message_key.unwrap(), m.payload_json))
+        .collect();
+    assert!(
+        !before.is_empty(),
+        "the first incarnation persisted a display row"
+    );
+
     manager.close_session(&sid).await.expect("close works");
     let resumed = manager
         .resume_session(&sid, dir.clone(), &sink)
         .await
         .expect("a native session resumes from the native_messages table (not NotResumable)");
+
+    // The RESUMED Worker's own stamp (ADR 0049) — two Worker processes
+    // spawned for one Session are two incarnations. Read BEFORE the `drain`
+    // below (which discards everything pending — this frame is already in the
+    // channel). NOTE: the display KEYS are not asserted stamped here — the
+    // `fake_worker` fixture hardcodes its `DisplayUpsert` keys and never runs
+    // `normalize`; `normalize_tests`' seam test is what proves the key rule.
+    let second_env = wait_for_update(&mut sink_rx, "session_info").await;
+    let stamp_b = second_env["incarnation"]
+        .as_str()
+        .expect("the resumed start envelope echoes its incarnation stamp")
+        .to_string();
+    assert_eq!(
+        stamp_b.len(),
+        6,
+        "the stamp is six hex chars, got {stamp_b}"
+    );
+    u32::from_str_radix(&stamp_b, 16).expect("the stamp is hex");
+    assert_ne!(
+        stamp_a, stamp_b,
+        "a resumed Worker is a NEW incarnation and must not inherit the stamp"
+    );
+
     assert_eq!(resumed.session_id, sid);
     assert!(
         resumed.capabilities.get("piSessionFile").is_none(),
@@ -302,6 +356,23 @@ async fn native_session_end_to_end() {
         resumed_chunk["content"]["text"], "canned ",
         "the resumed turn's first canned chunk"
     );
+
+    // (ADR 0049) The first incarnation's `agent-text` rows are still there,
+    // byte-identical: the second Worker never wrote into the first one's rows.
+    let after: Vec<(String, String)> = db
+        .messages_for(&sid)
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.kind == "agent-text")
+        .map(|m| (m.message_key.unwrap(), m.payload_json))
+        .collect();
+    for row in &before {
+        assert!(
+            after.contains(row),
+            "the first incarnation's row {row:?} did not survive the resumed \
+             Worker; the table now holds {after:?}"
+        );
+    }
 
     let _ = manager.close_session(&sid).await;
     let _ = std::fs::remove_dir_all(&dir);
