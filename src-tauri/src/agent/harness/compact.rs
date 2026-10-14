@@ -274,6 +274,34 @@ pub fn split_for_compaction(
     )
 }
 
+/// Trim the summarized range to the Summary input budget (ADR 0047): keep
+/// the NEWEST slice that fits — the recent end is what a summary must not
+/// lose — and report how many messages were dropped, which the harness
+/// writes into the summary it stores.
+///
+/// Like [`split_for_compaction`] the kept slice never STARTS on a `tool`
+/// message, but here the boundary snaps FORWARD (an orphaned `tool` result
+/// 400s on conformant APIs) and the snapped-past messages count as dropped.
+/// The result is always a SUFFIX of `older`, so "the oldest N" is literally
+/// true of the count. An EMPTY slice means the budget fits nothing: there is
+/// no honest summary to ask for and the caller must not send a doomed call.
+pub fn trim_for_summary_budget(older: &[ChatMessage], budget: u32) -> (Vec<ChatMessage>, usize) {
+    let mut keep_from = older.len();
+    let mut acc = 0u32;
+    while keep_from > 0 {
+        let next = acc.saturating_add(estimate_message_tokens(&older[keep_from - 1]));
+        if next > budget {
+            break;
+        }
+        acc = next;
+        keep_from -= 1;
+    }
+    while keep_from < older.len() && matches!(older[keep_from].role, ChatRole::Tool) {
+        keep_from += 1;
+    }
+    (older[keep_from..].to_vec(), keep_from)
+}
+
 // ---------------------------------------------------------------------------
 // The compaction orchestration (moved from `loop.rs` — free functions of the
 // values they need, so this module never depends on `AgentLoop`; `loop.rs`
@@ -1305,6 +1333,69 @@ mod tests {
             "the kept tail starts on the assistant message, not an orphaned tool"
         );
         assert!(matches!(recent[1].role, ChatRole::Tool));
+    }
+
+    /// (ADR 0047) The recent END of the summarized range is what a summary
+    /// must not lose, so the trim drops from the OLD end.
+    #[test]
+    fn the_trim_keeps_the_newest_slice_that_fits() {
+        // Each message: "m{i}" + 3 999 x's = 4 001 chars → 4 001/4 + 1 = 1_001.
+        let msgs: Vec<ChatMessage> = (0..4)
+            .map(|i| text_msg(&format!("m{i}{}", "x".repeat(3_999))))
+            .collect();
+        // 2_100 fits two (2_002) but not three (3_003).
+        let (kept, dropped) = trim_for_summary_budget(&msgs, 2_100);
+        assert_eq!(dropped, 2, "the two oldest are dropped");
+        assert_eq!(kept.len(), 2, "the newest two are summarized");
+        assert!(
+            matches!(&kept[0].content, MessageContent::Text(t) if t.starts_with("m2")),
+            "the slice starts at the newest end, got {:?}",
+            kept[0].content
+        );
+    }
+
+    /// The kept slice never STARTS on a `tool` result — the boundary snaps
+    /// FORWARD past it, and the snapped-past message still counts as dropped
+    /// (an orphaned `tool` message 400s on conformant APIs).
+    #[test]
+    fn the_trim_never_starts_the_kept_slice_on_a_tool_message() {
+        let asst = ChatMessage {
+            role: ChatRole::Assistant,
+            content: MessageContent::Text(String::new()),
+            tool_call_id: None,
+            tool_calls: Some(vec![crate::agent::harness::provider::ToolCall {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+                arguments: serde_json::json!({ "command": "ls" }),
+            }]),
+        };
+        let tool = ChatMessage {
+            role: ChatRole::Tool,
+            content: MessageContent::Text("result".to_string()),
+            tool_call_id: Some("t1".to_string()),
+            tool_calls: None,
+        };
+        // Estimates: "oldest" 2, `asst` 21 (one tool_call = 20, + 1), `tool` 2,
+        // "newest" 2. Budget 10 takes newest (2) + tool (4), stops at `asst`
+        // (25 > 10), so the RAW boundary lands on the tool result at index 2.
+        let msgs = vec![text_msg("oldest"), asst, tool, text_msg("newest")];
+        let (kept, dropped) = trim_for_summary_budget(&msgs, 10);
+        assert_eq!(dropped, 3, "the snapped-past tool result is still dropped");
+        assert_eq!(kept.len(), 1, "only the newest message is summarized");
+        assert!(
+            !matches!(kept[0].role, ChatRole::Tool),
+            "the summarized slice does not start on an orphaned tool result"
+        );
+    }
+
+    /// A budget that fits nothing summarizes nothing: the caller must NOT send
+    /// a doomed call, so the empty slice is the signal.
+    #[test]
+    fn a_budget_that_fits_nothing_trims_everything() {
+        let msgs = vec![text_msg("a"), text_msg("b")];
+        let (kept, dropped) = trim_for_summary_budget(&msgs, 0);
+        assert!(kept.is_empty(), "nothing fits a zero budget");
+        assert_eq!(dropped, 2);
     }
 
     // ── (finding 4) a truncated summary stream is NOT a good summary ──
