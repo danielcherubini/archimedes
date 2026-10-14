@@ -92,6 +92,9 @@ jobs:
       - name: Test the version check
         run: bash scripts/check-versions.test.sh
 
+      - name: Test the updater-manifest composer
+        run: bash scripts/compose-updater-manifest.test.sh
+
       # The same check on the real checkout, so the guard runs even when the
       # test script above is what changed.
       - name: Check the three version fields agree
