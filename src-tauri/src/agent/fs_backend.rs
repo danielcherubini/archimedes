@@ -290,8 +290,12 @@ mod tests {
         fs::write(&outside, "secret").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        // Windows spells the one-argument-free form `symlink_file` /
+        // `symlink_dir` — there is no `std::os::windows::fs::symlink`, so the
+        // arm below used to be a compile error on the first Windows build.
+        // `outside` is a FILE, so `symlink_file` is the honest match.
         #[cfg(windows)]
-        std::os::windows::fs::symlink(&outside, root.join("link")).unwrap();
+        std::os::windows::fs::symlink_file(&outside, root.join("link")).unwrap();
         let backend = FsBackend {
             roots: vec![root.clone()],
         };

@@ -291,11 +291,16 @@ impl SudoGroupGuard {
 
 impl Drop for SudoGroupGuard {
     fn drop(&mut self) {
+        // The group kill IS a unix syscall (`kill(-pgid)`), so the whole arm
+        // is gated, not the call inside it: with the cfg on the body only,
+        // the `if let` binding above it exists on every target and Windows
+        // — where nothing reads it — fails `cargo clippy -D warnings` with
+        // `unused_variable`. Off unix there is no process group to signal
+        // and nothing is lost: `kill_on_drop(true)` already killed the
+        // direct child, which is all there is to kill there.
+        #[cfg(unix)]
         if let Some(pid) = self.pid {
-            #[cfg(unix)]
-            {
-                let _ = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-            }
+            let _ = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
         }
     }
 }

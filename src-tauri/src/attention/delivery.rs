@@ -109,14 +109,18 @@ pub mod bus {
     }
 }
 
-/// macOS, Windows and anything mobile: hand the alert to
-/// `tauri-plugin-notification`, which has no bus-name semantics to keep alive.
+// The doc lives INSIDE the module (`//!`), matching the sibling `bus` module:
+// an outer `///` on a `mod` whose body opens with `//!` is `mixed_attributes_style`,
+// which is a hard error under the AGENTS.md `-D warnings`, and this module only
+// compiles on macOS/Windows — so the Linux bar that ran here could not see it.
 #[cfg(not(all(
     unix,
     not(any(target_os = "macos", target_os = "android", target_os = "ios"))
 )))]
 pub mod plugin {
-    //! A macOS/Windows notification is not a D-Bus message: there is no
+    //! macOS, Windows and anything mobile: hand the alert to
+    //! `tauri-plugin-notification`, which has no bus-name semantics to keep
+    //! alive. A macOS/Windows notification is not a D-Bus message: there is no
     //! sender's bus name for the desktop to watch, so the XDG retention
     //! machinery would buy nothing and cost a dependency, and the plugin's own
     //! platform handling (bundle identifier on macOS, AUMID on Windows) stays

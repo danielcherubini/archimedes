@@ -2,13 +2,31 @@ name: CI
 
 on:
   push:
-    branches: [main, feature/archimedes-desktop]
+    # `feature/*`, not a named branch: the merge bar is a per-branch promise,
+    # and a pinned branch name silently stops making it (the entry this
+    # replaced named one finished feature branch and matched nothing after).
+    branches: [main, feature/*]
   pull_request:
 
 jobs:
   lint-test-build:
-    name: Lint, test, and build (Linux)
-    runs-on: ubuntu-latest
+    name: Lint, test, and build (${{ matrix.os }})
+    # Every OS this app ships on runs the FULL AGENTS.md bar, not just Linux.
+    # A platform whose compiler has never been run is an untested platform:
+    # `src-tauri` carries deliberate `#[cfg(unix)]`/`#[cfg(target_os = "linux")]`
+    # hygiene that only a Windows/macOS compile proves, and finding it on the
+    # first release tag would mean the tag is the test. `macos-latest` is the
+    # standard (free for a public repo) runner — never an `-xlarge`-class
+    # label (charged even here) and never a pinned `macos-14` (deprecated
+    # upstream, so the label dies under us).
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform's red must not cancel the other two: a Windows-only
+      # compile error hiding a macOS-only one costs a second full round-trip
+      # to discover, which is the slowest possible way to read the list.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,8 +57,14 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      # Tauri's Linux prerequisites (webkit2gtk 4.1 + friends).
+      # Tauri's Linux prerequisites (webkit2gtk 4.1 + friends). The apt
+      # invocation and every package name in it are Linux-only: macOS needs
+      # nothing the runner image does not already carry (the Xcode
+      # command-line tools), and Windows needs nothing at all (the WebView2
+      # runtime is part of the image). Gated on `runner.os` rather than the
+      # matrix value because the step is about the MACHINE it lands on.
       - name: Install Linux build dependencies
+        if: runner.os == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
