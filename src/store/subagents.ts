@@ -1,7 +1,13 @@
 import { create } from "zustand";
-import type { SubagentMetrics } from "../lib/tauri";
+import type {
+  SubagentFailureReason,
+  SubagentMetrics,
+} from "../lib/tauri";
 
-export type { SubagentMetrics } from "../lib/tauri";
+export type {
+  SubagentFailureReason,
+  SubagentMetrics,
+} from "../lib/tauri";
 
 /**
  * Retention cap for CLOSED (completed/failed) entries. Subagent sessions are
@@ -67,6 +73,14 @@ export interface SubagentEntry {
    * child at all.
    */
   metrics?: SubagentMetrics;
+  /**
+   * The machine-readable WHY of a `failed` child (ADR 0055) — the Rust
+   * `SubagentFailureReason` verbatim. The card's one-line summary renders a
+   * short label mapped from this and NEVER `error`, because `error` is the
+   * parent-facing salvage prose. `undefined` on a payload from a backend that
+   * predates the field, which is exactly when the card falls back to `error`.
+   */
+  reason?: SubagentFailureReason;
   model?: string;
   thinkingLevel?: string;
   enabledTools?: string[];
@@ -83,6 +97,13 @@ interface SubagentState {
     status: "completed" | "failed",
     error?: string,
     metrics?: SubagentMetrics,
+    /**
+     * The machine-readable failure code (ADR 0055) — a TRAILING optional
+     * parameter, so every existing positional call site keeps compiling and a
+     * payload from an older backend simply leaves it `undefined` (the card's
+     * `error` fallback then renders).
+     */
+    reason?: SubagentFailureReason,
   ) => void;
   /** User dismiss (panel header). */
   dismiss: (sessionId: string) => void;
@@ -112,7 +133,7 @@ export const useSubagents = create<SubagentState>((set) => ({
       return { entries: evictOldestClosed(entries) };
     }),
 
-  markClosed: (sessionId, status, error, metrics) =>
+  markClosed: (sessionId, status, error, metrics, reason) =>
     set((state) => {
       const existing = state.entries[sessionId];
       if (!existing) return state; // unknown / dismissed id: no-op
@@ -123,6 +144,7 @@ export const useSubagents = create<SubagentState>((set) => ({
           status,
           error,
           metrics,
+          reason,
           // The directory's relative time for ENDED entries (when it
           // ended — distinct from `metrics.durationMs`, the DURATION).
           endedAt: Date.now(),

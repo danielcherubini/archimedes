@@ -26,6 +26,113 @@ beforeEach(() => {
 });
 
 describe("SubagentDelegatingCard (the subagent tool card with the nested list)", () => {
+  it("renders a short structured reason line for a failed child (ADR 0055)", () => {
+    // `reason` is the machine-readable why (`SubagentFailureReason`, snake_case
+    // over the wire); `error` is the PARENT-FACING salvage prose the parent
+    // model reads. The card is a one-line row: it renders the short label and
+    // must NOT dump the prose.
+    useSubagents.getState().addSession(
+      entry({
+        sessionId: "sub1",
+        status: "failed",
+        error: "subagent worker exited unexpectedly (code 137)",
+        reason: "crashed",
+      }),
+    );
+    render(
+      <SubagentDelegatingCard
+        title="subagent"
+        status="completed"
+        rawInput={{ task: "review the diff" }}
+        sessionId="main1"
+      />,
+    );
+    expect(screen.getByText("Crashed")).toBeTruthy();
+    expect(screen.queryByText(/subagent worker exited unexpectedly/)).toBeNull();
+  });
+
+  it("names the **Dead bound** in words, not the timeout prose", () => {
+    useSubagents.getState().addSession(
+      entry({
+        sessionId: "sub1",
+        status: "failed",
+        error: "timed out",
+        reason: "unresponsive",
+      }),
+    );
+    render(
+      <SubagentDelegatingCard
+        title="subagent"
+        status="completed"
+        rawInput={{ task: "review the diff" }}
+        sessionId="main1"
+      />,
+    );
+    expect(
+      screen.getByText("Unresponsive — no output for a long period"),
+    ).toBeTruthy();
+    expect(screen.queryByText("timed out")).toBeNull();
+  });
+
+  it("renders `Cancelled` for a cancelled child", () => {
+    useSubagents.getState().addSession(
+      entry({
+        sessionId: "sub1",
+        status: "failed",
+        error: "some prose the row must not show",
+        reason: "cancelled",
+      }),
+    );
+    render(
+      <SubagentDelegatingCard
+        title="subagent"
+        status="completed"
+        rawInput={{ task: "review the diff" }}
+        sessionId="main1"
+      />,
+    );
+    expect(screen.getByText("Cancelled")).toBeTruthy();
+    expect(screen.queryByText("some prose the row must not show")).toBeNull();
+  });
+
+  it("renders `Failed` for the `other` reason (a preflight failure)", () => {
+    useSubagents.getState().addSession(
+      entry({
+        sessionId: "sub1",
+        status: "failed",
+        error: "spawn the subagent worker: no such file",
+        reason: "other",
+      }),
+    );
+    render(
+      <SubagentDelegatingCard
+        title="subagent"
+        status="completed"
+        rawInput={{ task: "review the diff" }}
+        sessionId="main1"
+      />,
+    );
+    expect(screen.getByText("Failed")).toBeTruthy();
+    expect(screen.queryByText(/no such file/)).toBeNull();
+  });
+
+  it("falls back to `error` when the payload carries no `reason` (older backend)", () => {
+    // `reason` is optional: a `subagent-closed` from a backend predating
+    // ADR 0055 has only `error`, and showing nothing would hide the failure.
+    useSubagents.getState().addSession(
+      entry({ sessionId: "sub1", status: "failed", error: "boom" }),
+    );
+    render(
+      <SubagentDelegatingCard
+        title="subagent"
+        status="completed"
+        rawInput={{ task: "review the diff" }}
+        sessionId="main1"
+      />,
+    );
+    expect(screen.getByText("boom")).toBeTruthy();
+  });
+
   it("renders nested rows for subagents delegated in the tool call (name + task)", () => {
     useSubagents.getState().addSession(
       entry({ sessionId: "sub1", agentName: "reviewer", task: "review the diff" }),

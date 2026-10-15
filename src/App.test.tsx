@@ -1,7 +1,12 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import App from "./App";
-import { externalOpen, listenSessionTitled, listenSubagentClosed } from "./lib/tauri";
+import {
+  externalOpen,
+  listenInteractiveRequestClose,
+  listenSessionTitled,
+  listenSubagentClosed,
+} from "./lib/tauri";
 import { useSessions } from "./store/sessions";
 import { useSubagents } from "./store/subagents";
 import { useInteractive } from "./store/interactive";
@@ -974,6 +979,54 @@ describe("App (the `subagent-closed` listener)", () => {
     // 0040's amendment records (paraphrased here, not quoted): a closed child
     // keeps its gate card on screen until its entry is evicted.
     expect(useInteractive.getState().requests["sub1"]).toHaveLength(1);
+  });
+});
+
+describe("App (the `interactive-request-close` listener)", () => {
+  const clearStores = () => {
+    useInteractive.getState().dismissSession("sub1");
+    usePermissions.getState().dismissSessionPrompts("sub1");
+  };
+  beforeEach(clearStores);
+  afterEach(clearStores);
+
+  it("ONE close event clears the gate from BOTH stores", () => {
+    // The gates live in TWO different Client stores: an `ask` / sudo sub-prompt
+    // in `useInteractive.requests`, a **Permission** prompt in
+    // `usePermissions.prompts`. The Rust side emits ONE event name for both
+    // (`interactive-request-close`), and pre-fix this listener consulted only
+    // `useInteractive` — so a Permission card could never be closed by ANY
+    // emitter. That was already a hole on the MAIN-session path:
+    // `cleanup_pending_modals` emits this very event for tracked Permission
+    // modals, and nothing acted on those either.
+    useInteractive.getState().addRequest("sub1", {
+      requestId: "r1",
+      method: "ask",
+      source: "native",
+      params: {
+        questions: [
+          { id: "q1", question: "Which color?", options: [{ label: "Red" }] },
+        ],
+      },
+    });
+    usePermissions.getState().addPrompt("sub1", "p1", {
+      toolCall: { title: "Bash (apt install ripgrep)" },
+      options: [{ optionId: "allow", name: "Allow" }],
+    });
+    render(<App />);
+    const calls = vi.mocked(listenInteractiveRequestClose).mock.calls;
+    const onClose = calls[calls.length - 1][0];
+    act(() => {
+      onClose({ sessionId: "sub1", requestId: "p1" });
+    });
+    expect(usePermissions.getState().prompts["sub1"]).toHaveLength(0);
+    // The kind the event did NOT name survives — the removal is per requestId,
+    // so calling both filters is an idempotent no-op, not a wipe.
+    expect(useInteractive.getState().requests["sub1"]).toHaveLength(1);
+    act(() => {
+      onClose({ sessionId: "sub1", requestId: "r1" });
+    });
+    expect(useInteractive.getState().requests["sub1"]).toHaveLength(0);
   });
 });
 

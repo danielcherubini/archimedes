@@ -117,17 +117,37 @@ function App() {
         useInteractive.getState().addRequest(payload.sessionId, payload),
       ),
     );
-    // A DROPPED `sudo_exec` sub-prompt (a turn cancel skips the flow's
-    // exit-path cleanup) closes its modal (the Rust `SudoPromptCleanup`
-    // drop guard emits `interactive-request-close` — pre-fix the modal
-    // stayed open with no pending response, and a late answer got
-    // `Ok(true)` with the send silently failing).
+    // A DROPPED gate closes its card. Two emitters reach this one listener:
+    // the `sudo_exec` drop guard (a turn cancel skips the flow's exit-path
+    // cleanup — pre-fix the modal stayed open with no pending response, and a
+    // late answer got `Ok(true)` with the send silently failing), and
+    // `finish_subagent` (ADR 0055 — a **Subagent session** torn down with an
+    // unanswered gate; the router's own pending-modal cleanup is unreachable
+    // for a child, so that teardown is the emitter and keys the frame to the
+    // CHILD id). `cleanup_pending_modals` emits it too, for a MAIN session.
+    //
+    // BOTH stores are cleared, because the gates live in TWO of them: an `ask`
+    // / `confirm` / `password` prompt in `useInteractive.requests`, a
+    // **Permission** prompt in `usePermissions.prompts` — and
+    // `usePermissions` had NO listener at all for this event (its only removal
+    // was `PermissionPrompt.tsx`'s local one on an ANSWER). So a Permission
+    // card was unclosable by every emitter, including `cleanup_pending_modals`,
+    // which has been emitting closes for tracked Permission modals all along
+    // into a listener that ignored them. That pre-existing hole is fixed as a
+    // side effect here.
+    //
+    // Calling both for either kind is SAFE: `removeRequest` and `removePrompt`
+    // both FILTER one `requestId` out of one session's list, so the store that
+    // never held it is an idempotent no-op — it does not wipe its other rows.
     unlistenPromises.push(
-      listenInteractiveRequestClose((payload) =>
+      listenInteractiveRequestClose((payload) => {
         useInteractive
           .getState()
-          .removeRequest(payload.sessionId, payload.requestId),
-      ),
+          .removeRequest(payload.sessionId, payload.requestId);
+        usePermissions
+          .getState()
+          .removePrompt(payload.sessionId, payload.requestId);
+      }),
     );
     unlistenPromises.push(
       listenInteractiveEvent((payload) => {
@@ -200,7 +220,7 @@ function App() {
         discardSessionMessages(p.sessionId);
         useSubagents
           .getState()
-          .markClosed(p.sessionId, p.status, p.error, p.metrics);
+          .markClosed(p.sessionId, p.status, p.error, p.metrics, p.reason);
         // The child's todo board goes too — same reasoning as the discard
         // above: this is the only frame that ever names the end of a CHILD
         // session, so nothing else would free the slice (`session-closed`
