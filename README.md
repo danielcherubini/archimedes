@@ -209,14 +209,22 @@ local-only path.
 
 ## Linux + NVIDIA note
 
-On Linux with an NVIDIA GPU, the app may crash on startup with a DMABUF
-error. Work around it by launching with:
+On Linux with an NVIDIA GPU, WebKitGTK's DMABUF zero-copy path is broken —
+the app either crashes on startup or renders with visible lag. Archimedes
+works around it by setting `WEBKIT_DISABLE_DMABUF_RENDERER=1` itself before
+the WebView is created, so there is nothing to export and nothing to
+configure.
+
+That default is overridable, because the same flag costs Mesa (Intel/AMD)
+users a rendering downgrade where DMABUF is the fast path: any value you
+set yourself wins, including an empty one.
 
 ```sh
-WEBKIT_DISABLE_DMABUF_RENDERER=1 ./Archimedes\ Desktop.AppImage
+WEBKIT_DISABLE_DMABUF_RENDERER=0 ./Archimedes\ Desktop.AppImage   # back to zero-copy
 ```
 
-(or set the variable in your environment before starting the app).
+If a future webkit2gtk build fixes NVIDIA, that is the escape hatch — and
+the one to try first when a Linux rendering bug report looks renderer-related.
 
 ### Building AppImages on recent Fedora
 

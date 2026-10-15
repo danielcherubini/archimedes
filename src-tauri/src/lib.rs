@@ -10,6 +10,11 @@ pub mod storage;
 #[doc(hidden)]
 pub mod test_support;
 pub mod types;
+/// The Linux WebView environment work-around (`WEBKIT_DISABLE_DMABUF_
+/// RENDERER`) — WebKitGTK is the Linux engine only, so the module itself
+/// is Linux-only rather than a runtime check inside it.
+#[cfg(target_os = "linux")]
+pub mod webview_env;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -239,6 +244,13 @@ pub fn run() {
     // unset).
     crashlog::install_panic_hook("supervisor");
     debuglog::init_from_env();
+    // The Linux WebView environment (the DMABUF renderer work-around) — set
+    // HERE, before the Builder exists, because the WebView that reads it is
+    // created later inside `.run(...)`/`build(...)`: this is the last point
+    // at which the environment is still the one WebKit will see. Linux-only
+    // module (WebKitGTK is the Linux engine) — see `crate::webview_env`.
+    #[cfg(target_os = "linux")]
+    webview_env::apply_dmabuf_workaround();
     // The navigation guard (ADR 0051 Task 3): a navigation to anything that is
     // not the app's OWN page is refused, so an anchor nobody wrote a handler
     // for cannot replace this frameless window (no back, no reload). It is a
