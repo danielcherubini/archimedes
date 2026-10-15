@@ -1720,10 +1720,15 @@ mod tests {
         if !read_dir_order_is_sorted(dir) {
             return;
         }
-        assert!(
-            !cfg!(unix),
+        // `cfg!` is a COMPILE-time constant, so this reads as a per-platform
+        // guard rather than an `assert!` on a constant (which clippy 1.99
+        // rejects, and which a `const { assert!(…) }` would make a COMPILE
+        // error on every unix build — the wrong shape for a runtime premise).
+        #[cfg(unix)]
+        panic!(
             "test setup: this filesystem already returns readdir in alphabetical order, so the layout cannot discriminate"
         );
+        #[cfg(not(unix))]
         eprintln!(
             "note: readdir here is already alphabetical (NTFS index order), so the \
              survivor-ORDER half of this fixture is vacuous on this platform; the \
