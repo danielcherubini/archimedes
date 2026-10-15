@@ -7645,7 +7645,10 @@ mod tests {
         // (the oneshot's value is buffered — the loop's `select!` sees
         // it resolved immediately when it pops it at `dispatch`).
         tx.send(SubagentOutcome::Failed {
+            reason: crate::agent::subagent::SubagentFailureReason::Other,
             error: "boom".to_string(),
+            output: String::new(),
+            metrics: crate::agent::subagent::SubagentMetrics::default(),
         })
         .unwrap();
         let mut loop_ = build_loop_with_dispatcher(

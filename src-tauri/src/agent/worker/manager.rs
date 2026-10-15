@@ -45,7 +45,7 @@ use crate::agent::harness::r#loop::tool_specs;
 use crate::agent::harness::{ModelKey, ModelRef};
 use crate::agent::is_bookkeeping_message_id;
 use crate::agent::session::resolve_composed_model;
-use crate::agent::subagent::{SubagentMetrics, SubagentOutcome};
+use crate::agent::subagent::{SubagentFailureReason, SubagentMetrics, SubagentOutcome};
 use crate::agent::types::mint_session_id;
 use crate::agent::worker::client::{WorkerError, WorkerHandle, WorkerInboundEvent};
 use crate::agent::worker::protocol::{Inbound, StartEnv, StartMode, SubagentDispatchWire};
@@ -537,10 +537,13 @@ impl WorkerManager {
     /// `mint_session_id`), `wait_ready` + `send_start` + the initial
     /// `prompt` (the `task`), then the drive task (`agent_settled` →
     /// the `SubagentCapture`'s final text → `Completed`; an unexpected
-    /// `Exited` → `Failed { error: "subagent worker exited
-    /// unexpectedly (code N)" }`; the `settle_timeout` → `Failed {
-    /// error: "timed out" }`; a `SubagentCancel` → `send_abort` +
-    /// reap). The `Inbound::SubagentResult { id, outcome }` is sent to
+    /// `Exited` → `Failed { reason: Crashed, error: "subagent worker exited
+    /// unexpectedly (code N)" }`; the **Dead bound** → `Failed { reason:
+    /// Unresponsive, error: "timed out" }`; a `SubagentCancel` →
+    /// `send_abort` + reap → `Failed { reason: Cancelled }`). EVERY `Failed`
+    /// carries the `SubagentCapture`'s partial text + the real usage (ADR 0055
+    /// — a **Dead Subagent** is never `Completed`, but its work is not thrown
+    /// away). The `Inbound::SubagentResult { id, outcome }` is sent to
     /// the REQUESTING (main-session) Worker. The
     /// `subagent-session-started` / `subagent-closed` UI lifecycle
     /// events fire on the PARENT session's sink (the `subagent.rs:635`
@@ -972,9 +975,7 @@ fn dispatch_subagent(
                         &state,
                         &parent_session_id,
                         &wire,
-                        SubagentOutcome::Failed {
-                            error: format!("unknown model: {bare}"),
-                        },
+                        preflight_failed(format!("unknown model: {bare}")),
                     );
                     return;
                 }
@@ -987,9 +988,7 @@ fn dispatch_subagent(
                     &state,
                     &parent_session_id,
                     &wire,
-                    SubagentOutcome::Failed {
-                        error: format!("unknown model: {}", wire.model_key),
-                    },
+                    preflight_failed(format!("unknown model: {}", wire.model_key)),
                 );
                 return;
             }
@@ -1178,9 +1177,7 @@ fn dispatch_subagent(
                     &state,
                     &parent_session_id,
                     &wire,
-                    SubagentOutcome::Failed {
-                        error: format!("spawn the subagent worker: {e}"),
-                    },
+                    preflight_failed(format!("spawn the subagent worker: {e}")),
                 );
                 None
             }
@@ -1238,9 +1235,7 @@ async fn drive_subagent(
             state,
             parent_session_id,
             wire,
-            SubagentOutcome::Failed {
-                error: "the subagent worker failed to start".to_string(),
-            },
+            preflight_failed("the subagent worker failed to start".to_string()),
         );
         return None;
     }
@@ -1251,9 +1246,7 @@ async fn drive_subagent(
             state,
             parent_session_id,
             wire,
-            SubagentOutcome::Failed {
-                error: "send the subagent task".to_string(),
-            },
+            preflight_failed("send the subagent task".to_string()),
         );
         return None;
     }
@@ -1338,27 +1331,80 @@ async fn drive_subagent(
             };
             SubagentOutcome::Completed { output, metrics }
         }
-        Race::TimedOut => SubagentOutcome::Failed {
-            error: "timed out".to_string(),
-        },
-        Race::Cancelled => SubagentOutcome::Failed {
-            error: "cancelled".to_string(),
-        },
+        Race::TimedOut => failed_with_salvage(
+            SubagentFailureReason::Unresponsive,
+            "timed out".to_string(),
+            capture,
+            duration_ms,
+        ),
+        Race::Cancelled => failed_with_salvage(
+            SubagentFailureReason::Cancelled,
+            "cancelled".to_string(),
+            capture,
+            duration_ms,
+        ),
         Race::Exited(code) => {
             let code_str = code
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "signal".to_string());
-            SubagentOutcome::Failed {
-                error: format!("subagent worker exited unexpectedly (code {code_str})"),
-            }
+            failed_with_salvage(
+                SubagentFailureReason::Crashed,
+                format!("subagent worker exited unexpectedly (code {code_str})"),
+                capture,
+                duration_ms,
+            )
         }
     };
     Some(outcome)
 }
 
+/// A **Dead Subagent**'s outcome (ADR 0055): `failed` in STATUS, but the
+/// SALVAGE rides with it — whatever the `SubagentCapture` had accumulated when
+/// the child stopped making progress, plus its REAL usage and wall clock.
+///
+/// This is the fix for the discarding bug: the drive holds its own `Arc` clone
+/// of the capture, so the text and the tokens are readable on every crash /
+/// reap / cancel path even though the pump has already dropped the `drives`
+/// entry. A dead child is NEVER reported as `Completed` — it never decided it
+/// was finished — but its 29 minutes of findings must not be thrown away.
+fn failed_with_salvage(
+    reason: SubagentFailureReason,
+    error: String,
+    capture: &Arc<SubagentCapture>,
+    duration_ms: u64,
+) -> SubagentOutcome {
+    let (input_tokens, output_tokens) = capture.usage();
+    let output = capture.captured_text();
+    SubagentOutcome::Failed {
+        reason,
+        error,
+        output: output.clone(),
+        metrics: SubagentMetrics {
+            output,
+            input_tokens,
+            output_tokens,
+            cost: 0.0,
+            duration_ms,
+        },
+    }
+}
+
+/// A PREFLIGHT failure (ADR 0055): the child never started, so the empty
+/// `output` and the default `metrics` are DELIBERATE — there is nothing to
+/// salvage and nothing was ever spent. `reason: Other` (no **Dead bound**, no
+/// crash, no cancel — the dispatch simply never got off the ground).
+fn preflight_failed(error: String) -> SubagentOutcome {
+    SubagentOutcome::Failed {
+        reason: SubagentFailureReason::Other,
+        error,
+        output: String::new(),
+        metrics: SubagentMetrics::default(),
+    }
+}
+
 /// The UNCONDITIONAL teardown (settle / timeout / cancel / crash): the
 /// `subagent-closed` UI lifecycle event (EVERY exit path — the
-/// `subagent.rs:721/743` payload shapes: `status` / `error` /
+/// `subagent.rs:721/743` payload shapes: `status` / `reason` / `error` /
 /// `metrics`), the `reaping` flag (the `Exited` is EXPECTED: NO
 /// `on_crash`), the graceful `close` + 2 s grace + `kill`, the
 /// `drives` entry removal, and the `SubagentResult` delivery (the
@@ -1385,18 +1431,28 @@ async fn finish_subagent(
                     }),
                 );
             }
-            SubagentOutcome::Failed { error } => {
-                // The `metrics` (the failed-path shape — the `usage`
-                // is 0 — the turn never settled; the `duration_ms` is
-                // the wall clock to the failure).
-                let metrics = SubagentMetrics::default();
+            SubagentOutcome::Failed {
+                reason,
+                error,
+                metrics,
+                ..
+            } => {
+                // The REAL metrics (the outcome's — the salvage): a dead
+                // child's usage reaches the Client through THIS payload and
+                // nothing else, so reporting `default()` here made 29 minutes
+                // of real work look free. `reason` is the machine-readable
+                // why (ADR 0055) — the card's short line reads it instead of
+                // string-matching `error`. The `output` deliberately does NOT
+                // ride: the child's transcript is already persisted, and a
+                // 29-minute blob does not belong in a lifecycle event.
                 sink.emit(
                     "subagent-closed",
                     json!({
                         "sessionId": child_id,
                         "status": "failed",
+                        "reason": reason,
                         "error": error,
-                        "metrics": metrics_json(&metrics),
+                        "metrics": metrics_json(metrics),
                     }),
                 );
             }
@@ -1512,7 +1568,7 @@ mod tests {
 
     use crate::agent::events::EventSink;
     use crate::agent::harness::catalog::{Model, ModelCatalog};
-    use crate::agent::subagent::{LaunchConfig, SubagentOutcome};
+    use crate::agent::subagent::{LaunchConfig, SubagentFailureReason, SubagentOutcome};
     use crate::agent::worker::client::{WorkerError, WorkerHandle, WorkerInboundEvent};
     use crate::agent::worker::manager::{
         feed_capture, note_liveness_event, note_liveness_frame, SubagentCapture, SubagentDrive,
@@ -1725,10 +1781,24 @@ mod tests {
     /// the frame-driven tests, so `subagent_result_outcome` stays the
     /// observation point.
     fn dispatch_child_task(manager: &WorkerManager, parent_session_id: &str, task: &str) {
+        dispatch_child_task_with_id(manager, parent_session_id, task, "live-stream");
+    }
+
+    /// The same, with an explicit DISPATCH id. The `__cancel__` fixture emits
+    /// `SubagentCancel { id: "sub1" }`, so a cancel-driven test must dispatch
+    /// under `sub1` for that frame to name its drive (the cancel is routed by
+    /// DISPATCH id, not by child session id — `dispatch_child_task`'s
+    /// generated ids are unroutable from the fixture).
+    fn dispatch_child_task_with_id(
+        manager: &WorkerManager,
+        parent_session_id: &str,
+        task: &str,
+        dispatch_id: &str,
+    ) {
         manager.dispatch_subagent(
             parent_session_id,
             SubagentDispatchWire {
-                id: "live-stream".to_string(),
+                id: dispatch_id.to_string(),
                 parent_session_id: parent_session_id.to_string(),
                 parent_cwd: "/tmp/space".to_string(),
                 parent_enabled_tools: vec!["bash".to_string(), "read".to_string()],
@@ -1740,6 +1810,41 @@ mod tests {
                 model_key: "fake/m1".to_string(),
             },
         );
+    }
+
+    /// Bounded-wait for the child's `subagent-result-ack`, then read the
+    /// `SubagentOutcome` that rode it (the ack-first order is what lets a
+    /// caller cancel BEFORE the outcome exists).
+    async fn subagent_result_outcome_after_ack(
+        events: &EventLog,
+        session_id: &str,
+    ) -> SubagentOutcome {
+        let got = wait_for_event(events, session_id, |e| {
+            matches!(e, WorkerInboundEvent::SinkFrame { event, .. } if event == "subagent-result-ack")
+        })
+        .await;
+        subagent_result_outcome(events, session_id)
+            .unwrap_or_else(|| panic!("the outcome rides the ack verbatim: {got:?}"))
+    }
+
+    /// Bounded-wait for the `subagent-closed` payload on the parent's sink
+    /// (`finish_subagent` emits it on EVERY exit path; the `SinkEvents`
+    /// collector is already registered per parent session).
+    async fn wait_for_closed(sink_events: &SinkEvents) -> Value {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let got: Vec<(String, Value)> = sink_events
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
+            if let Some((_, payload)) = got.iter().find(|(e, _)| e == "subagent-closed") {
+                return payload.clone();
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("the `subagent-closed` event never fired");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     /// `attach` + `detach` bookkeeping (the `workers` map — the
@@ -2292,7 +2397,7 @@ mod tests {
         let outcome =
             subagent_result_outcome(&events, "t1").expect("the outcome rides the ack verbatim");
         match outcome {
-            SubagentOutcome::Failed { error } => {
+            SubagentOutcome::Failed { error, .. } => {
                 assert_eq!(error, "timed out", "the current timeout outcome");
             }
             other => panic!("expected `Failed {{ timed out }}`, got {other:?}"),
@@ -2412,6 +2517,164 @@ mod tests {
         assert_eq!(manager.test_session_count(), 1, "the parent survives");
     }
 
+    /// (ADR 0055 — the salvage) EVERY non-`Settled` drive path carries what
+    /// the child ACTUALLY produced: the `SubagentCapture`'s partial text, the
+    /// REAL accumulated usage, and a machine-readable `reason`. Before this,
+    /// `Failed { error }` held ONLY a string — 29 minutes of findings were
+    /// thrown away and `finish_subagent` reported `SubagentMetrics::default()`
+    /// (0 tokens for work that really cost money) on the one channel by which
+    /// a child's usage reaches the Client.
+    ///
+    /// Three paths, all at the DRIVE layer (never via `SubagentWait`):
+    /// - **dead** (`__stream_then_silence__` + a short bound) → `Unresponsive`
+    /// - **crash** (`__stream_then_crash__`) → `Crashed`
+    /// - **cancel** (`__stream_then_silence__` + a cancel mid-silence) → `Cancelled`
+    #[tokio::test]
+    async fn every_failure_path_carries_the_partial_output_and_real_usage() {
+        // ── 1. The Dead bound wins (`Unresponsive`) ────────────────────
+        // The bound is well inside the fixture's 10 s silence, and the
+        // chunks are NOT inside a tool call, so the silence clock runs.
+        let (manager, _crashes, events, sinks) = make_manager(Some(Duration::from_millis(400)));
+        let sink_events = register_sink(&sinks, "d1");
+        manager
+            .attach("d1", &test_env("d1", None))
+            .await
+            .expect("the parent attach completes");
+        dispatch_child_task(&manager, "d1", "__stream_then_silence__");
+        let outcome = subagent_result_outcome_after_ack(&events, "d1").await;
+        match outcome {
+            SubagentOutcome::Failed {
+                reason,
+                error,
+                output,
+                metrics,
+            } => {
+                assert_eq!(
+                    error, "timed out",
+                    "the timeout text is unchanged (Task 5 renames it)"
+                );
+                assert_eq!(
+                    reason,
+                    SubagentFailureReason::Unresponsive,
+                    "the **Dead bound** firing is DATA, not something to \
+                     string-match out of `error`"
+                );
+                assert_eq!(
+                    output, "Finding one. Finding two. Finding three.",
+                    "the **Dead Subagent**'s partial work reaches the parent"
+                );
+                assert_eq!(
+                    (metrics.input_tokens, metrics.output_tokens),
+                    (120, 34),
+                    "REAL usage — the fixture's `message_update` `usage` frame \
+                     (the bug reported 0/0 for work that cost money)"
+                );
+                assert!(
+                    metrics.duration_ms >= 1,
+                    "the wall clock to the failure, got {metrics:?}"
+                );
+            }
+            other => panic!("expected a salvaged `Failed`, got {other:?}"),
+        }
+        // The `subagent-closed` payload carries the REAL metrics + the
+        // `reason` (the sole channel by which a child's usage reaches the
+        // Client), but NOT the `output` (the transcript is already persisted).
+        let closed = wait_for_closed(&sink_events).await;
+        assert_eq!(closed["status"], "failed");
+        assert_eq!(closed["reason"], "unresponsive");
+        assert_eq!(closed["metrics"]["inputTokens"], 120);
+        assert_eq!(closed["metrics"]["outputTokens"], 34);
+        assert!(
+            closed.get("output").is_none(),
+            "the child's transcript does NOT ride a lifecycle event: {closed}"
+        );
+        assert_eq!(manager.test_drive_count(), 0, "the dead child is torn down");
+        drop(sink_events);
+        manager.detach("d1");
+
+        // ── 2. The process crashed (`Crashed`) ─────────────────────────
+        let (manager, _crashes, events, _sinks) = make_manager(Some(Duration::from_secs(30)));
+        manager
+            .attach("s1", &test_env("s1", None))
+            .await
+            .expect("the parent attach completes");
+        dispatch_child_task(&manager, "s1", "__stream_then_crash__");
+        let outcome = subagent_result_outcome_after_ack(&events, "s1").await;
+        match outcome {
+            SubagentOutcome::Failed {
+                reason,
+                error,
+                output,
+                metrics,
+            } => {
+                assert_eq!(
+                    error, "subagent worker exited unexpectedly (code 137)",
+                    "the crash still carries the exit code"
+                );
+                assert_eq!(reason, SubagentFailureReason::Crashed);
+                assert_eq!(
+                    output, "Finding one. Finding two. Finding three.",
+                    "a crashed child's partial work is not thrown away"
+                );
+                assert_eq!((metrics.input_tokens, metrics.output_tokens), (120, 34));
+            }
+            other => panic!("expected a salvaged `Failed` (crash), got {other:?}"),
+        }
+        assert_eq!(
+            manager.test_drive_count(),
+            0,
+            "the crashed child is torn down"
+        );
+        manager.detach("s1");
+
+        // ── 3. A cancel mid-silence (`Cancelled`) ──────────────────────
+        // A bound far longer than the test: ONLY the cancel may end this one.
+        let (manager, _crashes, events, _sinks) = make_manager(Some(Duration::from_secs(30)));
+        manager
+            .attach("k1", &test_env("k1", None))
+            .await
+            .expect("the parent attach completes");
+        // The `sub1` DISPATCH id — the `__cancel__` frame names that id.
+        dispatch_child_task_with_id(&manager, "k1", "__stream_then_silence__", "sub1");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while manager.test_drive_count() < 1 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(manager.test_drive_count(), 1, "the child is in flight");
+        // Let the partial chunks land in the capture, then cancel (the
+        // fixture's `SubagentCancel { id: "sub1" }` frame).
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        manager
+            .handle_for("k1")
+            .expect("the parent handle is reachable")
+            .send_prompt("__cancel__", &[])
+            .expect("the cancel prompt encodes");
+        let outcome = subagent_result_outcome_after_ack(&events, "k1").await;
+        match outcome {
+            SubagentOutcome::Failed {
+                reason,
+                error,
+                output,
+                metrics,
+            } => {
+                assert_eq!(error, "cancelled", "the cancel text is unchanged");
+                assert_eq!(reason, SubagentFailureReason::Cancelled);
+                assert_eq!(
+                    output, "Finding one. Finding two. Finding three.",
+                    "a cancelled child's partial work is not thrown away"
+                );
+                assert_eq!((metrics.input_tokens, metrics.output_tokens), (120, 34));
+            }
+            other => panic!("expected a salvaged `Failed` (cancel), got {other:?}"),
+        }
+        assert_eq!(
+            manager.test_drive_count(),
+            0,
+            "the cancelled child is torn down"
+        );
+        manager.detach("k1");
+    }
+
     /// A parent's `SubagentCancel` frame (the `IpcDispatcher`'s
     /// cancel watcher — a parent turn abort) reaches the DRIVE it names:
     /// the child is `send_abort`ed, the outcome is the `Cancelled` one,
@@ -2460,7 +2723,7 @@ mod tests {
         let outcome = subagent_result_outcome(&events, "c1")
             .unwrap_or_else(|| panic!("the cancel must resolve the dispatch: {got:?}"));
         match outcome {
-            SubagentOutcome::Failed { error } => assert_eq!(
+            SubagentOutcome::Failed { error, .. } => assert_eq!(
                 error, "cancelled",
                 "the cancel outcome — `timed out` means the frame was dropped"
             ),

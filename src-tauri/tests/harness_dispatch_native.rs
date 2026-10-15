@@ -250,7 +250,7 @@ async fn dispatch_native_a_crashed_child_is_failed_with_the_exit_code() {
     let (dispatch_rx, _cancel) = dispatch(&manager, default_launch(), "__crash__", &m1);
     let outcome = outcome(dispatch_rx, Duration::from_secs(30)).await;
     match outcome {
-        SubagentOutcome::Failed { error } => {
+        SubagentOutcome::Failed { error, .. } => {
             assert!(
                 error.contains("137"),
                 "the error carries the exit code — got: {error}"
@@ -276,7 +276,7 @@ async fn dispatch_native_times_out_and_reaps_a_hanging_child() {
     let (dispatch_rx, _cancel) = dispatch(&manager, default_launch(), "__slow__", &m1);
     let outcome = outcome(dispatch_rx, Duration::from_secs(30)).await;
     match outcome {
-        SubagentOutcome::Failed { error } => {
+        SubagentOutcome::Failed { error, .. } => {
             assert_eq!(error, "timed out", "the current timeout outcome");
         }
         other => panic!("expected `Failed {{ timed out }}`, got {other:?}"),
@@ -303,7 +303,7 @@ async fn dispatch_native_cancel_cancels_the_dispatch() {
     cancel.cancel();
     let outcome = outcome(dispatch_rx, Duration::from_secs(30)).await;
     match outcome {
-        SubagentOutcome::Failed { error } => {
+        SubagentOutcome::Failed { error, .. } => {
             assert_eq!(error, "cancelled", "the cancel outcome");
         }
         other => panic!("expected `Failed {{ cancelled }}`, got {other:?}"),
@@ -335,7 +335,7 @@ fn dispatch_native_without_a_worker_manager_fails_immediately() {
         .try_recv()
         .expect("the oneshot is already resolved (not configured)");
     match outcome {
-        SubagentOutcome::Failed { error } => {
+        SubagentOutcome::Failed { error, .. } => {
             assert!(
                 error.contains("not configured"),
                 "the error says the dispatch is not configured — got: {error}"
@@ -570,7 +570,7 @@ async fn dispatch_native_an_unknown_model_is_failed() {
     );
     let outcome = outcome(dispatch_rx, Duration::from_secs(30)).await;
     match outcome {
-        SubagentOutcome::Failed { error } => {
+        SubagentOutcome::Failed { error, .. } => {
             assert!(
                 error.contains("unknown model"),
                 "the error says the model is unknown — got: {error}"

@@ -138,7 +138,13 @@ impl SubagentSessionManager {
         let Some(wm) = self.worker_manager.get().cloned() else {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(SubagentOutcome::Failed {
+                // A preflight failure — the child NEVER started, so the empty
+                // `output` / default `metrics` are deliberate: nothing was
+                // ever produced.
+                reason: SubagentFailureReason::Other,
                 error: "native subagent dispatch is not configured".to_string(),
+                output: String::new(),
+                metrics: SubagentMetrics::default(),
             });
             return (rx, SubagentCancel::none());
         };
@@ -245,6 +251,23 @@ pub struct SubagentMetrics {
     pub duration_ms: u64,
 }
 
+/// Why a **Subagent session** ended without settling (ADR 0055). DATA, not
+/// prose — the `subagent-closed` payload's `reason` field and the card's short
+/// line read this; NOTHING may string-match `error` to find out what happened.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentFailureReason {
+    /// The **Dead bound** won — silent with nothing in flight.
+    Unresponsive,
+    /// The **Worker process** exited unexpectedly.
+    Crashed,
+    /// A Stop on the parent (or an app-exit teardown).
+    Cancelled,
+    /// Anything else (a preflight failure — the child never started).
+    #[default]
+    Other,
+}
+
 /// The outcome of a subagent dispatch. `Serialize` / `Deserialize` /
 /// `Clone` (ADR 0025 Task 2): the `SubagentResult` wire frame carries it
 /// verbatim (the Supervisor → Worker resolution), and the client-side
@@ -258,7 +281,23 @@ pub enum SubagentOutcome {
         metrics: SubagentMetrics,
     },
     /// The task failed (or was cancelled — `error` includes `"cancelled"`).
-    Failed { error: String },
+    /// A **Dead Subagent** is NEVER `Completed`: it never decided it was
+    /// finished. The status stays `failed`; the SALVAGE rides alongside.
+    Failed {
+        /// Why it ended (the machine-readable answer — never parsed out of
+        /// `error`). `#[serde(default)]` so a stale Worker's payload decodes.
+        #[serde(default)]
+        reason: SubagentFailureReason,
+        error: String,
+        /// Whatever the child had produced (the `SubagentCapture`'s text) — `""`
+        /// when there was nothing. Never a substitute for `Completed`.
+        #[serde(default)]
+        output: String,
+        /// REAL accumulated usage + wall clock (the failed path used to report
+        /// `SubagentMetrics::default()` — 0 tokens for work that really cost money).
+        #[serde(default)]
+        metrics: SubagentMetrics,
+    },
 }
 
 #[cfg(test)]
@@ -596,7 +635,7 @@ mod tests {
         );
         let outcome = outcome(dispatch_rx, Duration::from_secs(30)).await;
         match outcome {
-            SubagentOutcome::Failed { error } => {
+            SubagentOutcome::Failed { error, .. } => {
                 assert_eq!(
                     error, "subagent worker exited unexpectedly (code 137)",
                     "the crash carries the EXIT CODE in the error"
@@ -655,7 +694,7 @@ mod tests {
         assert!(
             matches!(
                 outcome,
-                SubagentOutcome::Failed { ref error } if error == "timed out"
+                SubagentOutcome::Failed { ref error, .. } if error == "timed out"
             ),
             "a hanging child settles `Failed` (timed out) — got {outcome:?}"
         );
@@ -694,7 +733,7 @@ mod tests {
         assert!(
             matches!(
                 outcome,
-                SubagentOutcome::Failed { ref error } if error == "cancelled"
+                SubagentOutcome::Failed { ref error, .. } if error == "cancelled"
             ),
             "a cancel settles `Failed` (cancelled) — got {outcome:?}"
         );
@@ -729,7 +768,7 @@ mod tests {
         assert!(
             matches!(
                 outcome,
-                SubagentOutcome::Failed { ref error }
+                SubagentOutcome::Failed { ref error, .. }
                     if error == "native subagent dispatch is not configured"
             ),
             "a `None` `WorkerManager` is an already-resolved `Failed` — got {outcome:?}"

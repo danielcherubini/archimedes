@@ -45,6 +45,15 @@
 //!   held OPEN for ~1.5 s before its `tool_execution_end` +
 //!   `agent_settled` (the "child inside a tool call, producing NOTHING"
 //!   state — legitimately silent, so a duration bound must never cut it).
+//! - a `prompt` whose text is `"__stream_then_silence__"`: a SHORT
+//!   `agent_message_chunk` stream + a `message_update` `usage` frame (real
+//!   capture text AND real tokens), then ~10 s of SILENCE and NO
+//!   `agent_settled` — a **Dead Subagent** (the **Dead bound** reaps it, and
+//!   a cancel reaches it mid-silence). The salvage input: the drive must
+//!   carry the partial text + the real usage instead of discarding them.
+//! - a `prompt` whose text is `"__stream_then_crash__"`: the same partial
+//!   production, then exit 137 (a **Dead Subagent** by process death — the
+//!   crash path's salvage input).
 //! - a `prompt` whose text is `"__cancel__"`: a `SubagentCancel` frame
 //!   (the `SubagentCancel` routing test).
 //! - a `prompt` whose text is `"__stderr__"`: a line on STDERR and NO
@@ -82,6 +91,12 @@ const LONG_STREAM_GAP: std::time::Duration = std::time::Duration::from_millis(10
 /// open (~1.5 s — the child is silent for 5× the injected bound while it is
 /// legitimately blocked inside the tool).
 const IN_TOOL_HOLD: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// How long the `__stream_then_silence__` scenario stays SILENT after its
+/// partial production (~10 s — LONGER than any bound the tests inject, so
+/// the **Dead bound** is the only thing that can end the dispatch, and a
+/// cancel mid-silence is unambiguously the cancel arm).
+const SILENCE_AFTER_STREAM: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Emit one outbound frame (one JSONL line — the `protocol` encode).
 fn emit<W: Write>(stdout: &mut W, frame: &Outbound) {
@@ -121,6 +136,50 @@ fn emit_long_chunk_stream<W: Write>(stdout: &mut W, session_id: &str) {
             },
         );
         std::thread::sleep(LONG_STREAM_GAP);
+    }
+}
+
+/// The PARTIAL production both salvage scenarios emit before they die: a
+/// `message_update` `usage` frame (so `SubagentCapture::usage()` reports REAL
+/// tokens — the failed path used to report 0 for work that really cost money)
+/// followed by three `agent_message_chunk` `SinkFrame`s on one `messageId`
+/// (so `SubagentCapture::captured_text()` is non-empty — the salvage the
+/// parent must receive).
+///
+/// The `messageId` is `m9` — neither `emit_canned_turn`'s `m1` nor
+/// `emit_long_chunk_stream`'s `m2` — and it is NOT a bookkeeping id, so the
+/// capture's last-`messageId`-with-non-empty-text rule picks it up. Neither
+/// scenario emits `agent_settled`: a **Dead Subagent** never decided it was
+/// finished, and a settle frame here would erase the very failure being tested.
+fn emit_partial_progress<W: Write>(stdout: &mut W, session_id: &str) {
+    emit(
+        stdout,
+        &Outbound::Event {
+            event: RpcEvent::message_update {
+                usage: serde_json::json!({ "inputTokens": 120, "outputTokens": 34 }),
+                assistant_message_event: serde_json::json!({
+                    "type": "text_delta",
+                    "contentIndex": 0,
+                    "delta": "partial "
+                }),
+            },
+        },
+    );
+    for text in ["Finding one. ", "Finding two. ", "Finding three."] {
+        emit(
+            stdout,
+            &Outbound::SinkFrame {
+                event: "session-update".to_string(),
+                payload: serde_json::json!({
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": "m9",
+                        "content": { "type": "text", "text": text }
+                    }
+                }),
+            },
+        );
     }
 }
 
@@ -558,6 +617,35 @@ fn main() {
                             event: RpcEvent::agent_settled,
                         },
                     );
+                }
+                // The salvage input for the **Dead bound** / cancel paths: a
+                // little REAL production (capture text + a `usage` frame),
+                // then ~10 s of SILENCE and NO `agent_settled`. With a short
+                // injected bound the drive arms its silence clock (the chunks
+                // are not inside a tool call, so nothing blocks it) and reaps
+                // the child — the capture must be non-empty at that moment.
+                // The same scenario also serves the CANCEL case (cancel it
+                // mid-silence).
+                "__stream_then_silence__" => {
+                    emit_partial_progress(&mut stdout, &sid);
+                    std::thread::sleep(SILENCE_AFTER_STREAM);
+                    // Never reached in the tests (the bound / the cancel wins
+                    // long before); the settle keeps the fixture well-formed
+                    // if the sleep ever does complete.
+                    emit(
+                        &mut stdout,
+                        &Outbound::Event {
+                            event: RpcEvent::agent_settled,
+                        },
+                    );
+                }
+                // The salvage input for the CRASH path: the same partial
+                // production, then exit 137 (NO `agent_settled` — the process
+                // death is the failure).
+                "__stream_then_crash__" => {
+                    emit_partial_progress(&mut stdout, &sid);
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    std::process::exit(137);
                 }
                 // The `interactive-event` `SinkFrame` (the `todos_update`
                 // push — the frontend's `useInteractive.applyTodoUpdate`
