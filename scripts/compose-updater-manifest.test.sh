@@ -481,6 +481,143 @@ assert_manifest_eq "every url is pinned to the tag, never /releases/latest/" \
 assert_manifest_eq "at least one platform is present" ".platforms | length >= 1" "true"
 assert_manifest_eq "the notes are passed through" ".notes" "Archimedes $tag"
 
+# ---------------------------------------------------------------------------
+# 10. The Fedora rpm payload is its own installed form. `tauri-bundler`'s rpm
+#     module names it `{product_name}-{version}-{release}.{arch}.rpm` with the
+#     release defaulting to `1` and the arch from the Rust-style table
+#     (`x86_64`), so the name is DASH-separated and never the deb's
+#     underscore/`amd64` spelling — hence a pattern of its own. It claims a
+#     distinct slot and lands on `linux-x86_64-rpm`, because the plugin's
+#     `get_urls` searches `{os}-{arch}-{installer}` BEFORE the bare key: a Fedora
+#     install with no `-rpm` key falls through to the AppImage and dies in
+#     `install_rpm`'s format check after downloading in full. The fixture here is
+#     a realistic release minus the deb — rpm is the only package format on disk.
+# ---------------------------------------------------------------------------
+rpm_sig="Archimedes-0.2.0-1.x86_64.rpm.sig"
+rpm_payload="Archimedes-0.2.0-1.x86_64.rpm"
+
+dir="$tmp_root/rpm-key"
+make_sigs_dir "$dir/sigs" "$win_sig" "$appimage_targz_sig" "$appimage_bare_sig" "$rpm_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo"
+assert_eq "the rpm fixture composes instead of failing as unrecognized" "0" "$status"
+assert_manifest_eq "the rpm fixture emits the rpm key alongside the AppImage keys" \
+  '.platforms | keys | sort | join(" ")' \
+  "linux-x86_64 linux-x86_64-appimage linux-x86_64-rpm windows-x86_64 windows-x86_64-nsis"
+assert_manifest_eq "linux-x86_64-rpm serves the rpm" \
+  ".platforms[\"linux-x86_64-rpm\"].url" "$base_url/$rpm_payload"
+assert_manifest_eq "linux-x86_64-rpm carries a non-empty signature" \
+  ".platforms[\"linux-x86_64-rpm\"].signature | length > 0" "true"
+# The rpm must not become the bare key's payload: the bare key is what an
+# AppImage install resolves, and it keeps the tar.gz pair it has always kept.
+assert_manifest_eq "the bare linux key still serves the AppImage tar.gz next to an rpm" \
+  ".platforms[\"linux-x86_64\"].url" "$base_url/$appimage_targz_payload"
+assert_manifest_eq "the appimage key still serves the AppImage tar.gz next to an rpm" \
+  ".platforms[\"linux-x86_64-appimage\"].url" "$base_url/$appimage_targz_payload"
+
+# ---------------------------------------------------------------------------
+# 11. The full fixture — every shipped shape at once (nsis-less Windows `.exe`,
+#     AppImage bare + tar.gz, deb, rpm): SIX keys, and each installer key still
+#     names its own format. One key per installed form is the whole point of the
+#     composer, so the comparison is against the whole sorted key set.
+# ---------------------------------------------------------------------------
+six_keys='linux-x86_64 linux-x86_64-appimage linux-x86_64-deb linux-x86_64-rpm windows-x86_64 windows-x86_64-nsis'
+
+dir="$tmp_root/full-set-with-rpm"
+make_sigs_dir "$dir/sigs" \
+  "$win_exe_sig" "$appimage_targz_sig" "$appimage_bare_sig" "$deb_sig" "$rpm_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo" --notes "Archimedes $tag"
+assert_eq "the full five-plus-rpm fixture exits 0" "0" "$status"
+assert_manifest_eq "the full fixture with an rpm emits all six platform keys" \
+  '.platforms | keys | sort | join(" ")' "$six_keys"
+jq -e . "$out_file" >/dev/null 2>&1 && echo "ok   case 11 manifest parses with jq" || {
+  echo "FAIL case 11 manifest parses with jq"
+  failures=$((failures + 1))
+}
+assert_manifest_eq "the bare linux key is still the AppImage in a six-key manifest" \
+  ".platforms[\"linux-x86_64\"].url" "$base_url/$appimage_targz_payload"
+assert_manifest_eq "the deb key is still the deb in a six-key manifest" \
+  ".platforms[\"linux-x86_64-deb\"].url" "$base_url/$deb_payload"
+assert_manifest_eq "the rpm key is the rpm in a six-key manifest" \
+  ".platforms[\"linux-x86_64-rpm\"].url" "$base_url/$rpm_payload"
+assert_manifest_eq "both Windows keys still serve the raw installer here" \
+  "[.platforms[\"windows-x86_64\",\"windows-x86_64-nsis\"] | .url | endswith(\"-setup.exe\")] | all" "true"
+assert_manifest_eq "no key is served the rpm by accident" \
+  "[.platforms | to_entries[] | select(.key != \"linux-x86_64-rpm\") | .value.url | endswith(\".rpm\")] | any" "false"
+
+# ---------------------------------------------------------------------------
+# 12. rpm and deb coexist: neither key moves, and neither format's pattern
+#     swallows the other's asset (the deb's `*_amd64` and the rpm's `*_x86_64`
+#     spellings are different strings, so a `*_amd64.deb` can never claim the
+#     rpm slot or vice versa).
+# ---------------------------------------------------------------------------
+dir="$tmp_root/rpm-and-deb"
+make_sigs_dir "$dir/sigs" "$appimage_bare_sig" "$deb_sig" "$rpm_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo"
+assert_eq "an rpm and a deb in one release compose together" "0" "$status"
+assert_manifest_eq "the rpm + deb set emits the four Linux keys and nothing else" \
+  '.platforms | keys | sort | join(" ")' \
+  "linux-x86_64 linux-x86_64-appimage linux-x86_64-deb linux-x86_64-rpm"
+assert_manifest_eq "the deb key is untouched by the rpm's presence" \
+  ".platforms[\"linux-x86_64-deb\"].url" "$base_url/$deb_payload"
+assert_manifest_eq "the rpm key is untouched by the deb's presence" \
+  ".platforms[\"linux-x86_64-rpm\"].url" "$base_url/$rpm_payload"
+assert_manifest_eq "the bare key next to rpm + deb is still the bare .AppImage" \
+  ".platforms[\"linux-x86_64\"].url" "$base_url/$appimage_bare_payload"
+assert_manifest_eq "the deb and rpm keys carry distinct payloads" \
+  "[.platforms[\"linux-x86_64-deb\",\"linux-x86_64-rpm\"] | .url] | unique | length" "2"
+
+# ---------------------------------------------------------------------------
+# 13. Two rpm signatures is a collision, not "last one wins" — the same rule the
+#     AppImage, deb and Windows slots enforce, because the loser would vanish
+#     from the manifest in silence.
+# ---------------------------------------------------------------------------
+dir="$tmp_root/two-rpms"
+make_sigs_dir "$dir/sigs" \
+  "Archimedes-0.2.0-1.x86_64.rpm.sig" "Archimedes_0.2.0_x86_64.rpm.sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo"
+assert_fails "two rpm .sigs collide instead of picking one"
+assert_contains "the rpm collision names both files" ".rpm.sig" "$output"
+assert_contains "the rpm collision says the platform is claimed twice" "same platform" "$output"
+assert_eq "no manifest survives the rpm collision" "no" "$(path_exists "$out_file")"
+
+# ---------------------------------------------------------------------------
+# 14. An rpm for an arch the pipeline does not build fails loud rather than
+#     becoming a key the client cannot reach: `aarch64` is the rpm's own arch
+#     spelling but there is no `linux-aarch64` (or Fedora-arm) updater key to
+#     put it on, so guessing would publish a manifest entry nobody can install.
+# ---------------------------------------------------------------------------
+dir="$tmp_root/rpm-unknown-arch"
+make_sigs_dir "$dir/sigs" "$appimage_bare_sig" "$rpm_sig" "Archimedes-0.2.0-1.aarch64.rpm.sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo"
+assert_fails "an *.aarch64.rpm.sig exits 1"
+assert_contains "the unknown-arch rpm is named" "Archimedes-0.2.0-1.aarch64.rpm.sig" "$output"
+assert_contains "the unknown-arch rpm is called an unrecognized signature" "unrecognized signature" "$output"
+assert_eq "no manifest survives the unknown-arch rpm" "no" "$(path_exists "$out_file")"
+# The accepted-suffix list an operator is handed must mention the rpm shape, or a
+# real rpm failure reads as "this format was never considered".
+assert_contains "the accepted-suffix list names the rpm pattern" "*_x86_64.rpm" "$output"
+
+# ---------------------------------------------------------------------------
+# 15. An rpm signature with no AppImage payload behind the Linux keys fails like
+#     the deb does (case 5): the `-rpm` key is emitted only once the bare Linux
+#     key resolved, so an rpm set with no AppImage exits 1 naming the AppImage
+#     and leaves no manifest. Emitting `linux-x86_64-rpm` over an unresolvable
+#     bare key is the same trap in Fedora clothing — and a partial
+#     `latest.json` uploaded over a good one strands every other installed form.
+# ---------------------------------------------------------------------------
+dir="$tmp_root/rpm-without-appimage"
+make_sigs_dir "$dir/sigs" "$win_sig" "$rpm_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo"
+assert_fails "a Linux set with an rpm sig and no AppImage sig exits 1"
+assert_contains "that failure names the AppImage as the missing payload" "AppImage" "$output"
+assert_eq "no manifest survives the orphaned rpm signature" "no" "$(path_exists "$out_file")"
+
 if ((failures > 0)); then
   echo
   echo "$failures check(s) failed" >&2

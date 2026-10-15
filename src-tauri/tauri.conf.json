@@ -27,7 +27,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "app", "dmg", "appimage", "deb"],
+    "targets": ["nsis", "app", "dmg", "appimage", "deb", "rpm"],
     "shortDescription": "Archimedes Desktop Coding Agent",
     "category": "DeveloperTool",
     "createUpdaterArtifacts": true,
