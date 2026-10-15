@@ -48,6 +48,44 @@ jobs:
           rustup default "$(rustup show active-toolchain | cut -d' ' -f1)"
           rustc --version
 
+      # The pnpm store is cached (see `cache: pnpm` on setup-node below); the Rust
+      # target dir is not, on either OS, so every run recompiles the dependency
+      # tree from scratch: run 38763849950 counted 563 crates compiled cold on
+      # Windows and 715 on Ubuntu, which is most of what those job times
+      # (windows 13.5 min, ubuntu 7.2, macos 7.6) spend. An empty runner image has
+      # no `~/.cargo/registry` and no `src-tauri/target`; this step gives the next
+      # one both.
+      #
+      # Placed AFTER the toolchain step on purpose: the action hashes the ACTIVE
+      # rustc (`rustc -vV` plus `rustup toolchain list`) into the key, so the key
+      # describes the compiler the cargo steps below actually run — and the
+      # pinned toolchain only becomes active once `rustup default` has run. (A
+      # rust-toolchain.toml bump changes the key regardless: that file is itself
+      # one of the hashed key files, so a bump means a cold run on every OS —
+      # stated plainly in AGENTS.md's pin rule, and never a red.)
+      #
+      # ONE input, and the action's defaults are the policy — spelled-out
+      # overrides only lie to the next reader:
+      #   - per-OS key scoping is automatic (the key carries runner OS, arch,
+      #     toolchain version and a lockfile-ish hash), so a Linux cache is never
+      #     handed to a Windows runner,
+      #   - the debug profile is what gets cached, which is what the cargo steps
+      #     below (fmt aside, which compiles nothing) build — `pnpm build` is
+      #     `tsc && vite build` and touches no Rust at all,
+      #   - `cache-all-crates` defaults false: this workspace's OWN crates are not
+      #     restored, only third-party deps. Right call for a PR workflow — our
+      #     code changes every run, so restoring it would pay upload+download
+      #     bytes for artifacts that are stale before the first compile.
+      #
+      # Honest cost: this consumes the repo's shared 10 GB Actions cache quota,
+      # and entries are evicted once they are 7 days unhit. A key miss (a lockfile
+      # change, a toolchain bump, an evicted entry) is exactly today's behavior —
+      # a cold compile, never a red build.
+      - name: Cache the Rust dependencies
+        uses: Swatinem/rust-cache@v2 # latest major; current release v2.9.2
+        with:
+          workspaces: src-tauri
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
