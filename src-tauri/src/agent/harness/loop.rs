@@ -2435,6 +2435,30 @@ mod tests {
     use crate::agent::worker::protocol::{StartEnv, StartMode};
     use crate::storage::Db;
 
+    /// The settle bound for this module's spawned-loop / round-trip waits.
+    ///
+    /// Dev machines see this whole suite in ~10 s on 8 cores, so the bare 5 s
+    /// bounds these waits used were tuned against margins they never came
+    /// close to spending. The shared 4-core CI runners starve SPAWNED tasks
+    /// long enough to lose that margin: three DIFFERENT pre-existing timing
+    /// tests tripped across three consecutive runs — the macOS `worker_e2e`
+    /// round-trip (run 38739902831), then `a_stop_mid_mcp_call_cancels` on
+    /// Windows (run 38750380996) alongside the macOS mcp http stream test
+    /// (run 38750373114), then
+    /// `a_cancel_stops_the_remaining_tool_calls_in_a_batch` +
+    /// `a_compact_control_command_compacts_when_idle` on 1c5a0e6's runs.
+    ///
+    /// This is NOT a weakened assertion. Every wait still fails LOUDLY — its
+    /// own `.expect(...)` / `panic!(...)` names the invariant it protects — it
+    /// just gets 15 s of patience instead of 5, so a real hang still fails and
+    /// CI only stops reporting "merely slow". The durations that ARE the thing
+    /// under test (retry backoffs, provider stub delays, settle beats, read
+    /// timeouts) stay exactly where they were tuned.
+    const SETTLE: Duration = Duration::from_secs(15);
+    /// `SETTLE` as a count of milliseconds, for `wait_for_event`'s
+    /// `timeout_ms` parameter.
+    const SETTLE_MS: u64 = 15_000;
+
     /// A `SudoRunner` that records a call (the tests assert the
     /// elevated command was / was NOT executed) and never runs it.
     struct RecordingSudoRunner {
@@ -2895,7 +2919,7 @@ mod tests {
         let task = tokio::spawn(async move { loop_.handle_prompt(&text_prompt("hello")).await });
         wait_for_event(
             &mut events_rx,
-            5000,
+            SETTLE_MS,
             |e| matches!(e, RpcEvent::tool_execution_start { tool_name, .. } if tool_name == "ask"),
         )
         .await
@@ -2970,7 +2994,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .cancel();
-        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+        let _ = tokio::time::timeout(SETTLE, task).await;
     }
 
     /// (finding 8a) A turn with 2 tool calls: a cancel after the first
@@ -3012,7 +3036,7 @@ mod tests {
         // The first tool starts (the `ask` blocks until the cancel).
         wait_for_event(
             &mut events_rx,
-            5000,
+            SETTLE_MS,
             |e| matches!(e, RpcEvent::tool_execution_start { tool_name, .. } if tool_name == "ask"),
         )
         .await
@@ -3022,11 +3046,11 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .cancel();
-        let _ = tokio::time::timeout(Duration::from_secs(5), task)
+        let _ = tokio::time::timeout(SETTLE, task)
             .await
             .expect("the turn settled after the cancel (it did not wait out the `ask`)");
         // The `read` was NOT executed — a cancelled tool result.
-        let end = wait_for_event(&mut events_rx, 5000, |e| {
+        let end = wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::tool_execution_end { tool_call_id, .. } if tool_call_id == "t2")
         })
         .await
@@ -3042,7 +3066,7 @@ mod tests {
             "the skipped call is NOT executed"
         );
         assert!(is_error, "the skipped call is an error result");
-        wait_for_event(&mut events_rx, 5000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -3071,10 +3095,10 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .cancel();
-        let _ = tokio::time::timeout(Duration::from_secs(5), task)
+        let _ = tokio::time::timeout(SETTLE, task)
             .await
             .expect("the cancel settled the turn (it did not wait out the model)");
-        wait_for_event(&mut events_rx, 5000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -3115,7 +3139,7 @@ mod tests {
         loop_.handle_prompt(&text_prompt("hello")).await;
         // The skipped prompt's settle (pre-fix this was missing → the
         // `send_prompt` caller hung).
-        wait_for_event(&mut events_rx, 5000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -3162,7 +3186,7 @@ mod tests {
         let _task = tokio::spawn(async move { loop_.run().await });
         // The drained prompt's settle (pre-fix missing → the `send_prompt`
         // caller hung).
-        wait_for_event(&mut events_rx, 5000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -3193,12 +3217,12 @@ mod tests {
         loop_.handle_prompt(&text_prompt("hello")).await;
         // The failed turn settles with `turn_end` (the timeline closes) +
         // `agent_settled` (the reliable settle signal) — `turn_end` FIRST.
-        wait_for_event(&mut events_rx, 5000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::turn_end { .. })
         })
         .await
         .expect("turn_end after the failed model call (finding 7)");
-        wait_for_event(&mut events_rx, 5000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -3243,7 +3267,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .cancel();
-        let _ = tokio::time::timeout(Duration::from_secs(5), task)
+        let _ = tokio::time::timeout(SETTLE, task)
             .await
             .expect(
                 "the turn settled promptly (the Stop won the race — the prompt has no deadline to wait out)",
@@ -3252,7 +3276,7 @@ mod tests {
             !ran.load(Ordering::SeqCst),
             "the elevated command was NEVER executed"
         );
-        let end = wait_for_event(&mut events_rx, 5000, |e| {
+        let end = wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::tool_execution_end { tool_call_id, .. } if tool_call_id == "t1")
         })
         .await
@@ -3278,7 +3302,7 @@ mod tests {
             "the sudo cancel result is the honest kill-behavior text (finding 3), not the generic `cancelled`"
         );
         assert!(is_error, "the cancelled flow is an error result");
-        wait_for_event(&mut events_rx, 5000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -3352,7 +3376,7 @@ mod tests {
             RetryPolicy::new_with(3, Duration::from_secs(30)),
         );
         let task = tokio::spawn(async move { loop_.handle_prompt(&text_prompt("hello")).await });
-        wait_for_event(&mut events_rx, 5000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::auto_retry_start { .. })
         })
         .await
@@ -3362,10 +3386,10 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .cancel();
-        let _ = tokio::time::timeout(Duration::from_secs(5), task)
+        let _ = tokio::time::timeout(SETTLE, task)
             .await
             .expect("the cancel settled the turn (the 30 s backoff was cut short)");
-        wait_for_event(&mut events_rx, 5000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -3421,7 +3445,7 @@ mod tests {
                 .any(|m| matches!(m.role, ChatRole::System)),
             "no summary message was inserted"
         );
-        let end = wait_for_event(&mut events_rx, 5000, |e| {
+        let end = wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::compaction_end { .. })
         })
         .await
@@ -3490,7 +3514,7 @@ mod tests {
         rx: &mut mpsc::UnboundedReceiver<RpcEvent>,
         pred: impl Fn(&RpcEvent) -> bool,
     ) -> Vec<RpcEvent> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + SETTLE;
         let mut events = Vec::new();
         while tokio::time::Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -3937,7 +3961,7 @@ mod tests {
         );
         loop_.handle_prompt(&text_prompt("hello")).await;
 
-        let end = wait_for_event(&mut events_rx, 5000, |e| {
+        let end = wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::tool_execution_end { tool_call_id, .. } if tool_call_id == "t1")
         })
         .await
@@ -4027,12 +4051,12 @@ mod tests {
         );
         loop_.handle_prompt(&text_prompt("hello")).await;
 
-        wait_for_event(&mut events_rx, 5000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::tool_execution_end { tool_call_id, .. } if tool_call_id == "t1")
         })
         .await
         .expect("the abandoned tool call is closed");
-        wait_for_event(&mut events_rx, 5000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -4100,7 +4124,7 @@ mod tests {
         loop_.messages = large_transcript(3);
         loop_.handle_prompt(&text_prompt("hello")).await;
 
-        let end = wait_for_event(&mut events_rx, 5000, |e| {
+        let end = wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::tool_execution_end { tool_call_id, .. } if tool_call_id == "t1")
         })
         .await
@@ -4509,7 +4533,7 @@ mod tests {
             "a skipped compaction makes no model call"
         );
         session_cancel.cancel();
-        let _ = tokio::time::timeout(Duration::from_secs(5), join).await;
+        let _ = tokio::time::timeout(SETTLE, join).await;
     }
 
     /// The Stop (Esc → `cancel_session` → `Inbound::Abort`) cancels whatever
@@ -4547,7 +4571,7 @@ mod tests {
             .send(ControlCmd::Compact { instructions: None })
             .await
             .expect("the loop's control queue is open");
-        wait_for_event(&mut events_rx, 5000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::compaction_start { .. })
         })
         .await
@@ -4559,7 +4583,7 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner())
             .clone()
             .cancel();
-        let end = wait_for_event(&mut events_rx, 5000, |e| {
+        let end = wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::compaction_end { .. })
         })
         .await
@@ -4580,7 +4604,7 @@ mod tests {
             "an aborted compaction rewrote NOTHING (a failed compaction is never a lost context)"
         );
         session_cancel.cancel();
-        let _ = tokio::time::timeout(Duration::from_secs(5), join).await;
+        let _ = tokio::time::timeout(SETTLE, join).await;
     }
 
     /// (ADR 0017) `prepend_system` PERSISTS the leading system message at
@@ -5876,7 +5900,7 @@ mod tests {
         );
         loop_.set_enabled_tools(Some(vec!["read".to_string()]));
         loop_.handle_prompt(&text_prompt("hello")).await;
-        let end = wait_for_event(&mut events_rx, 5000, |e| {
+        let end = wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::tool_execution_end { tool_call_id, .. } if tool_call_id == "t1")
         })
         .await
@@ -5892,7 +5916,7 @@ mod tests {
             result["content"][0]["text"], "tool not enabled: ls",
             "the model gets a tool-result error (the tool was NOT executed)"
         );
-        wait_for_event(&mut events_rx, 5000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -6958,7 +6982,7 @@ mod tests {
         );
         loop_.handle_prompt(&text_prompt("go")).await;
         // The `subagent` tool result: the `Completed` output verbatim.
-        let end = wait_for_event(&mut events_rx, 10000, |e| {
+        let end = wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::tool_execution_end { tool_call_id, .. } if tool_call_id == "t1")
         })
         .await
@@ -6974,7 +6998,7 @@ mod tests {
             result["content"][0]["text"], "the answer",
             "the tool result is the `Completed` output verbatim"
         );
-        wait_for_event(&mut events_rx, 10000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -7104,7 +7128,7 @@ mod tests {
             None,
         );
         loop_.handle_prompt(&text_prompt("go")).await;
-        wait_for_event(&mut events_rx, 10000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -7275,8 +7299,8 @@ mod tests {
         // The `join_all` batch blocks (the oneshots never resolve) until the
         // turn is cancelled — so drive it in a task.
         let task = tokio::spawn(async move { loop_.handle_prompt(&text_prompt("go")).await });
-        // Wait (up to 5 s) for BOTH subagents to be dispatched (in-flight).
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        // Wait (up to `SETTLE`) for BOTH subagents to be dispatched (in-flight).
+        let deadline = tokio::time::Instant::now() + SETTLE;
         while cancels.lock().unwrap().len() < 2 && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
@@ -7289,10 +7313,10 @@ mod tests {
         turn_cancel.lock().unwrap().cancel();
         // The turn must SETTLE (the `join_all` unwinds through both cancel
         // arms — it does NOT hang on the never-resolving oneshots).
-        let _ = tokio::time::timeout(Duration::from_secs(5), task)
+        let _ = tokio::time::timeout(SETTLE, task)
             .await
             .expect("the turn settled after the cancel (no hang)");
-        wait_for_event(&mut events_rx, 5000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -7533,18 +7557,18 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         // Cancel the turn — t2 (in-flight) is cancelled; t1's result is cached.
         turn_cancel.lock().unwrap().cancel();
-        let _ = tokio::time::timeout(Duration::from_secs(5), task)
+        let _ = tokio::time::timeout(SETTLE, task)
             .await
             .expect("the turn settled after the cancel");
         // Collect the tool results (drain until `agent_settled` — the
         // `tool_execution_end` events are emitted BEFORE the settle, so a
         // `wait_for_event` first would have consumed them and the drain
         // below would see nothing).
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + SETTLE;
         let mut results: HashMap<String, Value> = HashMap::new();
         loop {
             if tokio::time::Instant::now() >= deadline {
-                panic!("agent_settled not seen within 5 s");
+                panic!("agent_settled not seen within the settle bound");
             }
             match tokio::time::timeout(Duration::from_millis(100), events_rx.recv()).await {
                 Ok(Some(e)) => {
@@ -7628,7 +7652,7 @@ mod tests {
         );
         loop_.handle_prompt(&text_prompt("go")).await;
         // The `subagent` tool result: the `Failed` error, verbatim.
-        let end = wait_for_event(&mut events_rx, 10000, |e| {
+        let end = wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::tool_execution_end { tool_call_id, .. } if tool_call_id == "t1")
         })
         .await
@@ -7644,7 +7668,7 @@ mod tests {
             result["content"][0]["text"], "subagent failed: boom",
             "the tool result carries the `Failed` error verbatim"
         );
-        wait_for_event(&mut events_rx, 10000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -7699,7 +7723,7 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner())
             .cancel();
         turn.await.expect("the turn task completed");
-        let end = wait_for_event(&mut events_rx, 10000, |e| {
+        let end = wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::tool_execution_end { tool_call_id, .. } if tool_call_id == "t1")
         })
         .await
@@ -7715,7 +7739,7 @@ mod tests {
             result["content"][0]["text"], "cancelled",
             "the `Cancelled` tool result"
         );
-        wait_for_event(&mut events_rx, 10000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -7790,7 +7814,7 @@ mod tests {
         // no cancel), so a plain await (the `loop_` stays in scope for
         // the `messages` assertion below).
         loop_.handle_prompt(&text_prompt("read the image")).await;
-        wait_for_event(&mut events_rx, 5000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -7852,7 +7876,7 @@ mod tests {
                 }],
             })
             .await;
-        wait_for_event(&mut events_rx, 5000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -7883,7 +7907,7 @@ mod tests {
                 }],
             })
             .await;
-        wait_for_event(&mut events_rx, 5000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -7940,7 +7964,7 @@ mod tests {
 
         // Turn 1: has a tool call and follow-up completion
         loop_.handle_prompt(&text_prompt("run ls")).await;
-        wait_for_event(&mut events_rx, 5000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -7948,7 +7972,7 @@ mod tests {
 
         // Turn 2: another conversational prompt
         loop_.handle_prompt(&text_prompt("second turn")).await;
-        wait_for_event(&mut events_rx, 5000, |e| {
+        wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -8019,7 +8043,7 @@ mod tests {
         loop_.mcp = McpManager::new(dir.clone(), dir.clone(), None);
         loop_.handle_prompt(&text_prompt("call the mcp tool")).await;
         // The `mcp` tool result round-tripped (the `echo` → "hi").
-        let end = wait_for_event(&mut events_rx, 10000, |e| {
+        let end = wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::tool_execution_end { tool_call_id, .. } if tool_call_id == "m1")
         })
         .await
@@ -8080,17 +8104,17 @@ mod tests {
         );
         loop_.mcp = McpManager::new(dir.clone(), dir.clone(), None);
         let task = tokio::spawn(async move { loop_.handle_prompt(&text_prompt("call mcp")).await });
-        // The `mcp` tool starts (the `hang` never answers). 10 s, matching
-        // the sibling mcp round-trip test's bound above: this wait covers
+        // The `mcp` tool starts (the `hang` never answers). This wait covers
         // SPAWNING the MCP server process + handshake inside a spawned
         // task, and a loaded windows-latest runner produced one run where
         // that exceeded 5 s (run 38750380996 — timeout `()`, while the
         // SAME commit passed the test on the other runner). The assertion
         // this protects is what happens AFTER the start (the cancel), so a
-        // spawn that merely takes its time is not what the test pins.
+        // spawn that merely takes its time is not what the test pins — hence
+        // `SETTLE` rather than a locally-tuned bound.
         wait_for_event(
             &mut events_rx,
-            10000,
+            SETTLE_MS,
             |e| matches!(e, RpcEvent::tool_execution_start { tool_name, .. } if tool_name == "mcp"),
         )
         .await
@@ -8101,13 +8125,13 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .cancel();
-        match tokio::time::timeout(Duration::from_secs(5), task).await {
+        match tokio::time::timeout(SETTLE, task).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => panic!("the turn task failed: {e}"),
             Err(_) => panic!("the turn did not settle after the Stop (it waited out the `hang`)"),
         }
         // The tool result is `cancelled` (the in-flight request was cancelled).
-        let end = wait_for_event(&mut events_rx, 5000, |e| {
+        let end = wait_for_event(&mut events_rx, SETTLE_MS, |e| {
             matches!(e, RpcEvent::tool_execution_end { tool_call_id, .. } if tool_call_id == "m1")
         })
         .await
