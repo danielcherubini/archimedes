@@ -8080,10 +8080,17 @@ mod tests {
         );
         loop_.mcp = McpManager::new(dir.clone(), dir.clone(), None);
         let task = tokio::spawn(async move { loop_.handle_prompt(&text_prompt("call mcp")).await });
-        // The `mcp` tool starts (the `hang` never answers).
+        // The `mcp` tool starts (the `hang` never answers). 10 s, matching
+        // the sibling mcp round-trip test's bound above: this wait covers
+        // SPAWNING the MCP server process + handshake inside a spawned
+        // task, and a loaded windows-latest runner produced one run where
+        // that exceeded 5 s (run 38750380996 — timeout `()`, while the
+        // SAME commit passed the test on the other runner). The assertion
+        // this protects is what happens AFTER the start (the cancel), so a
+        // spawn that merely takes its time is not what the test pins.
         wait_for_event(
             &mut events_rx,
-            5000,
+            10000,
             |e| matches!(e, RpcEvent::tool_execution_start { tool_name, .. } if tool_name == "mcp"),
         )
         .await
