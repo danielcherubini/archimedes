@@ -213,10 +213,12 @@ fn a_directory_name_containing_a_quote_is_skipped() {
     // (a legal Unix directory name): the directory-name fallback carries
     // the quote → the skill is skipped, never listed.
     let tmp = tempfile::tempdir().unwrap();
+    // NOTE: the two cfg blocks are ALTERNATIVES (exactly one compiles per
+    // platform) — no early `return` needed, and clippy on the Windows
+    // runner flags one as needless.
     #[cfg(windows)]
     {
         assert_quote_component_is_unconstructible(tmp.path());
-        return;
     }
     #[cfg(not(windows))]
     {
@@ -244,6 +246,9 @@ fn a_path_containing_a_quote_is_skipped() {
     // malformed-tag class the name check guards against → the skill is
     // skipped, never listed.
     let tmp = tempfile::tempdir().unwrap();
+    // NOTE: the two cfg blocks are ALTERNATIVES (exactly one compiles per
+    // platform) — no early `return` needed, and clippy on the Windows
+    // runner flags one as needless.
     #[cfg(windows)]
     {
         // Windows: the scenario CANNOT be built — `"` is illegal in an
@@ -254,7 +259,6 @@ fn a_path_containing_a_quote_is_skipped() {
         // guarantee of the property (the helper asserts it, and fails
         // loudly if NTFS ever starts accepting the component).
         assert_quote_component_is_unconstructible(tmp.path());
-        return;
     }
     #[cfg(not(windows))]
     {
