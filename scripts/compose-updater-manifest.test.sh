@@ -92,6 +92,20 @@ assert_contains() {
   fi
 }
 
+# Pins that a retired message stays retired: a deleted policy must not come back
+# as a reassuring log line, so its old wording is asserted ABSENT.
+assert_not_contains() {
+  local what="$1" needle="$2" haystack="$3"
+  if [[ "$haystack" != *"$needle"* ]]; then
+    echo "ok   $what"
+  else
+    echo "FAIL $what"
+    echo "       expected NOT to contain: $needle"
+    echo "       actual output:           $haystack"
+    failures=$((failures + 1))
+  fi
+}
+
 assert_fails() {
   local what="$1"
   if [[ "$status" == "1" ]]; then
@@ -254,43 +268,92 @@ assert_contains "the unrecognized signature is named" "weird.txt.sig" "$output"
 assert_contains "the failure calls it an unrecognized signature" "unrecognized signature" "$output"
 
 # ---------------------------------------------------------------------------
-# 6b. The NSIS installer's own `.exe` signature. A Windows build ships the
-#     `…_x64-setup.exe` installer NEXT TO the `…_x64-setup.nsis.zip` the updater
-#     actually installs from, so `…_x64-setup.exe.sig` arrives in the sigs dir on
-#     every real Windows run. It has no manifest slot — the updater would try to
-#     unzip an `.exe` — so it is skipped DELIBERATELY and LOUDLY (a visible
-#     `skip:` line, exit still 0) rather than killed on, and rather than swallowed
-#     in silence. The five keys are unchanged by it: skipping is not emitting.
+# 6b. The raw NSIS installer's `.exe` IS a Windows updater payload.
+#     tauri-plugin-updater's `extract()` only unzips when the bytes ARE a zip and
+#     otherwise falls through to `extract_exe()` → `WindowsUpdaterType::nsis` →
+#     ShellExecuteW, so the installer a human double-clicks is installable by the
+#     updater itself. The REAL v0.1.0 release proved the need: its assets were
+#     `Archimedes_0.1.0_x64-setup.exe{,.sig}` and NO `…_setup.nsis.zip(.sig)`, so
+#     the old skip arm published a three-key manifest and Windows clients were
+#     silently frozen on 0.1.0 forever. Hence the `.exe` now CLAIMS the Windows
+#     slot instead of being set aside.
 # ---------------------------------------------------------------------------
-win_exe_sig="Archimedes_0.1.0_x64-setup.exe.sig"
+win_exe_sig="Archimedes_0.2.0_x64-setup.exe.sig"
+win_exe_payload="Archimedes_0.2.0_x64-setup.exe"
 
-dir="$tmp_root/nsis-installer-sig"
+# (a) exe-only: no zip anywhere in the release.
+dir="$tmp_root/nsis-exe-only"
+make_sigs_dir "$dir/sigs" "$win_exe_sig" "$appimage_targz_sig" "$appimage_bare_sig" "$deb_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo"
+assert_eq "the raw NSIS .exe.sig composes instead of being skipped" "0" "$status"
+assert_manifest_eq "the .exe-only set emits all five keys" \
+  '.platforms | keys | sort | join(" ")' "$five_keys"
+assert_manifest_eq "windows-x86_64 serves the .exe installer when there is no zip" \
+  ".platforms[\"windows-x86_64\"].url" "$base_url/$win_exe_payload"
+assert_manifest_eq "windows-x86_64-nsis serves the .exe installer when there is no zip" \
+  ".platforms[\"windows-x86_64-nsis\"].url" "$base_url/$win_exe_payload"
+assert_manifest_eq "the .exe URL really is the setup.exe asset" \
+  '[.platforms | to_entries[] | select(.key | startswith("windows")) | .value.url | endswith("-setup.exe")] | all' "true"
+assert_manifest_eq "the .exe signature is carried, not dropped" \
+  "[.platforms[\"windows-x86_64\",\"windows-x86_64-nsis\"] | .signature | length > 0] | all" "true"
+# The retired policy must not survive as a log line: a skip message here would
+# tell the operator Windows was left out while the manifest says otherwise.
+assert_not_contains "the retired skip line is gone" "skip: $win_exe_sig" "$output"
+assert_not_contains "the retired skipped-signature summary is gone" "signature(s) skipped" "$output"
+
+# (a2) The Windows-only release that used to fail: an `.exe`-only release has no
+#      Linux sigs, so the OLD code emitted ZERO keys and exited 1 ("no platform
+#      keys could be derived"). It is now an ordinary composition.
+dir="$tmp_root/nsis-exe-only-windows-only"
+make_sigs_dir "$dir/sigs" "$win_exe_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo"
+assert_eq "a Windows-only .exe release exits 0 instead of failing on zero keys" "0" "$status"
+assert_manifest_eq "the Windows-only .exe set emits exactly the two windows keys" \
+  '.platforms | keys | sort | join(" ")' "windows-x86_64 windows-x86_64-nsis"
+assert_manifest_eq "the Windows-only .exe manifest points at the installer" \
+  ".platforms[\"windows-x86_64\"].url" "$base_url/$win_exe_payload"
+
+# (a3) The REAL v0.1.0 asset names (recorded under Task 8), as a fixture:
+#      exe + AppImage + deb, no tar.gz, no nsis zip. This is the exact set that
+#      shipped the three-key manifest.
+dir="$tmp_root/real-v0.1.0-assets"
+make_sigs_dir "$dir/sigs" \
+  "Archimedes_0.1.0_x64-setup.exe.sig" \
+  "Archimedes_0.1.0_amd64.AppImage.sig" \
+  "Archimedes_0.1.0_amd64.deb.sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo"
+assert_eq "the real v0.1.0 asset set composes" "0" "$status"
+assert_manifest_eq "the real v0.1.0 asset set emits all five keys" \
+  '.platforms | keys | sort | join(" ")' "$five_keys"
+assert_manifest_eq "the real v0.1.0 windows key names the setup.exe" \
+  ".platforms[\"windows-x86_64\"].url" "https://github.com/$repo/releases/download/$tag/Archimedes_0.1.0_x64-setup.exe"
+
+# (b) zip AND exe: five keys, the zip wins the plain key (updater unzips it;
+#     matches tauri-action's non-preferNsis default), the exe keeps `-nsis`, and
+#     the split is announced rather than inferred from the JSON.
+dir="$tmp_root/nsis-zip-and-exe"
 make_sigs_dir "$dir/sigs" "$win_sig" "$win_exe_sig" "$appimage_targz_sig" "$appimage_bare_sig" "$deb_sig"
 out_file="$dir/out/latest.json"
 run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo"
-assert_eq "the raw NSIS .exe.sig exits 0 instead of stranding the release" "0" "$status"
-assert_contains "the skipped installer signature is named" "$win_exe_sig" "$output"
-assert_contains "the skip is announced as a skip, not silence" \
-  "skip: $win_exe_sig (installer signature, not a manifest payload)" "$output"
-assert_manifest_eq "the installer signature adds no platform key" \
+assert_eq "zip + exe composes instead of colliding" "0" "$status"
+assert_manifest_eq "zip + exe emits all five keys" \
   '.platforms | keys | sort | join(" ")' "$five_keys"
-assert_manifest_eq "no key points at the .exe installer payload" \
-  '[.platforms[].url | endswith(".exe")] | any' "false"
-
-# A skipped installer signature must also not trip the ORPHAN rule on its own:
-# a Windows-only release (no Linux sigs at all) is a legitimate composition.
-dir="$tmp_root/nsis-installer-sig-windows-only"
-make_sigs_dir "$dir/sigs" "$win_sig" "$win_exe_sig"
-out_file="$dir/out/latest.json"
-run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo"
-assert_eq "a Windows-only set with the installer .sig exits 0" "0" "$status"
-assert_manifest_eq "the Windows-only set emits exactly the two nsis keys" \
-  '.platforms | keys | sort | join(" ")' "windows-x86_64 windows-x86_64-nsis"
+assert_manifest_eq "the nsis zip wins the plain windows-x86_64 key" \
+  ".platforms[\"windows-x86_64\"].url" "$base_url/$win_payload"
+assert_manifest_eq "the raw installer keeps the windows-x86_64-nsis key" \
+  ".platforms[\"windows-x86_64-nsis\"].url" "$base_url/$win_exe_payload"
+assert_contains "the winner is announced, naming the zip as the plain-key payload" \
+  "wins windows-x86_64" "$output"
+assert_contains "the winner line names the nsis zip" "$win_payload" "$output"
+assert_contains "the winner line names the raw installer" "$win_exe_payload" "$output"
 
 # ---------------------------------------------------------------------------
-# 6c. The deliberate skip is scoped to the installer shape. A `.sig` matching NO
-#     known pattern still fails loud, and the skip must not mask it by running
-#     first: the skip is a narrow allow-list, not a general tolerance.
+# 6c. Claiming the .exe is not tolerance for everything: a `.sig` matching NO
+#     known pattern still fails loud next to it, and it must still be reported as
+#     an unrecognized ASSET rather than as an orphan.
 # ---------------------------------------------------------------------------
 dir="$tmp_root/installer-sig-plus-unknown"
 make_sigs_dir "$dir/sigs" "$win_sig" "$win_exe_sig" "weird.txt.sig"
@@ -298,7 +361,25 @@ out_file="$dir/out/latest.json"
 run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo"
 assert_fails "an unknown .sig alongside the installer .sig still exits 1"
 assert_contains "the unknown signature is still the one named" "weird.txt.sig" "$output"
+assert_contains "the failure still calls it an unrecognized signature" "unrecognized signature" "$output"
 assert_eq "no manifest survives the unknown signature" "no" "$(path_exists "$out_file")"
+
+dir="$tmp_root/installer-exe-only-plus-unknown"
+make_sigs_dir "$dir/sigs" "$win_exe_sig" "weird.txt.sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo"
+assert_fails "an unknown .sig alongside an exe-only Windows set exits 1"
+assert_contains "the unknown signature is named, not the installer" "weird.txt.sig" "$output"
+assert_eq "no manifest survives that failure" "no" "$(path_exists "$out_file")"
+
+# Two raw installers for one Windows slot is still a collision: claiming the
+# `.exe` shape must not turn into "last one wins".
+dir="$tmp_root/two-installers"
+make_sigs_dir "$dir/sigs" "Archimedes_0.2.0_x64-setup.exe.sig" "Archimedes_0.2.0_x86-setup.exe.sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo"
+assert_fails "two installer .sigs collide instead of picking one"
+assert_contains "the collision names both installers" "setup.exe.sig" "$output"
 
 # ---------------------------------------------------------------------------
 # 7. The darwin payload name carries neither version nor arch, so two archs
