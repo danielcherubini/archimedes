@@ -83,9 +83,9 @@ describe("SubagentModals (the one overlay host for every child's gates)", () => 
     // session's requests — and a `Subagent session` id is never the ACTIVE
     // session, so this is the ONLY renderer for a child's `confirm` (the
     // render-site partition). It matters: there is no prompt deadline, so a
-    // gate rendered NOWHERE strands the child until its 30-minute
-    // `settle_timeout` (`DEFAULT_SUBAGENT_SETTLE_TIMEOUT`,
-    // `src-tauri/src/agent/worker/manager.rs`).
+    // gate rendered NOWHERE strands the child INDEFINITELY (ADR 0055: a child
+    // parked on a gate holds its `tool_call_id` open, so it is an Active
+    // Subagent and `DEFAULT_SUBAGENT_DEAD_BOUND` never runs on it).
     expect(screen.getByText("Run this command with sudo?")).toBeTruthy();
     expect(screen.getByText("apt install ripgrep")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Run" })).toBeTruthy();
@@ -421,8 +421,9 @@ describe("SubagentModals (the overlay keeps only what ChatStream cannot render)"
     // `min(480, 100vw - 480)` — 320px at the 800px default, 120px at 600, a
     // ~40px sliver at 520, and at ≤ 480 the dodge's own width cap clamps to
     // 0 while its 480px offset moves the box OFF the viewport: mounted, zero
-    // width, UNREACHABLE, stranding the child for its 30-minute
-    // `settle_timeout`. That trades the branch's worst failure for a worse one,
+    // width, UNREACHABLE, stranding the child INDEFINITELY (ADR 0055 — a
+    // gate-parked child is an Active Subagent and no clock bounds it). That
+    // trades the branch's worst failure for a worse one,
     // so the dodge engages only from `GATE_PANEL_DODGE_BREAKPOINT` (760 = the
     // sheet's 480 + the 280px floor a card needs) and below it the panel keeps
     // the corner geometry — right edge, capped at 90% of the viewport: buried

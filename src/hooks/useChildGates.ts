@@ -129,8 +129,9 @@ Object.freeze(NO_GATES);
  * inline in its parent's transcript, or in the `SubagentModals` overlay — until
  * its entry is evicted. (So does a child parked on an unanswered gate, for the
  * same reason: `SubagentModals`' own doc says nothing closes the gate in the
- * meantime and only the 30-minute `DEFAULT_SUBAGENT_SETTLE_TIMEOUT` ends the
- * DELEGATION, which is not the same as closing it.) That makes the drop a
+ * meantime, and since ADR 0055 nothing times it out either — a gate-parked
+ * child holds its `tool_call_id` open, so it is an **Active Subagent** and
+ * `DEFAULT_SUBAGENT_DEAD_BOUND` never runs on it.) That makes the drop a
  * STRONGER justification than a cleanup chain would, not a weaker one: eviction
  * is the single event that takes such a gate off every surface at once — no
  * inline card, no overlay row, no alert (the snapshot no longer recognises the

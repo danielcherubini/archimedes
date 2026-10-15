@@ -36,7 +36,11 @@ pub enum SessionError {
     #[error("invalid prompt payload: {reason}")]
     InvalidPrompt { reason: String },
 
-    /// The turn did not settle within the settle timeout (a hung turn).
+    /// The turn did not settle within the turn's settle BOUND (a hung turn).
+    /// UNCONSTRUCTED today (the session layer has no turn-level bound); the
+    /// serialised `kind` string is part of the IPC contract, so this variant's
+    /// NAME is deliberately untouched by the ADR 0055 subagent rename — it is
+    /// the MAIN-session turn vocabulary, not the subagent **Dead bound**.
     #[error("settle timeout: {detail}")]
     SettleTimeout { detail: String },
 }

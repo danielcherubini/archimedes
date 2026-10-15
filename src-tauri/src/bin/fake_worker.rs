@@ -26,7 +26,7 @@
 //!   (ANY `outcome`) → the tool-execution events + `agent_settled`
 //!   (the round-trip test).
 //! - a `prompt` whose text is `"__slow__"`: sleeps 10 s before
-//!   settling (the `settle_timeout` tests).
+//!   settling (the **Dead bound** tests).
 //! - a `prompt` whose text is `"__subagent__"` /
 //!   `"__slow_subagent__"` / `"__subagent_tools__"`: a canned
 //!   `SubagentDispatch` frame (the Supervisor-side dispatch-flow test
@@ -388,7 +388,7 @@ fn emit_tool_execution_and_settle<W: Write>(stdout: &mut W, session_id: &str) {
 /// The canned `SubagentDispatch` frame (the Supervisor-side
 /// dispatch-flow test input — the `model_key` — `fake/m1` — resolves
 /// against the parent's `StartEnv` catalog; the `task` is the
-/// subagent's initial prompt — `"__slow__"` for the `settle_timeout`
+/// subagent's initial prompt — `"__slow__"` for the **Dead bound**
 /// tests, `"__subagent_tools__"`'s `launch.tools` is
 /// `Some(["subagent"])` — the empties-out-after-the-guard-minus
 /// case).
@@ -563,9 +563,9 @@ fn main() {
                     // `PermissionOutcome` was delivered verbatim).
                     emit_tool_execution_and_settle(&mut stdout, &sid);
                 }
-                // The slow settle (the `settle_timeout` tests — a 10 s
-                // sleep before settling; the `settle_timeout` bound is
-                // shorter, so the timeout wins).
+                // The slow settle (the **Dead bound** tests — a 10 s
+                // sleep before settling; the **Dead bound** is
+                // shorter, so the child is reaped as Dead).
                 "__slow__" => {
                     std::thread::sleep(std::time::Duration::from_secs(10));
                     emit_canned_turn(&mut stdout, &sid, &incarnation);
@@ -708,7 +708,7 @@ fn main() {
                         },
                     );
                 }
-                // The `settle_timeout` test input (the same frame with
+                // The **Dead bound** test input (the same frame with
                 // the SLOW child task — the subagent's initial
                 // prompt is `"__slow__"` → the 10 s settle).
                 "__slow_subagent__" => {

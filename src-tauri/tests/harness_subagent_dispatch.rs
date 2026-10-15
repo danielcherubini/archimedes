@@ -74,13 +74,13 @@ impl WorkerFactory for FakeWorkerFactory {
 /// Task 5 re-plumb — the native dispatch runs in a `fake_worker`
 /// process): the parent `ns1` is `attach`ed with the given `catalog`
 /// (the `dispatch_subagent` flow resolves the child's `model` against
-/// it) + a short settle bound. The `sink_for` lookup returns the given
+/// it) + a short **Dead bound**. The `sink_for` lookup returns the given
 /// sink for the parent (the `subagent-session-started` /
 /// `subagent-closed` UI lifecycle events are delivered on the PARENT's
 /// sink).
 async fn make_manager(
     catalog: ModelCatalog,
-    settle_timeout: Duration,
+    dead_bound: Duration,
     sink: Arc<dyn EventSink>,
 ) -> Arc<SubagentSessionManager> {
     let factory: Arc<dyn WorkerFactory> = Arc::new(FakeWorkerFactory);
@@ -94,7 +94,7 @@ async fn make_manager(
         ),
         Arc::new(move |id: &str| (id == "ns1").then(|| sink.clone())),
     )
-    .with_settle_timeout(settle_timeout);
+    .with_dead_bound(dead_bound);
     let wm = Arc::new(wm);
     let env = StartEnv::from_parts(
         "ns1".to_string(),

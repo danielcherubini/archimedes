@@ -908,8 +908,9 @@ describe("useAttentionAlert — a stalled PARENT re-times its children's countdo
     // arrives as `removeRequest(parent, …)` and is a no-op here (ADR 0040's
     // amendment records the mis-keying as a known upstream defect). A crashed
     // child's open `ask` therefore stays on screen: the delegation ends at the
-    // Worker's exit — or, for a child merely PARKED on an unanswered gate, at the
-    // 30-minute `settle_timeout` — never because a close frame arrived.
+    // Worker's exit, and for a child merely PARKED on an unanswered gate the
+    // delegation ends on NO clock at all (ADR 0055 makes a gate-parked child an
+    // Active Subagent). Either way it is never because a close frame arrived.
     useSessions.setState({ sessions: [row("main1")], activeSessionId: "main1" });
     renderHook(() => useAttentionAlert());
     act(() => {

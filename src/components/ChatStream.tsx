@@ -314,8 +314,9 @@ export default function ChatStream() {
   // are on screen in the `SubagentModals` overlay, so the cue means "you owe
   // something, somewhere" and never lies. Which Session owes it is the inline
   // card's and the parent row's status' business, not this dot's, and an
-  // unrendered gate would strand the child until its 30-minute `settle_timeout`
-  // anyway — so counting wide is both honest and safe. Called UNCONDITIONALLY,
+  // unrendered gate would strand the child INDEFINITELY anyway (ADR 0055: a
+  // child parked on a gate is an Active Subagent and no clock bounds it)
+  // — so counting wide is both honest and safe. Called UNCONDITIONALLY,
   // BEFORE the `!activeSessionId` early return below: it reads stores via
   // `useSyncExternalStore` (zustand), so
   // calling it only on the full-frame path would change the hook count when the

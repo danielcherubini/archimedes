@@ -56,7 +56,7 @@ describe("SubagentDelegatingCard (the subagent tool card with the nested list)",
       entry({
         sessionId: "sub1",
         status: "failed",
-        error: "timed out",
+        error: "unresponsive",
         reason: "unresponsive",
       }),
     );
@@ -71,7 +71,9 @@ describe("SubagentDelegatingCard (the subagent tool card with the nested list)",
     expect(
       screen.getByText("Unresponsive — no output for a long period"),
     ).toBeTruthy();
-    expect(screen.queryByText("timed out")).toBeNull();
+    // The raw `error` wire text must never reach this row (the label comes from
+    // `reason`). Asserting the CURRENT wire string keeps the pin real.
+    expect(screen.queryByText("unresponsive")).toBeNull();
   });
 
   it("renders `Cancelled` for a cancelled child", () => {

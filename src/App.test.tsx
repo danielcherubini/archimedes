@@ -429,9 +429,9 @@ describe("App (the child-gate overlay host mounted at the App root)", () => {
     // The workspace unmounts in the settings view (`SidePane`,
     // `SubagentDetailHost`, `ChatStream` are all inside the ternary's
     // else-branch) — a host mounted in either of them would render NOTHING
-    // here, and an unrendered gate strands the child until its 30-minute
-    // `settle_timeout` (`DEFAULT_SUBAGENT_SETTLE_TIMEOUT`,
-    // `src-tauri/src/agent/worker/manager.rs`).
+    // here, and an unrendered gate strands the child INDEFINITELY (ADR 0055: a
+    // child parked on a gate holds its `tool_call_id` open, so it is an Active
+    // Subagent and `DEFAULT_SUBAGENT_DEAD_BOUND` never runs on it).
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(screen.getByText("General")).toBeTruthy();
     expect(screen.getByText("Which color?")).toBeTruthy();
@@ -537,8 +537,8 @@ describe("App (a child gate renders at EXACTLY ONE site: inline vs overlay)", ()
   // partition splits the two sites on ONE key: is this gate's parent the ACTIVE
   // session. Exactly one site per gate, in every state — never two (divergent
   // typed-but-unsubmitted drafts, an Esc that closes only one) and never zero
-  // (an unrendered gate strands the child until its 30-minute
-  // `settle_timeout`).
+  // (an unrendered gate strands the child INDEFINITELY — ADR 0055 makes a
+  // gate-parked child an Active Subagent, so no clock bounds it).
   const childEntry = {
     sessionId: "sub1",
     parentSessionId: "main1",
@@ -1097,11 +1097,13 @@ describe("App (the accepted settings-view hole for an inline gate)", () => {
     expect(screen.queryByText("Which color?")).toBeNull();
     expect(screen.queryByTestId("subagent-gate-overlay")).toBeNull();
     // The gate is still PENDING (nothing answered it), and nothing in the Rust
-    // side closes it either: the bound that ends this state is the child's own
-    // 30-minute `settle_timeout` (`DEFAULT_SUBAGENT_SETTLE_TIMEOUT`,
-    // `src-tauri/src/agent/worker/manager.rs`), which fails the DELEGATION — it
-    // is not a gate close, and the user leaving Settings is what makes the card
-    // reachable again.
+    // side closes it either. Since ADR 0055 NOTHING times it out either: the
+    // child parked on this gate holds its `tool_call_id` open, so it is an
+    // **Active Subagent** and the drive's `DEFAULT_SUBAGENT_DEAD_BOUND`
+    // (`src-tauri/src/agent/worker/manager.rs`) does not run at all while a
+    // tool call is outstanding. The user leaving Settings is what makes the
+    // card reachable again; at teardown the child's own
+    // `interactive-request-close` does.
     expect(useInteractive.getState().requests["sub1"]).toHaveLength(1);
     // Back to the workspace and the card is answerable again (no leak, no dup).
     fireEvent.click(screen.getByRole("button", { name: "Back" }));

@@ -171,7 +171,7 @@ interface ActivityInfo {
  *
  * It exists because `error` is NOT a display string: every failure path carries
  * SALVAGE prose addressed to the PARENT model ("subagent worker exited
- * unexpectedly (code 137)", "timed out"), and this row is one truncated line in
+ * unexpectedly (code 137)", "unresponsive"), and this row is one truncated line in
  * a compact list — the prose is unreadable there and duplicates what the
  * parent's own tool result already says. The code is data, so nothing here
  * string-matches `error`.

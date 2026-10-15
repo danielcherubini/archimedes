@@ -6493,7 +6493,7 @@ mod tests {
     /// parent (the `subagent-session-started` / `subagent-closed` UI
     /// lifecycle events are delivered on the PARENT's sink).
     async fn make_worker_manager(
-        settle_timeout: Duration,
+        dead_bound: Duration,
         models: Vec<Model>,
         config_dir: Option<&std::path::Path>,
         sink: Arc<dyn EventSink>,
@@ -6518,7 +6518,7 @@ mod tests {
             ),
             Arc::new(move |id: &str| (id == "s1").then(|| sink.clone())),
         )
-        .with_settle_timeout(settle_timeout);
+        .with_dead_bound(dead_bound);
         let wm = Arc::new(wm);
         let env = StartEnv::from_parts(
             "s1".to_string(),
@@ -6551,12 +6551,12 @@ mod tests {
     /// `"s1"` is `attach`ed with the given `models` catalog (the
     /// `dispatch_subagent` flow resolves the child's `model` against it).
     async fn make_subagent_manager(
-        settle_timeout: Duration,
+        dead_bound: Duration,
         models: Vec<Model>,
         config_dir: Option<&std::path::Path>,
         sink: Arc<dyn EventSink>,
     ) -> Arc<SubagentSessionManager> {
-        let wm = make_worker_manager(settle_timeout, models, config_dir, sink).await;
+        let wm = make_worker_manager(dead_bound, models, config_dir, sink).await;
         let manager = Arc::new(SubagentSessionManager::new());
         manager.set_worker_manager(wm);
         manager

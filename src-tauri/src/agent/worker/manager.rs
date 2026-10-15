@@ -6,7 +6,7 @@
 //! `Outbound::SubagentDispatch` → here: the model-key resolution
 //! (the ADR 0020/0023 resolution moved Supervisor-side), the
 //! three-way `enabled_tools` rule, the child `StartEnv`, the
-//! `SubagentCapture`, the `settle_timeout`, and the
+//! `SubagentCapture`, the **Dead bound**, and the
 //! `subagent-session-started` / `subagent-closed` UI lifecycle
 //! events).
 //!
@@ -25,9 +25,12 @@
 //! are `tokio::spawn`ed (`'static`), so they own clones of the `Arc`
 //! — the `&self` methods delegate to the `Arc`-backed free functions.
 
-/// The default subagent settle bound (30 min: a hung / slow subagent
-/// turn is torn down at the bound).
-pub const DEFAULT_SUBAGENT_SETTLE_TIMEOUT: std::time::Duration =
+/// The default **Dead bound** (ADR 0055): 30 min of UNEXPLAINED SILENCE. It is
+/// the most a **Subagent session** may go WITHOUT producing a frame AND with no
+/// `tool_call_id` outstanding — it is NOT a ceiling on the length of the
+/// delegation (an **Active Subagent** has no timeout of any kind). Overridden
+/// in production by `settings.json`'s `subagentDeadBoundSecs`.
+pub const DEFAULT_SUBAGENT_DEAD_BOUND: std::time::Duration =
     std::time::Duration::from_secs(30 * 60);
 
 use std::collections::HashMap;
@@ -439,14 +442,15 @@ type CwdRegistrar = Arc<dyn Fn(&str, &str) + Send + Sync>;
 type SinkLookup = Arc<dyn Fn(&str) -> Option<Arc<dyn EventSink>> + Send + Sync>;
 
 /// A registry of live Workers (session-keyed) + the Supervisor-side
-/// subagent-dispatch flow. The `settle_timeout` is OUTSIDE the `Arc`
-/// (the `with_settle_timeout` test variant swaps it without rebuilding
+/// subagent-dispatch flow. The `dead_bound` is OUTSIDE the `Arc`
+/// (the `with_dead_bound` test variant swaps it without rebuilding
 /// the `Arc`-backed state — the `StdMutex` maps are not `Clone`).
 pub struct WorkerManager {
     state: Arc<ManagerState>,
-    /// The subagent settle bound (default 30 min; tests shorten it via
-    /// `with_settle_timeout`).
-    settle_timeout: Duration,
+    /// The **Dead bound** (default 30 min of unexplained silence; production
+    /// reads it from `settings.json`'s `subagentDeadBoundSecs` via
+    /// `with_dead_bound_secs`, tests shorten it via `with_dead_bound`).
+    dead_bound: Duration,
 }
 
 impl WorkerManager {
@@ -466,18 +470,18 @@ impl WorkerManager {
                 drives: StdMutex::new(HashMap::new()),
                 cwd_registrar: std::sync::OnceLock::new(),
             }),
-            settle_timeout: DEFAULT_SUBAGENT_SETTLE_TIMEOUT,
+            dead_bound: DEFAULT_SUBAGENT_DEAD_BOUND,
         }
     }
 
-    /// A test variant with a shortened settle bound (the `__slow__`
-    /// settle-timeout tests — the fixture's 10 s settle is longer than
-    /// the bound). The `settle_timeout` is outside the `Arc`, so the
+    /// A test variant with a shortened **Dead bound** (the `__slow__`
+    /// silence-bound tests — the fixture's 10 s settle is longer than
+    /// the bound). The `dead_bound` is outside the `Arc`, so the
     /// swap is a field assignment (the `Arc`-backed state is shared).
-    pub fn with_settle_timeout(self, timeout: Duration) -> Self {
+    pub fn with_dead_bound(self, bound: Duration) -> Self {
         Self {
             state: self.state,
-            settle_timeout: timeout,
+            dead_bound: bound,
         }
     }
 
@@ -485,10 +489,10 @@ impl WorkerManager {
     /// `subagentDeadBoundSecs` key, applied at the one `lib.rs` construction
     /// site): SECONDS of unexplained silence after which a **Subagent session**
     /// is reaped as Dead. Tests inject their bound in `Duration`s via
-    /// [`Self::with_settle_timeout`]; the unit here is seconds because that is
+    /// [`Self::with_dead_bound`]; the unit here is seconds because that is
     /// the unit the setting is written in.
     pub fn with_dead_bound_secs(self, secs: u64) -> Self {
-        self.with_settle_timeout(Duration::from_secs(secs))
+        self.with_dead_bound(Duration::from_secs(secs))
     }
 
     /// Spawn a Worker for `session_id` + the `ready` handshake (5 s
@@ -505,7 +509,7 @@ impl WorkerManager {
         // `Start` frame — the advertised `enabledTools` — is seen).
         start_pump(
             self.state.clone(),
-            self.settle_timeout,
+            self.dead_bound,
             session_id.to_string(),
             false,
             handle.clone(),
@@ -583,7 +587,7 @@ impl WorkerManager {
     /// the `SubagentCapture`'s final text → `Completed`; an unexpected
     /// `Exited` → `Failed { reason: Crashed, error: "subagent worker exited
     /// unexpectedly (code N)" }`; the **Dead bound** → `Failed { reason:
-    /// Unresponsive, error: "timed out" }`; a `SubagentCancel` →
+    /// Unresponsive, error: "unresponsive" }`; a `SubagentCancel` →
     /// `send_abort` + reap → `Failed { reason: Cancelled }`). EVERY `Failed`
     /// carries the `SubagentCapture`'s partial text + the real usage (ADR 0055
     /// — a **Dead Subagent** is never `Completed`, but its work is not thrown
@@ -596,7 +600,7 @@ impl WorkerManager {
     pub fn dispatch_subagent(&self, parent_session_id: &str, wire: SubagentDispatchWire) {
         dispatch_subagent(
             self.state.clone(),
-            self.settle_timeout,
+            self.dead_bound,
             parent_session_id.to_string(),
             wire,
             SubagentOutcomeSink::Requester,
@@ -618,7 +622,7 @@ impl WorkerManager {
     ) {
         dispatch_subagent(
             self.state.clone(),
-            self.settle_timeout,
+            self.dead_bound,
             parent_session_id.to_string(),
             wire,
             SubagentOutcomeSink::Oneshot(std::sync::Arc::new(std::sync::Mutex::new(Some(outcome)))),
@@ -747,10 +751,10 @@ impl WorkerManager {
 
 /// The read-loop pump (the `events()` consumer — the `on_event` /
 /// `on_crash` routing; the `is_subagent` flag threaded; the
-/// `settle_timeout` for the `SubagentDispatch` it runs).
+/// `dead_bound` for the `SubagentDispatch` it runs).
 fn start_pump(
     state: Arc<ManagerState>,
-    settle_timeout: Duration,
+    dead_bound: Duration,
     session_id: String,
     is_subagent: bool,
     handle: WorkerHandle,
@@ -799,7 +803,7 @@ fn start_pump(
                 // `SinkFrame` `session-update` stream — the final-text
                 // source; the `message_update` `usage` — the metrics'
                 // token fields) + the settle signal (the drive task
-                // races it against the `settle_timeout` / the process
+                // races it against the `dead_bound` / the process
                 // exit / the cancel) + the liveness signal (ADR 0055:
                 // EVERY frame — a `SinkFrame` included — bumps the
                 // drive's `seq`, so a child that only STREAMS still
@@ -848,7 +852,7 @@ fn start_pump(
                 WorkerInboundEvent::SubagentDispatch(wire) => {
                     dispatch_subagent(
                         state.clone(),
-                        settle_timeout,
+                        dead_bound,
                         session_id.clone(),
                         wire,
                         SubagentOutcomeSink::Requester,
@@ -861,7 +865,7 @@ fn start_pump(
                 // the permissive `_` arm and vanish — a Stop then did NOT
                 // stop the subagent (it ran its whole turn, mutating files
                 // the user had just asked to leave alone) and its Worker
-                // process stayed alive until the 30-minute settle bound.
+                // process stayed alive until the 30-minute **Dead bound**.
                 WorkerInboundEvent::SubagentCancel { id } => {
                     cancel_subagent_by_dispatch_id(&state, &id);
                 }
@@ -986,7 +990,7 @@ fn unexpected_exit(state: &ManagerState, session_id: &str) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn dispatch_subagent(
     state: Arc<ManagerState>,
-    settle_timeout: Duration,
+    dead_bound: Duration,
     parent_session_id: String,
     wire: SubagentDispatchWire,
     sink: SubagentOutcomeSink,
@@ -1187,7 +1191,7 @@ fn dispatch_subagent(
     }
     // 8. The drive task (the spawn + `wait_ready` + `send_start` +
     // the initial `prompt` (the `task`) + the settle vs
-    // `settle_timeout` vs the process exit vs the cancel race +
+    // `dead_bound` vs the process exit vs the cancel race +
     // the UNCONDITIONAL teardown + the `SubagentResult` delivery).
     tokio::spawn(async move {
         let start = std::time::Instant::now();
@@ -1211,7 +1215,7 @@ fn dispatch_subagent(
                 // frames).
                 start_pump(
                     state.clone(),
-                    settle_timeout,
+                    dead_bound,
                     child_id.clone(),
                     true,
                     handle.clone(),
@@ -1227,10 +1231,10 @@ fn dispatch_subagent(
                     cancel_rx,
                     // The ADR 0055 liveness receiver (the drive's future
                     // silence bound reads it — this task only threads it,
-                    // the race still runs on `settle_timeout`).
+                    // the race still runs on `dead_bound`).
                     liveness_rx,
                     &capture,
-                    settle_timeout,
+                    dead_bound,
                     &sink,
                 )
                 .await
@@ -1245,13 +1249,13 @@ fn dispatch_subagent(
                 None
             }
         };
-        // The UNCONDITIONAL teardown (settle / timeout / cancel /
+        // The UNCONDITIONAL teardown (settle / Dead / cancel /
         // crash / spawn failure): the `reaping` flag is set FIRST
         // (the `Exited` is EXPECTED: NO `on_crash`), the `drives`
         // entry is removed (the pump's `Exited` lookup misses — no
         // `on_crash`), the `SubagentResult` is delivered (the
         // `drive_subagent` already sent it on the early-failure
-        // paths — this is the settle / timeout / cancel / crash
+        // paths — this is the settle / Dead / cancel / crash
         // delivery).
         if let Some(outcome) = outcome {
             finish_subagent(&state, &child_id, &parent_session_id, &wire, outcome, &sink).await;
@@ -1264,7 +1268,7 @@ fn dispatch_subagent(
     });
 }
 
-/// The drive task (the settle vs `settle_timeout` vs the process exit
+/// The drive task (the settle vs `dead_bound` vs the process exit
 /// vs the cancel race — the `drive_subagent` core): the `wait_ready`,
 /// `send_start`, and the initial `prompt` (the `task`) preflight, then
 /// the race. Returns the `SubagentOutcome` (`None` on a preflight
@@ -1285,7 +1289,7 @@ async fn drive_subagent(
     // This is what the self-rearming silence clock below reads.
     mut liveness_rx: watch::Receiver<SubagentLiveness>,
     capture: &Arc<SubagentCapture>,
-    settle_timeout: Duration,
+    dead_bound: Duration,
     sink: &SubagentOutcomeSink,
 ) -> Option<SubagentOutcome> {
     // The preflight (a `wait_ready` failure / a `send_start` error
@@ -1319,7 +1323,7 @@ async fn drive_subagent(
     // settle-then-exit is the teardown below) vs the `SubagentCancel` (a
     // parent turn abort — `cancel_subagent` flips it).
     //
-    // The bound is a SELF-REARMING silence clock: `settle_timeout` is the
+    // The bound is a SELF-REARMING silence clock: `dead_bound` is the
     // child's maximum run of UNEXPLAINED SILENCE, so it is recomputed on
     // every pass of the loop below — a pass is only ever entered because
     // something CHANGED. There is no ceiling on how long a delegation may
@@ -1337,7 +1341,7 @@ async fn drive_subagent(
         // the deadline at its ORIGINAL arm time for an unblocked quiet child,
         // which silently restores the absolute wall-clock bound this change
         // removes.
-        deadline = std::time::Instant::now() + settle_timeout;
+        deadline = std::time::Instant::now() + dead_bound;
         let in_flight = {
             // The borrow is scoped so the `RefMut` CANNOT be held across the
             // `select!` — held across an await point it makes the future
@@ -1374,7 +1378,7 @@ async fn drive_subagent(
             // outstanding — a child inside a tool, parked on a gate, or
             // awaiting its own nested Subagent is Active and has NO timeout.
             // In that state the bound is not "longer"; it does not run.
-            _ = &mut sleep, if !in_flight => break Race::TimedOut,
+            _ = &mut sleep, if !in_flight => break Race::Dead,
         }
     };
     // The outcome (the `SubagentCapture`'s final text — the
@@ -1394,9 +1398,9 @@ async fn drive_subagent(
             };
             SubagentOutcome::Completed { output, metrics }
         }
-        Race::TimedOut => failed_with_salvage(
+        Race::Dead => failed_with_salvage(
             SubagentFailureReason::Unresponsive,
-            "timed out".to_string(),
+            "unresponsive".to_string(),
             capture,
             duration_ms,
         ),
@@ -1465,7 +1469,7 @@ fn preflight_failed(error: String) -> SubagentOutcome {
     }
 }
 
-/// The UNCONDITIONAL teardown (settle / timeout / cancel / crash): the
+/// The UNCONDITIONAL teardown (settle / Dead / cancel / crash): the
 /// `subagent-closed` UI lifecycle event (EVERY exit path — the
 /// `subagent.rs:721/743` payload shapes: `status` / `reason` / `error` /
 /// `metrics`), the `reaping` flag (the `Exited` is EXPECTED: NO
@@ -1648,7 +1652,7 @@ async fn reap_worker(handle: WorkerHandle) {
     let _ = handle.kill().await;
 }
 
-/// The subagent drive's outcome (the settle vs `settle_timeout` vs the
+/// The subagent drive's outcome (the settle vs `dead_bound` vs the
 /// process exit vs the `SubagentCancel`).
 enum Race {
     /// The child settled (the pump's `agent_settled` flipped the
@@ -1657,9 +1661,9 @@ enum Race {
     /// The process exited (an UNEXPECTED exit — a crash; a
     /// settle-then-exit is the teardown below).
     Exited(Option<i32>),
-    /// The `settle_timeout` won (a hung / slow turn — the child is
-    /// torn down unconditionally).
-    TimedOut,
+    /// The **Dead bound** won — the child was silent with nothing in flight
+    /// for the whole bound, so it is **Dead** and torn down unconditionally.
+    Dead,
     /// The `SubagentCancel` handle fired (a user / caller cancel —
     /// `cancel_subagent` flipped it).
     Cancelled,
@@ -1779,9 +1783,7 @@ mod tests {
 
     /// A `WorkerManager` on the `fake_worker` factory + the collectors
     /// (`on_crash` / `on_event` / the parent-scope sink lookup).
-    fn make_manager(
-        settle_timeout: Option<Duration>,
-    ) -> (WorkerManager, CrashLog, EventLog, SinkMap) {
+    fn make_manager(dead_bound: Option<Duration>) -> (WorkerManager, CrashLog, EventLog, SinkMap) {
         let crashes = Arc::new(StdMutex::new(Vec::new()));
         let events = Arc::new(StdMutex::new(Vec::new()));
         let sinks: SinkMap = Arc::new(StdMutex::new(HashMap::new()));
@@ -1814,8 +1816,8 @@ mod tests {
                     .map(|s| s as Arc<dyn EventSink>)
             }),
         );
-        let manager = match settle_timeout {
-            Some(t) => manager.with_settle_timeout(t),
+        let manager = match dead_bound {
+            Some(t) => manager.with_dead_bound(t),
             None => manager,
         };
         (manager, crashes, events, sinks)
@@ -2418,20 +2420,20 @@ mod tests {
     /// (ADR 0055 — configuration) The **Dead bound** production seam:
     /// `with_dead_bound_secs` (applied at the ONE `lib.rs` construction site,
     /// reading `settings.json`'s `subagentDeadBoundSecs`) sets the same bound
-    /// the test seam `with_settle_timeout` sets — the seconds are converted
+    /// the test seam `with_dead_bound` sets — the seconds are converted
     /// once, at the boundary, and nowhere else.
     #[test]
     fn the_dead_bound_secs_seam_sets_the_bound() {
         let (defaulted, _c, _e, _s) = make_manager(None);
         assert_eq!(
-            defaulted.settle_timeout,
-            super::DEFAULT_SUBAGENT_SETTLE_TIMEOUT,
+            defaulted.dead_bound,
+            super::DEFAULT_SUBAGENT_DEAD_BOUND,
             "`new` alone keeps the built-in default"
         );
         let (configured, _c, _e, _s) = make_manager(None);
         let configured = configured.with_dead_bound_secs(45);
         assert_eq!(
-            configured.settle_timeout,
+            configured.dead_bound,
             Duration::from_secs(45),
             "the setting's SECONDS become the bound verbatim"
         );
@@ -2626,11 +2628,12 @@ mod tests {
     /// A `"__slow__"` subagent (a 10 s settle) is SILENT with NOTHING in
     /// flight, so the **Dead bound** reaps it (the surviving safety net —
     /// ADR 0055 pins the *predicate*, not the duration: an unexplained run
-    /// of silence still ends the dispatch `Failed { error: "timed out" }`,
-    /// and the subagent is torn down unconditionally).
+    /// of silence still ends the dispatch `Failed { reason: Unresponsive,
+    /// error: "unresponsive" }`, and the subagent is torn down
+    /// unconditionally).
     #[tokio::test]
     async fn a_silent_child_with_nothing_in_flight_hits_the_dead_bound() {
-        // The settle bound is SHORTER than the fixture's 10 s sleep.
+        // The **Dead bound** is SHORTER than the fixture's 10 s sleep.
         let (manager, _crashes, events, _sinks) = make_manager(Some(Duration::from_secs(1)));
         manager
             .attach("t1", &test_env("t1", None))
@@ -2657,10 +2660,15 @@ mod tests {
         let outcome =
             subagent_result_outcome(&events, "t1").expect("the outcome rides the ack verbatim");
         match outcome {
-            SubagentOutcome::Failed { error, .. } => {
-                assert_eq!(error, "timed out", "the current timeout outcome");
+            SubagentOutcome::Failed { reason, error, .. } => {
+                assert_eq!(error, "unresponsive", "the **Dead bound** outcome");
+                assert_eq!(
+                    reason,
+                    SubagentFailureReason::Unresponsive,
+                    "the reason is DATA — set from `Race::Dead`, never inferred"
+                );
             }
-            other => panic!("expected `Failed {{ timed out }}`, got {other:?}"),
+            other => panic!("expected `Failed {{ unresponsive }}`, got {other:?}"),
         }
         // The subagent is torn down (the UNCONDITIONAL teardown — the
         // `drives` entry is removed; the parent's Worker is untouched).
@@ -2668,7 +2676,7 @@ mod tests {
         assert_eq!(
             manager.test_drive_count(),
             0,
-            "the timed-out subagent is torn down"
+            "the Dead subagent is torn down"
         );
         assert_eq!(manager.test_session_count(), 1, "the parent survives");
     }
@@ -2681,9 +2689,9 @@ mod tests {
     /// a SILENCE bound: every frame rearms it, so a streaming child is an
     /// Active Subagent and completes normally.
     ///
-    /// RED against the single never-rearmed `sleep(settle_timeout)`: the
+    /// RED against the single never-rearmed `sleep(dead_bound)`: the
     /// sleep fires at 300 ms while the child is still streaming →
-    /// `Failed { error: "timed out" }` (the reaping IS the bug). The
+    /// `Failed { error: "unresponsive" }` (the reaping IS the bug). The
     /// fixture's total turn is ~1.8 s, so the bound is not merely short — it
     /// is exceeded 5× by pure production.
     #[tokio::test]
@@ -2716,7 +2724,7 @@ mod tests {
             }
             other => panic!(
                 "a streaming child is an Active Subagent and must COMPLETE, got {other:?} \
-                 (a `Failed {{ timed out }}` here is the bug: the drive bounded the \
+                 (a `Failed {{ unresponsive }}` here is the bug: the drive bounded the \
                  delegation's DURATION instead of the child's SILENCE)"
             ),
         }
@@ -2736,9 +2744,9 @@ mod tests {
     /// `tool_call_id` is precisely the state in which silence means NOTHING,
     /// so the bound must not run at all here — not "be longer".
     ///
-    /// RED against the single never-rearmed `sleep(settle_timeout)`: the
+    /// RED against the single never-rearmed `sleep(dead_bound)`: the
     /// 300 ms sleep expires during the silent tool window →
-    /// `Failed { error: "timed out" }` while `in_flight` holds `t1`.
+    /// `Failed { error: "unresponsive" }` while `in_flight` holds `t1`.
     #[tokio::test]
     async fn a_child_inside_a_tool_call_is_never_reaped() {
         // The bound is 300 ms; the tool call stays open for ~1.5 s.
@@ -2764,7 +2772,7 @@ mod tests {
             }
             other => panic!(
                 "a child with an outstanding `tool_call_id` must NEVER be reaped, got \
-                 {other:?} (a `Failed {{ timed out }}` here is the bug: the bound ran \
+                 {other:?} (a `Failed {{ unresponsive }}` here is the bug: the bound ran \
                  while the child was blocked inside its tool)",
             ),
         }
@@ -2810,8 +2818,10 @@ mod tests {
                 metrics,
             } => {
                 assert_eq!(
-                    error, "timed out",
-                    "the timeout text is unchanged (Task 5 renames it)"
+                    error, "unresponsive",
+                    "the **Dead bound**'s outcome text (ADR 0055 — the old \
+                     timeout wording told the parent nothing about WHICH \
+                     predicate fired)"
                 );
                 assert_eq!(
                     reason,
@@ -2940,13 +2950,13 @@ mod tests {
     /// the child is `send_abort`ed, the outcome is the `Cancelled` one,
     /// and the child Worker is REAPED. Pre-fix the pump's `match` had no
     /// arm for the frame at all — it was dropped — so the drive raced on
-    /// to the `settle_timeout`: a Stop did not stop the subagent (it kept
+    /// to the `dead_bound`: a Stop did not stop the subagent (it kept
     /// working after the user asked it to), and its Worker process
     /// lingered until the 30-minute bound.
     #[tokio::test]
     async fn a_parent_subagent_cancel_frame_cancels_and_reaps_the_child() {
         // A bound far longer than the test: ONLY the cancel may end this
-        // dispatch (a `TimedOut` outcome is the bug's signature).
+        // dispatch (a `Race::Dead` outcome is the bug's signature).
         let (manager, _crashes, events, _sinks) = make_manager(Some(Duration::from_secs(30)));
         manager
             .attach("c1", &test_env("c1", None))
@@ -2983,10 +2993,18 @@ mod tests {
         let outcome = subagent_result_outcome(&events, "c1")
             .unwrap_or_else(|| panic!("the cancel must resolve the dispatch: {got:?}"));
         match outcome {
-            SubagentOutcome::Failed { error, .. } => assert_eq!(
-                error, "cancelled",
-                "the cancel outcome — `timed out` means the frame was dropped"
-            ),
+            SubagentOutcome::Failed { error, reason, .. } => {
+                assert_eq!(
+                    error, "cancelled",
+                    "the cancel outcome — `unresponsive` here means the frame was dropped"
+                );
+                assert_eq!(
+                    reason,
+                    SubagentFailureReason::Cancelled,
+                    "the cancel is DATA — a `Unresponsive` here means the \
+                     `SubagentCancel` frame was dropped"
+                );
+            }
             other => panic!("expected `Failed {{ cancelled }}`, got {other:?}"),
         }
         // The UNCONDITIONAL teardown reaps the child (the `drives` entry

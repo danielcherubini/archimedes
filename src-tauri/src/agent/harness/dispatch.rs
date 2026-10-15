@@ -443,7 +443,7 @@ mod tests {
                 ),
                 Arc::new(|_id: &str| None),
             )
-            .with_settle_timeout(Duration::from_secs(30)),
+            .with_dead_bound(Duration::from_secs(30)),
         );
         let env = crate::agent::worker::protocol::StartEnv::from_parts(
             "parent-1".to_string(),
@@ -513,13 +513,13 @@ mod tests {
     /// (ADR 0055 — the salvage) A `Failed` outcome WITH partial output gets
     /// the banner: the parent is told the child did NOT finish, that the text
     /// below it is unfinished work, and where to read the full transcript.
-    /// Before this the parent got `subagent failed: timed out` and 29 minutes
-    /// of findings were thrown away.
+    /// Before this the parent got the bare `subagent failed: <outcome>` line
+    /// and 29 minutes of findings were thrown away.
     #[tokio::test]
     async fn a_failed_dispatch_with_output_includes_the_partial_output_banner() {
         let text = dispatch_failed_with_output("Finding one. Finding two.").await;
         assert!(
-            text.starts_with("subagent failed: timed out\n"),
+            text.starts_with("subagent failed: unresponsive\n"),
             "the error line still leads (the failure is never hidden), got: {text}"
         );
         assert!(
@@ -544,7 +544,7 @@ mod tests {
     async fn a_failed_dispatch_with_no_output_omits_the_partial_output_banner() {
         let text = dispatch_failed_with_output("").await;
         assert_eq!(
-            text, "subagent failed: timed out",
+            text, "subagent failed: unresponsive",
             "no output → no banner, and no trailing separator"
         );
         assert!(
@@ -562,7 +562,7 @@ mod tests {
         dispatcher.queue(rx, SubagentCancel::none());
         tx.send(SubagentOutcome::Failed {
             reason: SubagentFailureReason::Unresponsive,
-            error: "timed out".to_string(),
+            error: "unresponsive".to_string(),
             output: output.to_string(),
             metrics: crate::agent::subagent::SubagentMetrics::default(),
         })
