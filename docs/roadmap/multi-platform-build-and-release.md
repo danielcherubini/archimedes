@@ -344,3 +344,7 @@ README: rewrite Auto-update to describe what EXISTS after Task 5 (manual check i
 ## Plan-level acceptance (the done-when)
 
 Published (not draft) release with all assets on Linux + Windows, a five-key `latest.json` whose URLs all resolve, the full CI bar green on three OSes, and an installed 0.1.0 that updates itself to 0.1.1 from the Settings section. macOS packaging stays gated on `APPLE_*` secrets — compiling and testing macOS is NOT gated and must be green.
+
+## Task 3 follow-ups (recorded at ship time)
+
+- `tests/ipc.rs` is `#![cfg(target_os = "linux")]` — the mock-runtime link graph crashes environmentally on macOS (SIGSEGV) and Windows (`STATUS_ENTRYPOINT_NOT_FOUND`) before any assertion runs (evidence quoted in the gate's doc-comment). Re-open by deleting the cfg when a tauri/wry/tao upgrade resolves it; until then the headless IPC-surface pin is Linux-only coverage.
