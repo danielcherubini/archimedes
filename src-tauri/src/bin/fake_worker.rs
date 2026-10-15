@@ -35,6 +35,16 @@
 //!   frame with the SLOW child task; `__subagent_tools__` is the
 //!   frame with `launch.tools: Some(["subagent"])` — the
 //!   empties-out-after-the-guard-minus case).
+//! - a `prompt` whose text is `"__long_stream__"`: a LONG `SinkFrame`
+//!   `session-update` `agent_message_chunk` stream (the chunks land ~100 ms
+//!   apart for ~1.5 s of CONTINUOUS production) and ONLY then the canned
+//!   turn + `agent_settled` (the ADR 0055 regression input — a child that
+//!   keeps PRODUCING far past a SHORT injected bound must COMPLETE, not be
+//!   reaped mid-answer).
+//! - a `prompt` whose text is `"__in_tool__"`: a `tool_execution_start`
+//!   held OPEN for ~1.5 s before its `tool_execution_end` +
+//!   `agent_settled` (the "child inside a tool call, producing NOTHING"
+//!   state — legitimately silent, so a duration bound must never cut it).
 //! - a `prompt` whose text is `"__cancel__"`: a `SubagentCancel` frame
 //!   (the `SubagentCancel` routing test).
 //! - a `prompt` whose text is `"__stderr__"`: a line on STDERR and NO
@@ -57,11 +67,61 @@ use archimedes_lib::agent::worker::protocol::{decode_inbound, encode_outbound, I
 /// The fixture version (the `ready` frame's `version` field).
 const VERSION: &str = "fake-worker-0.0.0";
 
+/// The `__long_stream__` chunk count (ADR 0055) — `LONG_STREAM_CHUNKS` ×
+/// `LONG_STREAM_GAP` ≈ 1.5 s of CONTINUOUS production: long enough to blow
+/// the tests' injected 300 ms bound by 5×, short enough to keep the suite
+/// fast (the whole scenario stays under ~2 s).
+const LONG_STREAM_CHUNKS: u32 = 15;
+
+/// The gap between two `__long_stream__` chunks (~100 ms — a chunk arrives
+/// well INSIDE the tests' 300 ms bound, so a self-rearming silence clock can
+/// never expire while the child is talking).
+const LONG_STREAM_GAP: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How long the `__in_tool__` scenario holds its `tool_execution_start`
+/// open (~1.5 s — the child is silent for 5× the injected bound while it is
+/// legitimately blocked inside the tool).
+const IN_TOOL_HOLD: std::time::Duration = std::time::Duration::from_millis(1500);
+
 /// Emit one outbound frame (one JSONL line — the `protocol` encode).
 fn emit<W: Write>(stdout: &mut W, frame: &Outbound) {
     let line = encode_outbound(frame);
     let _ = stdout.write_all(line.as_bytes());
     let _ = stdout.flush();
+}
+
+/// The long `agent_message_chunk` stream (ADR 0055 — the `__long_stream__`
+/// scenario's body): `LONG_STREAM_CHUNKS` `SinkFrame` `session-update`
+/// frames ~100 ms apart (~1.5 s of CONTINUOUS production). They ride
+/// `messageId: "m2"` — a DIFFERENT id from `emit_canned_turn`'s canned `m1` —
+/// so the stream is an INTERMEDIATE message in the capture's
+/// last-`messageId`-with-non-empty-text rule and never concatenates into the
+/// child's final answer (exactly the shape a real tool-using turn has); the
+/// `messageId` values are literal because the `SubagentCapture` keys on the
+/// frame's id, not on the stamped display row's.
+///
+/// Ordering invariant (the same one `emit_canned_turn` documents): this is
+/// only the child's PRODUCTION phase — `agent_settled` is emitted by
+/// `emit_canned_turn`, LAST, after the whole stream, so the `SubagentCapture`
+/// is fully fed before the settle signal (no drive-teardown race).
+fn emit_long_chunk_stream<W: Write>(stdout: &mut W, session_id: &str) {
+    for i in 0..LONG_STREAM_CHUNKS {
+        emit(
+            stdout,
+            &Outbound::SinkFrame {
+                event: "session-update".to_string(),
+                payload: serde_json::json!({
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": "m2",
+                        "content": { "type": "text", "text": if i == 0 { "streamed" } else { "…" } }
+                    }
+                }),
+            },
+        );
+        std::thread::sleep(LONG_STREAM_GAP);
+    }
 }
 
 /// The canned `RpcEvent` stream (the Supervisor's bookkeeping input —
@@ -442,6 +502,62 @@ fn main() {
                 "__slow__" => {
                     std::thread::sleep(std::time::Duration::from_secs(10));
                     emit_canned_turn(&mut stdout, &sid, &incarnation);
+                }
+                // The LONG stream (ADR 0055 — the
+                // `a_streaming_subagent_outlives_the_dead_bound` regression
+                // input): ~1.5 s of CONTINUOUS `agent_message_chunk`
+                // production — 5× the tests' injected 300 ms bound — and
+                // ONLY THEN the canned turn (whose `agent_settled` stays
+                // LAST, after the whole stream, so the `SubagentCapture` is
+                // fully fed before the settle). A child that keeps
+                // PRODUCING must COMPLETE, not be reaped mid-answer.
+                "__long_stream__" => {
+                    emit_long_chunk_stream(&mut stdout, &sid);
+                    emit_canned_turn(&mut stdout, &sid, &incarnation);
+                }
+                // A tool call held OPEN (ADR 0055 — the
+                // `a_child_inside_a_tool_call_is_never_reaped` regression
+                // input): the `tool_execution_start` ANNOUNCE, then
+                // NOTHING for ~1.5 s (the tool runs — the child is silent
+                // BY CONSTRUCTION and legitimately blocked), then the
+                // matching `tool_execution_end` + `agent_settled`. The
+                // frames mirror `emit_tool_execution_and_settle`'s shapes
+                // (the same `t1` / `bash`), split around the hold.
+                "__in_tool__" => {
+                    emit(
+                        &mut stdout,
+                        &Outbound::Event {
+                            event: RpcEvent::tool_execution_start {
+                                tool_call_id: "t1".to_string(),
+                                tool_name: "bash".to_string(),
+                                args: serde_json::json!({ "command": "sleep 1.5" }),
+                            },
+                        },
+                    );
+                    std::thread::sleep(IN_TOOL_HOLD);
+                    emit(
+                        &mut stdout,
+                        &Outbound::Event {
+                            event: RpcEvent::tool_execution_end {
+                                tool_call_id: "t1".to_string(),
+                                tool_name: "bash".to_string(),
+                                result: serde_json::json!({
+                                    "content": [{ "type": "text", "text": "ok" }],
+                                    "details": { "exitCode": 0 },
+                                    "isError": false
+                                }),
+                                is_error: false,
+                            },
+                        },
+                    );
+                    // The settle (LAST — the invariant: NOTHING the
+                    // `SubagentCapture` reads arrives after it).
+                    emit(
+                        &mut stdout,
+                        &Outbound::Event {
+                            event: RpcEvent::agent_settled,
+                        },
+                    );
                 }
                 // The `interactive-event` `SinkFrame` (the `todos_update`
                 // push — the frontend's `useInteractive.applyTodoUpdate`

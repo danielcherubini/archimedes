@@ -1220,10 +1220,10 @@ async fn drive_subagent(
     mut settle_rx: watch::Receiver<bool>,
     mut cancel_rx: watch::Receiver<bool>,
     // The child's liveness signal (ADR 0055) — the drive's half of the
-    // `watch` the pump feeds. NOT read yet (the race below is still the
-    // duration bound); the underscore is the "threaded, not consumed"
-    // marker and drops when the self-rearming silence clock lands.
-    _liveness_rx: watch::Receiver<SubagentLiveness>,
+    // `watch` the pump feeds. Every frame bumps its `seq` (activity);
+    // `in_flight` holds the `tool_call_id`s announced and not yet closed.
+    // This is what the self-rearming silence clock below reads.
+    mut liveness_rx: watch::Receiver<SubagentLiveness>,
     capture: &Arc<SubagentCapture>,
     settle_timeout: Duration,
     sink: &SubagentOutcomeSink,
@@ -1258,15 +1258,68 @@ async fn drive_subagent(
         return None;
     }
     // The race: the child's settle (the pump's `agent_settled` flips
-    // it) vs the `settle_timeout` vs the process exit (an UNEXPECTED
-    // exit — a crash; a settle-then-exit is the teardown below) vs
-    // the `SubagentCancel` (a parent turn abort — `cancel_subagent`
-    // flips it).
-    let race = tokio::select! {
-        _ = settle_rx.wait_for(|v| *v) => Race::Settled,
-        code = handle.exited() => Race::Exited(code),
-        _ = tokio::time::sleep(settle_timeout) => Race::TimedOut,
-        _ = cancel_rx.changed() => Race::Cancelled,
+    // it) vs the SILENCE bound (ADR 0055 — NOT a bound on the delegation's
+    // duration) vs the process exit (an UNEXPECTED exit — a crash; a
+    // settle-then-exit is the teardown below) vs the `SubagentCancel` (a
+    // parent turn abort — `cancel_subagent` flips it).
+    //
+    // The bound is a SELF-REARMING silence clock: `settle_timeout` is the
+    // child's maximum run of UNEXPLAINED SILENCE, so it is recomputed on
+    // every pass of the loop below — a pass is only ever entered because
+    // something CHANGED. There is no ceiling on how long a delegation may
+    // run, and while a `tool_call_id` is outstanding the bound does not run
+    // at all (the arm is disabled, not merely lengthened).
+    // The declared-outside binding is only a scope (the value is meaningless
+    // before the loop's first pass, which is exactly where it is computed).
+    let mut deadline;
+    let race = loop {
+        // EVERY pass of this loop was entered because something changed (the
+        // first pass, or the `changed()` arm) — so the deadline is recomputed
+        // UNCONDITIONALLY here. That IS the activity reset: a frame bumps
+        // `seq`, `changed()` fires, we come round, the clock restarts. Do NOT
+        // guard this recompute on `in_flight` — a guarded recompute leaves
+        // the deadline at its ORIGINAL arm time for an unblocked quiet child,
+        // which silently restores the absolute wall-clock bound this change
+        // removes.
+        deadline = std::time::Instant::now() + settle_timeout;
+        let in_flight = {
+            // The borrow is scoped so the `RefMut` CANNOT be held across the
+            // `select!` — held across an await point it makes the future
+            // non-`Send` and the spawn fails to compile.
+            //
+            // `borrow_and_update` and NOT `borrow`: it marks the value seen
+            // at borrow time, so a frame that lands BETWEEN this borrow and
+            // the `select!` still leaves `changed()` ready (no missed
+            // wakeup). A plain `borrow()` would leave it unseen, making
+            // `changed()` return immediately on every pass — a hot spin that
+            // starves the other arms.
+            liveness_rx
+                .borrow_and_update()
+                .in_flight
+                .iter()
+                .next()
+                .is_some()
+        };
+        // One fresh `sleep_until` per pass (each pass IS the reset, so this
+        // is never skipped — a child streaming at ~30 fps re-arms ~30
+        // times/sec, which is negligible next to the frame it just processed).
+        let mut sleep = Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(
+            deadline,
+        )));
+        tokio::select! {
+            _ = settle_rx.wait_for(|v| *v) => break Race::Settled,
+            code = handle.exited() => break Race::Exited(code),
+            _ = cancel_rx.changed() => break Race::Cancelled,
+            // Activity (ADR 0055): any frame from the child — a streamed
+            // token, a tool boundary, a control-plane reply — re-arms the
+            // clock instead of letting it expire.
+            _ = liveness_rx.changed() => continue,
+            // The guard DISABLES the arm entirely while a tool call is
+            // outstanding — a child inside a tool, parked on a gate, or
+            // awaiting its own nested Subagent is Active and has NO timeout.
+            // In that state the bound is not "longer"; it does not run.
+            _ = &mut sleep, if !in_flight => break Race::TimedOut,
+        }
     };
     // The outcome (the `SubagentCapture`'s final text — the
     // `SinkFrame` `agent_message_chunk` source; the `usage` from the
@@ -1459,13 +1512,13 @@ mod tests {
 
     use crate::agent::events::EventSink;
     use crate::agent::harness::catalog::{Model, ModelCatalog};
-    use crate::agent::subagent::SubagentOutcome;
+    use crate::agent::subagent::{LaunchConfig, SubagentOutcome};
     use crate::agent::worker::client::{WorkerError, WorkerHandle, WorkerInboundEvent};
     use crate::agent::worker::manager::{
         feed_capture, note_liveness_event, note_liveness_frame, SubagentCapture, SubagentDrive,
         SubagentLiveness, WorkerFactory, WorkerManager,
     };
-    use crate::agent::worker::protocol::{StartEnv, StartMode};
+    use crate::agent::worker::protocol::{StartEnv, StartMode, SubagentDispatchWire};
 
     /// The test logging type aliases (the `clippy::type_complexity`
     /// bound — the `Arc<StdMutex<...>>` shapes are repeated across
@@ -1662,6 +1715,31 @@ mod tests {
                 }
                 _ => None,
             })
+    }
+
+    /// Dispatch a child directly with `task` (the ADR 0055 regression
+    /// harness — the same `dispatch_subagent` entry point the parent's
+    /// `SubagentDispatch` frame reaches through the pump, so the ONLY thing
+    /// a test supplies is the child's task; the wire shape mirrors
+    /// `subagent.rs`'s). The outcome reaches the parent Worker exactly as in
+    /// the frame-driven tests, so `subagent_result_outcome` stays the
+    /// observation point.
+    fn dispatch_child_task(manager: &WorkerManager, parent_session_id: &str, task: &str) {
+        manager.dispatch_subagent(
+            parent_session_id,
+            SubagentDispatchWire {
+                id: "live-stream".to_string(),
+                parent_session_id: parent_session_id.to_string(),
+                parent_cwd: "/tmp/space".to_string(),
+                parent_enabled_tools: vec!["bash".to_string(), "read".to_string()],
+                agent_name: "tester".to_string(),
+                launch: LaunchConfig::default(),
+                task: task.to_string(),
+                // The RESOLVED `provider/id` key (what `subagent.rs` composes —
+                // it resolves against `test_env`'s `fake/m1` catalog entry).
+                model_key: "fake/m1".to_string(),
+            },
+        );
     }
 
     /// `attach` + `detach` bookkeeping (the `workers` map — the
@@ -2180,11 +2258,13 @@ mod tests {
         );
     }
 
-    /// A `"__slow__"` subagent (a 10 s settle) hits the `settle_timeout`
-    /// outcome (the current timeout outcome — `Failed { error: "timed
-    /// out" }`; the subagent is torn down unconditionally).
+    /// A `"__slow__"` subagent (a 10 s settle) is SILENT with NOTHING in
+    /// flight, so the **Dead bound** reaps it (the surviving safety net —
+    /// ADR 0055 pins the *predicate*, not the duration: an unexplained run
+    /// of silence still ends the dispatch `Failed { error: "timed out" }`,
+    /// and the subagent is torn down unconditionally).
     #[tokio::test]
-    async fn a_slow_subagent_hits_the_settle_timeout_outcome() {
+    async fn a_silent_child_with_nothing_in_flight_hits_the_dead_bound() {
         // The settle bound is SHORTER than the fixture's 10 s sleep.
         let (manager, _crashes, events, _sinks) = make_manager(Some(Duration::from_secs(1)));
         manager
@@ -2196,7 +2276,7 @@ mod tests {
             .expect("the parent handle is reachable")
             .send_prompt("__slow_subagent__", &[])
             .expect("the prompt encodes");
-        // The `SubagentResult` frame (the `settle_timeout` won — the
+        // The `SubagentResult` frame (the **Dead bound** won — the
         // fixture's 10 s settle never arrives in time; the
         // `subagent-result-ack` is the round-trip observation point).
         let got = wait_for_event(&events, "t1", |e| {
@@ -2224,6 +2304,110 @@ mod tests {
             manager.test_drive_count(),
             0,
             "the timed-out subagent is torn down"
+        );
+        assert_eq!(manager.test_session_count(), 1, "the parent survives");
+    }
+
+    /// (ADR 0055 — the reported bug) A child that keeps PRODUCING outlives
+    /// the bound. The fixture streams 15 `agent_message_chunk` `SinkFrame`s
+    /// ~100 ms apart (~1.7 s of continuous production — 5× the bound
+    /// injected here) and only then settles, so a drive that bounds the
+    /// child's DELEGATION DURATION cuts it off mid-answer. The bound must be
+    /// a SILENCE bound: every frame rearms it, so a streaming child is an
+    /// Active Subagent and completes normally.
+    ///
+    /// RED against the single never-rearmed `sleep(settle_timeout)`: the
+    /// sleep fires at 300 ms while the child is still streaming →
+    /// `Failed { error: "timed out" }` (the reaping IS the bug). The
+    /// fixture's total turn is ~1.8 s, so the bound is not merely short — it
+    /// is exceeded 5× by pure production.
+    #[tokio::test]
+    async fn a_streaming_subagent_outlives_the_dead_bound() {
+        // The bound is 300 ms; the child streams for ~1.7 s.
+        let (manager, _crashes, events, _sinks) = make_manager(Some(Duration::from_millis(300)));
+        manager
+            .attach("l1", &test_env("l1", None))
+            .await
+            .expect("the parent attach completes");
+        dispatch_child_task(&manager, "l1", "__long_stream__");
+        // The `SubagentResult` frame (the round-trip observation point — the
+        // fixture's `subagent-result-ack` echoes the outcome verbatim).
+        let got = wait_for_event(&events, "l1", |e| {
+            matches!(e, WorkerInboundEvent::SinkFrame { event, .. } if event == "subagent-result-ack")
+        })
+        .await;
+        let outcome = subagent_result_outcome(&events, "l1")
+            .unwrap_or_else(|| panic!("the streaming child must resolve the dispatch: {got:?}"));
+        match outcome {
+            SubagentOutcome::Completed { output, metrics } => {
+                assert_eq!(output, "canned answer", "the captured child text");
+                // The child genuinely ran PAST the bound — the proof that
+                // this is the liveness case, not a race the fixture won.
+                assert!(
+                    metrics.duration_ms >= 600,
+                    "the child must have run well past the 300 ms bound \
+                     (it streamed for ~1.7 s), got {metrics:?}"
+                );
+            }
+            other => panic!(
+                "a streaming child is an Active Subagent and must COMPLETE, got {other:?} \
+                 (a `Failed {{ timed out }}` here is the bug: the drive bounded the \
+                 delegation's DURATION instead of the child's SILENCE)"
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            manager.test_drive_count(),
+            0,
+            "the settled subagent is torn down"
+        );
+        assert_eq!(manager.test_session_count(), 1, "the parent survives");
+    }
+
+    /// (ADR 0055) A child INSIDE a tool call is never reaped. The fixture
+    /// announces a `tool_execution_start`, produces NOTHING for ~1.5 s (the
+    /// tool is running — the child is silent BY CONSTRUCTION and legitimately
+    /// blocked), then closes the call and settles. An outstanding
+    /// `tool_call_id` is precisely the state in which silence means NOTHING,
+    /// so the bound must not run at all here — not "be longer".
+    ///
+    /// RED against the single never-rearmed `sleep(settle_timeout)`: the
+    /// 300 ms sleep expires during the silent tool window →
+    /// `Failed { error: "timed out" }` while `in_flight` holds `t1`.
+    #[tokio::test]
+    async fn a_child_inside_a_tool_call_is_never_reaped() {
+        // The bound is 300 ms; the tool call stays open for ~1.5 s.
+        let (manager, _crashes, events, _sinks) = make_manager(Some(Duration::from_millis(300)));
+        manager
+            .attach("i1", &test_env("i1", None))
+            .await
+            .expect("the parent attach completes");
+        dispatch_child_task(&manager, "i1", "__in_tool__");
+        let got = wait_for_event(&events, "i1", |e| {
+            matches!(e, WorkerInboundEvent::SinkFrame { event, .. } if event == "subagent-result-ack")
+        })
+        .await;
+        let outcome = subagent_result_outcome(&events, "i1")
+            .unwrap_or_else(|| panic!("the in-tool child must resolve the dispatch: {got:?}"));
+        match outcome {
+            SubagentOutcome::Completed { metrics, .. } => {
+                assert!(
+                    metrics.duration_ms >= 1000,
+                    "the child must have been held by the OPEN tool call well past \
+                     the 300 ms bound, got {metrics:?}"
+                );
+            }
+            other => panic!(
+                "a child with an outstanding `tool_call_id` must NEVER be reaped, got \
+                 {other:?} (a `Failed {{ timed out }}` here is the bug: the bound ran \
+                 while the child was blocked inside its tool)",
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            manager.test_drive_count(),
+            0,
+            "the settled subagent is torn down"
         );
         assert_eq!(manager.test_session_count(), 1, "the parent survives");
     }
