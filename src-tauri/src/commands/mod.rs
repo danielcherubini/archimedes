@@ -9,6 +9,7 @@ pub mod sessions;
 pub mod settings;
 pub mod skills;
 pub mod spaces;
+pub mod update;
 pub mod window_state;
 
 use serde::Serialize;

@@ -266,6 +266,15 @@ pub fn run() {
         // Rust only, so no capability entry and no npm package (the plugin's
         // `request_permission` is a documented no-op on desktop).
         .plugin(tauri_plugin_notification::init())
+        // The auto-updater (ADR 0053) — a BUILDER, not `init()`. Registered for
+        // the Rust side only: nothing in `capabilities/default.json` refers to it,
+        // so the webview reaches it through our three commands and never holds
+        // updater or restart rights. It is also the ONE target-gated plugin here
+        // (its dep is gated to the three desktop OSes, which is all this app
+        // builds); a mobile port would gate this registration and `commands::update`
+        // with the same `cfg` — `generate_handler!` takes no per-entry `cfg`, so it
+        // would be a second handler list, not an attribute.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
             commands::sessions::start_session,
@@ -306,6 +315,9 @@ pub fn run() {
             commands::attention::attention_disarm,
             commands::open::external_open,
             commands::window_state::get_window_state,
+            commands::update::check_update,
+            commands::update::install_update,
+            commands::update::relaunch_app,
         ])
         .setup(|app| {
             // The on-disk dirs are named `archimedes` (NOT the bundle

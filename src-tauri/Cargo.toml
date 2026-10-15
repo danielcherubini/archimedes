@@ -116,6 +116,16 @@ gtk = "0.18"
 [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies]
 notify-rust = "4.18"
 
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+# The auto-updater behind `check_update` / `install_update` / `relaunch_app`
+# (ADR 0053) — registered in Rust and called from Rust, so there is no
+# capability entry and no npm package, exactly like the notification plugin
+# above. Target-gated to the three desktop OSes because that is the whole set
+# the plugin supports (its own manifest lists no mobile support) and this app
+# ships desktop-only; `tauri` itself stays pinned at the version
+# `@tauri-apps/cli` is pinned to (AGENTS.md), which 2.14 respects (`tauri = "2.12"`).
+tauri-plugin-updater = "2.14.0"
+
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
 codegen-units = 1
