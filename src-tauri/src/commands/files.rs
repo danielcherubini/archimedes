@@ -1671,18 +1671,15 @@ mod tests {
         // REVERSE of insertion order — so creating a.txt..l.txt makes the
         // walk order disagree with alphabetical order, and a walker without
         // `sort_by_file_name` keeps the alphabetically-LATE names and goes
-        // red. (`read_dir_order_is_sorted` below says so out loud if a
-        // filesystem ever returns an already-sorted order, in which case
-        // this pin would be vacuous rather than wrong.)
+        // red. (`assert_readdir_disagrees_with_sorted_order` below says so out
+        // loud if a filesystem ever returns an already-sorted order — which NTFS
+        // does, and it is skipped there with a printed note rather than deleted.)
         let root = tmp_dir("cap-order");
         let names: Vec<String> = ('a'..='l').map(|c| format!("{c}.txt")).collect();
         for name in &names {
             touch(&root, name);
         }
-        assert!(
-            !read_dir_order_is_sorted(&root),
-            "test setup: this filesystem already returns readdir in alphabetical order, so the layout cannot discriminate"
-        );
+        assert_readdir_disagrees_with_sorted_order(&root);
 
         let (entries, truncated) = collect_files(&root, 4);
         assert!(
@@ -1702,6 +1699,41 @@ mod tests {
         let mut sorted = seen.clone();
         sorted.sort();
         seen == sorted
+    }
+
+    /// Assert the fixture's raw enumeration order DISAGREES with the alphabetical
+    /// order `sort_by_file_name` imposes — the premise every "the survivors are the
+    /// alphabetically first" assertion below depends on — and say so out loud on
+    /// the one platform where the premise cannot be established.
+    ///
+    /// WHY IT CANNOT BE ESTABLISHED ON WINDOWS: NTFS enumerates a directory in its
+    /// B-tree index order, i.e. already sorted, so `readdir` cannot disagree with
+    /// the walker's sort no matter how the files are created (measured on
+    /// windows-latest: the guard fired for both cap fixtures). Linux (tmpfs/ext4,
+    /// insertion-hash / reversed order) and macOS (APFS) do disagree, so the
+    /// premise holds and is asserted there. Skipping it on Windows makes the
+    /// survivor-order assertion VACUOUS there — stated, not hidden — and the
+    /// determinism claim stays pinned on every other platform. The alternative was
+    /// to delete the guard and let the test pass for the wrong reason silently,
+    /// which is exactly what the guard was written against.
+    fn assert_readdir_disagrees_with_sorted_order(dir: &std::path::Path) {
+        if !read_dir_order_is_sorted(dir) {
+            return;
+        }
+        // `cfg!` is a COMPILE-time constant, so this reads as a per-platform
+        // guard rather than an `assert!` on a constant (which clippy 1.99
+        // rejects, and which a `const { assert!(…) }` would make a COMPILE
+        // error on every unix build — the wrong shape for a runtime premise).
+        #[cfg(unix)]
+        panic!(
+            "test setup: this filesystem already returns readdir in alphabetical order, so the layout cannot discriminate"
+        );
+        #[cfg(not(unix))]
+        eprintln!(
+            "note: readdir here is already alphabetical (NTFS index order), so the \
+             survivor-ORDER half of this fixture is vacuous on this platform; the \
+             survivor-COUNT and `truncated` halves still run"
+        );
     }
 
     #[test]
@@ -1859,11 +1891,45 @@ mod tests {
             .collect()
     }
 
+    /// The spelling a `?` token can actually CARRY for `dir`.
+    ///
+    /// The engine's input is a token the user typed, and the renderer's absolute
+    /// shape (`FILE_ABSOLUTE_TOKEN_RE` in `src/lib/skills.ts`) admits only
+    /// `~/…`, `/…` and `[A-Za-z]:/…` — NEVER a backslash — which is exactly why
+    /// `abs_to_slash` exists: a directory row on Windows inserts `C:/Users/you/…`
+    /// so the NEXT token is still formable. `dir.to_string_lossy()` is the other
+    /// spelling: on Windows the platform's own temp root renders
+    /// `C:\Users\runneradmin\AppData\Local\Temp`, and a query built from it fails
+    /// `expand_completion_root`'s drive-root byte test (`bytes[2] == b'/'`), which
+    /// returns `None`, and `completion_dir` honestly answers `(empty, false)`.
+    /// Every `[]` in the Windows run of this module came from here, not from the
+    /// walker.
+    ///
+    /// So the FIXTURE was wrong, not the product: it handed the engine a shape its
+    /// documented contract says no caller can produce, and then read the refusal as
+    /// an empty listing. The substitution is a BYTE test mirroring the product's own
+    /// drive-root arm — no `cfg!`, so Linux and macOS take the `else` branch
+    /// untouched (their temp roots are `/`-rooted and already carry `/`), and only a
+    /// drive-letter-with-backslashes spelling is rewritten.
+    fn slash_query_form(dir: &std::path::Path) -> String {
+        let raw = dir.to_string_lossy().into_owned();
+        let bytes = raw.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes[2] == b'\\'
+        {
+            raw.replace('\\', "/")
+        } else {
+            raw
+        }
+    }
+
     /// A `completion_dir` query meaning "list `dir` itself": an absolute path
     /// plus the trailing separator the grammar puts there (no trailing `/` means
     /// "list the parent", which is a different test).
     fn list_query(dir: &std::path::Path) -> String {
-        format!("{}/", dir.to_string_lossy())
+        format!("{}/", slash_query_form(dir))
     }
 
     #[test]
@@ -2073,6 +2139,24 @@ mod tests {
     /// newline (which also terminates the message).
     const UNGRAMMATABLE: [&str; 2] = ["we?ird.md", "bad\nname.md"];
 
+    /// Can this platform's OWN filesystem create a file with these bytes in its
+    /// name? Unix: yes for both. Windows: NO for both — `?` is in the forbidden
+    /// character set (`\ / : * ? " < > |`) and so is any control character below
+    /// 0x20, and `CreateFileW` answers `ERROR_INVALID_NAME` (measured on
+    /// windows-latest: `called Result::unwrap() on an Err value: Os { code: 123,
+    /// kind: InvalidFilename, … }` inside `touch`). That is why the fixture below
+    /// builds them conditionally rather than unconditionally: the two bytes that
+    /// break the TOKEN grammar are bytes the Windows FILESYSTEM also refuses, so
+    /// the ungrammatical entries cannot exist there and the refusal is
+    /// unobservable — on Windows the product has nothing to hide because nothing
+    /// can be named that way. The fixture still builds the three ordinary rows,
+    /// so both tests keep their "a filter that is too broad cannot pass" half on
+    /// every platform; only the "these specific names are absent" half is
+    /// unix-only, and it stays pinned on Linux/macOS by the same assertions.
+    fn os_allows_grammar_hostile_name() -> bool {
+        cfg!(unix)
+    }
+
     /// The same fixture both representability tests build: two ungrammatical
     /// NAMES (a file each) plus an ungrammatical DIRECTORY holding a CLEAN-NAMED
     /// child — the recursive walk's real hazard, since its rows are RELATIVE PATHS
@@ -2085,9 +2169,11 @@ mod tests {
         std::fs::create_dir_all(root.join("docs")).unwrap();
         touch(&root, "docs/ok.md");
         touch(&root, "a file with spaces.md");
-        touch(&root, UNGRAMMATABLE[0]);
-        touch(&root, UNGRAMMATABLE[1]);
-        touch(&root, "wei?rd/inner.md");
+        if os_allows_grammar_hostile_name() {
+            touch(&root, UNGRAMMATABLE[0]);
+            touch(&root, UNGRAMMATABLE[1]);
+            touch(&root, "wei?rd/inner.md");
+        }
         root
     }
 
@@ -2133,6 +2219,15 @@ mod tests {
         // THIS IS REPRESENTABILITY, NOT VISIBILITY, and the distinction is the
         // point of the helper's doc comment: no convention, name, or project policy
         // is consulted, only bytes the grammar cannot carry.
+        //
+        // ON WINDOWS THE ABSENCE HALF IS VACUOUS, stated rather than glossed:
+        // Windows FORBIDS `?` in a filename, so `os_allows_grammar_hostile_name`
+        // skips those three fixture entries there (creating them is an
+        // `ERROR_INVALID_NAME`), and the rows below are simply what the fixture
+        // holds. The assertion still runs everywhere and still fails if the filter
+        // gets too broad — three ordinary rows are checked — but the positive proof
+        // that a `?`-named file is refused is Linux/macOS's, and no Windows run can
+        // supply it.
         let root = ungrammatical_fixture("completion-grammar");
         let (entries, truncated) = completion_dir(&list_query(&root), None, MAX_PICKER_ENTRIES);
         assert_eq!(
@@ -2177,7 +2272,10 @@ mod tests {
         // THE SAME RULE IN THE OTHER WALK, and it is the same rule for the same
         // reason: a name the picker cannot insert is not a completable name in the
         // Space listing either (the relative charset is `[^\n?]`-narrower still, so
-        // these two bytes fail it too).
+        // these two bytes fail it too). The fixture's grammar-hostile entries are
+        // unix-only (Windows forbids `?` in a name — see
+        // `os_allows_grammar_hostile_name`), so on Windows this pins the four
+        // ordinary rows and the poisoned directory's subtree stays untested there.
         let root = ungrammatical_fixture("collect-grammar");
         let (entries, truncated) = collect_files(&root, 5_000);
         assert_eq!(
@@ -2252,7 +2350,7 @@ mod tests {
         // `?~/notes/too` in the shape the engine takes it. The trailing `too` is
         // what the RENDERER filters on; the engine returns the whole directory,
         // so the assertion below expects both files and says nothing about `too`.
-        let query = format!("{}/notes/todo", root.to_string_lossy());
+        let query = format!("{}/notes/todo", slash_query_form(&root));
         let (entries, truncated) = completion_dir(&query, None, MAX_PICKER_ENTRIES);
         assert_eq!(
             rows(&entries),
@@ -2270,7 +2368,7 @@ mod tests {
         // emptied the parent arm would still see a non-empty listing fail the
         // assertion above for the wrong reason.
         let (slash, _) = completion_dir(
-            &format!("{}/notes/", root.to_string_lossy()),
+            &format!("{}/notes/", slash_query_form(&root)),
             None,
             MAX_PICKER_ENTRIES,
         );
@@ -2797,11 +2895,10 @@ mod tests {
         // ascending order is what makes the two orders disagree on the tmpfs/ext4
         // directories these run on (`readdir` comes back reversed); if a
         // filesystem ever returns them sorted, this assertion says so instead of
-        // letting the test pass for the wrong reason.
-        assert!(
-            !read_dir_order_is_sorted(&root),
-            "test setup: this filesystem already returns readdir in alphabetical order, so the layout cannot discriminate"
-        );
+        // letting the test pass for the wrong reason. (NTFS DOES return them
+        // sorted — the helper skips the premise there with a printed note, see its
+        // doc comment.)
+        assert_readdir_disagrees_with_sorted_order(&root);
         let (entries, truncated) = completion_dir(&list_query(&root), None, 3);
         assert!(truncated, "more entries than the cap must be reported");
         assert_eq!(
@@ -2908,7 +3005,20 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    /// Gated to LINUX, not to `cfg(unix)`, and the difference is the finding:
+    /// this fixture's premise is that the filesystem STORES a name that is not
+    /// valid UTF-8. Linux (ext4/tmpfs) does; macOS's APFS refuses it at create
+    /// time (measured on macos-latest:
+    /// `called Result::unwrap() on an Err value: Os { code: 92, kind:
+    /// Uncategorized, message: "Illegal byte sequence" }` on the `File::create`
+    /// below — the failure happens in the FIXTURE, before the product is called). The gap this test pins — `to_string_lossy()` putting U+FFFD into
+    /// `name` and `insert`, so the row inserts a path that names nothing — is
+    /// platform-neutral CODE, and the lossy conversion is additionally covered on
+    /// every platform by `completion_insert_never_contains_a_backslash`'s
+    /// separator claim and the `name_is_completable` table; only the FIXTURE needs
+    /// a filesystem that can hold the byte. Deleting the test would drop the only
+    /// pin of the gap, so it stays where the byte can exist.
+    #[cfg(target_os = "linux")]
     #[test]
     fn completion_dir_offers_a_non_utf8_name_with_a_lossy_insert() {
         // THE OTHER HALF of the representability story, and the half that is a

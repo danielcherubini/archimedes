@@ -1,0 +1,23 @@
+---
+status: accepted
+date: 2026-10-14
+superseded-by:
+---
+
+# Compose the updater manifest in one trailing `publish` job instead of letting each platform's build job write `latest.json`
+
+A tag builds on several OS runners, and every one of them wants to write the same `latest.json` release asset that the updater endpoint polls. `tauri-action` does **merge** rather than overwrite — it downloads the existing manifest and splices in its own platform keys, and has since 2023 (`upload-version-json.ts`, `c5c0e27`) — but that merge is an unguarded read-modify-write with no locking: N parallel jobs seed from the same state and the last writer publishes its own merge, silently losing every platform that finished in between (upstream #409 "latest.json contains data for only one platform", #1270 asset-delete 404). So "just use the action's flag" leaves a race whose failure mode is invisible on the day it ships and appears only when a user on the losing platform cannot update. We decided to set `uploadUpdaterJson: false` on every build job and compose the ONE manifest in a trailing `publish` job that reads the `.sig` assets off the draft release with `gh`, writes the JSON with `jq --rawfile`, validates it, uploads it `--clobber`, and only then runs `gh release edit --draft=false` — one writer, so the race is structurally gone rather than retried away.
+
+## Considered Options
+
+- **`uploadUpdaterJson: true` on all build jobs (rejected).** Upstream's own fix for the conflict is a `Math.random()` retry delay, and it exists only on the `@v1` line (`98b1609`); the `@v0` line we were on retries with zero delay and does not wrap the manifest upload at all. Mitigation is not serialisation, and the residual failure — a manifest describing one platform — is silent from CI's point of view.
+- **Build jobs upload workflow artifacts only; one publish job owns installers *and* manifest (rejected).** Fully deterministic and never uses the draft release as the hand-off medium, but it re-implements the asset upload `tauri-action` already does correctly (asset naming, `.sig` collection, retry). We keep `uploadWorkflowArtifacts: true` as a debug escape hatch only.
+- **Serialise the build jobs with `needs:` so each merge sees the previous one (rejected).** Correct, but it trades away the parallelism that makes a three-OS release tolerable, and adding macOS later lengthens the chain again.
+
+## Consequences
+
+- **Publish order is load-bearing, not cosmetic.** `GET /releases/latest/download/latest.json` serves only a **published, non-prerelease** release (GitHub's own REST description; 404 otherwise), so a draft release can never satisfy the endpoint our `tauri.conf.json` names. Publishing before the manifest exists opens a window where the new version is visible to clients with no manifest, or with the previous version's. The `publish` job therefore composes → validates → uploads → publishes, in that order, and any failure before the last step leaves the release a draft.
+- **The manifest job duplicates the updater's target-resolution rule**, so that rule is now ours to keep correct. `Updater::get_urls` tries `{os}-{arch}-{installer}` BEFORE `{os}-{arch}` (`updater.rs:700-733`), and the Linux payload bundler only ever signs the AppImage — so a manifest carrying only the bare `linux-x86_64` key serves a `.deb` install the AppImage, which downloads in full, verifies its signature, and only then fails `install_deb`'s `infer::archive::is_deb` check with `invalid updater binary format`. Hence the per-installer keys (`linux-x86_64-appimage`, `linux-x86_64-deb`, `windows-x86_64-nsis`) alongside the bare ones, and hence `jq --rawfile` rather than a heredoc: a `.sig` is base64 *with embedded newlines*, and an empty `signature` string parses perfectly and fails only client-side at minisign.
+- **Asset names are discovered by pattern, never hardcoded.** The names carry `productName`, version, arch spellings that differ per bundler (`x64` for nsis, `amd64` for deb/AppImage) and an updater payload suffix (`…AppImage.tar.gz`, `…-setup.nsis.zip`) chosen so the payload's bytes match what the installer on the other end sniffs. A hardcoded name is a silent "platform missing from manifest" waiting for the first `productName` or version change.
+- **`tauri-action` moves to `@v1`** in the same change, because the `{os}-{arch}-{installer}` keys and `uploadWorkflowArtifacts` do not exist on `@v0`. Its input names differ (`uploadUpdaterJson`, not `includeUpdaterJson`).
+- **A second writer to `latest.json` would reintroduce the bug.** The `uploadUpdaterJson: false` line looks like a mistake to a reader who knows the action has that feature; that is why it carries a pointer here rather than only a comment.

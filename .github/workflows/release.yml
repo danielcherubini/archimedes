@@ -1,121 +1,187 @@
 name: Release
 
+# A tag is the trigger; `workflow_dispatch` is the build-only rehearsal that
+# lets this file be tested on a branch, with no tag and no release to touch.
 on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag this branch would be released as (informational — build-only mode uploads nothing, so nothing reads it)"
+        required: false
+        default: ""
+
+# Explicit `cancel-in-progress: false`: a cancel landing between "assets
+# uploaded" and "`--draft=false`" strands a half-populated draft that no
+# later run recognises as finished, and the re-tag flow (roadmap Task 8)
+# re-runs this workflow on the same ref while an older run may still be
+# uploading. Queuing instead of cancelling is the whole point.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# Top level, because all three stages need it: `create-release` creates and
+# edits the release, `build` uploads assets, `publish` uploads `latest.json`
+# and flips the draft. A per-job grant would work but invites a future job to
+# forget it.
+permissions:
+  contents: write
 
 jobs:
-  release-macos:
-    name: macOS (Developer ID + notarization)
-    runs-on: macos-latest
-    env:
-      # Notarization credentials (macOS ships signed + notarized from day one).
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      # tauri build signs the updater artifacts (.sig) at build time.
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # The toolchain comes from `src-tauri/rust-toolchain.toml` — see ci.yml
-      # for why no version is named here. A release built on a different
-      # compiler than the one `main` was linted with is unvalidated.
-      - name: Install the pinned Rust toolchain
-        working-directory: src-tauri
-        # bash on every OS: the Windows job's default shell is PowerShell,
-        # which has no `cut`.
-        shell: bash
-        run: |
-          rustup toolchain install
-          rustup default "$(rustup show active-toolchain | cut -d' ' -f1)"
-          rustc --version
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-
-      # tauri-action runs `pnpm tauri build` (which signs the .sig
-      # artifacts via TAURI_SIGNING_PRIVATE_KEY) and publishes the
-      # artifacts to the GitHub Release, including latest.json for the
-      # updater.
-      - name: Build, sign, and publish
-        uses: tauri-apps/tauri-action@v0
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Archimedes Desktop v${{ github.ref_name }}"
-          releaseBody: |
-            Archimedes Desktop v${{ github.ref_name }} — macOS (Developer ID signed + notarized).
-          releaseDraft: true
-          includeUpdaterJson: true
-
-  release-windows:
-    name: Windows (unsigned for v1)
-    runs-on: windows-latest
-    env:
-      # No code-signing for v1 — SmartScreen warnings are the category
-      # norm. Updater artifacts are still minisign-signed.
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # The toolchain comes from `src-tauri/rust-toolchain.toml` — see ci.yml.
-      - name: Install the pinned Rust toolchain
-        working-directory: src-tauri
-        # bash on every OS: the Windows job's default shell is PowerShell,
-        # which has no `cut`.
-        shell: bash
-        run: |
-          rustup toolchain install
-          rustup default "$(rustup show active-toolchain | cut -d' ' -f1)"
-          rustc --version
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build, sign, and publish
-        uses: tauri-apps/tauri-action@v0
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Archimedes Desktop v${{ github.ref_name }}"
-          releaseBody: |
-            Archimedes Desktop v${{ github.ref_name }} — Windows (unsigned for v1).
-          releaseDraft: true
-          includeUpdaterJson: true
-
-  release-linux:
-    name: Linux (AppImage + deb)
+  # Stage 1: one job owns the release object, so the race that three parallel
+  # `tauri-action` jobs used to lose (upstream #914 — the action cannot fetch a
+  # draft release by tag, so each job created its own draft) cannot happen: by
+  # the time any build job runs, exactly one release exists and the build jobs
+  # are handed its id instead of a tag to look up.
+  create-release:
+    name: Create the draft release
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    # Explicit, not the runner's implicit default: `gh` inside a `run:` step only
+    # finds a token when one is in its environment, and the implicit
+    # `GITHUB_TOKEN` that `actions/checkout` and the toolkit injects for us is a
+    # runner-version implementation detail, not a contract. The publish job states
+    # it the same way.
     env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      release-id: ${{ steps.create.outputs.release-id }}
+    steps:
+      # `fetch-depth: 0` so `--verify-tag` can resolve the annotated tag object
+      # rather than only the checked-out commit.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # A release whose three version fields disagree is a release announcing
+      # the wrong number, and the bundle names come from `tauri.conf.json` —
+      # so refuse before the assets exist, not after. `--tag` adds the tag to the
+      # agreement: three files agreeing on `0.1.0` under a `v0.1.1` tag otherwise
+      # publishes a manifest every installed client rejects outright.
+      # `$GITHUB_REF_NAME` is passed as an argument in a quoted parameter
+      # expansion, never interpolated into the script text — a tag name is
+      # attacker-visible input the moment someone pushes `v1.0.0; curl evil`.
+      - name: Check the version fields agree with each other and with the tag
+        run: bash scripts/check-versions.sh --tag "$GITHUB_REF_NAME"
+
+      - name: Resolve the tag
+        id: resolve
+        run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      # `||` instead of view-then-create: a re-run on the same tag (the re-tag
+      # flow, or a retried failed job) must find the existing draft and keep
+      # going, not die on "release already exists". `--verify-tag` is the loud
+      # failure for the race where the tag was deleted between the push and
+      # this step; `--draft` keeps every asset invisible until the publish job
+      # has written the manifest; `--notes` is non-empty because this is the
+      # only place the body is ever set — the publish job edits the DRAFT flag
+      # and nothing else, so an empty note here is an empty release page
+      # forever.
+      - name: Create the draft release
+        id: create
+        run: |
+          # Not `${{ github.ref_name }}` interpolated into the script: a tag
+          # name is text that can carry quotes, and this job runs on a tag
+          # someone pushed. `GITHUB_REF_NAME` is the same value, via the
+          # environment instead of via string substitution.
+          TAG="$GITHUB_REF_NAME"
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --draft --verify-tag \
+                 --title "Archimedes $TAG" --notes "Archimedes $TAG"
+          echo "release-id=$(gh release view "$TAG" --json databaseId -q .databaseId)" >> "$GITHUB_OUTPUT"
+
+  # Stage 2: per-OS build jobs. `needs:` is UNCONDITIONAL and the `if:` guard is
+  # required, not cosmetic: on `workflow_dispatch` there is no tag so
+  # `create-release` is SKIPPED, and a skipped `needs` target skips its
+  # dependents — without `always()` the dispatch mode would do nothing at all
+  # and look green while doing it.
+  build:
+    name: Build (${{ matrix.os }})
+    needs: create-release
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.create-release.result == 'success')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # A Windows-only bundling failure must not cancel the Linux run (and
+      # vice versa): losing the second platform's result costs a full re-run to
+      # see it.
+      fail-fast: false
+      matrix:
+        include:
+          # `ubuntu-latest` matches ci.yml's runner on purpose: validate and
+          # ship on one glibc baseline. The shipped AppImage's minimum glibc is
+          # the BUILD runner's — there is no auto-compat magic, so building on a
+          # newer image than CI tests on would ship something CI never proved.
+          - os: windows-latest
+            args: ""
+          - os: ubuntu-latest
+            args: ""
+
+          # ----------------------------------------------------------------
+          # macOS packaging, present but disabled: the mac package is skipped
+          # until the APPLE_* signing secrets exist. Uncommenting ONLY these two
+          # rows is not enough — every item below is load-bearing:
+          #
+          # (a) Uncomment BOTH rows. Two archs with distinct `--target`s: a
+          #     matrix of two macOS rows without them builds the same host arch
+          #     twice, so the asset names collide and one platform is silently
+          #     dropped from the release.
+          # (b) The "Install the pinned Rust toolchain" step must gain
+          #     `targets: aarch64-apple-darwin x86_64-apple-darwin` (see the
+          #     commented line inside that step). `src-tauri/rust-toolchain.toml`
+          #     deliberately lists no targets, so a cross-target that was never
+          #     installed fails the build — late, in the Rust compile.
+          # (c) Job-level `env:` CAN read `secrets`, so the notarization block
+          #     lives at JOB level (quoted with the rows below), not in a step
+          #     `if:`.
+          # (d) The per-arch SKIP GATE cannot be `if: secrets.X != ''` —
+          #     `secrets` is not a context in `if:` expressions. The shape is a
+          #     step that writes the answer to an output (secrets ARE expanded
+          #     in `run:`) and a STEP-level `if:` on the tauri-action step.
+          # (e) Drop `--no-sign` for macOS: signing is the point of those rows,
+          #     and `--no-sign` short-circuits before the key is read.
+          #
+          # - os: macos-latest
+          #   args: "--target aarch64-apple-darwin"
+          # - os: macos-latest
+          #   args: "--target x86_64-apple-darwin"
+          #
+          # Job-level env (uncomment with the rows; job env may read secrets,
+          # step `if:` may not):
+          # env:
+          #   APPLE_ID: ${{ secrets.APPLE_ID }}
+          #   APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          #   APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          #
+          # Skip gate — a step BEFORE tauri-action:
+          # - name: Check whether macOS signing secrets exist
+          #   id: check-macos-signing
+          #   run: echo "enabled=${{ secrets.APPLE_ID != '' }}" >> "$GITHUB_OUTPUT"
+          #
+          # …and on the tauri-action step:
+          #   if: matrix.os != 'macos-latest' || steps.check-macos-signing.outputs.enabled == 'true'
+          # ----------------------------------------------------------------
+    env:
+      # `tauri build` signs the updater artifacts (`.sig`) at build time; the
+      # signatures are what the publish job composes `latest.json` from.
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # The toolchain comes from `src-tauri/rust-toolchain.toml` — see ci.yml.
+      # No toolchain version named here on purpose: `src-tauri/rust-toolchain.toml`
+      # is the pin, and naming one in this step fights it (`rustup default`
+      # loses to the directory override, so the version installed would be
+      # the version NOT used — and its clippy/rustfmt would be installed
+      # onto a toolchain nothing runs). Run from `src-tauri/` so rustup reads
+      # the file, which also carries the `components` (a command-line
+      # `--component` is ignored when no toolchain is named). `rustup
+      # default` then makes the pin the default too, so a cargo step that
+      # does not set `working-directory` still resolves the pinned compiler.
       - name: Install the pinned Rust toolchain
         working-directory: src-tauri
         # bash on every OS: the Windows job's default shell is PowerShell,
@@ -125,6 +191,12 @@ jobs:
           rustup toolchain install
           rustup default "$(rustup show active-toolchain | cut -d' ' -f1)"
           rustc --version
+        # macOS re-enable, checklist item (b): cross-targets are NOT in
+        # rust-toolchain.toml, so an uncommented macOS row needs them added to
+        # this step as a `with:` block (a sibling of `run:` — the order of the
+        # two keys does not matter):
+        # with:
+        #   targets: aarch64-apple-darwin x86_64-apple-darwin
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -135,8 +207,11 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      # Tauri's Linux prerequisites.
+      # Tauri's Linux prerequisites (webkit2gtk 4.1 + friends) — the same list
+      # ci.yml installs. Gated on `runner.os` because the step is about the
+      # MACHINE it lands on, not the matrix value.
       - name: Install Linux build dependencies
+        if: runner.os == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -149,12 +224,166 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build, sign, and publish
-        uses: tauri-apps/tauri-action@v0
+      # macOS re-enable, checklist item (d): the skip-gate step goes here,
+      # before the build.
+      # - name: Check whether macOS signing secrets exist
+      #   id: check-macos-signing
+      #   run: echo "enabled=${{ secrets.APPLE_ID != '' }}" >> "$GITHUB_OUTPUT"
+
+      # `@v1` (verified against the upstream repo: tags `v1`, `v1.0` and
+      # `v1.0.0` all exist; v1.0.0 is the release this line resolves to). v1 is
+      # the input names used below — v0's `includeUpdaterJson` no longer exists,
+      # which is exactly how the old three-job file lost the race.
+      - name: Build and upload the bundles
+        uses: tauri-apps/tauri-action@v1
+        # The action throws `GITHUB_TOKEN is required` without it, in its own
+        # `env:` — the job-level token is not what it reads.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # macOS re-enable, checklist item (d):
+        # if: matrix.os != 'macos-latest' || steps.check-macos-signing.outputs.enabled == 'true'
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Archimedes Desktop v${{ github.ref_name }}"
-          releaseBody: |
-            Archimedes Desktop v${{ github.ref_name }} — Linux (AppImage + deb).
-          releaseDraft: true
-          includeUpdaterJson: true
+          # `--no-sign` in dispatch mode only: the rehearsal has no reason to
+          # consume the signing key, and its absence is asserted below (a
+          # `--no-sign` build produces NO `.sig` files at all).
+          # macOS re-enable, checklist item (e): this expression appends
+          # `--no-sign` to EVERY row in dispatch mode, macOS included. On the
+          # TAG path (the one that ships) nothing is appended, so signing stays
+          # on there; a dispatch rehearsal of the macOS rows proves the compile,
+          # not the signature. Narrow it to non-macOS rows if that ever matters.
+          args: ${{ matrix.args }}${{ github.event_name == 'workflow_dispatch' && ' --no-sign' || '' }}
+          # The release the assets belong to, handed over as an id instead of a
+          # tag the action would have to look up (and could not find, for a
+          # draft — upstream #914). Empty on `workflow_dispatch`, where the
+          # `needs` job was skipped; the action treats an empty `releaseId` as
+          # unset and uploads nothing, which is what a rehearsal wants.
+          releaseId: ${{ needs.create-release.outputs.release-id }}
+          # Three concurrent read-modify-write merges of one asset is how a
+          # platform vanishes from the manifest while CI stays green, so every
+          # per-OS build job keeps out of it:
+          uploadUpdaterJson: false # ADR 0052 — one writer (the `publish` job composes latest.json from every .sig)
+          # The default, stated explicitly because it is the contract: these
+          # signatures are the input `scripts/compose-updater-manifest.sh`
+          # consumes in the publish job.
+          uploadUpdaterSignatures: true
+          # Debug-only: the raw workflow artifacts are ~124 MB of AppImages
+          # across both OSes, kept 90 days per run. Pay that only when there is
+          # no release to look at instead.
+          uploadWorkflowArtifacts: ${{ github.event_name == 'workflow_dispatch' }}
+          # Deliberately ABSENT, both for a reason:
+          # - the project-path input: the action resolves the Tauri CLI by
+          #   looking for `@tauri-apps/cli` in `package.json` AT that path with
+          #   no upward search, so pointing it at `src-tauri` (no package.json
+          #   there) would install a floating global CLI — the exact thing
+          #   AGENTS.md forbids, because the CLI is the bundler whose version
+          #   must match the locked `tauri`. The default root path finds the
+          #   pinned `@tauri-apps/cli`.
+          # - `releaseDraft` / `releaseName` / `releaseBody` / `tagName`: with
+          #   `releaseId` set the action never creates or edits the release, so
+          #   these are ignored. Dead keys in YAML lie to the next reader.
+
+      # Dispatch mode only. Without uploads, a run that produced zero bundles
+      # still goes GREEN (nothing failed), so the rehearsal would prove nothing.
+      # These two steps are what make build-only mode a real test.
+      - name: Assert the bundles were built (dispatch mode)
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLE_DIR=src-tauri/target/release/bundle
+          if [ ! -d "$BUNDLE_DIR" ]; then
+            echo "::error::no bundle directory at $BUNDLE_DIR — the build produced nothing"
+            exit 1
+          fi
+          echo "bundle tree:"
+          find "$BUNDLE_DIR" -type f | sort
+          count=$(find "$BUNDLE_DIR" -type f \( \
+            -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \
+            -o -name '*.exe' -o -name '*.msi' -o -name '*.nsis.zip' \
+            -o -name '*.dmg' -o -name '*.app.tar.gz' \) | wc -l)
+          if [ "$count" -eq 0 ]; then
+            echo "::error::no installer bundles under $BUNDLE_DIR (see the tree above)"
+            exit 1
+          fi
+          echo "installer bundles found: $count"
+
+      # The `--no-sign` proof, asserted on the ARTIFACTS rather than on a log
+      # line: a signing-enabled rehearsal would also leave `.sig` files behind,
+      # which is what this guards against.
+      - name: Assert --no-sign produced no signatures (dispatch mode)
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLE_DIR=src-tauri/target/release/bundle
+          sigs=$(find "$BUNDLE_DIR" -type f -name '*.sig' 2>/dev/null | wc -l || true)
+          if [ "$sigs" -ne 0 ]; then
+            echo "::error::--no-sign was not honored: $sigs .sig file(s) were produced"
+            find "$BUNDLE_DIR" -type f -name '*.sig'
+            exit 1
+          fi
+          echo "no .sig files produced, as expected for --no-sign"
+
+  # Stage 3: the single writer, and it runs LAST on purpose — stated here
+  # because it is the ordering a fast reader is tempted to "optimise" away.
+  # `/releases/latest/download/latest.json` serves only a PUBLISHED,
+  # non-prerelease release, so publishing before the manifest exists would let
+  # every installed client see a version whose manifest is missing (404) or
+  # still pointing at the previous release. Assets first, manifest second,
+  # draft flag last.
+  publish:
+    name: Compose the updater manifest and publish
+    needs: [create-release, build]
+    # `always()` is spelled per the roadmap, and both result checks stay strict:
+    # on `workflow_dispatch` `create-release` is SKIPPED, and a skipped `needs`
+    # target would otherwise skip this job by the plain `needs` rule instead of
+    # by this condition saying "the release does not exist, so there is nothing
+    # to publish". Same outcome, stated reason — and the condition must stay
+    # `== 'success'` for BOTH jobs: nothing may go public unless the release
+    # object exists and every platform's bundles were uploaded.
+    if: always() && needs.create-release.result == 'success' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.create-release.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The manifest's `version` must be the bare number (`v`-prefixed is
+      # rejected by the composer, and by the client) while every URL is
+      # tag-pinned, hence both forms.
+      - name: Resolve the version
+        run: echo "VER=${TAG#v}" >> "$GITHUB_ENV"
+
+      # `gh release download` errors on its own when the pattern matches
+      # nothing; the `ls` is the belt-and-braces version of the same check with
+      # a message that names the pipeline instead of gh's glob complaint.
+      - name: Download the signatures
+        run: |
+          gh release download "$TAG" --pattern '*.sig' --dir sigs --clobber
+          ls sigs/*.sig || {
+            echo "::error::no .sig assets on $TAG — the build jobs uploaded nothing signable"
+            exit 1
+          }
+
+      - name: Compose latest.json
+        run: |
+          bash scripts/compose-updater-manifest.sh \
+            --sigs-dir sigs \
+            --version "$VER" \
+            --tag "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --out latest.json \
+            --notes "Archimedes $TAG"
+
+      # The one and only `latest.json` upload (ADR 0052).
+      - name: Upload the updater manifest
+        run: gh release upload "$TAG" latest.json --clobber
+
+      # LAST step, nothing after it: flipping the draft is the moment installed
+      # clients start seeing this version, so it happens only once the assets
+      # and the manifest are both in place. The body/title are never edited
+      # here — they were set at creation.
+      - name: Publish the release
+        run: gh release edit "$TAG" --draft=false

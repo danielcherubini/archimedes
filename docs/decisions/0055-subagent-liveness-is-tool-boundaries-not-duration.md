@@ -1,0 +1,27 @@
+---
+status: accepted
+date: 2026-10-15
+superseded-by:
+---
+
+# Subagent liveness is decided by tool-execution boundaries, not by delegation duration
+
+A **Subagent session** was torn down by `DEFAULT_SUBAGENT_SETTLE_TIMEOUT` — a single `tokio::time::sleep` armed once after the dispatch preflight and raced against `agent_settled` (`src/agent/worker/manager.rs`). It was an ABSOLUTE wall-clock bound on the whole delegation, so a child that streamed tokens and ran tools for 30+ minutes was reaped mid-work as `Failed { "timed out" }`: the bound could not distinguish a wedged child from a busy one. We decided to replace the duration bound with a **silence bound on a liveness signal derived from the existing `tool_execution_start` / `tool_execution_end` frames** — a child is **Active** (and has NO timeout of any kind) while it is producing frames or has at least one outstanding `tool_call_id`, and only a child that is silent with nothing in flight for `DEFAULT_SUBAGENT_DEAD_BOUND` (30 min) is **Dead** and reaped.
+
+The tool boundary is the signal because it is the one observation that already covers every legitimately-silent state without a new protocol message: a child inside `bash`/`edit`/an MCP call emits nothing; a child parked on an `ask`, a **Permission prompt** or a sudo prompt is by construction *inside* a tool call — `tool_execution_start` fires at announce time, `gate_tool` blocks later inside it (`loop.rs:951` / `:1240`) — so it holds an outstanding id while it waits for the user; and a child awaiting its own nested **Subagent session** holds `tool_execution_start { tool_name: "subagent" }` open while the grandchild's frames are already relayed into the parent's stream (`manager.rs`'s pump delivers a child's frames under the PARENT's delivery id). The frames are already received by the pump and already handled under the drive's existing mutex, so the signal costs no new IPC and no new lock.
+
+## Considered Options
+
+- **Keep the bound absolute, raise it and make it a setting** — rejected: it defers the bug instead of fixing it. A 3-hour legitimate delegation still dies, just later, and the 30-minute failure still discards all partial work.
+- **No bound at all, rely on Stop** — rejected: a wedged child (a tool that never returns, a provider stall the 5-minute idle `read_timeout` does not catch) would sit silently forever holding a Worker process. The bound existed for a real reason; only its *predicate* was wrong.
+- **A Worker→Supervisor heartbeat** — rejected: it adds a protocol message and a timer per Worker to learn something the tool boundary already reports, and it still cannot tell "blocked on the user" from "wedged" without the same tool-boundary state.
+
+## Consequences
+
+- The in-flight set is a `HashSet<tool_call_id>`, deliberately NOT a counter: ADR 0048 has the cancel and turn-abandoned paths emit `tool_execution_end` for calls that were announced but never dispatched (`loop.rs`'s abandoned loop), so an `end` without a `start` is a LEGAL frame. A counter would go negative and un-block a child that is still working; a set's removal is idempotent.
+- The set means "ANNOUNCED and not yet closed", not "currently executing": `tool_execution_start` is emitted while the Provider streams each `toolCall` (`loop.rs:951`), before the batch's execution loop runs them one at a time. So a batch of five tool calls has five outstanding ids immediately. The skew is one-directional — it can only ever keep a child alive longer, never cut it sooner — which is the correct bias for a bound whose entire failure mode was cutting live children.
+- The gate case needs no special-casing, and that is load-bearing: `tool_execution_start` fires at announce time, while the permission gate (`gate_tool`) and every interactive flow run later inside the same tool call, closing only at `tool_execution_end` (`loop.rs:1261`). A child parked on an `ask`, a `confirm`/`password` prompt or a **Permission prompt** therefore always has an outstanding id, which is what stops the silence bound from killing a child that is waiting for the user.
+- A Worker that deadlocks INSIDE a tool keeps an outstanding `tool_call_id` forever and is therefore never reaped. This is accepted on purpose — reaping it would mean re-introducing a ceiling over an Active child, which is the defect being removed. `bash` bounds itself (300 s default) so the realistic exposure is a hung MCP tool call, and the fix belongs in the tool layer where the hang is. Stop-on-parent remains the manual escape hatch (`SubagentCancel` → `cancel_drive` → reap).
+- The 30-minute silence bound is safe rather than arbitrary because the provider layer already self-bounds at a 5-minute IDLE `read_timeout` (`provider/transport.rs`): a stalled stream errors long before 30 minutes, so a child silent that long with nothing in flight cannot be waiting on the model.
+- This changes what ADR 0040 relied on. That ADR named the 30-minute bound as the only thing that resolves a **Subagent session** parked on an unanswered gate; under this decision such a child is Active and is NEVER resolved by the clock. ADR 0040's known hole (a child's open gate is not auto-closed) is therefore no longer rescued by a timer and needs its own fix.
+- The outcome vocabulary changes: `Failed { "timed out" }` becomes `Failed { "unresponsive" }`, because "timed out" told the parent nothing about which predicate fired and invited the misreading this decision exists to remove.

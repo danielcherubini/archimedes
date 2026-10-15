@@ -189,24 +189,52 @@ fn a_name_containing_a_quote_is_skipped() {
     );
 }
 
+/// Windows pins for the two quote-in-PATH tests: `"` is an ILLEGAL path
+/// component on NTFS, so the fixture cannot be built (CI proved it:
+/// `create_dir_all` → `Os { code: 123, kind: InvalidFilename }`). The
+/// honest expectation is THAT — the quote-carrying skill path cannot exist
+/// on Windows, so the discovery skip is unreachable-by-construction (the
+/// skip RULE itself stays pinned on Windows through the frontmatter route,
+/// `a_name_containing_a_quote_is_skipped`, which needs no illegal name).
+#[cfg(windows)]
+fn assert_quote_component_is_unconstructible(dir: &Path) {
+    let built = fs::create_dir_all(dir.join("we\"ird/SKILL.md"));
+    assert!(
+        built.is_err(),
+        "NTFS must REFUSE a `\"` component for this scenario to stay \
+         unreachable — if this ever succeeds, delete the cfg branch and \
+         run the real assertion"
+    );
+}
+
 #[test]
 fn a_directory_name_containing_a_quote_is_skipped() {
     // A `SKILL.md` with NO frontmatter in a directory named `we"ird`
     // (a legal Unix directory name): the directory-name fallback carries
     // the quote → the skill is skipped, never listed.
     let tmp = tempfile::tempdir().unwrap();
-    write_skill(
-        tmp.path(),
-        "we\"ird",
-        "Just a plain body, no frontmatter at all.\n",
-    );
-    let root = tmp.path().to_path_buf();
+    // NOTE: the two cfg blocks are ALTERNATIVES (exactly one compiles per
+    // platform) — no early `return` needed, and clippy on the Windows
+    // runner flags one as needless.
+    #[cfg(windows)]
+    {
+        assert_quote_component_is_unconstructible(tmp.path());
+    }
+    #[cfg(not(windows))]
+    {
+        write_skill(
+            tmp.path(),
+            "we\"ird",
+            "Just a plain body, no frontmatter at all.\n",
+        );
+        let root = tmp.path().to_path_buf();
 
-    let rows = discover_in_roots(&[(root, SkillScope::User)]);
-    assert!(
-        rows.is_empty(),
-        "a fallback name containing a quote must be skipped: {rows:?}"
-    );
+        let rows = discover_in_roots(&[(root, SkillScope::User)]);
+        assert!(
+            rows.is_empty(),
+            "a fallback name containing a quote must be skipped: {rows:?}"
+        );
+    }
 }
 
 #[test]
@@ -218,18 +246,35 @@ fn a_path_containing_a_quote_is_skipped() {
     // malformed-tag class the name check guards against → the skill is
     // skipped, never listed.
     let tmp = tempfile::tempdir().unwrap();
-    write_skill(
-        tmp.path(),
-        "we\"ird",
-        "---\nname: foo\ndescription: d\n---\nB.\n",
-    );
-    let root = tmp.path().to_path_buf();
+    // NOTE: the two cfg blocks are ALTERNATIVES (exactly one compiles per
+    // platform) — no early `return` needed, and clippy on the Windows
+    // runner flags one as needless.
+    #[cfg(windows)]
+    {
+        // Windows: the scenario CANNOT be built — `"` is illegal in an
+        // NTFS component (`create_dir_all` → ERROR_INVALID_NAME 123, which
+        // is what CI's first run did, at the fixture line). So there is no
+        // path-with-quote to discover: the skip is unreachable by
+        // construction, and the NTFS refusal IS the platform's own
+        // guarantee of the property (the helper asserts it, and fails
+        // loudly if NTFS ever starts accepting the component).
+        assert_quote_component_is_unconstructible(tmp.path());
+    }
+    #[cfg(not(windows))]
+    {
+        write_skill(
+            tmp.path(),
+            "we\"ird",
+            "---\nname: foo\ndescription: d\n---\nB.\n",
+        );
+        let root = tmp.path().to_path_buf();
 
-    let rows = discover_in_roots(&[(root, SkillScope::User)]);
-    assert!(
-        rows.is_empty(),
-        "a skill whose path contains a quote must be skipped: {rows:?}"
-    );
+        let rows = discover_in_roots(&[(root, SkillScope::User)]);
+        assert!(
+            rows.is_empty(),
+            "a skill whose path contains a quote must be skipped: {rows:?}"
+        );
+    }
 }
 
 #[test]

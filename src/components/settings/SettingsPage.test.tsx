@@ -1410,6 +1410,45 @@ describe("SettingsPage (the attention-alert rows)", () => {
   });
 });
 
+describe("SettingsPage (the Updates section — ADR 0053)", () => {
+  it("the Updates nav button is in the sidebar, after MCP", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    const buttons = [...document.querySelectorAll("nav button")].map(
+      (b) => b.getAttribute("aria-label") ?? "",
+    );
+    // The section list, in sidebar order (the render chain's order is this).
+    expect(buttons).toEqual([
+      "General",
+      "Appearance",
+      "Providers",
+      "Subagents",
+      "MCP",
+      "Updates",
+    ]);
+  });
+
+  it("selecting Updates renders the section, and General still renders after going back", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    fireEvent.click(screen.getByRole("button", { name: "Updates" }));
+    // The render arm is live (the section's own behaviour is tested in
+    // `UpdateSection.test.tsx` — this pins only that the page reaches it).
+    expect(
+      await screen.findByRole("button", { name: "Check for updates" }),
+    ).toBeTruthy();
+    expect(screen.getByText("Version")).toBeTruthy();
+    // The previous section's content is gone (one arm renders at a time).
+    expect(screen.queryByText("Default model")).toBeNull();
+    // And the arm switches back out.
+    fireEvent.click(screen.getByRole("button", { name: "General" }));
+    expect(await screen.findByText("Default model")).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Check for updates" }),
+    ).toBeNull();
+  });
+});
+
 describe("SettingsPage (the MCP section — ADR 0019)", () => {
   it("the_mcp_section_lists_the_servers_with_their_actions", async () => {
     render(<SettingsPage onBack={vi.fn()} />);

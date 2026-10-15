@@ -44,6 +44,48 @@ trusting the warning.
 The `pi-archimedes` monorepo (the agent-side extension suite, a separate repo)
 is validated with `pnpm test` + `pnpm -r exec -- tsc --noEmit` from its root.
 
+## Releasing
+
+**The version lives in THREE files**, and nothing but the check script knows
+all three: `package.json`, `src-tauri/Cargo.toml` and
+`src-tauri/tauri.conf.json`. The first two are the ones a bumping tool can
+find; the third is Tauri's bundle version, and it is the one that ends up in
+the artifact names, the updater manifest and the About box. A release where it
+was left behind produces a bundle labelled with the previous version — which
+the updater then reads as "already newer", so the drift is not cosmetic. The
+`release` skill's version table knows the first two, so the step below exists
+for the third. CI enforces it: `scripts/check-versions.sh` (the `scripts` job
+in `.github/workflows/ci.yml`) fails any PR where the three disagree, so a
+forgotten file reddens the PR that introduced it rather than the release.
+
+**Skill-executable step** (the `release` skill reads this file at Step 1 and
+applies release instructions at Step 5, so this is written to be executed, not
+just read): after the skill's automated bump, set `version` in
+`src-tauri/tauri.conf.json` to the SAME `X.Y.Z`, then run
+`bash scripts/check-versions.sh` from the repo root and require it to print
+`versions match: X.Y.Z` before tagging. The bump commit covers all three
+files. The values stay bare `X.Y.Z` — no `v` prefix (the tag carries the `v`;
+the manifest composer rejects a `v`-prefixed version precisely because the two
+are not interchangeable).
+
+- The minisign private key and its password live as GitHub secrets —
+  `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — and
+  nowhere in the repo; the public half is committed in
+  `src-tauri/tauri.conf.json` under `plugins.updater.pubkey`, because that is
+  what every installed client verifies signatures against.
+- A keypair MISMATCH is **warn-only** in CI (tauri-cli logs it and carries on),
+  so CI cannot be the check: verify the pair locally before tagging — the
+  ceremony is in README's `## Releasing` section.
+- **A draft is not a shipped release.** The updater endpoint is
+  `/releases/latest/download/latest.json`, and that path serves only a
+  published, non-prerelease release — a draft 404s, which every installed
+  client reads as `release-not-found`. Hence `release.yml` publishes LAST,
+  after the manifest is uploaded.
+- **macOS packaging is gated on the `APPLE_*` signing secrets** and is silently
+  skipped while they are absent — the matrix rows exist in `release.yml` but
+  the step gate refuses, so "no macOS asset" on a release means no secrets, not
+  a failed build.
+
 ## Conventions
 
 - **TDD**: write the failing test first, confirm it fails, then make it pass.

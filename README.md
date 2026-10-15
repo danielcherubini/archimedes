@@ -23,8 +23,9 @@ See [CONTEXT.md](CONTEXT.md) for the project's language and terminology.
   or deny in the UI.
 - Conversations survive restarts — history is persisted in a local SQLite
   database and can be resumed.
-- Auto-update: signed updates (minisign) delivered through GitHub
-  Releases; the updater verifies the signature before installing.
+- Auto-update: **Settings → Updates** checks GitHub Releases when you ask it
+  to (nothing checks on launch), and every update is minisign-verified before
+  it is installed.
 
 ## Prerequisites
 
@@ -64,33 +65,147 @@ Artifacts land in `src-tauri/target/release/bundle/`:
 
 | Platform | Bundles |
 | -------- | ------- |
-| macOS    | `.app` + `.dmg` (Developer ID signed + notarized in CI) |
+| macOS    | `.app` + `.dmg` — **not shipped yet**: pipeline ready, gated on the `APPLE_*` signing secrets (the matrix rows and their gate are in `release.yml`, commented out; see Releasing) |
 | Windows  | `.exe` (NSIS; unsigned in v1 — expect SmartScreen warnings) |
 | Linux    | `.AppImage` + `.deb` |
 
-With `createUpdaterArtifacts` enabled, each build also produces the
-updater payload (`.app.tar.gz` / `.nsis.zip`) and its `.sig` signature.
+With `createUpdaterArtifacts` enabled (it is, in `tauri.conf.json`), each
+build also writes the updater payload next to the installer —
+`…_x64-setup.nsis.zip` on Windows, `…_amd64.AppImage.tar.gz` on Linux — plus a
+`.sig` minisign signature for **every** artifact. A local build without the
+signing key refuses to bundle for that reason; use `pnpm tauri build
+--no-sign` (see Releasing).
 
 ## Auto-update
 
-The updater plugin checks a static `latest.json` on GitHub Releases and
-verifies every update with the minisign public key embedded in
-`tauri.conf.json` before installing. The "Check for updates" menu item
-triggers a check.
+What exists today: **Settings → Updates** has a manual **Check for updates**
+button, and that button is the only thing that ever asks the update server —
+nothing checks on launch, nothing downloads without a click, and there is no
+menu item (this app defines no menu).
 
-**First-release steps (before the first tag):**
+The whole flow is Rust-side (ADR 0053). `tauri-plugin-updater` is registered
+in `src-tauri/src/lib.rs` and driven by three of our own commands
+(`check_update` / `install_update` / `relaunch_app`) plus one event
+(`update://progress`) in `src-tauri/src/commands/update.rs`; the webview holds
+no updater or restart permission and `src-tauri/capabilities/default.json`
+carries no updater entry. That layer owns the three things a JS port would get
+wrong: a check has **three** outcomes (current / newer / could-not-ask — a 404
+on `latest.json` is the last one, never "up to date"), the plugin's per-TCP-chunk
+progress callback is rate-limited before it reaches the UI, and Windows'
+install never returns (the process exits when the installer starts), so the UI
+announces the closing window before awaiting.
 
-1. ~~Replace the `<owner>` placeholder in `plugins.updater.endpoints` in
-   `src-tauri/tauri.conf.json` with the real GitHub owner.~~ Done — the
-   endpoint points at `https://github.com/danielcherubini/archimedes-desktop/releases/latest/download/latest.json`.
-2. Create the `TAURI_SIGNING_PRIVATE_KEY` (and optional
-   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) repository secret — the value is
-   the minisign private key generated with `pnpm tauri signer generate`
-   (keep it outside the repo, e.g. `~/.archimedes/tauri-signing.key`).
-3. Add `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` secrets for macOS
-   notarization.
-4. Tag `v0.1.0` (or later) — `.github/workflows/release.yml` builds all
-   three platforms and publishes the release with `latest.json`.
+Updates are signed per artifact with minisign and verified against the public
+key in `tauri.conf.json` (`plugins.updater.pubkey`) before anything is
+installed; `requireSignedVersion` is on, so a manifest cannot announce a
+version newer than the one the signature binds. The client reads one manifest
+— `latest.json` at
+`https://github.com/danielcherubini/archimedes-desktop/releases/latest/download/latest.json`,
+the published release's own download path — and that file carries one key per
+installed form (`windows-x86_64`, `windows-x86_64-nsis`, `linux-x86_64`,
+`linux-x86_64-appimage`, `linux-x86_64-deb`, and `darwin-*` once macOS
+shipping happens), each pointing at the payload the installer on that device
+can actually consume. CI composes it in one writer (`release.yml`'s `publish`
+job + `scripts/compose-updater-manifest.sh`) and publishes it **last**, because
+`/releases/latest/download/` serves only a published, non-prerelease release —
+publish first and every installed client sees a version whose manifest is not
+there yet.
+
+## Releasing
+
+The version lives in **three** files (`package.json`, `src-tauri/Cargo.toml`,
+`src-tauri/tauri.conf.json`) and CI fails any PR where they disagree
+(`scripts/check-versions.sh`, run by the `scripts` job); AGENTS.md's
+`## Releasing` section is the skill-executable version of the same rule. The
+order a release actually takes:
+
+**skill version bump (all three files) → tag `vX.Y.Z` → `release.yml` creates
+the DRAFT → the Windows and Linux builds upload their bundles and `.sig`s →
+the `publish` job composes and uploads `latest.json`, and only then flips the
+draft to published.** A draft is not a shipped release — it 404s from the
+updater endpoint.
+
+Before the first tag, the signing key has to exist. This is the ceremony; the
+password-touching steps are run by a human in their own terminal.
+
+1. Generate the updater keypair:
+
+   ```sh
+   pnpm tauri signer generate -w ~/.archimedes/archimedes-updater.key
+   ```
+
+   The password you choose becomes `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Lose
+   either half and nothing you build afterwards can ever be updated by
+   anything already installed.
+
+2. Put the **entire** contents of `~/.archimedes/archimedes-updater.key.pub`
+   (one base64 string, newlines and all) into `plugins.updater.pubkey` in
+   `src-tauri/tauri.conf.json`. That file is committed — it is the public half,
+   and it is what every installed client verifies against.
+
+3. Set the two secrets, feeding the **whole private key file** so its newlines
+   survive:
+
+   ```sh
+   gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.archimedes/archimedes-updater.key
+   gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD   # prompts
+   ```
+
+   Secrets, not `.env` files: CI reads them from the repository's secret store,
+   and nothing in this repo may contain a private key — `git grep` for the
+   private key file's own header string (excluding `docs/`) must come back
+   empty; the committed `.pub` is a different, public string.
+
+4. **Verify the pair before tagging**, because a keypair MISMATCH is
+   warn-only in CI — tauri-cli logs it and keeps bundling, so CI will happily
+   publish signatures nobody can verify:
+
+   ```sh
+   # the password really decrypts this key (a wrong one fails here):
+   TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.archimedes/archimedes-updater.key)" \
+   TAURI_SIGNING_PRIVATE_KEY_PASSWORD=… \
+     pnpm tauri signer sign some-scratch-file
+   # and that key's PUBLIC half is the one the config commits — both lines
+   # below decode to `untrusted comment: minisign public key: <ID>` and the two
+   # ids must be identical:
+   base64 -d ~/.archimedes/archimedes-updater.key.pub | head -n1
+   jq -r .plugins.updater.pubkey src-tauri/tauri.conf.json | base64 -d | head -n1
+   ```
+
+   The signature's own TEXT carries no key id — `signer sign`'s untrusted
+   comment says only `signature from tauri secret key` — but the base64
+   SIGNATURE LINE below it embeds it, so the full statement "this password,
+   this key, this committed pubkey are one set" is checkable end to end:
+
+   ```sh
+   # the key id inside the signature (bytes 2..9 of the decoded signature
+   # line, little-endian) must equal the pubkey id above, byte-reversed:
+   sed -n 2p some-scratch-file.sig | base64 -d | od -An -tx1 | head -n1
+   # e.g. pubkey id 2C0BB905F9BAB271 shows there as `71 b2 ba f9 05 b9 0b 2c`.
+   ```
+
+   (This is how the rotation was actually verified; a mismatch here means the
+   signatures CI publishes will never verify against the committed pubkey,
+   and CI's warn-only check will not stop it.)
+
+5. Tag `vX.Y.Z` on a green `main`. The workflow builds Windows and Linux;
+   **macOS is skipped silently while `APPLE_ID` / `APPLE_PASSWORD` /
+   `APPLE_TEAM_ID` are absent** — the matrix rows and the step gate are already
+   in `release.yml`, commented, with the re-enable checklist beside them, so a
+   missing macOS asset means "no Apple secrets", not "the build failed".
+
+6. Prove the release before believing it: install the built version, then bump
+   to a throwaway patch version, release that, and confirm the installed copy
+   offers and applies the upgrade in place through Settings → Updates. A
+   manifest that is wrong in some quiet way is indistinguishable to a user
+   from "no update available".
+
+**Local unsigned builds** use `pnpm tauri build --no-sign`: the flag
+short-circuits before the signing key is read, and the observable effect is
+that no `.sig` files are produced (which is what CI asserts in its
+build-only `workflow_dispatch` mode). The Makefile's `appimage` recipe keeps
+its `--config '{"bundle":{"createUpdaterArtifacts":false}}` overlay as the
+local-only path.
 
 ## Linux + NVIDIA note
 

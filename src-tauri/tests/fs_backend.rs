@@ -93,6 +93,16 @@ fn path_escape_via_dotdot_is_rejected() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A symlink inside root that points to a file outside root.
+///
+/// `#[cfg(unix)]`: creating a symlink is a privileged operation on Windows
+/// (`SeCreateSymbolicLinkPrivilege`), so the fixture cannot be built there —
+/// the same reason `a_symlink_inside_a_non_first_root_pointing_outside_is_rejected`
+/// below carries the gate, and why `tests/skills.rs` / `tests/storage.rs` do.
+/// The rule itself is not unix-specific (it is `canonicalize`-based), so
+/// `src/agent/fs_backend.rs`'s `resolve_symlink_escape_rejected` covers the
+/// Windows shape of the same claim with `symlink_file`.
+#[cfg(unix)]
 #[test]
 fn path_escape_via_symlink_is_rejected() {
     let root = temp_root();
@@ -283,8 +293,9 @@ fn a_symlink_inside_a_non_first_root_pointing_outside_is_rejected() {
 }
 
 /// An EMPTY root set is a hard error, NOT "unrestricted": fail closed. (The
-/// `Ask`/`Allow` floor is an explicit `UNRESTRICTED` root, never an empty
-/// vec.)
+/// `Ask`/`Allow` floor is an explicit floor ROOT SET — `agent::boundary`'s
+/// `unrestricted_floor()`: `/` on unix, the mounted drive roots on Windows —
+/// never an empty vec.)
 #[test]
 fn an_empty_root_set_fails_closed() {
     let backend = FsBackend { roots: Vec::new() };

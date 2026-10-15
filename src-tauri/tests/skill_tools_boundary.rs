@@ -69,19 +69,33 @@ fn write_hidden_skill(root: &Path, name: &str, body: &str) -> PathBuf {
     dir
 }
 
+/// Symlinks inside a skill dir are the whole fixture here, and creating one
+/// is a PRIVILEGED operation on Windows (`SeCreateSymbolicLinkPrivilege`) —
+/// so `symlink()` reports whether the link exists rather than assuming it, and
+/// the tests below guard on it the way the `rg`-dependent tests guard on
+/// `rg_available()` (a premise the OS refuses is skipped, never faked).
 #[cfg(unix)]
-fn symlink(target: &Path, link: &Path) {
+fn symlink(target: &Path, link: &Path) -> bool {
     std::os::unix::fs::symlink(target, link).unwrap();
+    true
 }
 #[cfg(windows)]
-fn symlink(target: &Path, link: &Path) {
+fn symlink(target: &Path, link: &Path) -> bool {
     // Symlinks need privilege on Windows; a junction covers the DIRECTORY
-    // cases (the file-symlink cases are skipped there).
+    // cases (the file-symlink cases are skipped there). The result is
+    // RETURNED, not discarded: a caller that cannot tell "linked" from "the OS
+    // said no" would assert against a fixture that was never built.
     if target.is_dir() {
-        std::os::windows::fs::symlink_dir(target, link).is_ok();
+        std::os::windows::fs::symlink_dir(target, link).is_ok()
     } else {
-        std::os::windows::fs::symlink_file(target, link).is_ok();
+        std::os::windows::fs::symlink_file(target, link).is_ok()
     }
+}
+
+/// Seed every link a case set needs; false when the OS refused ANY of them —
+/// the guard a symlink-shaped fixture needs before it can assert anything.
+fn seed_symlinks(links: &[(&Path, &Path)]) -> bool {
+    links.iter().all(|(target, link)| symlink(target, link))
 }
 
 fn ctx(cwd: &Path, roots: &[&Path]) -> ToolCtx {
@@ -155,18 +169,28 @@ async fn read_skill_rejects_every_path_that_leaves_the_skill_dir() {
     let outside_file = outside.path().join("HONEY.txt");
     fs::write(&outside_file, "HONEY-OUTSIDE").unwrap();
 
-    // Symlinks INSIDE the skill dir — each looks in-bounds by NAME.
-    symlink(&outside_file, &skill.join("link-out"));
-    symlink(&root.path().join("SECRET.txt"), &skill.join("link-sibling"));
-    symlink(
-        &outside.path().join("nope.txt"),
-        &skill.join("link-dangling"),
-    );
+    // Symlinks INSIDE the skill dir — each looks in-bounds by NAME. Symlink
+    // creation is a PRIVILEGED operation on Windows, so the fixture may be
+    // refused there: the rows that depend on a link are then dropped from the
+    // matrix, while every other row (traversal, absolute, NUL) is still
+    // asserted on every OS. Coverage narrows to the fixture the OS allows —
+    // never to "assert nothing".
     fs::create_dir_all(skill.join("sub")).unwrap();
-    symlink(outside.path(), &skill.join("dir-out"));
+    let links = [
+        (outside_file.clone(), skill.join("link-out")),
+        (root.path().join("SECRET.txt"), skill.join("link-sibling")),
+        (outside.path().join("nope.txt"), skill.join("link-dangling")),
+        (outside.path().to_path_buf(), skill.join("dir-out")),
+    ];
+    let linked = seed_symlinks(
+        &links
+            .iter()
+            .map(|(t, l)| (t.as_path(), l.as_path()))
+            .collect::<Vec<_>>(),
+    );
 
     let outside_str = outside_file.to_string_lossy().into_owned();
-    let cases: Vec<(&str, String)> = vec![
+    let mut cases: Vec<(&str, String)> = vec![
         ("empty", String::new()),
         ("dot", ".".into()),
         ("slash", "/".into()),
@@ -176,12 +200,16 @@ async fn read_skill_rejects_every_path_that_leaves_the_skill_dir() {
         ("via-subdir", "sub/../../SECRET.txt".into()),
         ("absolute-outside", outside_str.clone()),
         ("absolute-passwd", "/etc/passwd".into()),
-        ("symlink-to-file", "link-out".into()),
-        ("symlink-to-sibling", "link-sibling".into()),
-        ("symlink-dangling", "link-dangling".into()),
-        ("symlink-through-dir", "dir-out/HONEY.txt".into()),
         ("nul-byte", "sub/../\u{0}SECRET".into()),
     ];
+    if linked {
+        cases.extend([
+            ("symlink-to-file", "link-out".into()),
+            ("symlink-to-sibling", "link-sibling".into()),
+            ("symlink-dangling", "link-dangling".into()),
+            ("symlink-through-dir", "dir-out/HONEY.txt".into()),
+        ]);
+    }
 
     for (label, path) in &cases {
         let r = execute_tool(
@@ -243,7 +271,12 @@ async fn a_skill_discovered_through_a_symlinked_root_is_still_readable() {
     let real = Tmp::new("symroot-real");
     let link_root = Tmp::new("symroot-link");
     write_skill(real.path(), "beta", "B-BODY");
-    symlink(real.path(), &link_root.path().join("target"));
+    // The whole test IS about reaching a skill through a link, so a refused
+    // link leaves nothing to test (the root would simply not exist).
+    if !symlink(real.path(), &link_root.path().join("target")) {
+        eprintln!("skipping: this OS refused to create the symlinked root");
+        return;
+    }
 
     let c = ctx(cwd.path(), &[&link_root.path().join("target")]);
     let list = execute_tool(&c, "list_skills", &json!({})).await;
@@ -362,13 +395,24 @@ async fn the_attack_matrix_still_holds_with_an_extra_boundary_root() {
     let outside_file = outside.path().join("HONEY.txt");
     fs::write(&outside_file, "HONEY-OUTSIDE").unwrap();
     fs::write(outside.path().join("sub"), "HONEY-SUB").unwrap();
-    // Symlinks INSIDE the extra root — each looks in-bounds by NAME.
-    symlink(&outside_file, &extra.path().join("link-out"));
-    symlink(
-        &outside.path().join("nope.txt"),
-        &extra.path().join("link-dangling"),
+    // Symlinks INSIDE the extra root — each looks in-bounds by NAME. As in
+    // the matrix above, a Windows runner may refuse to create them (symlink
+    // creation needs privilege), so only the rows that need a link are
+    // dropped when the fixture is unavailable.
+    let links = [
+        (outside_file.clone(), extra.path().join("link-out")),
+        (
+            outside.path().join("nope.txt"),
+            extra.path().join("link-dangling"),
+        ),
+        (outside.path().to_path_buf(), extra.path().join("dir-out")),
+    ];
+    let linked = seed_symlinks(
+        &links
+            .iter()
+            .map(|(t, l)| (t.as_path(), l.as_path()))
+            .collect::<Vec<_>>(),
     );
-    symlink(outside.path(), &extra.path().join("dir-out"));
     // A sibling of the extra root: reachable by `..`, and NOT a root.
     let sibling = Tmp::new("mr-sibling");
     fs::write(sibling.path().join("SECRET.txt"), "HONEY-SIBLING").unwrap();
@@ -397,15 +441,9 @@ async fn the_attack_matrix_still_holds_with_an_extra_boundary_root() {
     let outside_str = outside_file.to_string_lossy().into_owned();
     let extra_str = extra.path().to_string_lossy().into_owned();
     let sibling_str = sibling.path().to_string_lossy().into_owned();
-    let cases: Vec<(&str, String)> = vec![
+    let mut cases: Vec<(&str, String)> = vec![
         ("abs-outside", outside_str.clone()),
         ("abs-passwd", "/etc/passwd".into()),
-        ("symlink-to-file", format!("{extra_str}/link-out")),
-        ("symlink-dangling", format!("{extra_str}/link-dangling")),
-        (
-            "symlink-through-dir",
-            format!("{extra_str}/dir-out/HONEY.txt"),
-        ),
         (
             "dotdot-into-non-root",
             format!("{extra_str}/../{}/SECRET.txt", sibling_name(&sibling)),
@@ -423,6 +461,16 @@ async fn the_attack_matrix_still_holds_with_an_extra_boundary_root() {
             format!("{extra_str}/sub/../../../etc/passwd"),
         ),
     ];
+    if linked {
+        cases.extend([
+            ("symlink-to-file", format!("{extra_str}/link-out")),
+            ("symlink-dangling", format!("{extra_str}/link-dangling")),
+            (
+                "symlink-through-dir",
+                format!("{extra_str}/dir-out/HONEY.txt"),
+            ),
+        ]);
+    }
 
     for (label, path) in &cases {
         let r = execute_tool(&c, "read", &json!({ "path": path })).await;
@@ -470,11 +518,17 @@ async fn a_symlinked_home_yields_canonical_roots_and_still_denies_writes() {
     let original_home = std::env::var_os("HOME");
     let _restore = RestoreHome(original_home);
 
-    // The real home + a symlink that points at it; `HOME` = the symlink.
+    // The real home + a symlink that points at it; `HOME` = the symlink. The
+    // test's ENTIRE premise is that link, so an OS that refuses to create it
+    // (Windows: symlink creation needs privilege) has nothing to assert —
+    // skip rather than assert against a missing fixture.
     let real = Tmp::new("symhome-real");
     let link_parent = Tmp::new("symhome-link");
     let home_link = link_parent.path().join("home");
-    symlink(real.path(), &home_link);
+    if !symlink(real.path(), &home_link) {
+        eprintln!("skipping: this OS refused to create the symlinked-$HOME fixture");
+        return;
+    }
     let skill_dir = real.path().join(".agents/skills/alpha");
     fs::create_dir_all(&skill_dir).unwrap();
     let skill_md = skill_dir.join("SKILL.md");

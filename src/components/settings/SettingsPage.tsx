@@ -3,6 +3,7 @@ import type { ReactElement } from "react";
 import {
   ArrowLeftIcon,
   BotIcon,
+  DownloadIcon,
   PackageIcon,
   PaletteIcon,
   ServerIcon,
@@ -34,9 +35,16 @@ import GeneralSection from "./GeneralSection";
 import AppearanceSection from "./AppearanceSection";
 import ProviderSection from "./ProviderSection";
 import SubagentSection from "./SubagentSection";
+import UpdateSection from "./UpdateSection";
 import McpSection, { type McpDraft } from "./McpSection";
 
-type Section = "general" | "appearance" | "providers" | "subagents" | "mcp";
+type Section =
+  | "general"
+  | "appearance"
+  | "providers"
+  | "subagents"
+  | "mcp"
+  | "updates";
 
 /** A ZCode-style slug: lowercase alphanumeric + `-`. */
 function slugify(name: string): string {
@@ -88,7 +96,7 @@ function remapModelRefs(
 /**
  * The settings page (the approved ZCode-parity design, spec §1/§4): a full
  * content-area view — a 268px section sidebar (back button + General /
- * Appearance / Providers / Subagents / MCP) + the active section's content. Immediate save:
+ * Appearance / Providers / Subagents / MCP / Updates) + the active section's content. Immediate save:
  * a control change → `saveSettings` with the COMPLETE document (text
  * fields commit on blur/Enter; no save button, no dirty state).
  */
@@ -383,6 +391,11 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
     />
   );
 
+  // The Updates section takes no props: its version row reads `getAppInfo`
+  // itself and its state machine is entirely local (no settings document is
+  // involved — an update is not a preference).
+  const updatesSection = <UpdateSection />;
+
   return (
     <div className="grid h-full grid-cols-[268px_minmax(0,1fr)]">
       <aside className="min-w-0 border-r border-border">
@@ -432,6 +445,12 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
                 active={section === "mcp"}
                 onClick={() => setSection("mcp")}
               />
+              <SettingsSidebarButton
+                icon={DownloadIcon}
+                label="Updates"
+                active={section === "updates"}
+                onClick={() => setSection("updates")}
+              />
             </div>
           </nav>
         </div>
@@ -446,7 +465,9 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
                 ? providersSection
                 : section === "subagents"
                   ? subagentsSection
-                  : mcpSection}
+                  : section === "mcp"
+                    ? mcpSection
+                    : updatesSection}
         </div>
       </section>
     </div>
