@@ -2458,6 +2458,17 @@ mod tests {
     /// `SETTLE` as a count of milliseconds, for `wait_for_event`'s
     /// `timeout_ms` parameter.
     const SETTLE_MS: u64 = 15_000;
+    /// The bound for waits that cover SPAWNING A REAL PROCESS (the MCP
+    /// server child, the `fake_worker` subagent children) before any of the
+    /// test's own logic runs. `SETTLE` covers in-process scheduling; it is
+    /// NOT enough here: `a_stop_mid_mcp_call_cancels` lost its 15 s wait on
+    /// a windows-latest runner that needed 181 s for the whole suite
+    /// (d38db13's push run 38756887012 — while the SAME commit passed the
+    /// PR run 38756898713 on a quieter runner). Windows Defender scans every
+    /// spawned exe, and under contention that dwarfs any scheduling margin.
+    /// A hung child still fails the test — at 60 s instead of 20, and only
+    /// in the runs where it was going to fail anyway.
+    const SPAWN_MS: u64 = 60_000;
 
     /// A `SudoRunner` that records a call (the tests assert the
     /// elevated command was / was NOT executed) and never runs it.
@@ -6631,7 +6642,7 @@ mod tests {
         // (the `fake_worker`'s canned `"canned answer"` — the
         // `SubagentCapture` over the child's `SinkFrame`
         // `agent_message_chunk` stream).
-        let end = wait_for_event(&mut events_rx, 20000, |e| {
+        let end = wait_for_event(&mut events_rx, SPAWN_MS, |e| {
             matches!(e, RpcEvent::tool_execution_end { tool_call_id, .. } if tool_call_id == "t1")
         })
         .await
@@ -6649,7 +6660,7 @@ mod tests {
         );
         // The parent turn settled (bounded — the `ScriptedProvider`
         // settles it; the child ran to completion inside the dispatch).
-        wait_for_event(&mut events_rx, 20000, |e| {
+        wait_for_event(&mut events_rx, SPAWN_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -6751,7 +6762,7 @@ mod tests {
         loop_.handle_prompt(&text_prompt("go")).await;
         // The `subagent` tool result: the child's captured final text
         // (the `fake_worker`'s canned `"canned answer"`).
-        let end = wait_for_event(&mut events_rx, 20000, |e| {
+        let end = wait_for_event(&mut events_rx, SPAWN_MS, |e| {
             matches!(e, RpcEvent::tool_execution_end { tool_call_id, .. } if tool_call_id == "t1")
         })
         .await
@@ -6769,7 +6780,7 @@ mod tests {
         );
         // The parent turn settled (bounded — the `ScriptedProvider`
         // settles it; the child ran to completion inside the dispatch).
-        wait_for_event(&mut events_rx, 20000, |e| {
+        wait_for_event(&mut events_rx, SPAWN_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -6872,7 +6883,7 @@ mod tests {
         loop_.handle_prompt(&text_prompt("go")).await;
         // The parent turn settled (bounded — the `ScriptedProvider`
         // settles it; the child ran to completion inside the dispatch).
-        wait_for_event(&mut events_rx, 20000, |e| {
+        wait_for_event(&mut events_rx, SPAWN_MS, |e| {
             matches!(e, RpcEvent::agent_settled)
         })
         .await
@@ -8105,16 +8116,15 @@ mod tests {
         loop_.mcp = McpManager::new(dir.clone(), dir.clone(), None);
         let task = tokio::spawn(async move { loop_.handle_prompt(&text_prompt("call mcp")).await });
         // The `mcp` tool starts (the `hang` never answers). This wait covers
-        // SPAWNING the MCP server process + handshake inside a spawned
-        // task, and a loaded windows-latest runner produced one run where
-        // that exceeded 5 s (run 38750380996 — timeout `()`, while the
-        // SAME commit passed the test on the other runner). The assertion
-        // this protects is what happens AFTER the start (the cancel), so a
-        // spawn that merely takes its time is not what the test pins — hence
-        // `SETTLE` rather than a locally-tuned bound.
+        // SPAWNING the MCP server process + handshake inside a spawned task,
+        // so it rides `SPAWN_MS` (see the const's why-comment: 5 s lost to
+        // run 38750380996, 15 s lost to 38756887012, both while the same
+        // commit passed elsewhere). The assertion this protects is what
+        // happens AFTER the start (the cancel), so a spawn that merely takes
+        // its time is not what the test pins.
         wait_for_event(
             &mut events_rx,
-            SETTLE_MS,
+            SPAWN_MS,
             |e| matches!(e, RpcEvent::tool_execution_start { tool_name, .. } if tool_name == "mcp"),
         )
         .await
