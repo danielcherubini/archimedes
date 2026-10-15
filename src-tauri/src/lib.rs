@@ -304,7 +304,8 @@ pub fn run() {
             commands::files::list_completion_entries,
             commands::attention::attention_arm,
             commands::attention::attention_disarm,
-            commands::open::external_open
+            commands::open::external_open,
+            commands::window_state::get_window_state,
         ])
         .setup(|app| {
             // The on-disk dirs are named `archimedes` (NOT the bundle
@@ -328,6 +329,10 @@ pub fn run() {
                 },
             )?;
             setup_dirs(app, config_dir, app_data_dir)?;
+
+            #[cfg(target_os = "linux")]
+            commands::window_state::install_gtk_bridge(app);
+
             Ok(())
         })
         .build(tauri::generate_context!())

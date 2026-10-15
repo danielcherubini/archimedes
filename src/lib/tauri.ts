@@ -1051,3 +1051,26 @@ export async function respondInteractiveRequest(
 ): Promise<void> {
   return invoke("respond_interactive_request", { sessionId, requestId, result });
 }
+
+// ---------------------------------------------------------------------------
+// Window state (Linux tiling / snap detection)
+// ---------------------------------------------------------------------------
+
+export interface WindowFrameState {
+  isTiled: boolean;
+  isMaximized: boolean;
+  isFullscreen: boolean;
+  native: boolean;
+}
+
+export async function getWindowState(): Promise<WindowFrameState> {
+  return invoke<WindowFrameState>("get_window_state");
+}
+
+export async function listenWindowState(
+  handler: (payload: WindowFrameState) => void,
+): Promise<() => void> {
+  return listen<WindowFrameState>("window-state-changed", (event) =>
+    handler(event.payload),
+  );
+}

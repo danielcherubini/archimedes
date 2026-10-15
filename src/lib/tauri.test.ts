@@ -12,17 +12,26 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(),
+}));
+
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type EventCallback } from "@tauri-apps/api/event";
 import {
   attentionArm,
   attentionDisarm,
   compactSession,
   externalOpen,
+  getWindowState,
+  listenWindowState,
   listCompletionEntries,
   listSpaceFiles,
+  type WindowFrameState,
 } from "./tauri";
 
 const mockedInvoke = vi.mocked(invoke);
+const mockedListen = vi.mocked(listen);
 
 describe("listSpaceFiles (the `?` File-completion IPC boundary, ADR 0033)", () => {
   beforeEach(() => {
@@ -285,5 +294,57 @@ describe("externalOpen (the External-open IPC boundary, ADR 0051)", () => {
     await expect(externalOpen("/home/u/proj/notes.md", null)).resolves.toBeUndefined();
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0][0]).toContain("os-error:no handler");
+  });
+});
+
+describe("getWindowState / listenWindowState (the Linux window tiling IPC boundary)", () => {
+  beforeEach(() => {
+    mockedInvoke.mockReset();
+    mockedListen.mockReset();
+  });
+
+  it("invokes `get_window_state` with no payload", async () => {
+    const payload = {
+      isTiled: true,
+      isMaximized: false,
+      isFullscreen: false,
+      native: true,
+    };
+    mockedInvoke.mockResolvedValue(payload);
+
+    const result = await getWindowState();
+    expect(mockedInvoke).toHaveBeenCalledWith("get_window_state");
+    expect(result).toEqual(payload);
+  });
+
+  it("registers `listenWindowState` on the `window-state-changed` event and forwards payload", async () => {
+    const unlisten = vi.fn();
+    let eventCallback: EventCallback<WindowFrameState> | undefined;
+    mockedListen.mockImplementation((_event, cb) => {
+      eventCallback = cb as EventCallback<WindowFrameState>;
+      return Promise.resolve(unlisten);
+    });
+
+    const handler = vi.fn();
+    const resultUnlisten = await listenWindowState(handler);
+
+    expect(mockedListen).toHaveBeenCalledWith(
+      "window-state-changed",
+      expect.any(Function),
+    );
+    expect(resultUnlisten).toBe(unlisten);
+
+    const payload: WindowFrameState = {
+      isTiled: true,
+      isMaximized: false,
+      isFullscreen: false,
+      native: true,
+    };
+    eventCallback?.({
+      event: "window-state-changed",
+      id: 1,
+      payload,
+    });
+    expect(handler).toHaveBeenCalledWith(payload);
   });
 });
