@@ -198,6 +198,36 @@ jobs:
         # with:
         #   targets: aarch64-apple-darwin x86_64-apple-darwin
 
+      # Same cold-start evidence as ci.yml — run 38763849950 compiled 563 crates
+      # on Windows and 715 on Ubuntu because nothing caches `src-tauri/target`
+      # (the pnpm store is cached, the Rust tree is not) — and a release pays it
+      # AGAIN on top, in the `release` profile plus tauri's bundling. The
+      # release-profile deps are the expensive ones: they are compiled with
+      # optimization, and every release job would rebuild all of them.
+      #
+      # AFTER the toolchain step, because the toolchain version feeds the cache
+      # key: the action reads the ACTIVE rustc, and `rustup default` above is what
+      # makes the pinned toolchain active. Keyed before it, the cache would be
+      # named after the runner image's compiler instead of the pinned one.
+      #
+      # One input only; the defaults are the policy. The key (verified against
+      # the action's v2.9.2 source: src/config.ts) is prefix + GITHUB_JOB +
+      # runner OS/arch + a hash of the active rustc and CARGO_*/RUST*/CC_* env
+      # + a hash of Cargo.lock's package set, .cargo/config.toml and
+      # rust-toolchain.toml. So this job's `build` entries and ci.yml's
+      # `lint-test-build` entries live under different prefixes on their own —
+      # no `key:` override needed, and adding one would only couple the two
+      # workflows' caches by hand.
+      #
+      # Honest cost: it spends the repo's shared 10 GB cache quota, with 7-day
+      # eviction of unhit entries, per (OS, toolchain, lockfile-ish) key. A miss
+      # costs a cold release build — today's behavior — and can never turn a
+      # release red.
+      - name: Cache the Rust dependencies
+        uses: Swatinem/rust-cache@v2 # latest major; current release v2.9.2
+        with:
+          workspaces: src-tauri
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
