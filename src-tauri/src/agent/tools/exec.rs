@@ -224,12 +224,47 @@ fn protected_refusal(ctx: &ToolCtx, tool: &str, resolved: &Path) -> Option<Strin
 /// protected write in EXACTLY the executor's words — two copies of that
 /// sentence would drift, and a gate-level deny that reads differently from
 /// the executor-level one is indistinguishable from a bug to a user.
+///
+/// # The comparison is CANONICAL on both sides
+///
+/// `resolved` arrives canonical from the EXECUTOR callers (both go through
+/// [`FsBackend::resolve`], which canonicalizes). A deny-list entry is NOT
+/// necessarily canonical: production fills `ctx.protected` from
+/// `boundary::protected_dirs()` — which canonicalizes — but nothing in the
+/// type system enforces that, and any other caller (a test, a future session
+/// bootstrap, a plugin seam) may hand raw paths. Comparing a canonical
+/// `resolved` against a raw entry with a plain `starts_with` therefore silently
+/// NO-OPS the deny-list, and "refused in EVERY policy" is exactly the property
+/// that must not depend on the caller's hygiene. This is a real, observed
+/// bypass, not a hypothetical: on macOS CI the temp dir sits under `/var`,
+/// which is a symlink to `/private/var`, so `resolved` = `/private/var/…` never
+/// prefixed the raw `/var/…` entry and the protected write SUCCEEDED (the same
+/// tests reddened macOS and Windows CI, where a canonical `\\?\C:\…` verbatim
+/// path never matched a raw `C:\…`).
+///
+/// So each entry is canonicalized at comparison time. An entry that cannot be
+/// canonicalized (it does not exist) matches NOTHING — the same semantics
+/// `boundary::canon` / `push_roots` already give the production list, where a
+/// missing dir is simply not part of the deny-list. Already-canonical entries
+/// canonicalize to themselves, so the production path (and Linux CI) is
+/// unchanged. The REFUSAL still names the ORIGINAL entry: the message must
+/// show the caller the directory it actually registered, not a rewritten one.
+///
+/// NOTE the GATE caller (`loop.rs::deny_tool_result`) hands the model's RAW
+/// argument as `resolved` — the mirror image of the case above, where the
+/// ENTRY is canonical and the compared path is raw. Canonicalizing entries
+/// cannot reach that one: the gate's path is usually a not-yet-existing write
+/// target, so a plain `canonicalize` fails on it and matching it properly needs
+/// `FsBackend::resolve`'s ancestor-walk seam. Left for a later wave.
 pub(crate) fn protected_refusal_text(
     protected: &[PathBuf],
     tool: &str,
     resolved: &Path,
 ) -> Option<String> {
-    let hit = protected.iter().find(|dir| resolved.starts_with(dir))?;
+    let hit = protected.iter().find(|dir| {
+        dir.canonicalize()
+            .is_ok_and(|canon| resolved.starts_with(canon))
+    })?;
     Some(format!(
         "{tool}: {} is a protected agent-definition directory ({}) — writing there is refused in every policy",
         resolved.display(),
@@ -2821,6 +2856,91 @@ mod tests {
         assert!(r.is_error, "a new file under a protected dir is refused");
         assert!(!protected.join("new").exists(), "nothing is created");
         let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// The deny-list compares CANONICALLY, so a RAW (never-canonicalized)
+    /// protected entry still refuses a write whose `resolved` path reaches it
+    /// through a symlink.
+    ///
+    /// CI evidence for the bug this pins: on macOS `std::env::temp_dir()` lives
+    /// under `/var`, which is a symlink to `/private/var`, and on Windows
+    /// `canonicalize` returns the `\\?\C:\…` VERBATIM form while a
+    /// `temp_dir()`-joined entry is the plain `C:\…` form. Either way the raw
+    /// entry no longer prefixed the canonical `resolved`, `starts_with` missed,
+    /// and the protected write SUCCEEDED — i.e. the "refused in EVERY policy"
+    /// floor silently no-opped for any caller that filled `ctx.protected` from
+    /// a non-canonicalized source. Linux temp dirs carry no such symlink, so
+    /// the mismatch is MANUFACTURED here with a symlinked dir (unix); the
+    /// non-unix leg leans on the platform's own raw-vs-canonical spelling.
+    #[tokio::test]
+    async fn a_raw_protected_entry_still_refuses_a_canonical_path_under_it() {
+        use crate::agent::policy::{AccessPolicy, FilePolicy};
+        let base = temp_cwd("protect-sym");
+        let real = base.join("real");
+        let skills = real.join(".agents/skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        std::fs::write(skills.join("SKILL.md"), "OLD").unwrap();
+
+        // The protected entry stays RAW, and the session `cwd` is the path the
+        // model would join from — on unix that is the SYMLINK, so the
+        // executor's canonical `resolved` comes back through `real` and shares
+        // no textual prefix with the `link`-spelled entry.
+        #[cfg(unix)]
+        let (cwd, protected) = {
+            std::os::unix::fs::symlink(&real, base.join("link")).unwrap();
+            let link = base.join("link");
+            let protected = link.join(".agents/skills");
+            (link, protected)
+        };
+        #[cfg(not(unix))]
+        let (cwd, protected) = {
+            // No symlink privileges: `temp_dir()`'s own spelling is already
+            // the raw one that `canonicalize` rewrites on Windows.
+            (real.clone(), real.join(".agents/skills"))
+        };
+
+        // The fixture's PREMISE (so a platform where the two spellings agree
+        // says so loudly instead of testing nothing): the entry handed to
+        // `ctx.protected` is genuinely NOT canonical.
+        assert_ne!(
+            protected.canonicalize().unwrap(),
+            protected,
+            "the fixture must hand the deny-list a RAW entry, got {}",
+            protected.display()
+        );
+
+        let c = ToolCtx {
+            protected: vec![protected.clone()],
+            file_policy: FilePolicy {
+                writes: AccessPolicy::Allow,
+                ..FilePolicy::default()
+            },
+            ..ctx(&cwd)
+        };
+        let r = execute_tool(
+            &c,
+            "write",
+            &json!({ "path": ".agents/skills/SKILL.md", "content": "PWNED" }),
+        )
+        .await;
+        assert!(
+            r.is_error,
+            "a raw protected entry must still refuse the write"
+        );
+        let text = text_of(&r).to_string();
+        assert!(text.contains("protected"), "{text}");
+        // The refusal stays HONEST about which entry it matched: the ORIGINAL
+        // (raw) entry, not the canonicalized form the comparison used.
+        assert!(
+            text.contains(&protected.to_string_lossy().into_owned()),
+            "the refusal must name the entry as the caller spelled it: {text}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(skills.join("SKILL.md")).unwrap(),
+            "OLD",
+            "the file behind the symlink must be untouched"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// `bash` IGNORES the boundary (its `Sandboxed` tier is Landlock, Task 5):
