@@ -161,7 +161,7 @@ Four legitimately-silent states, each covered by a frame the pump already sees:
 | inside a tool (`bash` / `edit` / an MCP call) | its `tool_execution_start` has no matching `tool_execution_end` — the id is outstanding |
 | parked on an `ask` | the `InteractiveRequest`'s id IS that tool-call id, open for the whole human wait |
 | parked on a **Permission prompt** or a sudo `:confirm` / `:password` prompt | `gate_tool` blocks INSIDE the announced call (the derived prompt suffix is stripped, so one id space) |
-| awaiting a nested **Subagent** | `tool_execution_start { tool_name: "subagent" }` stays open across the whole nested run, whose frames the pump already relays into the parent's stream |
+| awaiting a nested **Subagent** | `tool_execution_start { tool_name: "subagent" }` would stay open across the whole nested run, whose frames the pump already relays into the parent's stream — DEFENSIVE today: the recursion guard (`subagent_enabled: false` on a child's `StartEnv`, pinned by `a_child_excludes_subagent_and_list_agents_tools`) means a child cannot dispatch one, so this row documents the invariant a future un-guard would need, not a reachable state |
 
 A gate is ALWAYS an outstanding id: `tool_execution_start` fires at ANNOUNCE time
 while the Provider still streams the `toolCall` (`loop.rs`), and `gate_tool`
