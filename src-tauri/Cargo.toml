@@ -101,6 +101,12 @@ tokio = { version = "1", features = ["test-util"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Direct GTK dependency matches tao/wry 0.18 on Linux to access
+# GdkWindowState and gtk_window on the main thread; a Tauri bump must
+# check the matching tao version.
+gtk = "0.18"
+
 # The session-bus send behind a Linux attention alert (`attention::delivery`).
 # Version AND default features are the plugin's own (`notify-rust = "4.18"`,
 # default `z`), so feature unification keeps ONE copy of the crate in the

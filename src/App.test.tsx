@@ -99,8 +99,24 @@ vi.mock("./lib/tauri", async () => {
     // calls it, and the real one reaches `invoke` — mocked so the two
     // `SpaceCwdProvider` tests below can assert the cwd it is handed.
     externalOpen: vi.fn().mockResolvedValue(undefined),
+    // Window state hydration and subscription (`useWindowMaximized`)
+    getWindowState: vi.fn().mockResolvedValue({
+      isTiled: false,
+      isMaximized: false,
+      isFullscreen: false,
+      native: false,
+    }),
+    listenWindowState: vi.fn().mockResolvedValue(() => {}),
   };
 });
+
+const mockIsMaximized = vi.fn().mockResolvedValue(false);
+const mockIsFullscreen = vi.fn().mockResolvedValue(false);
+const mockOnResized = vi.fn().mockResolvedValue(() => {});
+const mockOnMoved = vi.fn().mockResolvedValue(() => {});
+const mockOuterPosition = vi.fn().mockResolvedValue({ x: 100, y: 100 });
+const mockOuterSize = vi.fn().mockResolvedValue({ width: 800, height: 600 });
+const mockCurrentMonitor = vi.fn().mockResolvedValue(null);
 
 // `App` renders `WindowControls`, which calls `getCurrentWindow()` from
 // `@tauri-apps/api/window` on EVERY render (its own test file documents
@@ -111,7 +127,14 @@ vi.mock("@tauri-apps/api/window", () => ({
     minimize: vi.fn(),
     toggleMaximize: vi.fn(),
     close: vi.fn(),
+    isMaximized: mockIsMaximized,
+    isFullscreen: mockIsFullscreen,
+    onResized: mockOnResized,
+    onMoved: mockOnMoved,
+    outerPosition: mockOuterPosition,
+    outerSize: mockOuterSize,
   }),
+  currentMonitor: () => mockCurrentMonitor(),
 }));
 
 beforeAll(() => {
@@ -134,6 +157,56 @@ describe("App (the gear icon + settings view swap)", () => {
   beforeEach(() => {
     setLeftPaneCollapsed(false);
     setSidePaneCollapsed(false);
+    mockIsMaximized.mockResolvedValue(false);
+    mockIsFullscreen.mockResolvedValue(false);
+    mockOnResized.mockResolvedValue(() => {});
+    mockOnMoved.mockResolvedValue(() => {});
+    mockOuterPosition.mockResolvedValue({ x: 100, y: 100 });
+    mockOuterSize.mockResolvedValue({ width: 800, height: 600 });
+    mockCurrentMonitor.mockResolvedValue(null);
+  });
+
+  it("renders with rounded-xl corners when window is floating (not maximized)", async () => {
+    mockIsMaximized.mockResolvedValue(false);
+    mockIsFullscreen.mockResolvedValue(false);
+    render(<App />);
+    const root = document.querySelector('[data-testid="chrome-bar"]')!.parentElement!;
+    expect(root.className).toContain("rounded-xl");
+    expect(root.className).not.toContain("rounded-none");
+  });
+
+  it("renders with rounded-none (no rounded corners) when window is maximized", async () => {
+    mockIsMaximized.mockResolvedValue(true);
+    mockIsFullscreen.mockResolvedValue(false);
+    render(<App />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const root = document.querySelector('[data-testid="chrome-bar"]')!.parentElement!;
+    expect(root.className).toContain("rounded-none");
+    expect(root.className).not.toContain("rounded-xl");
+  });
+
+  it("renders with rounded-none (no rounded corners) when window is snapped to a side", async () => {
+    mockIsMaximized.mockResolvedValue(false);
+    mockIsFullscreen.mockResolvedValue(false);
+    mockCurrentMonitor.mockResolvedValue({
+      scaleFactor: 1,
+      workArea: {
+        position: { x: 0, y: 0 },
+        size: { width: 1920, height: 1040 },
+      },
+    });
+    mockOuterPosition.mockResolvedValue({ x: 0, y: 0 });
+    mockOuterSize.mockResolvedValue({ width: 960, height: 1040 });
+
+    render(<App />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const root = document.querySelector('[data-testid="chrome-bar"]')!.parentElement!;
+    expect(root.className).toContain("rounded-none");
+    expect(root.className).not.toContain("rounded-xl");
   });
 
   it("the header shows the app icon (app-icon-large) and NO 'Archimedes' text (the word was removed — icon only)", () => {

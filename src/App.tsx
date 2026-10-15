@@ -33,8 +33,10 @@ import SubagentDetailHost from "./components/SubagentDetailHost";
 import { SubagentModals } from "./components/SubagentModals";
 import SettingsPage from "./components/settings/SettingsPage";
 import { SpaceCwdProvider } from "./components/SpaceCwd";
+import { cn } from "./components/lib/utils";
 import { useAttentionAlert } from "./hooks/useAttentionAlert";
 import { useActiveSpaceCwd } from "./hooks/useActiveSpaceCwd";
+import { useWindowMaximized } from "./hooks/useWindowMaximized";
 
 function App() {
   // Attention alerts (ADR 0038/0039): arm the OS notification when a Session
@@ -264,6 +266,7 @@ function App() {
     subscribeLeftPane,
     getLeftPaneCollapsed,
   );
+  const isMaximized = useWindowMaximized();
   useEffect(() => {
     Promise.all([listSessions(true), listSpaces()])
       .then(([rows, spaces]) => {
@@ -291,7 +294,12 @@ function App() {
   const spaceCwd = useActiveSpaceCwd();
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden rounded-xl bg-frame text-foreground">
+    <div
+      className={cn(
+        "flex h-screen w-screen flex-col overflow-hidden bg-frame text-foreground",
+        isMaximized ? "rounded-none" : "rounded-xl",
+      )}
+    >
       {/* Frameless window chrome (the window is `decorations: false` in
           tauri.conf.json, so this bar replaces the native titlebar).
           BROWSER-STYLE: the Space tabs live HERE (the window titlebar
