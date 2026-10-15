@@ -11,8 +11,10 @@
 //! outside the `cwd` yet must be readable. Containment is therefore "under
 //! ANY root", and `roots[0]` is the relative-path join base (always the
 //! canonical `cwd` for a session). An EMPTY root set is an error, never
-//! "no limits" — the unrestricted floor is an explicit `/` root
-//! (`agent::boundary::UNRESTRICTED`).
+//! "no limits" — the unrestricted floor is an explicit floor ROOT SET
+//! (`agent::boundary::unrestricted_floor`: `/` on unix, the mounted drive
+//! roots on Windows). Containment below stays plain `starts_with` against
+//! canonicalized roots — it knows nothing about floors.
 //!
 //! `FsError` is local to this module (it used to ride on the protocol
 //! layer's error type, which died with the pi-RPC swap): `Io` for
