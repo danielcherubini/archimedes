@@ -377,11 +377,36 @@ mod tests {
         };
         // `newdir` does NOT exist (the fast / canonicalize path cannot
         // resolve the `..` — the slow path peels it off).
-        let err = backend.validate(Path::new("newdir/../a.txt")).unwrap_err();
-        assert!(
-            matches!(err, FsError::PathEscape { .. }),
-            "a `..` under a missing parent must be rejected, got {err:?}"
-        );
+        let outcome = backend.validate(Path::new("newdir/../a.txt"));
+        #[cfg(not(windows))]
+        {
+            let err = outcome.unwrap_err();
+            assert!(
+                matches!(err, FsError::PathEscape { .. }),
+                "a `..` under a missing parent must be rejected, got {err:?}"
+            );
+        }
+        // Windows: `canonicalize()` goes through `GetFullPathNameW`, which
+        // collapses `newdir\..\a.txt` LEXICALLY — the `..` is cancelled
+        // against a component that never existed, so the whole path exists
+        // and the FAST path answers `root\a.txt`. The slow path's `..`
+        // rejection is a rule about a peel Windows never performs; forcing
+        // it would mean second-guessing the OS before canonicalizing, which
+        // buys nothing: the containment property this test actually guards
+        // still holds (the surviving path is checked `starts_with` the roots
+        // like every other resolve, and pinning THAT is
+        // `resolve_dotdot_escape_rejected` and the attack matrix — both run
+        // on Windows unchanged). Stated per-OS rather than gated away: the
+        // fast path resolving is a Windows BEHAVIOR worth pinning, not a
+        // silence.
+        #[cfg(windows)]
+        {
+            let ok = outcome.unwrap();
+            assert!(
+                ok.starts_with(&root) && ok.ends_with("a.txt"),
+                "the OS-level lexical collapse must stay inside the root, got {ok:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

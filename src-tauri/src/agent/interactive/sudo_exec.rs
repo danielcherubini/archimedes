@@ -460,13 +460,25 @@ mod tests {
         // EPIPE. The suite's EPIPE policy: record only, don't fail — the
         // child's exit settles the run (`error: None`), and the (new) 5 s
         // write timeout does NOT trip (the EPIPE arrives in milliseconds).
+        //
+        // The binary is `/usr/bin/true` on macOS, `/bin/true` on Linux —
+        // CI's macos-latest run killed the Linux spelling on the spot
+        // (`/bin/true must exist` fired at the guard below): BSD lineage
+        // puts `true` in /usr/bin, and Apple's /bin carries no such entry.
+        // (/bin/sh, which the sibling group-kill test uses, DOES exist on
+        // both — only this one differs.)
+        let true_path = if cfg!(target_os = "macos") {
+            "/usr/bin/true"
+        } else {
+            "/bin/true"
+        };
         assert!(
-            std::path::Path::new("/bin/true").exists(),
-            "/bin/true must exist"
+            std::path::Path::new(true_path).exists(),
+            "{true_path} must exist"
         );
         let big_password = "x".repeat(200_000);
         let run = run_sudo_real(
-            vec!["/bin/true".to_string()],
+            vec![true_path.to_string()],
             big_password,
             Duration::from_secs(5),
         )
