@@ -249,6 +249,7 @@ build: ## Release build → src-tauri/target/release/bundle/ (signs the updater 
 # `make build` stays the signed release path, and an unsigned bundle you run
 # locally is the point here. (`--no-sign` also exits 0, but it keeps the
 # updater-artifact code path alive for a payload nobody publishes from here.)
+# See README → Releasing for `pnpm tauri build --no-sign`, the other unsigned build.
 .PHONY: appimage
 appimage: ## Build ONLY the AppImage → src-tauri/target/release/bundle/appimage/ (unsigned, no updater artifacts)
 	$(if $(NO_STRIP),NO_STRIP=$(NO_STRIP) ,)$(PNPM) tauri build --bundles appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
