@@ -39,6 +39,13 @@ jobs:
     name: Create the draft release
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    # Explicit, not the runner's implicit default: `gh` inside a `run:` step only
+    # finds a token when one is in its environment, and the implicit
+    # `GITHUB_TOKEN` that `actions/checkout` and the toolkit injects for us is a
+    # runner-version implementation detail, not a contract. The publish job states
+    # it the same way.
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
       release-id: ${{ steps.create.outputs.release-id }}
@@ -52,9 +59,14 @@ jobs:
 
       # A release whose three version fields disagree is a release announcing
       # the wrong number, and the bundle names come from `tauri.conf.json` —
-      # so refuse before the assets exist, not after.
-      - name: Check the three version fields agree
-        run: bash scripts/check-versions.sh
+      # so refuse before the assets exist, not after. `--tag` adds the tag to the
+      # agreement: three files agreeing on `0.1.0` under a `v0.1.1` tag otherwise
+      # publishes a manifest every installed client rejects outright.
+      # `$GITHUB_REF_NAME` is passed as an argument in a quoted parameter
+      # expansion, never interpolated into the script text — a tag name is
+      # attacker-visible input the moment someone pushes `v1.0.0; curl evil`.
+      - name: Check the version fields agree with each other and with the tag
+        run: bash scripts/check-versions.sh --tag "$GITHUB_REF_NAME"
 
       - name: Resolve the tag
         id: resolve

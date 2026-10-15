@@ -112,6 +112,57 @@ assert_contains "missing tauri.conf.json names the file" "src-tauri/tauri.conf.j
 run_check "$repo_root"
 assert_eq "the real tree's three versions agree" "0" "$status"
 
+# 6. --tag: the three files can agree on a version the TAG contradicts, and
+#    create-release would then publish a manifest whose `version` the installed
+#    clients' `requireSignedVersion` check rejects — every device is told "update
+#    available", downloads it, and refuses to install it, forever. So the tag has
+#    to be part of the agreement, not merely consistent with itself.
+root="$tmp_root/tag-matches"
+make_fixture "$root" "1.2.3" "1.2.3" "1.2.3"
+run_check "$root" --tag v1.2.3
+assert_eq "--tag matching the agreed version exits 0" "0" "$status"
+assert_contains "--tag matching still reports the match" "versions match: 1.2.3" "$output"
+
+# --tag first, repo root after: the release.yml call site is
+# `check-versions.sh --tag "$GITHUB_REF_NAME"` from the repo root, so neither
+# order may be the only one that parses.
+run_check --tag v1.2.3 "$root"
+assert_eq "--tag before the repo root exits 0" "0" "$status"
+
+# 7. v0.1.1 over files that agree on 0.1.0 — the stranding case itself. Both
+#    values have to be in the message: "which is wrong" is the only question an
+#    operator reading a failed release can answer from the log.
+root="$tmp_root/tag-mismatches"
+make_fixture "$root" "0.1.0" "0.1.0" "0.1.0"
+run_check "$root" --tag v0.1.1
+assert_eq "--tag disagreeing with the files exits 1" "1" "$status"
+assert_contains "the tag mismatch names the tag's version" "0.1.1" "$output"
+assert_contains "the tag mismatch names the files' version" "0.1.0" "$output"
+assert_contains "the tag mismatch names the tag itself" "v0.1.1" "$output"
+
+# 8. A tag with no `v` is either a bad argument or a bad tag; both need saying.
+run_check "$root" --tag 0.1.0
+assert_eq "--tag without the v prefix exits 1" "1" "$status"
+assert_contains "the v-less tag says what it expected" "v" "$output"
+
+# 9. `--tag` with nothing after it must not be read as "no tag was asked for" —
+#    that would let create-release pass while checking nothing at all.
+run_check "$root" --tag
+assert_eq "--tag with no value exits 1" "1" "$status"
+assert_contains "the valueless --tag names the flag" "--tag" "$output"
+
+root="$tmp_root/tag-empty-value"
+make_fixture "$root" "1.2.3" "1.2.3" "1.2.3"
+run_check "$root" --tag ""
+assert_eq "--tag with an empty value exits 1" "1" "$status"
+
+# 10. No --tag at all keeps the old behaviour exactly: the PR-side ci.yml job
+#     runs this on branches with no tag, and must not start demanding one.
+root="$tmp_root/tag-absent"
+make_fixture "$root" "1.2.3" "1.2.3" "0.1.0"
+run_check "$root"
+assert_eq "a missing --tag leaves the three-file check alone" "1" "$status"
+
 if ((failures > 0)); then
   echo
   echo "$failures check(s) failed" >&2

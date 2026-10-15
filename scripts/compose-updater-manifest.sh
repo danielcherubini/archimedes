@@ -152,6 +152,12 @@ appimage_bare_sig="" appimage_bare_payload=""
 deb_sig="" deb_payload=""
 darwin_sig="" darwin_payload=""
 
+# Signatures deliberately set aside (see the `*-setup.exe` arm below). They are
+# NOT orphans — the orphan rule further down consults this list — but they are
+# also never referenced by a key, and every one is announced on stderr so the
+# set-aside is visible in the CI log rather than inferred from its absence.
+skipped_sigs=()
+
 claim() {
   local slot="$1" sig="$2"
   local current="${!slot}"
@@ -168,6 +174,20 @@ for sig_path in "${sig_paths[@]}"; do
   payload="${sig_name%.sig}"
 
   case "$payload" in
+    # The raw NSIS installer: tauri's Windows bundle ships `…_x64-setup.exe`
+    # (the thing a human double-clicks) ALONGSIDE `…_x64-setup.nsis.zip` (the
+    # thing the updater installs from), and signs both. The `.exe` therefore has
+    # no manifest slot at all — the plugin's `install_inner` would try to unzip
+    # it — so its signature belongs to no key by design, not by omission. This
+    # is the one unrecognized-looking name that is guaranteed to appear on every
+    # real Windows run, so treating it as an error would strand every release
+    # that publishes at all. Hence: skipped DELIBERATELY and OUT LOUD. It stays
+    # out of `keys` (the five-platform key set is untouched) and out of the
+    # orphan rule, and nothing else is tolerated — the arm below still fires.
+    *-setup.exe)
+      printf 'skip: %s (installer signature, not a manifest payload)\n' "$sig_name" >&2
+      skipped_sigs+=("$sig_name")
+      ;;
     *_x64-setup.nsis.zip)
       claim win_sig "$sig_name"; win_payload="$payload"
       ;;
@@ -193,10 +213,11 @@ for sig_path in "${sig_paths[@]}"; do
     *)
       # Fail-loud, by name: an unrecognized .sig means a real platform would be
       # missing from the manifest, and a missing platform is invisible to CI and
-      # permanent on the user's device. A `.sig` for an asset that is NOT an
-      # updater payload (the NSIS `.exe` is the instance to expect — it ships
-      # alongside the nsis zip) belongs excluded at the download step, not
-      # silently tolerated here, so the message says what IS accepted.
+      # permanent on the user's device. The ONE non-payload signature that is
+      # known to show up and is excused is the NSIS `.exe` above, and it is
+      # excused by an explicit arm that prints a skip line — never by a wildcard,
+      # so an unexpected name still lands here and the message says what IS
+      # accepted.
       fail "unrecognized signature: $sig_name (payload would be $payload)
        no updater platform key matches this asset name; accepted payload suffixes: $accepted_suffixes"
       ;;
@@ -236,6 +257,15 @@ superseded_sig() {
   local sig="$1" entry
   (( ${#superseded_sigs[@]} == 0 )) && return 1
   for entry in "${superseded_sigs[@]}"; do
+    [[ "$entry" == "$sig" ]] && return 0
+  done
+  return 1
+}
+
+skipped_sig() {
+  local sig="$1" entry
+  (( ${#skipped_sigs[@]} == 0 )) && return 1
+  for entry in "${skipped_sigs[@]}"; do
     [[ "$entry" == "$sig" ]] && return 0
   done
   return 1
@@ -296,13 +326,16 @@ if [[ -n "$darwin_sig" ]]; then
   add_key "$darwin_key" "$darwin_payload" "$darwin_sig"
 fi
 
-# The orphan rule's allow-list is exactly one case, and it is this one: when the
+# The orphan rule's allow-list is exactly two cases. One: when the
 # `…AppImage.tar.gz` pair is the payload, the bare `…AppImage.sig` covers the
 # SAME AppImage in its non-tar form and is therefore superseded, not orphaned.
-# No other unreferenced signature is excused.
+# Two: the deliberately skipped installer signatures, each of which already
+# printed its own `skip:` line — an orphan complaint after a skip line would
+# contradict the skip and strand the release anyway. No other unreferenced
+# signature is excused.
 for sig_path in "${sig_paths[@]}"; do
   sig_name="${sig_path##*/}"
-  if ! references_sig "$sig_name" && ! superseded_sig "$sig_name"; then
+  if ! references_sig "$sig_name" && ! superseded_sig "$sig_name" && ! skipped_sig "$sig_name"; then
     fail "signature $sig_name is not referenced by any platform key — refusing to publish a manifest that ignores it"
   fi
 done
@@ -378,6 +411,10 @@ if ! jq -e --arg base "$base_url/" '
   fail "the manifest just written failed self-validation: $out_file"
 fi
 
-printf 'composed %s: %s platform key(s), version %s, tag %s\n' \
+printf 'composed %s: %s platform key(s), version %s, tag %s' \
   "$out_file" "${#keys[@]}" "$version" "$tag" >&2
+if (( ${#skipped_sigs[@]} > 0 )); then
+  printf ', %s signature(s) skipped' "${#skipped_sigs[@]}" >&2
+fi
+printf '\n' >&2
 exit 0

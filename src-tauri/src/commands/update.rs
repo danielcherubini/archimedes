@@ -229,6 +229,80 @@ pub struct ProgressPayload {
 /// The single event name the renderer subscribes to during an install.
 pub const PROGRESS_EVENT: &str = "update://progress";
 
+/// The error a second concurrent install gets back — its own code, because the
+/// renderer's advice for it is "the other one is still running", not "retry".
+const INSTALL_IN_PROGRESS: &str = "install-in-progress";
+
+/// The process-wide "one install at a time" flag, and its RAII claim.
+///
+/// The claim lives HERE rather than in the renderer because the renderer cannot
+/// own it: the Settings section that starts an install UNMOUNTS the moment the
+/// user navigates away, and its click-guard goes with it, so a second visit
+/// would otherwise happily start a second `download_and_install` — two writers
+/// into the same package state, on Linux two `pkexec` transactions. A
+/// module-level `AtomicBool` outlives every component and every command future,
+/// which makes it the only place this invariant can actually live.
+///
+/// The release is RAII (`Drop`), never an explicit call, so every early `?` and
+/// every `map_err` on the way out gives the slot back. Where that matters
+/// differs by platform, and the difference is why the drop is not redundant:
+/// * **macOS / Linux** — `download_and_install` RETURNS, so `Drop` fires on the
+///   command future's completion (success, or a mapped error) and a later click
+///   can retry. A raw `store(true)` with no drop would strand the app in
+///   `"install-in-progress"` forever after one failed install.
+/// * **Windows** — moot by construction: `install_inner` launches the NSIS
+///   installer and calls `std::process::exit(0)` inside the `await` below, so
+///   neither the future nor the process reaches the drop. The process dying IS
+///   the release; holding the flag until then is exactly the semantics wanted.
+///
+/// Ordering is the default `SeqCst`: this gates a one-shot expensive operation,
+/// not a hot loop, and `compare_exchange`'s failure ordering matters only in
+/// that it must not miss a release that happened-before it.
+#[derive(Debug)]
+pub struct InstallClaim(&'static std::sync::atomic::AtomicBool);
+
+impl InstallClaim {
+    /// Claims `flag`, or `None` when someone already holds it.
+    ///
+    /// Takes the flag rather than reaching for the static, so the guard is
+    /// provable WITHOUT a tauri `AppHandle`: the unit test hands it a flag of its
+    /// own and still exercises the real `Drop`. The `&'static` is what the `Drop`
+    /// needs to write the flag back after the guard has moved and outlived every
+    /// borrow — the production caller passes the module's own static.
+    #[must_use]
+    pub fn try_claim(flag: &'static std::sync::atomic::AtomicBool) -> Option<Self> {
+        flag.compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        // `Err(existing)` here can only be `true` — that is the state we compared
+        // against and the only one `store` ever writes.
+        .ok()
+        .map(|_| Self(flag))
+    }
+}
+
+impl Drop for InstallClaim {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The flag [`InstallClaim`] claims. Private to this module: nothing outside it
+/// may set or clear the updater's install slot.
+static INSTALLING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Claim the process-wide install slot for as long as the returned guard lives.
+///
+/// The command calls this before it touches the network; the unit tests exercise
+/// [`InstallClaim::try_claim`] against their OWN `AtomicBool` instead, which is
+/// what keeps the guard provable without an `AppHandle`.
+fn claim_install_slot() -> Option<InstallClaim> {
+    InstallClaim::try_claim(&INSTALLING)
+}
+
 /// Ask the configured endpoint whether there is anything newer.
 ///
 /// Thin by design: the plugin does the request, the version comparison and the
@@ -275,6 +349,12 @@ pub async fn check_update(app: AppHandle) -> Result<CheckOutcome, String> {
 /// re-check that finds nothing is `"no-update-available"` — reachable whenever the
 /// user clicks twice, or a `check_update` has aged into a withdrawn release.
 ///
+/// It also claims the process-wide slot from [`InstallClaim`] for as long as the
+/// download runs, so a SECOND install — started after the Settings section
+/// unmounted and remounted, which is exactly what the "Restart to finish" wait
+/// invites — comes back as the typed `"install-in-progress"` instead of racing
+/// the first one into the same package state.
+///
 /// **On Windows this future never resolves.** `install_inner` launches the NSIS
 /// installer and calls `std::process::exit(0)` once `ShellExecuteW` succeeds
 /// (`updater.rs:1050`), so the `Ok(())`/`Err(…)` arm below is not reached on that
@@ -292,6 +372,11 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
     use std::sync::{Arc, Mutex};
     use tauri::Emitter;
     use tauri_plugin_updater::UpdaterExt;
+
+    // Claimed BEFORE the re-check, so a second click cannot even start a
+    // parallel `check()`; the guard releases on drop (see its doc — on Windows
+    // the process exits below and the drop is moot).
+    let _install_claim = claim_install_slot().ok_or(INSTALL_IN_PROGRESS.to_string())?;
 
     let update = app
         .updater()
@@ -360,7 +445,7 @@ pub fn relaunch_app(app: AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{map_check_error, ProgressThrottle};
+    use super::{map_check_error, InstallClaim, ProgressThrottle};
     use std::time::{Duration, Instant};
     use tauri_plugin_updater::Error as UpdaterError;
 
@@ -389,6 +474,41 @@ mod tests {
     fn ago(base: Instant, ms: u64) -> Instant {
         base.checked_sub(Duration::from_millis(ms))
             .expect("fabricated instant is after the base")
+    }
+
+    #[test]
+    fn the_install_claim_is_exclusive_and_releases_on_drop() {
+        // The safety net for the unmounting Settings section: the component that
+        // starts an install can be torn down mid-download (navigation), so its
+        // click-guard dies with it and a remount would otherwise start a SECOND
+        // concurrent `download_and_install`. The Rust-side slot is what makes
+        // that impossible, so its three transitions are pinned here — claim,
+        // refuse while held, and re-claim once the RAII guard drops.
+        //
+        // A LOCAL flag, not the module's static: `cargo test` runs these in
+        // parallel threads, and the production slot must not be observable from a
+        // sibling test. `try_claim` holds on to the flag it claimed precisely so
+        // this stays honest — the re-claim below asserts on the SAME flag the
+        // guard was taken from, so it really is the guard's `Drop` being
+        // exercised, and the production path is the identical call with the
+        // module's static.
+        use std::sync::atomic::AtomicBool;
+
+        // A leaked flag: `try_claim` needs `&'static` (the `Drop` writes through
+        // it after the guard has moved), and a test-local `static` would be
+        // shared with the parallel tests above.
+        let flag: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+        let first = InstallClaim::try_claim(flag).expect("the first claim always wins");
+        assert!(
+            InstallClaim::try_claim(flag).is_none(),
+            "a second claim while the slot is held must be refused"
+        );
+        drop(first);
+        assert!(
+            InstallClaim::try_claim(flag).is_some(),
+            "the slot must be claimable again after the guard drops \
+             (mac/linux: a finished or failed install has to be retryable)"
+        );
     }
 
     #[test]

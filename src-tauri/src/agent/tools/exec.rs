@@ -252,18 +252,33 @@ fn protected_refusal(ctx: &ToolCtx, tool: &str, resolved: &Path) -> Option<Strin
 ///
 /// # The COMPARED path is canonicalized the same way
 ///
-/// The mirror case is just as much a bypass: the GATE caller
-/// (`loop.rs::deny_tool_result`) hands the model's RAW argument here, while
-/// its `protected` entries arrive CANONICAL from
+/// The mirror case is just as much a mismatch: the GATE caller
+/// (`harness/loop.rs::deny_tool_result`) hands the model's RAW argument here,
+/// while its `protected` entries arrive CANONICAL from
 /// [`crate::agent::boundary::protected_dirs`]. Canonicalizing the entries
 /// cannot reach that at all — the mismatch is now on the other side, and a raw
 /// `/var/…` never prefix-matches the canonical `/private/var/…` entry (macOS),
-/// and a raw `C:\…` never matches the verbatim `\\?\C:\…` one (Windows). Under
-/// `writes: Allow` the gate is the ONLY protected check on a path that does not
-/// exist yet (the executor's own check never runs — the widening means it does
-/// not re-decide), so a raw `~/.agents/skills/…` argument slipped the deny-list
-/// outright on both platforms: the exact bypass 3fd702f closed on the executor
-/// side, from the other direction.
+/// and a raw `C:\…` never matches the verbatim `\\?\C:\…` one (Windows).
+///
+/// What that mismatch costs is worth stating exactly, because the obvious story
+/// is wrong. The DENY-LIST is not one of the things the policy moves: both
+/// executors call [`protected_refusal`] unconditionally, straight after
+/// `validate` and with no test of `ctx.file_policy.writes`, so a protected write
+/// is refused by the EXECUTOR in every mode — `writes: Allow` included. What the
+/// widening moves is the BOUNDARY check and nothing else: `write_backend` builds
+/// its `roots` from `ctx.file_policy.writes`, so under `Allow` the roots go
+/// unrestricted and `validate` stops refusing, while the deny-list (independent
+/// of `roots`) keeps refusing. And under `Allow` the gate's copy of this
+/// function is not even reached — the verdict is `Allow`, so `dispatch_tool`
+/// runs and `deny_tool_result`, which only answers a `Deny`, never fires.
+///
+/// The gate's copy exists for the DENY path, where it decides WHICH refusal the
+/// model reads (the deny-list sentence, or "escapes the sandbox"). So a raw
+/// protected path reaching that seam slipped the deny-list MATCH and came back
+/// worded as a boundary escape — the model sent hunting for a boundary that is
+/// not the problem, which is precisely the drift the shared text exists to
+/// prevent. That is the bug this canonicalization closes from the gate side; the
+/// executor-side refusal itself has been policy-independent since 3fd702f.
 ///
 /// So the compared path goes through
 /// [`crate::agent::fs_backend::canonicalize_lenient`] — the peel-to-deepest-

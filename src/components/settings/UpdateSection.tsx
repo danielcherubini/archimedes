@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import type { ReactElement } from "react";
 import { getAppInfo } from "@/lib/version";
 import {
@@ -40,6 +40,78 @@ type Phase =
   | { kind: "downloaded"; version: string }
   | { kind: "restarting" };
 
+/**
+ * ───────────────────────────── the updater store ─────────────────────────────
+ *
+ * The phase lives HERE, at module scope, and NOT in the component's state —
+ * because the work it describes outlives the component. `UpdateSection` is one
+ * arm of the Settings page: clicking a different nav item UNMOUNTS it, while the
+ * Rust `install_update` keeps downloading in the background. Held in `useState`,
+ * that meant a user who navigated away mid-install came back to a section that
+ * had forgotten everything — the "…restart to finish" line gone (so the update
+ * looked like it had done nothing), and worse, a brand-new `useRef` guard, so a
+ * second Install click started a SECOND concurrent download into the same
+ * package state. The process-level truth needs a process-level holder, and a
+ * module-level singleton is the smallest one that is not a state library.
+ *
+ * The shape is deliberately the bare React external-store triad: a mutable
+ * `phase`, a `Set` of listeners, and `subscribe`/`get` for
+ * `useSyncExternalStore` (already the idiom of `lib/sidePaneState.ts` +
+ * `SidePane.tsx` in this repo — same shared-flag pattern, same reason). The two
+ * `…InFlight` booleans are the old `checkingRef`/`installingRef` guards moved
+ * beside the state they protect: a guard that dies with the component guards
+ * nothing, and these are the front door to the Rust `InstallClaim`, which
+ * refuses a second install with `"install-in-progress"` regardless.
+ *
+ * One consequence worth naming: writes here are safe WHILE UNMOUNTED. The
+ * install closure keeps calling `setPhase` after its component is gone, and
+ * notifying an empty listener set is the no-op it should be — the alternative
+ * (unmount cancels the bookkeeping) is precisely the bug being fixed.
+ */
+const IDLE: Phase = { kind: "idle" };
+
+let phase: Phase = IDLE;
+let checkInFlight = false;
+let installInFlight = false;
+const listeners = new Set<() => void>();
+
+/** Reads the current phase (the `useSyncExternalStore` snapshot). */
+function getPhase(): Phase {
+  return phase;
+}
+
+/** Subscribes to phase changes; the returned fn is the unsubscribe. */
+function subscribePhase(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+/** Writes the phase and notifies — the only writer in this module. */
+function setPhase(next: Phase | ((current: Phase) => Phase)): void {
+  phase = typeof next === "function" ? next(phase) : next;
+  // A copy: a listener that unsubscribes during the fan-out must not skip a
+  // sibling, and `Set` iteration is live.
+  for (const listener of [...listeners]) listener();
+}
+
+/**
+ * Back to `idle` with no in-flight guards.
+ *
+ * NO production caller — a real process gets a fresh module on every launch,
+ * which is exactly what this emulates. The test suite needs it because the
+ * module now holds state across `render()`/`cleanup()` pairs: without it, the
+ * case that leaves a never-settling install in flight would leak `installing`
+ * into every later case in this file.
+ */
+export function resetUpdaterSectionState(): void {
+  phase = IDLE;
+  checkInFlight = false;
+  installInFlight = false;
+  listeners.clear();
+}
+
 /** Bytes → a human size (`1.2 MB`, `806 KB`, `4096 B`). */
 function bytes(n: number): string {
   if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
@@ -52,18 +124,18 @@ function bytes(n: number): string {
  * flow. Nothing here runs on its own — mounting the section asks the server
  * nothing (ADR 0053 keeps the trigger manual, because an update cadence that
  * ships cannot be retracted afterwards).
+ *
+ * This component is a PROJECTION of the store, with no updater state of its own:
+ * a remount reads whatever the install in the background has reached, so
+ * navigating away and back shows the same phase it showed before (see the store
+ * note above). The only local state is the version string, which is a per-mount
+ * read of our own binary and is genuinely nothing to remember.
  */
 export default function UpdateSection(): ReactElement {
   // The version row's only source (`getAppInfo` — the same read the rest of
   // the settings use; there is no second version string in the UI).
   const [version, setVersion] = useState<string | null>(null);
-  const [phase, setPhase] = useState<Phase>({ kind: "idle" });
-  // The in-flight guards are REFS, not state: a click handler closes over the
-  // state of the render it was created in, so two synchronous clicks would both
-  // read `idle`. The ref flips before the first `await`, which is the only
-  // thing that makes "no double check" true.
-  const checkingRef = useRef(false);
-  const installingRef = useRef(false);
+  const phase = useSyncExternalStore(subscribePhase, getPhase);
 
   useEffect(() => {
     // Reading our OWN version is not a network check, so it is safe on mount —
@@ -80,8 +152,11 @@ export default function UpdateSection(): ReactElement {
   }, []);
 
   const check = async (): Promise<void> => {
-    if (checkingRef.current) return;
-    checkingRef.current = true;
+    // The old `checkingRef` guard, moved into the store so it survives a remount
+    // (behaviour unchanged: the flag flips BEFORE the first `await`, so two
+    // synchronous clicks — or two mounts — start exactly one invoke).
+    if (checkInFlight) return;
+    checkInFlight = true;
     setPhase({ kind: "checking" });
     try {
       const outcome = await checkUpdate();
@@ -100,13 +175,13 @@ export default function UpdateSection(): ReactElement {
       // the sentence above it is the human half. Not a "you are current".
       setPhase({ kind: "checkFailed", error: String(error) });
     } finally {
-      checkingRef.current = false;
+      checkInFlight = false;
     }
   };
 
   const install = async (available: string, notes: string | null): Promise<void> => {
-    if (installingRef.current) return;
-    installingRef.current = true;
+    if (installInFlight) return;
+    installInFlight = true;
     // PAINT FIRST. On Windows the `await` below never returns — the installer
     // starts and the process exits inside the Rust command — so this is the
     // LAST state the user will ever see on that platform. Announcing after the
@@ -115,6 +190,9 @@ export default function UpdateSection(): ReactElement {
     let unlisten: (() => void) | null = null;
     try {
       // Subscribe before downloading, so the first chunk has somewhere to land.
+      // The subscription belongs to THIS closure, not to the mounted component:
+      // a remount does not subscribe again (that would double the fan-out), it
+      // just reads what this callback keeps writing.
       unlisten = await listenUpdateProgress((progress) => {
         setPhase((current) =>
           current.kind === "installing" ? { ...current, progress } : current,
@@ -130,7 +208,7 @@ export default function UpdateSection(): ReactElement {
       // the check-failed sentence (the server was reachable).
       setPhase({ kind: "available", version: available, notes, error: String(error) });
     } finally {
-      installingRef.current = false;
+      installInFlight = false;
       unlisten?.();
     }
   };

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import UpdateSection from "./UpdateSection";
+import UpdateSection, { resetUpdaterSectionState } from "./UpdateSection";
 import { getAppInfo } from "@/lib/version";
 import {
   checkUpdate,
@@ -46,6 +46,13 @@ async function openAvailable(): Promise<void> {
 }
 
 beforeEach(() => {
+  // The section's phase now lives in a MODULE-LEVEL store (it has to — the
+  // install outlives the component), so it survives `cleanup()`. This is the
+  // one line that makes each case start from `idle` again, the way a fresh
+  // process starts from `idle`; without it the case that leaves a
+  // never-settling install in flight would leak `installing` into every case
+  // below it. It replaces nothing about the assertions themselves.
+  resetUpdaterSectionState();
   mockedCheck.mockReset();
   mockedInstall.mockReset();
   mockedRelaunch.mockReset();
@@ -139,6 +146,9 @@ describe("UpdateSection (the manual updater, ADR 0053)", () => {
     // with the error — not on the failed-check sentence (the server was
     // reachable; the install is what broke) and not on a dead end.
     cleanup();
+    // A fresh "process" for the second half (the phase lives in a module store
+    // now, and the half above left an install in flight forever on purpose).
+    resetUpdaterSectionState();
     render(<UpdateSection />);
     await screen.findByText("0.1.0");
     await openAvailable();
@@ -227,6 +237,69 @@ describe("UpdateSection (the manual updater, ADR 0053)", () => {
     fireEvent.click(button);
     await act(async () => {});
     expect(mockedCheck).toHaveBeenCalledTimes(1);
+  });
+
+  it("an install that RESOLVES survives an unmount: a remount still says restart to finish (case 9)", async () => {
+    // The unmount the old `useState` could not survive. The Settings page renders
+    // ONE section at a time, so navigating away really does unmount this
+    // component while the Rust install keeps running; the phase therefore lives
+    // in a module-level store. The old shape painted "Restart to finish" from
+    // component state that evaporated on unmount — the returning user saw an
+    // IDLE section and no hint that the update had in fact landed.
+    render(<UpdateSection />);
+    await screen.findByText("0.1.0");
+    await openAvailable();
+    mockedInstall.mockResolvedValue(undefined);
+    fireEvent.click(screen.getByRole("button", { name: "Install update" }));
+    await screen.findByRole("button", { name: "Restart to finish" });
+
+    // Navigation: the component is gone (nothing of it is on screen)…
+    cleanup();
+    expect(screen.queryByText(/restart to finish/i)).toBeNull();
+    // …but the install it started is NOT, and the phase is process state now.
+    expect(mockedInstall).toHaveBeenCalledTimes(1);
+
+    // Coming back re-renders from the store: the mac/linux "installed, relaunch
+    // me" truth is still on screen, and the version is the AVAILABLE one. (One
+    // query for the sentence — `getByText(/restart to finish/i)` alone would
+    // match both this line and the button, which is its own kind of pin that the
+    // copy is present in both places.)
+    render(<UpdateSection />);
+    const installed = await screen.findByText(/0\.2\.0 is installed/i);
+    expect(installed.textContent ?? "").toMatch(/restart to finish/i);
+    expect(screen.getByRole("button", { name: "Restart to finish" })).toBeTruthy();
+    // Still no auto-relaunch across the remount, and no second install: the
+    // restart button is the only way forward.
+    expect(mockedRelaunch).not.toHaveBeenCalled();
+    expect(mockedInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it("an install still in flight survives an unmount: a remount shows the installing copy and no install button (case 10)", async () => {
+    // THE DOOR, SHUT TWICE. Same navigation as above, but the install never
+    // settles — which on Windows is the SUCCESS path (`install_inner` exits the
+    // process). With the phase in component state the remount read `idle`: the
+    // "this window will close" announcement was gone AND a fresh click-guard
+    // offered "Install update" again, i.e. the UI itself invited a second
+    // concurrent `download_and_install`. The Rust `InstallClaim` refuses that
+    // with `"install-in-progress"` whatever the UI does; this case pins that the
+    // UI does not ask for it either.
+    render(<UpdateSection />);
+    await screen.findByText("0.1.0");
+    await openAvailable();
+    mockedInstall.mockReturnValue(new Promise<void>(() => {}));
+    fireEvent.click(screen.getByRole("button", { name: "Install update" }));
+    await screen.findByText(/window will close/i);
+
+    cleanup();
+    render(<UpdateSection />);
+    await screen.findByText("0.1.0");
+    // The installing copy is still what the user sees, unasked…
+    expect(screen.getByText(/window will close/i).textContent ?? "").toBeTruthy();
+    // …and there is NO install button to click: the section cannot be talked
+    // into a second download by the remount.
+    expect(screen.queryByRole("button", { name: "Install update" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Check for updates" })).toBeNull();
+    expect(mockedInstall).toHaveBeenCalledTimes(1);
   });
 });
 

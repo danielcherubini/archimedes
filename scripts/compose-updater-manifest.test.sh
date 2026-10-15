@@ -254,6 +254,53 @@ assert_contains "the unrecognized signature is named" "weird.txt.sig" "$output"
 assert_contains "the failure calls it an unrecognized signature" "unrecognized signature" "$output"
 
 # ---------------------------------------------------------------------------
+# 6b. The NSIS installer's own `.exe` signature. A Windows build ships the
+#     `…_x64-setup.exe` installer NEXT TO the `…_x64-setup.nsis.zip` the updater
+#     actually installs from, so `…_x64-setup.exe.sig` arrives in the sigs dir on
+#     every real Windows run. It has no manifest slot — the updater would try to
+#     unzip an `.exe` — so it is skipped DELIBERATELY and LOUDLY (a visible
+#     `skip:` line, exit still 0) rather than killed on, and rather than swallowed
+#     in silence. The five keys are unchanged by it: skipping is not emitting.
+# ---------------------------------------------------------------------------
+win_exe_sig="Archimedes_0.1.0_x64-setup.exe.sig"
+
+dir="$tmp_root/nsis-installer-sig"
+make_sigs_dir "$dir/sigs" "$win_sig" "$win_exe_sig" "$appimage_targz_sig" "$appimage_bare_sig" "$deb_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo"
+assert_eq "the raw NSIS .exe.sig exits 0 instead of stranding the release" "0" "$status"
+assert_contains "the skipped installer signature is named" "$win_exe_sig" "$output"
+assert_contains "the skip is announced as a skip, not silence" \
+  "skip: $win_exe_sig (installer signature, not a manifest payload)" "$output"
+assert_manifest_eq "the installer signature adds no platform key" \
+  '.platforms | keys | sort | join(" ")' "$five_keys"
+assert_manifest_eq "no key points at the .exe installer payload" \
+  '[.platforms[].url | endswith(".exe")] | any' "false"
+
+# A skipped installer signature must also not trip the ORPHAN rule on its own:
+# a Windows-only release (no Linux sigs at all) is a legitimate composition.
+dir="$tmp_root/nsis-installer-sig-windows-only"
+make_sigs_dir "$dir/sigs" "$win_sig" "$win_exe_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo"
+assert_eq "a Windows-only set with the installer .sig exits 0" "0" "$status"
+assert_manifest_eq "the Windows-only set emits exactly the two nsis keys" \
+  '.platforms | keys | sort | join(" ")' "windows-x86_64 windows-x86_64-nsis"
+
+# ---------------------------------------------------------------------------
+# 6c. The deliberate skip is scoped to the installer shape. A `.sig` matching NO
+#     known pattern still fails loud, and the skip must not mask it by running
+#     first: the skip is a narrow allow-list, not a general tolerance.
+# ---------------------------------------------------------------------------
+dir="$tmp_root/installer-sig-plus-unknown"
+make_sigs_dir "$dir/sigs" "$win_sig" "$win_exe_sig" "weird.txt.sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo"
+assert_fails "an unknown .sig alongside the installer .sig still exits 1"
+assert_contains "the unknown signature is still the one named" "weird.txt.sig" "$output"
+assert_eq "no manifest survives the unknown signature" "no" "$(path_exists "$out_file")"
+
+# ---------------------------------------------------------------------------
 # 7. The darwin payload name carries neither version nor arch, so two archs
 #    would collide on one key: the composer refuses to guess and needs --arch.
 #    The flag values are rustup-target-flavoured selectors that MAP to the
