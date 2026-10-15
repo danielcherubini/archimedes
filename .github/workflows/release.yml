@@ -91,6 +91,7 @@ jobs:
     name: Build (${{ matrix.os }})
     needs: create-release
     if: always() && (github.event_name == 'workflow_dispatch' || needs.create-release.result == 'success')
+    runs-on: ${{ matrix.os }}
     strategy:
       # A Windows-only bundling failure must not cancel the Linux run (and
       # vice versa): losing the second platform's result costs a full re-run to
