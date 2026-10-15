@@ -207,16 +207,108 @@ build-only `workflow_dispatch` mode). The Makefile's `appimage` recipe keeps
 its `--config '{"bundle":{"createUpdaterArtifacts":false}}` overlay as the
 local-only path.
 
-## Linux + NVIDIA note
+## Linux rendering: the DMABUF environment variables
 
-On Linux with an NVIDIA GPU, the app may crash on startup with a DMABUF
-error. Work around it by launching with:
+WebKitGTK's DMABUF path is where Linux rendering goes wrong. It is not one
+switch and it is not the same fix per vendor, so pick the row that matches
+your GPU — and set **only one**.
+
+| GPU | What it does here | Variable |
+|---|---|---|
+| NVIDIA | Turns the DMABUF renderer off entirely — the failure on this driver is a crash, so it needs the blunt switch | `WEBKIT_DISABLE_DMABUF_RENDERER=1` |
+| AMD / Intel | Keeps the accelerated renderer and drops only the zero-copy hardware buffer import — the lighter fix, so try it first on Mesa | `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` |
+
+If neither is enough on Mesa, `WEBKIT_DISABLE_DMABUF_RENDERER=1` is the
+fallback — it subsumes `FORCE_SHM` (see below).
 
 ```sh
-WEBKIT_DISABLE_DMABUF_RENDERER=1 ./Archimedes\ Desktop.AppImage
+# NVIDIA
+WEBKIT_DISABLE_DMABUF_RENDERER=1 ./Archimedes_0.1.1_amd64.AppImage
+
+# AMD / Intel
+WEBKIT_DMABUF_RENDERER_FORCE_SHM=1 ./Archimedes_0.1.1_amd64.AppImage
 ```
 
-(or set the variable in your environment before starting the app).
+(`make install-appimage` puts the bundle at `~/AppImages/archimedes.appimage`,
+which is the name the desktop entry runs — substitute whichever path you
+actually launch.)
+
+### Why two, and why never both
+
+WebKit decides the renderer's buffer transport once per process, in
+`AcceleratedBackingStore::rendererBufferTransportMode()`
+(`WebKit/WebKit`, `Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.cpp`),
+and the two variables are a **hierarchy, not a choice of equals**:
+
+```cpp
+const char* disableDMABuf = getenv("WEBKIT_DISABLE_DMABUF_RENDERER");
+if (disableDMABuf && g_strcmp0(disableDMABuf, "0"))
+    return;                  // transport mode stays EMPTY: the DMABUF
+                             // renderer never runs at all
+...
+mode.add(RendererBufferTransportMode::SharedMemory);
+const char* forceSHM = getenv("WEBKIT_DMABUF_RENDERER_FORCE_SHM");
+if (forceSHM && g_strcmp0(forceSHM, "0"))
+    return;                  // SharedMemory only — no Hardware transport
+...
+mode.add(RendererBufferTransportMode::Hardware);
+```
+
+So `FORCE_SHM` is the surgical one: the accelerated renderer stays on and
+only the zero-copy *hardware* buffer import is dropped, buffers going over
+shared memory instead. `DISABLE` is the blunt one: it returns before
+`SharedMemory` is even added, turning the whole accelerated backing store
+off. It has to be that coarse on NVIDIA, where the failure is a crash
+rather than a stutter.
+
+And because `DISABLE` is read first and returns, **setting it silently
+makes `FORCE_SHM` dead code** — that is the one combination worth
+remembering when a workaround "doesn't take".
+
+Two details from those same lines, both easy to get wrong:
+
+* **Any value except the literal string `0` counts as set — including an
+  empty one.** `g_strcmp0("", "0")` is non-zero, so
+  `WEBKIT_DISABLE_DMABUF_RENDERER=` *enables* the workaround. To turn one
+  off, say so: `=0`.
+* The mode is resolved behind a `std::once_flag`, once per UI process, at
+  first use. Exporting the variable from a *running* session and then
+  launching the app works; changing it "live" does not.
+
+### Setting it for the desktop, not just a shell
+
+A `~/`-shell export reaches nothing: a double-clicked desktop entry, a
+launcher, or an autostart entry inherits the *session* environment, not your
+`.bashrc`. For a global setting use the systemd user session — this reaches
+AppImage, `.deb`, `.rpm` and a launcher start alike:
+
+```sh
+mkdir -p ~/.config/environment.d
+echo 'WEBKIT_DMABUF_RENDERER_FORCE_SHM=1' >> ~/.config/environment.d/archimedes.conf
+```
+
+`~/.config/environment.d/*.conf` is read by systemd's
+`30-systemd-environment-d-generator` and exported into the user manager, so
+everything the session starts afterwards — including `gnome-shell` itself —
+inherits it. It applies on the **next login**, not immediately, so a window
+that is already open keeps whatever environment it started with.
+
+Verify from a fresh terminal that a launcher-started app would actually see
+it, rather than assuming:
+
+```sh
+systemctl --user show-environment | grep WEBKIT
+```
+
+If that prints nothing after a re-login, the variable is only in your
+terminal's environment and a desktop-launch window will not have it.
+
+### When you are debugging a rendering bug on Linux
+
+Reproduce with *neither* variable set before filing anything: the
+workarounds mask the class of bug the report is about. Then note which one
+you had set, and whether `=0` on it changes the behaviour — that answer
+locates the fault in the hardware-transport path or below it.
 
 ### Building AppImages on recent Fedora
 
