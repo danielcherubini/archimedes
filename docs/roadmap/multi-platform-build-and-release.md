@@ -309,7 +309,7 @@ README: rewrite Auto-update to describe what EXISTS after Task 5 (manual check i
 **Acceptance criteria:**
 - [ ] `gh secret list` shows the two secrets.
 - [ ] The scratch signature's key id equals the pubkey id in `tauri.conf.json`.
-- [ ] The private key is nowhere in the repo: `git grep "untrusted comment" -- ':!docs'` hits NOTHING (scoped: docs may quote the ceremony; the secret form `minisign encrypted secret key` must appear in NO tracked file — the committed pubkey is a single-line base64 string and cannot match).
+- [ ] The private key is nowhere in the repo: the secret form `minisign encrypted secret key` (what a generated private key file's first line says) appears in NO tracked file, and no tracked FILE DECODES to private-key material — the committed pubkey is the public half and cannot. (Amended wording: the original grep for `untrusted comment` was always going to hit prose — Task 6 deliberately documents the verification ceremony in README, which quotes the PUBLIC-side comment; prose about the ceremony is allowed anywhere, key material nowhere.)
 
 ---
 
