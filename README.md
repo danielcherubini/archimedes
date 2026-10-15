@@ -172,11 +172,21 @@ password-touching steps are run by a human in their own terminal.
    jq -r .plugins.updater.pubkey src-tauri/tauri.conf.json | base64 -d | head -n1
    ```
 
-   Compare the two public halves, not the signature's own text: `signer sign`
-   emits base64 whose untrusted comment says only `signature from tauri secret
-   key` — no key id — so "the signature names the config's key id" is not
-   something the CLI can show you. The two checks above together are the real
-   statement "this password, this key, this committed pubkey are one set".
+   The signature's own TEXT carries no key id — `signer sign`'s untrusted
+   comment says only `signature from tauri secret key` — but the base64
+   SIGNATURE LINE below it embeds it, so the full statement "this password,
+   this key, this committed pubkey are one set" is checkable end to end:
+
+   ```sh
+   # the key id inside the signature (bytes 2..9 of the decoded signature
+   # line, little-endian) must equal the pubkey id above, byte-reversed:
+   sed -n 2p some-scratch-file.sig | base64 -d | od -An -tx1 | head -n1
+   # e.g. pubkey id 2C0BB905F9BAB271 shows there as `71 b2 ba f9 05 b9 0b 2c`.
+   ```
+
+   (This is how the rotation was actually verified; a mismatch here means the
+   signatures CI publishes will never verify against the committed pubkey,
+   and CI's warn-only check will not stop it.)
 
 5. Tag `vX.Y.Z` on a green `main`. The workflow builds Windows and Linux;
    **macOS is skipped silently while `APPLE_ID` / `APPLE_PASSWORD` /
