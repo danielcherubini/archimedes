@@ -116,6 +116,44 @@ done-when: A published (non-draft) GitHub Release exists whose assets install an
 - [ ] `jq empty` accepts every emitted fixture manifest.
 - [ ] No `--out` file survives a validation failure (case 5 asserts it).
 
+#### Note — 2026-10-15: the Fedora rpm is a shipped target (`feature/rpm-release-target`)
+
+`bundle.targets` gained `"rpm"` (after `deb`; nothing else in `tauri.conf.json` moved, and
+`release.yml` was untouched — it already counts `*.rpm` in its bundle assertion and passes empty
+`args` on linux, so `targets` is the only pipeline switch). The composer learned the matching slot.
+Verified against the pinned `tauri-bundler` source, not guessed:
+
+- **Artifact name shape, and why the rpm glob differs from the deb's.** `rpm.rs` builds
+  `{product_name}-{version}-{release}.{arch}.rpm`, `release` defaulting to `"1"` and `arch` coming
+  from the Rust-style table (`x86_64`), so we ship `Archimedes-0.1.2-1.x86_64.rpm`. The deb's
+  `Archimedes_0.1.2_amd64.deb` and this are disjoint strings — different separators AND a different
+  arch table — so the deb arm's `*_amd64.deb` could never claim an rpm, and the rpm needs its own
+  arm. ⚠ The arch is **dot**-separated (`-1.x86_64.rpm`), not the deb's `_amd64`: an arm spelled
+  only `*_x86_64.rpm` (the deb-shaped guess) rejects every real rpm as "unrecognized signature", so
+  the arm matches `*.x86_64.rpm` (the real name) alongside `*_x86_64.rpm`, and the accepted-suffix
+  help string says `*_x86_64.rpm`. An `*.aarch64.rpm` stays unrecognized — there is no updater key
+  for an arch we do not ship, and inventing one publishes an entry no client can install.
+- **Zero apt additions to the Linux dependency step.** The rpm is built IN-PROCESS by the Rust `rpm`
+  crate: no `rpmbuild` binary, so `ubuntu-latest` needs no new packages (there is no earlier note in
+  this doc claiming an `rpm-build` prerequisite — nothing to retract, and the absence is recorded so
+  the next reader does not go looking for a dependency that does not exist).
+- **Empty `License` tag.** `rpm.rs` reads `settings.license().unwrap_or_default()`, so a build with
+  no `license` in `tauri.conf.json` succeeds and emits an empty `License` tag. That is the current
+  state: the LICENSE decision is pending and explicitly OUT OF SCOPE here, so no license field was
+  added anywhere. Flagged, not fixed.
+- **No client-side change.** `tauri-plugin-updater` 2.14.0's `get_urls` searches
+  `linux-x86_64-rpm` BEFORE the bare `linux-x86_64`, and `install_rpm` (`pkexec rpm -U`) already
+  exists, so no Rust changed. The key is emitted only after the bare Linux key resolved — the same
+  rule as `-deb`: without `-rpm` a Fedora install falls through to the bare key and is handed the
+  AppImage, which downloads in full and then fails `install_rpm`'s format check. The rpm therefore
+  never touches the bare key's AppImage semantics.
+- **Consequence for the expectations written above:** a release shipping every format now composes
+  SIX keys — `linux-x86_64 linux-x86_64-appimage linux-x86_64-deb linux-x86_64-rpm windows-x86_64
+  windows-x86_64-nsis` — with `linux-x86_64` and `linux-x86_64-appimage` still naming the AppImage
+  tar.gz. The five-key strings in Task 2/Task 8 predate this target; re-check them against the
+  release's actual asset list at rehearsal.
+
+
 ---
 
 ### Task 3: CI three-OS matrix + stabilize Windows and macOS to green

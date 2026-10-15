@@ -151,6 +151,7 @@ win_exe_sig="" win_exe_payload=""
 appimage_targz_sig="" appimage_targz_payload=""
 appimage_bare_sig="" appimage_bare_payload=""
 deb_sig="" deb_payload=""
+rpm_sig="" rpm_payload=""
 darwin_sig="" darwin_payload=""
 
 claim() {
@@ -162,7 +163,7 @@ claim() {
   printf -v "$slot" '%s' "$sig"
 }
 
-accepted_suffixes='*_x64-setup.nsis.zip, *_setup.exe (the raw NSIS installer), *_amd64.AppImage, *_amd64.AppImage.tar.gz, *_amd64.deb, *.app.tar.gz (the last one needs --arch)'
+accepted_suffixes='*_x64-setup.nsis.zip, *_setup.exe (the raw NSIS installer), *_amd64.AppImage, *_amd64.AppImage.tar.gz, *_amd64.deb, *_x86_64.rpm, *.app.tar.gz (the last one needs --arch)'
 
 for sig_path in "${sig_paths[@]}"; do
   sig_name="${sig_path##*/}"
@@ -201,6 +202,27 @@ for sig_path in "${sig_paths[@]}"; do
       ;;
     *_amd64.deb)
       claim deb_sig "$sig_name"; deb_payload="$payload"
+      ;;
+    # The Fedora rpm is its own installed form and therefore its own slot. Its
+    # name comes from a DIFFERENT table than the deb's: `tauri-bundler`'s rpm
+    # module builds `{product_name}-{version}-{release}.{arch}.rpm` (release
+    # defaults to "1", arch from the Rust-style list — `x86_64`), so the real
+    # asset is `Archimedes-0.1.2-1.x86_64.rpm`: DASH- and DOT-separated, never
+    # the deb's underscore/`amd64`. The deb's `*_amd64.deb` therefore matches
+    # nothing the rpm produces, and the dot spelling here is what makes the real
+    # name claim its slot — an arm spelled only `*_x86_64.rpm` (the deb-shaped
+    # guess) would reject every real rpm as "unrecognized signature". The
+    # underscore spelling is accepted alongside it because the only assets that
+    # can carry it are still x86_64 rpms, so neither pattern can produce a wrong
+    # key; and because the two spellings are disjoint from the deb's, no deb can
+    # reach this arm and no rpm can reach the deb arm above.
+    #
+    # `x86_64` is spelled literally on purpose: an `*.aarch64.rpm` (a cross build
+    # nobody ships) has no updater key to land on, and guessing one would
+    # publish a manifest entry no installed client can install — so it stays
+    # unrecognized and fails loud.
+    *.x86_64.rpm | *_x86_64.rpm)
+      claim rpm_sig "$sig_name"; rpm_payload="$payload"
       ;;
     *.app.tar.gz)
       # The macOS payload name carries neither version nor arch (`Archimedes.app
@@ -294,7 +316,7 @@ fi
 # failure below. A Linux build that produced NO recognizable Linux asset cannot
 # get here silently anyway — its `.sig` matches no pattern and exits earlier as
 # "unrecognized signature".
-if [[ -n "$appimage_targz_sig$appimage_bare_sig$deb_sig" ]]; then
+if [[ -n "$appimage_targz_sig$appimage_bare_sig$deb_sig$rpm_sig" ]]; then
   linux_payload=""
   linux_sig=""
   if [[ -n "$appimage_targz_sig" ]]; then
@@ -318,6 +340,17 @@ if [[ -n "$appimage_targz_sig$appimage_bare_sig$deb_sig" ]]; then
   # bare key is precisely the "deb install served the AppImage" bug.
   if [[ -n "$deb_sig" ]]; then
     add_key "linux-x86_64-deb" "$deb_payload" "$deb_sig"
+  fi
+
+  # The rpm key follows the SAME rule for the same reason, on the Fedora side:
+  # `tauri-plugin-updater`'s `get_urls` (2.14.0) looks up `linux-x86_64-rpm`
+  # before the bare `linux-x86_64`, and `install_rpm` shells `pkexec rpm -U`.
+  # Without this key an rpm install resolves the bare key, i.e. the AppImage, and
+  # fails `install_rpm`'s format check after downloading the whole payload — the
+  # identical trap the deb comment above records, so the rpm never touches the
+  # bare key's AppImage semantics either way.
+  if [[ -n "$rpm_sig" ]]; then
+    add_key "linux-x86_64-rpm" "$rpm_payload" "$rpm_sig"
   fi
 fi
 
