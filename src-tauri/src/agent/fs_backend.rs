@@ -217,9 +217,36 @@ mod tests {
 
     /// A fresh temp dir as the sandbox `root` (returns the root + a unique
     /// outside-sandbox target path that does NOT exist).
+    ///
+    /// THE ROOT IS CANONICALIZED, the way the production boundary hands one
+    /// over: `boundary::read_roots`/`write_roots` canonicalize everything they
+    /// give an `FsBackend`, so a raw fixture root was a shape the app never
+    /// builds. It stayed green on Linux only because Linux's `temp_dir()` is
+    /// already canonical; everywhere else it is not, and the equality
+    /// assertions then compare a RAW path against the CANONICAL path `resolve`
+    /// returns (`check_under_roots` hands back the canonicalized candidate):
+    /// macOS `/var` → `/private/var`, Windows `C:\Users\…\Temp` →
+    /// `\\?\C:\Users\…\Temp`. Canonical here makes `resolved == f` hold on all
+    /// three because `f` is derived from the root, and it makes two fixtures
+    /// mean what they say rather than accidentally pass:
+    ///
+    /// * `resolve_dotdot_in_missing_parent_rejected` needed it. With a RAW
+    ///   (non-verbatim) Windows root the candidate
+    ///   `C:\…\fsb-esc-slow-<uuid>\newdir/../a.txt` is a path `GetFullPathNameW`
+    ///   resolves LEXICALLY, so the fast canonicalize path SUCCEEDED (`a.txt`
+    ///   exists) and the slow path's `..` rejection was never reached — the
+    ///   `unwrap_err` fired. Under the canonical `\\?\` root verbatim paths
+    ///   disable that lexical resolution, `newdir` is missing, canonicalize
+    ///   fails, and the peel rejects the `..` as the test claims.
+    /// * `outside` stays RAW on purpose: it is only ever used to create/read a
+    ///   target outside the sandbox and to assert `!outside.exists()` — never
+    ///   compared for equality with a returned path — and a raw `/var/…` link
+    ///   target is the better fixture for the escape tests, since escaping the
+    ///   sandbox THROUGH a symlink is what they are about.
     fn temp_root(tag: &str) -> (PathBuf, PathBuf) {
         let dir = std::env::temp_dir().join(format!("fsb-{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
         let outside =
             std::env::temp_dir().join(format!("fsb-outside-{tag}-{}", uuid::Uuid::new_v4()));
         (dir, outside)
