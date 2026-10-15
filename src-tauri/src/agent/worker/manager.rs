@@ -260,6 +260,57 @@ impl SubagentCapture {
     }
 }
 
+/// The subagent's liveness signal (ADR 0055): `seq` bumps on EVERY frame the
+/// pump sees for this child, and `in_flight` holds the `tool_call_id`s that
+/// have been ANNOUNCED (`tool_execution_start`) and not yet closed
+/// (`tool_execution_end`) — NOT "currently executing" (a batch announces every
+/// call before running any of them, so the set is deliberately generous).
+/// The skew is one-directional: it can only keep a child alive longer, never
+/// cut it sooner.
+///
+/// A `HashSet` and NOT a counter, deliberately: ADR 0048 has the cancel and
+/// turn-abandoned paths emit `tool_execution_end` for calls that were announced
+/// but never dispatched, so an `end` without a `start` is LEGAL. A counter would
+/// go negative and un-block a child that is still working; a set's removal is
+/// idempotent.
+#[derive(Debug, Default)]
+pub struct SubagentLiveness {
+    pub seq: u64,
+    pub in_flight: std::collections::HashSet<String>,
+}
+
+/// Bump the liveness clock for ONE frame the pump saw (ADR 0055). A
+/// `SinkFrame` — the child's `session-update` text stream — is NOT an
+/// `RpcEvent` and carries no tool boundary at all, so the frame count is a
+/// SEPARATE fact from the outstanding-call set: a child that only streams
+/// tokens is an **Active Subagent** and must register as such.
+fn note_liveness_frame(liveness: &mut SubagentLiveness) {
+    liveness.seq += 1;
+}
+
+/// Bump the liveness clock for one `RpcEvent` AND maintain the outstanding
+/// `tool_call_id` set (ADR 0055): the set means "ANNOUNCED and not yet closed",
+/// so `tool_execution_start` adds the id (the announce fires while the Provider
+/// still streams the `toolCall` — before the batch executes anything) and
+/// `tool_execution_end` removes it. The removal is idempotent on purpose: an
+/// `end` whose call was never announced is a LEGAL frame (ADR 0048's cancel /
+/// turn-abandoned paths close announced-but-never-dispatched calls), and a
+/// child parked on a **gate** holds its id open for the whole wait.
+///
+/// Everything else leaves the set alone — the clock still advances.
+fn note_liveness_event(liveness: &mut SubagentLiveness, event: &RpcEvent) {
+    liveness.seq += 1;
+    match event {
+        RpcEvent::tool_execution_start { tool_call_id, .. } => {
+            liveness.in_flight.insert(tool_call_id.clone());
+        }
+        RpcEvent::tool_execution_end { tool_call_id, .. } => {
+            liveness.in_flight.remove(tool_call_id);
+        }
+        _ => {}
+    }
+}
+
 /// The in-flight subagent dispatch's bookkeeping (the `drives` map
 /// value — the pump reads it on the subagent's `agent_settled` /
 /// `Exited`; the drive task removes it on the UNCONDITIONAL teardown):
@@ -283,6 +334,11 @@ struct SubagentDrive {
     dispatch_id: String,
     settle_tx: watch::Sender<bool>,
     cancel_tx: watch::Sender<bool>,
+    /// The child's liveness signal (ADR 0055 — the `SubagentLiveness`
+    /// doc): the pump bumps it on EVERY frame it sees for this child
+    /// and maintains the outstanding `tool_call_id` set. The drive
+    /// task's receiver half is threaded through `drive_subagent`.
+    liveness_tx: watch::Sender<SubagentLiveness>,
     capture: Arc<SubagentCapture>,
     handle: Option<WorkerHandle>,
     reaping: bool,
@@ -697,15 +753,26 @@ fn start_pump(
                 // source; the `message_update` `usage` — the metrics'
                 // token fields) + the settle signal (the drive task
                 // races it against the `settle_timeout` / the process
-                // exit / the cancel).
+                // exit / the cancel) + the liveness signal (ADR 0055:
+                // EVERY frame — a `SinkFrame` included — bumps the
+                // drive's `seq`, so a child that only STREAMS still
+                // reads as an Active Subagent).
                 WorkerInboundEvent::SinkFrame { event, payload } if is_subagent => {
-                    feed_capture(&state, &session_id, |c| {
+                    feed_capture(&state, &session_id, |c, liveness| {
+                        note_liveness_frame(liveness);
                         c.observe_sink_frame(&event, &payload);
                         false
                     });
                 }
                 WorkerInboundEvent::Event(e) if is_subagent => {
-                    feed_capture(&state, &session_id, |c| {
+                    feed_capture(&state, &session_id, |c, liveness| {
+                        // The boundary bookkeeping runs BEFORE the capture
+                        // feed (ADR 0055): the announced-and-not-yet-closed
+                        // `tool_call_id` set is what tells a legitimately
+                        // silent **Active Subagent** (inside a tool, parked
+                        // on a gate, awaiting a nested delegation) from a
+                        // **Dead** one.
+                        note_liveness_event(liveness, &e);
                         c.observe_event(&e);
                         matches!(e, RpcEvent::agent_settled)
                     });
@@ -759,16 +826,39 @@ fn start_pump(
     });
 }
 
-/// Feed the subagent's `SubagentCapture` (the `drives` map entry —
-/// `None` when the dispatch is gone); the closure returns `true` when
-/// the settle watch should be flipped (the `agent_settled` event).
-fn feed_capture(state: &ManagerState, session_id: &str, f: impl Fn(&SubagentCapture) -> bool) {
+/// Feed the subagent's `SubagentCapture` AND its `SubagentLiveness` (the
+/// `drives` map entry — `None` when the dispatch is gone); the closure
+/// returns `true` when the settle watch should be flipped (the
+/// `agent_settled` event).
+///
+/// The capture borrow stays IMMUTABLE on purpose (`observe_sink_frame` /
+/// `observe_event` take `&self` — they mutate through their internal
+/// `StdMutex`es), and the liveness value is mutated in place through the
+/// drive's `watch` sender (`send_modify` takes `&self`, so the two field
+/// borrows stay disjoint).
+fn feed_capture(
+    state: &ManagerState,
+    session_id: &str,
+    f: impl FnOnce(&SubagentCapture, &mut SubagentLiveness) -> bool,
+) {
     let mut drives = state.drives.lock().unwrap_or_else(|p| p.into_inner());
     let Some(drive) = drives.get_mut(session_id) else {
         return;
     };
-    if f(&drive.capture) {
-        let _ = drive.settle_tx.send(true);
+    // The disjoint-field borrows made explicit (the capture is read through
+    // the `Arc`, the liveness value is written through the `watch`).
+    let SubagentDrive {
+        capture,
+        liveness_tx,
+        settle_tx,
+        ..
+    } = drive;
+    let mut settle = false;
+    liveness_tx.send_modify(|liveness| {
+        settle = f(capture, liveness);
+    });
+    if settle {
+        let _ = settle_tx.send(true);
     }
 }
 
@@ -1007,9 +1097,15 @@ fn dispatch_subagent(
     // 7. The in-flight dispatch bookkeeping (the `settle` watch —
     // the pump flips it on `agent_settled`; the `cancel` watch —
     // the `SubagentCancel` flow; the `SubagentCapture` — the pump
-    // feeds it, the drive task reads the final text on settle).
+    // feeds it, the drive task reads the final text on settle; the
+    // `liveness` watch — the ADR 0055 signal the pump bumps on every
+    // frame it sees for this child).
     let (settle_tx, settle_rx) = watch::channel(false);
     let (cancel_tx, cancel_rx) = watch::channel(false);
+    let (liveness_tx, liveness_rx) = watch::channel(SubagentLiveness {
+        seq: 0,
+        in_flight: Default::default(),
+    });
     let capture = Arc::new(SubagentCapture::new());
     {
         let mut drives = state.drives.lock().unwrap_or_else(|p| p.into_inner());
@@ -1020,6 +1116,7 @@ fn dispatch_subagent(
                 dispatch_id: wire.id.clone(),
                 settle_tx: settle_tx.clone(),
                 cancel_tx: cancel_tx.clone(),
+                liveness_tx,
                 capture: capture.clone(),
                 handle: None,
                 reaping: false,
@@ -1066,6 +1163,10 @@ fn dispatch_subagent(
                     start,
                     settle_rx,
                     cancel_rx,
+                    // The ADR 0055 liveness receiver (the drive's future
+                    // silence bound reads it — this task only threads it,
+                    // the race still runs on `settle_timeout`).
+                    liveness_rx,
                     &capture,
                     settle_timeout,
                     &sink,
@@ -1118,6 +1219,11 @@ async fn drive_subagent(
     start: std::time::Instant,
     mut settle_rx: watch::Receiver<bool>,
     mut cancel_rx: watch::Receiver<bool>,
+    // The child's liveness signal (ADR 0055) — the drive's half of the
+    // `watch` the pump feeds. NOT read yet (the race below is still the
+    // duration bound); the underscore is the "threaded, not consumed"
+    // marker and drops when the self-rearming silence clock lands.
+    _liveness_rx: watch::Receiver<SubagentLiveness>,
     capture: &Arc<SubagentCapture>,
     settle_timeout: Duration,
     sink: &SubagentOutcomeSink,
@@ -1349,12 +1455,16 @@ mod tests {
     use std::time::Duration;
 
     use serde_json::Value;
+    use tokio::sync::watch;
 
     use crate::agent::events::EventSink;
     use crate::agent::harness::catalog::{Model, ModelCatalog};
     use crate::agent::subagent::SubagentOutcome;
     use crate::agent::worker::client::{WorkerError, WorkerHandle, WorkerInboundEvent};
-    use crate::agent::worker::manager::{SubagentCapture, WorkerFactory, WorkerManager};
+    use crate::agent::worker::manager::{
+        feed_capture, note_liveness_event, note_liveness_frame, SubagentCapture, SubagentDrive,
+        SubagentLiveness, WorkerFactory, WorkerManager,
+    };
     use crate::agent::worker::protocol::{StartEnv, StartMode};
 
     /// The test logging type aliases (the `clippy::type_complexity`
@@ -1871,6 +1981,203 @@ mod tests {
                 "messageId": "retract:1" } }),
         );
         assert_eq!(capture.captured_text(), "");
+    }
+
+    // ── The `SubagentLiveness` signal (ADR 0055) ──────────────────────
+
+    /// Seed a real `SubagentDrive` in the real `drives` map under
+    /// `child_id` (the map the pump feeds through `feed_capture` — the
+    /// SAME entry production inserts in `dispatch_subagent`; the
+    /// `handle` is `None` because these tests never talk to a Worker
+    /// process, they hand the pump's feed the frames).
+    fn seed_drive(manager: &WorkerManager, child_id: &str) {
+        manager
+            .state
+            .drives
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(
+                child_id.to_string(),
+                SubagentDrive {
+                    parent_session_id: "live-parent".to_string(),
+                    dispatch_id: "live-dispatch".to_string(),
+                    settle_tx: watch::channel(false).0,
+                    cancel_tx: watch::channel(false).0,
+                    liveness_tx: watch::channel(SubagentLiveness {
+                        seq: 0,
+                        in_flight: Default::default(),
+                    })
+                    .0,
+                    capture: Arc::new(SubagentCapture::new()),
+                    handle: None,
+                    reaping: false,
+                },
+            );
+    }
+
+    /// The drive's CURRENT liveness signal read through the pump's own
+    /// `watch` — the observation point is the SAME value the drive task's
+    /// receiver reads (Task 2's silence bound), NOT a copy the test
+    /// mutated. `(seq, the sorted in-flight ids)`.
+    fn liveness_view(manager: &WorkerManager, child_id: &str) -> (u64, Vec<String>) {
+        let drives = manager
+            .state
+            .drives
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let drive = drives.get(child_id).expect("the drive is seeded");
+        let liveness = drive.liveness_tx.borrow();
+        let mut ids: Vec<String> = liveness.in_flight.iter().cloned().collect();
+        ids.sort();
+        (liveness.seq, ids)
+    }
+
+    /// A canned `tool_execution_start` (the ANNOUNCE frame the pump sees while
+    /// the Provider still streams the `toolCall`).
+    fn tool_start(tool_call_id: &str) -> crate::agent::events::RpcEvent {
+        crate::agent::events::RpcEvent::tool_execution_start {
+            tool_call_id: tool_call_id.to_string(),
+            tool_name: "bash".to_string(),
+            args: serde_json::json!({ "command": "ls" }),
+        }
+    }
+
+    /// A canned `tool_execution_end` (the close of one announced call).
+    fn tool_end(tool_call_id: &str) -> crate::agent::events::RpcEvent {
+        crate::agent::events::RpcEvent::tool_execution_end {
+            tool_call_id: tool_call_id.to_string(),
+            tool_name: "bash".to_string(),
+            result: serde_json::json!({ "content": [], "isError": false }),
+            is_error: false,
+        }
+    }
+
+    /// (ADR 0055) The liveness set is "ANNOUNCED and not yet closed": a
+    /// `tool_execution_start` puts the `tool_call_id` in and the matching
+    /// `tool_execution_end` takes it out — so an ADR 0055 silence bound can
+    /// tell a legitimately-silent **Active Subagent** (inside a tool, parked on
+    /// a **gate**, or awaiting a nested **Subagent session**) from a **Dead
+    /// Subagent**. The second half is the set-vs-counter guard: ADR 0048 has
+    /// the cancel / turn-abandoned paths close calls that were announced but
+    /// never dispatched, so an `end` with NO `start` is a LEGAL frame — on a
+    /// FRESH drive it must leave the set EMPTY and still count as a frame
+    /// (`seq` advances). A counter would go negative here and un-block a child
+    /// that is still working; a set's removal is idempotent.
+    #[test]
+    fn the_liveness_set_tracks_announced_and_closed_tool_calls() {
+        let (manager, _crashes, _events, _sinks) = make_manager(None);
+        seed_drive(&manager, "live1");
+
+        // The announce (the pump's `Event` arm: the boundary bookkeeping runs
+        // BEFORE the capture feed).
+        let start = tool_start("t1");
+        feed_capture(&manager.state, "live1", |capture, liveness| {
+            note_liveness_event(liveness, &start);
+            capture.observe_event(&start);
+            false
+        });
+        assert_eq!(
+            liveness_view(&manager, "live1"),
+            (1, vec!["t1".to_string()]),
+            "an ANNOUNCED tool call is outstanding"
+        );
+
+        // The close.
+        let end = tool_end("t1");
+        feed_capture(&manager.state, "live1", |capture, liveness| {
+            note_liveness_event(liveness, &end);
+            capture.observe_event(&end);
+            false
+        });
+        assert_eq!(
+            liveness_view(&manager, "live1"),
+            (2, Vec::new()),
+            "the matching `tool_execution_end` closes it"
+        );
+
+        // A DRIVING turn emits plenty of frames that are neither boundary —
+        // they advance the liveness clock and leave the set alone.
+        let turn = crate::agent::events::RpcEvent::turn_start;
+        feed_capture(&manager.state, "live1", |capture, liveness| {
+            note_liveness_event(liveness, &turn);
+            capture.observe_event(&turn);
+            false
+        });
+        assert_eq!(
+            liveness_view(&manager, "live1"),
+            (3, Vec::new()),
+            "a non-boundary event bumps `seq` and leaves the set alone"
+        );
+
+        // A FRESH drive + a lone `tool_execution_end` (ADR 0048: the cancel /
+        // turn-abandoned paths close calls that were only ever announced — no
+        // `start` ever arrived for `ghost`).
+        seed_drive(&manager, "live2");
+        let ghost = tool_end("ghost");
+        feed_capture(&manager.state, "live2", |capture, liveness| {
+            note_liveness_event(liveness, &ghost);
+            capture.observe_event(&ghost);
+            false
+        });
+        assert_eq!(
+            liveness_view(&manager, "live2"),
+            (1, Vec::new()),
+            "an `end` without a `start` leaves the set EMPTY (no panic, no \
+             underflow) and still counts as a frame"
+        );
+    }
+
+    /// (ADR 0055) EVERY frame the pump sees bumps `seq` — including a
+    /// `SinkFrame`, which is NOT an `RpcEvent`: the child's text stream rides
+    /// the `session-update` `agent_message_chunk` `SinkFrame`s, so a child that
+    /// ONLY streams tokens must still register as live or the silence bound of
+    /// ADR 0055 would reap it mid-answer.
+    #[test]
+    fn every_frame_bumps_the_liveness_seq() {
+        let (manager, _crashes, _events, _sinks) = make_manager(None);
+        seed_drive(&manager, "stream1");
+        let chunk = |text: &str| {
+            serde_json::json!({ "sessionId": "stream1", "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": text },
+                "messageId": "m1" } })
+        };
+        // The pump's `SinkFrame` arm (a `SinkFrame` bumps the liveness clock
+        // AND still feeds the capture).
+        feed_capture(&manager.state, "stream1", |capture, liveness| {
+            note_liveness_frame(liveness);
+            capture.observe_sink_frame("session-update", &chunk("a"));
+            false
+        });
+        assert_eq!(
+            liveness_view(&manager, "stream1").0,
+            1,
+            "a `SinkFrame` (NOT an `RpcEvent`) counts as liveness"
+        );
+        feed_capture(&manager.state, "stream1", |capture, liveness| {
+            note_liveness_frame(liveness);
+            capture.observe_sink_frame("session-update", &chunk("b"));
+            false
+        });
+        assert_eq!(
+            liveness_view(&manager, "stream1").0,
+            2,
+            "every frame bumps `seq` again"
+        );
+        assert_eq!(
+            manager
+                .state
+                .drives
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get("stream1")
+                .expect("the drive is seeded")
+                .capture
+                .captured_text(),
+            "ab",
+            "the SAME call still feeds the capture (the pump's existing \
+             contract is untouched)"
+        );
     }
 
     /// A `"__slow__"` subagent (a 10 s settle) hits the `settle_timeout`
