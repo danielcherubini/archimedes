@@ -481,6 +481,16 @@ impl WorkerManager {
         }
     }
 
+    /// The production seam for the ADR 0055 **Dead bound** (the `settings.json`
+    /// `subagentDeadBoundSecs` key, applied at the one `lib.rs` construction
+    /// site): SECONDS of unexplained silence after which a **Subagent session**
+    /// is reaped as Dead. Tests inject their bound in `Duration`s via
+    /// [`Self::with_settle_timeout`]; the unit here is seconds because that is
+    /// the unit the setting is written in.
+    pub fn with_dead_bound_secs(self, secs: u64) -> Self {
+        self.with_settle_timeout(Duration::from_secs(secs))
+    }
+
     /// Spawn a Worker for `session_id` + the `ready` handshake (5 s
     /// bound) + the `start` envelope. The read-loop pump is spawned
     /// (the `on_event` / `on_crash` routing — `is_subagent: false`).
@@ -2403,6 +2413,28 @@ mod tests {
             result: serde_json::json!({ "content": [], "isError": false }),
             is_error: false,
         }
+    }
+
+    /// (ADR 0055 — configuration) The **Dead bound** production seam:
+    /// `with_dead_bound_secs` (applied at the ONE `lib.rs` construction site,
+    /// reading `settings.json`'s `subagentDeadBoundSecs`) sets the same bound
+    /// the test seam `with_settle_timeout` sets — the seconds are converted
+    /// once, at the boundary, and nowhere else.
+    #[test]
+    fn the_dead_bound_secs_seam_sets_the_bound() {
+        let (defaulted, _c, _e, _s) = make_manager(None);
+        assert_eq!(
+            defaulted.settle_timeout,
+            super::DEFAULT_SUBAGENT_SETTLE_TIMEOUT,
+            "`new` alone keeps the built-in default"
+        );
+        let (configured, _c, _e, _s) = make_manager(None);
+        let configured = configured.with_dead_bound_secs(45);
+        assert_eq!(
+            configured.settle_timeout,
+            Duration::from_secs(45),
+            "the setting's SECONDS become the bound verbatim"
+        );
     }
 
     /// (ADR 0055) The liveness set is "ANNOUNCED and not yet closed": a

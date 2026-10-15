@@ -112,16 +112,26 @@ pub fn setup_dirs_with_factory<R: tauri::Runtime>(
         let m = manager.clone();
         let m2 = manager.clone();
         let sink_for = sink.clone();
-        Arc::new(WorkerManager::new(
-            worker_factory.unwrap_or_else(|| Arc::new(ProductionWorkerFactory)),
-            Arc::new(move |session_id, code| m.handle_crash(&session_id, code)),
-            Arc::new(move |session_id, is_subagent, evt| {
-                m2.route_event(&session_id, is_subagent, evt)
-            }),
-            // The parent-scope sink lookup (the subagent UI lifecycle
-            // events — the single shared `TauriSink`).
-            Arc::new(move |_| Some(sink_for.clone())),
-        ))
+        Arc::new(
+            WorkerManager::new(
+                worker_factory.unwrap_or_else(|| Arc::new(ProductionWorkerFactory)),
+                Arc::new(move |session_id, code| m.handle_crash(&session_id, code)),
+                Arc::new(move |session_id, is_subagent, evt| {
+                    m2.route_event(&session_id, is_subagent, evt)
+                }),
+                // The parent-scope sink lookup (the subagent UI lifecycle
+                // events — the single shared `TauriSink`).
+                Arc::new(move |_| Some(sink_for.clone())),
+            )
+            // The ADR 0055 **Dead bound** (the `settings.json`
+            // `subagentDeadBoundSecs` key): SECONDS of unexplained silence before a
+            // **Subagent session** is reaped as Dead. Applied at the ONE production
+            // construction site (a builder, not a 5th `WorkerManager::new`
+            // parameter — the other 12 call sites keep the default).
+            .with_dead_bound_secs(
+                crate::config::load_settings(&config_dir).subagent_dead_bound_secs,
+            ),
+        )
     };
     manager.attach_worker_manager(wm.clone());
     // The `WorkerManager` is managed state (the `set_space_trusted`
