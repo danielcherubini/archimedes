@@ -147,16 +147,11 @@ fi
 # collision (two archs whose names are identical after all suffixes), and the
 # loser would be dropped from the manifest in silence — so it is an error.
 win_sig="" win_payload=""
+win_exe_sig="" win_exe_payload=""
 appimage_targz_sig="" appimage_targz_payload=""
 appimage_bare_sig="" appimage_bare_payload=""
 deb_sig="" deb_payload=""
 darwin_sig="" darwin_payload=""
-
-# Signatures deliberately set aside (see the `*-setup.exe` arm below). They are
-# NOT orphans — the orphan rule further down consults this list — but they are
-# also never referenced by a key, and every one is announced on stderr so the
-# set-aside is visible in the CI log rather than inferred from its absence.
-skipped_sigs=()
 
 claim() {
   local slot="$1" sig="$2"
@@ -167,26 +162,33 @@ claim() {
   printf -v "$slot" '%s' "$sig"
 }
 
-accepted_suffixes='*_x64-setup.nsis.zip, *_amd64.AppImage, *_amd64.AppImage.tar.gz, *_amd64.deb, *.app.tar.gz (the last one needs --arch)'
+accepted_suffixes='*_x64-setup.nsis.zip, *_setup.exe (the raw NSIS installer), *_amd64.AppImage, *_amd64.AppImage.tar.gz, *_amd64.deb, *.app.tar.gz (the last one needs --arch)'
 
 for sig_path in "${sig_paths[@]}"; do
   sig_name="${sig_path##*/}"
   payload="${sig_name%.sig}"
 
   case "$payload" in
-    # The raw NSIS installer: tauri's Windows bundle ships `…_x64-setup.exe`
-    # (the thing a human double-clicks) ALONGSIDE `…_x64-setup.nsis.zip` (the
-    # thing the updater installs from), and signs both. The `.exe` therefore has
-    # no manifest slot at all — the plugin's `install_inner` would try to unzip
-    # it — so its signature belongs to no key by design, not by omission. This
-    # is the one unrecognized-looking name that is guaranteed to appear on every
-    # real Windows run, so treating it as an error would strand every release
-    # that publishes at all. Hence: skipped DELIBERATELY and OUT LOUD. It stays
-    # out of `keys` (the five-platform key set is untouched) and out of the
-    # orphan rule, and nothing else is tolerated — the arm below still fires.
+    # The nsis zip and the raw NSIS installer are BOTH Windows updater payloads,
+    # and they are separate slots: tauri-plugin-updater's `extract()` (2.14.0,
+    # updater.rs) only unzips when the downloaded bytes ARE a zip and otherwise
+    # falls through to `extract_exe()` → `infer::app::is_exe` → a temp `.exe` →
+    # `WindowsUpdaterType::nsis` → ShellExecuteW. So the installer a human
+    # double-clicks installs perfectly well from the updater.
+    #
+    # The zip wins the plain `windows-x86_64` key (it unzips — and that matches
+    # tauri-action's non-`preferNsis` default, so the bytes the updater prefers
+    # are the bytes the release tooling considers primary); the `.exe` keeps
+    # `windows-x86_64-nsis`, which names it truthfully: the file IS the NSIS
+    # installer. When a release ships ONLY the `.exe` — which is what the real
+    # v0.1.0 assets were (`Archimedes_0.1.0_x64-setup.exe{,.sig}`, no
+    # `…_setup.nsis.zip`) — the `.exe` serves both keys, because a skipped
+    # Windows slot is a Windows install frozen on the current version forever.
+    # Each shape still goes through `claim()`, so two zips or two installers
+    # collide rather than picking one, and the split is announced, never inferred
+    # from the emitted JSON.
     *-setup.exe)
-      printf 'skip: %s (installer signature, not a manifest payload)\n' "$sig_name" >&2
-      skipped_sigs+=("$sig_name")
+      claim win_exe_sig "$sig_name"; win_exe_payload="$payload"
       ;;
     *_x64-setup.nsis.zip)
       claim win_sig "$sig_name"; win_payload="$payload"
@@ -213,11 +215,10 @@ for sig_path in "${sig_paths[@]}"; do
     *)
       # Fail-loud, by name: an unrecognized .sig means a real platform would be
       # missing from the manifest, and a missing platform is invisible to CI and
-      # permanent on the user's device. The ONE non-payload signature that is
-      # known to show up and is excused is the NSIS `.exe` above, and it is
-      # excused by an explicit arm that prints a skip line — never by a wildcard,
-      # so an unexpected name still lands here and the message says what IS
-      # accepted.
+      # permanent on the user's device. Nothing is excused by a wildcard any
+      # more — the `.exe` that used to be skipped by an explicit arm is now
+      # claimed by one, so EVERY accepted shape ends up in a key, and an
+      # unexpected name still lands here with a message saying what IS accepted.
       fail "unrecognized signature: $sig_name (payload would be $payload)
        no updater platform key matches this asset name; accepted payload suffixes: $accepted_suffixes"
       ;;
@@ -262,21 +263,23 @@ superseded_sig() {
   return 1
 }
 
-skipped_sig() {
-  local sig="$1" entry
-  (( ${#skipped_sigs[@]} == 0 )) && return 1
-  for entry in "${skipped_sigs[@]}"; do
-    [[ "$entry" == "$sig" ]] && return 0
-  done
-  return 1
-}
-
-# Windows: the nsis zip is the updater payload (the plugin's `install_inner`
-# sniffs `is_zip` first); the bare key points at the same bytes, so an NSIS
-# install registered under either name resolves. The `.exe` is never a payload.
-if [[ -n "$win_sig" ]]; then
+# Windows: BOTH shapes are payloads (see the two Windows arms above). The nsis
+# zip takes the plain key when it exists — the updater unzips it, and that is
+# what tauri-action publishes as primary without `preferNsis` — and the raw
+# installer takes `-nsis`, which is exactly what it is. With no zip on disk the
+# installer serves both keys, so a release that publishes only the `.exe` still
+# reaches Windows clients instead of dropping the platform out of the manifest.
+if [[ -n "$win_sig" && -n "$win_exe_sig" ]]; then
+  add_key "windows-x86_64" "$win_payload" "$win_sig"
+  add_key "windows-x86_64-nsis" "$win_exe_payload" "$win_exe_sig"
+  printf 'windows: %s wins windows-x86_64 (the updater unzips it); %s keeps windows-x86_64-nsis (the raw NSIS installer)\n' \
+    "$win_payload" "$win_exe_payload" >&2
+elif [[ -n "$win_sig" ]]; then
   add_key "windows-x86_64-nsis" "$win_payload" "$win_sig"
   add_key "windows-x86_64" "$win_payload" "$win_sig"
+elif [[ -n "$win_exe_sig" ]]; then
+  add_key "windows-x86_64-nsis" "$win_exe_payload" "$win_exe_sig"
+  add_key "windows-x86_64" "$win_exe_payload" "$win_exe_sig"
 fi
 
 # Linux: the plugin's Linux installer unzips the updater bundle, so the
@@ -326,16 +329,15 @@ if [[ -n "$darwin_sig" ]]; then
   add_key "$darwin_key" "$darwin_payload" "$darwin_sig"
 fi
 
-# The orphan rule's allow-list is exactly two cases. One: when the
+# The orphan rule's allow-list is exactly ONE case: when the
 # `…AppImage.tar.gz` pair is the payload, the bare `…AppImage.sig` covers the
 # SAME AppImage in its non-tar form and is therefore superseded, not orphaned.
-# Two: the deliberately skipped installer signatures, each of which already
-# printed its own `skip:` line — an orphan complaint after a skip line would
-# contradict the skip and strand the release anyway. No other unreferenced
-# signature is excused.
+# That is all it needs to be now that the NSIS `.exe` claims a key of its own —
+# every other `.sig` on disk is referenced by a key or the composition fails. An
+# unreferenced signature means an installed platform nobody can update.
 for sig_path in "${sig_paths[@]}"; do
   sig_name="${sig_path##*/}"
-  if ! references_sig "$sig_name" && ! superseded_sig "$sig_name" && ! skipped_sig "$sig_name"; then
+  if ! references_sig "$sig_name" && ! superseded_sig "$sig_name"; then
     fail "signature $sig_name is not referenced by any platform key — refusing to publish a manifest that ignores it"
   fi
 done
@@ -411,10 +413,6 @@ if ! jq -e --arg base "$base_url/" '
   fail "the manifest just written failed self-validation: $out_file"
 fi
 
-printf 'composed %s: %s platform key(s), version %s, tag %s' \
+printf 'composed %s: %s platform key(s), version %s, tag %s\n' \
   "$out_file" "${#keys[@]}" "$version" "$tag" >&2
-if (( ${#skipped_sigs[@]} > 0 )); then
-  printf ', %s signature(s) skipped' "${#skipped_sigs[@]}" >&2
-fi
-printf '\n' >&2
 exit 0
