@@ -250,17 +250,52 @@ fn protected_refusal(ctx: &ToolCtx, tool: &str, resolved: &Path) -> Option<Strin
 /// unchanged. The REFUSAL still names the ORIGINAL entry: the message must
 /// show the caller the directory it actually registered, not a rewritten one.
 ///
-/// NOTE the GATE caller (`loop.rs::deny_tool_result`) hands the model's RAW
-/// argument as `resolved` — the mirror image of the case above, where the
-/// ENTRY is canonical and the compared path is raw. Canonicalizing entries
-/// cannot reach that one: the gate's path is usually a not-yet-existing write
-/// target, so a plain `canonicalize` fails on it and matching it properly needs
-/// `FsBackend::resolve`'s ancestor-walk seam. Left for a later wave.
+/// # The COMPARED path is canonicalized the same way
+///
+/// The mirror case is just as much a bypass: the GATE caller
+/// (`loop.rs::deny_tool_result`) hands the model's RAW argument here, while
+/// its `protected` entries arrive CANONICAL from
+/// [`crate::agent::boundary::protected_dirs`]. Canonicalizing the entries
+/// cannot reach that at all — the mismatch is now on the other side, and a raw
+/// `/var/…` never prefix-matches the canonical `/private/var/…` entry (macOS),
+/// and a raw `C:\…` never matches the verbatim `\\?\C:\…` one (Windows). Under
+/// `writes: Allow` the gate is the ONLY protected check on a path that does not
+/// exist yet (the executor's own check never runs — the widening means it does
+/// not re-decide), so a raw `~/.agents/skills/…` argument slipped the deny-list
+/// outright on both platforms: the exact bypass 3fd702f closed on the executor
+/// side, from the other direction.
+///
+/// So the compared path goes through
+/// [`crate::agent::fs_backend::canonicalize_lenient`] — the peel-to-deepest-
+/// existing-ancestor seam [`FsBackend::resolve`] itself uses, NOT a second
+/// canonicalizer, because the gate must agree with the executor about where a
+/// path lands. A not-yet-existing write target is exactly the shape the gate
+/// sees, which is why a plain `canonicalize` was never going to work here.
+///
+/// Two directions of the remaining slop are worth naming:
+/// * The re-appended components (below the deepest existing ancestor) are
+///   compared as plain strings, so they cannot hide a symlink hop. At THIS
+///   seam that only ever errs toward a FALSE POSITIVE — an over-refusal —
+///   because the comparison's only power is to DENY (a deny-list match
+///   refuses; nothing here can grant anything). Fail-closed in the safe
+///   direction, and the symlink-at-an-existing-component case that `resolve`
+///   rejects outright cannot make this seam ALLOW: it can only make a path
+///   compare differently, and comparing differently here means missing the
+///   entry, which is what the canonicalization just fixed.
+/// * A path that cannot be resolved at all comes back unchanged, i.e. the raw
+///   spelling is compared — the pre-fix behaviour for that (rare, unresolvable)
+///   shape, never worse.
+///
+/// The EXECUTOR callers hand paths that `FsBackend::resolve` already
+/// canonicalized: lenient-canonicalizing them again is IDEMPOTENT (a canonical
+/// path canonicalizes to itself, so the peel stops on its first step and the
+/// comparison is unchanged). Their behaviour, and Linux CI, are byte-identical.
 pub(crate) fn protected_refusal_text(
     protected: &[PathBuf],
     tool: &str,
     resolved: &Path,
 ) -> Option<String> {
+    let resolved = crate::agent::fs_backend::canonicalize_lenient(resolved);
     let hit = protected.iter().find(|dir| {
         dir.canonicalize()
             .is_ok_and(|canon| resolved.starts_with(canon))
@@ -2939,6 +2974,88 @@ mod tests {
             std::fs::read_to_string(skills.join("SKILL.md")).unwrap(),
             "OLD",
             "the file behind the symlink must be untouched"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The MIRROR of `a_raw_protected_entry_still_refuses_a_canonical_path_under_it`:
+    /// the ENTRIES are canonical (what production hands over, via
+    /// `boundary::protected_dirs`) and the COMPARED path is RAW. That is exactly
+    /// what the GATE does — `loop.rs::deny_tool_result` passes the model's `path`
+    /// argument verbatim — so this seam must canonicalize its ARGUMENT side too.
+    ///
+    /// CI evidence (branch run 38702103063, the `f9b5c17`/`3fd702f` family):
+    /// macOS `a_gate_denial_of_a_protected_dir_uses_the_protected_wording` failed
+    /// with `got "write: path escapes the session sandbox: …"` (Windows the same
+    /// with the `\\?\C:\…` verbatim spelling): the gate's raw argument shared no
+    /// prefix with its canonical entry, so the deny-list branch never fired and
+    /// the refusal fell through to the boundary's wording.
+    ///
+    /// The target does NOT exist (a gate refusal is usually a brand-new write),
+    /// so a plain `canonicalize` on the argument fails — this is the shape
+    /// `canonicalize_lenient` (the peel `FsBackend::resolve` uses) exists for.
+    /// Linux `temp_dir()` is already canonical, so the mismatch is MANUFACTURED
+    /// with a `link -> real` symlink exactly as 3fd702f did: entries spelled
+    /// through `real` (canonical), the argument through `link` (raw).
+    #[cfg(unix)]
+    #[test]
+    fn a_raw_argument_still_refuses_against_canonical_protected_entries() {
+        let base = temp_cwd("protect-gate-arg");
+        let real = base.join("real");
+        let skills = real.join(".agents/skills");
+        std::fs::create_dir_all(&skills).unwrap();
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, base.join("link")).unwrap();
+        let link = base.join("link");
+
+        // The fixture's PREMISE (so a platform where the two spellings agree
+        // fails loudly instead of testing nothing): the path the model would
+        // send is genuinely NOT canonical.
+        assert_ne!(
+            link.canonicalize().unwrap(),
+            link,
+            "the argument must be spelled through a symlink, got {}",
+            link.display()
+        );
+
+        // The ENTRIES as production builds them: canonical.
+        let entries = vec![skills.clone()];
+        // The ARGUMENT as the model sends it: the RAW spelling, under a
+        // directory that does not exist yet (the gate's usual case).
+        let raw = link.join(".agents/skills/pwn/SKILL.md");
+
+        let refusal = protected_refusal_text(&entries, "write", &raw)
+            .expect("a raw argument under a canonical protected entry must refuse");
+        assert!(
+            refusal.contains("protected agent-definition directory"),
+            "{refusal}"
+        );
+        // The refusal names the entry the caller registered (canonical here) —
+        // the SAME sentence the executor produces.
+        assert!(
+            refusal.contains(&skills.to_string_lossy().into_owned()),
+            "the refusal must name the protected entry: {refusal}"
+        );
+
+        // IDEMPOTENCE (the executor callers): handing the already-canonical
+        // form of the same path answers identically — canonical input
+        // canonicalizes to itself, so nothing about that seam changed.
+        let canon = skills.join("pwn/SKILL.md");
+        let again = protected_refusal_text(&entries, "write", &canon)
+            .expect("the canonical spelling refuses too (unchanged behaviour)");
+        assert!(
+            again.contains("protected agent-definition directory"),
+            "{again}"
+        );
+
+        // And the fix does not turn the deny-list into a blanket refusal: a raw
+        // path that resolves OUTSIDE the entries is still `None`.
+        let outside = link.join("notes/todo.md");
+        assert_eq!(
+            protected_refusal_text(&entries, "write", &outside),
+            None,
+            "a non-protected raw path must not be refused"
         );
         let _ = std::fs::remove_dir_all(&base);
     }

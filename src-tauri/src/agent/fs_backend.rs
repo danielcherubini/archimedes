@@ -121,72 +121,36 @@ impl FsBackend {
             self.roots[0].join(path)
         };
 
-        // Fast path: the whole path exists and can be canonicalized directly.
-        if let Ok(canon) = candidate.canonicalize() {
-            return self.check_under_roots(&canon);
+        // Fast path (a path that exists whole) AND slow path (peel to the
+        // deepest existing ancestor, canonicalize it, re-append what led to
+        // the missing target) both live in [`peel_to_existing`] — ONE
+        // implementation of the peel rules, so no second canonicalizer can
+        // resolve `..` / a symlink differently from this one.
+        let peel = peel_to_existing(&candidate)?;
+        if peel.trailing.is_empty() {
+            return self.check_under_roots(&peel.canon);
         }
 
-        // Slow path: the target does not exist yet. Walk up to the deepest
-        // existing ancestor, canonicalize it, validate it, then re-append the
+        // Slow path: validate the canonical ancestor, then re-append the
         // components that led to the (missing) target.
-        let mut ancestor = candidate.clone();
-        let mut trailing: Vec<std::ffi::OsString> = Vec::new();
-        loop {
-            match ancestor.canonicalize() {
-                Ok(canon) => {
-                    self.check_under_roots(&canon)?;
-                    // The "not yet exists" premise must hold for EVERY
-                    // trailing component, not just the deepest
-                    // canonicalizable ancestor: a component that EXISTS
-                    // here (it could not be canonicalized as part of the
-                    // full path, so it is a dangling/broken symlink) would
-                    // be re-appended as-is and FOLLOWED by the subsequent
-                    // `fs::write`/`create_dir_all` — creating the target
-                    // OUTSIDE the sandbox. Reject it.
-                    let mut probe = canon.clone();
-                    for component in trailing.iter().rev() {
-                        probe.push(component);
-                        if fs::symlink_metadata(&probe).is_ok() {
-                            return Err(FsError::PathEscape {
-                                path: probe.display().to_string(),
-                            });
-                        }
-                    }
-                    let mut result = canon;
-                    for component in trailing.iter().rev() {
-                        result.push(component);
-                    }
-                    return Ok(result);
-                }
-                Err(_) => {
-                    // Peel off the last component and try the parent. Own it
-                    // as an OsString so it does not borrow `ancestor`.
-                    let last = ancestor.file_name().map(|n| n.to_os_string());
-                    if let Some(last) = last {
-                        trailing.push(last);
-                    } else if ancestor.ends_with("..") {
-                        // A trailing `..` (`file_name()` is `None` for it)
-                        // is REJECTED, not silently DROPPED: dropping it
-                        // would make `root/newdir/../file.txt` (with
-                        // `newdir` missing) resolve to
-                        // `root/newdir/file.txt` instead of `root/file.txt`
-                        // — the tool would report one path and land another.
-                        // (The fast / canonicalize path resolves `..`
-                        // correctly, so only the slow path needs this.)
-                        return Err(FsError::PathEscape {
-                            path: ancestor.display().to_string(),
-                        });
-                    }
-                    if !ancestor.pop() {
-                        // Reached the filesystem root without finding an
-                        // existing ancestor: the path is not under a real dir.
-                        return Err(FsError::Io {
-                            detail: "path does not exist under the sandbox root".to_string(),
-                        });
-                    }
-                }
+        self.check_under_roots(&peel.canon)?;
+        // The "not yet exists" premise must hold for EVERY trailing
+        // component, not just the deepest canonicalizable ancestor: a
+        // component that EXISTS here (it could not be canonicalized as part
+        // of the full path, so it is a dangling/broken symlink) would be
+        // re-appended as-is and FOLLOWED by the subsequent
+        // `fs::write`/`create_dir_all` — creating the target OUTSIDE the
+        // sandbox. Reject it.
+        let mut probe = peel.canon.clone();
+        for component in peel.trailing.iter().rev() {
+            probe.push(component);
+            if fs::symlink_metadata(&probe).is_ok() {
+                return Err(FsError::PathEscape {
+                    path: probe.display().to_string(),
+                });
             }
         }
+        Ok(reapply(peel.canon, &peel.trailing))
     }
 
     /// Confirm `canon` (already canonicalized) is a root or a descendant of
@@ -208,6 +172,114 @@ impl FsBackend {
         Err(FsError::PathEscape {
             path: canon.display().to_string(),
         })
+    }
+}
+
+/// The result of [`peel_to_existing`]: the canonical form of the deepest
+/// EXISTING ancestor of a path, plus the components that lead from it to the
+/// (possibly missing) target.
+///
+/// Empty `trailing` means the path itself existed, so `canon` IS its
+/// canonicalization (the fast path).
+struct Peel {
+    /// The canonicalized deepest existing ancestor.
+    canon: PathBuf,
+    /// The components between `canon` and the original path, collected while
+    /// walking UP, so the INNERMOST one is last — see [`reapply`].
+    trailing: Vec<std::ffi::OsString>,
+}
+
+/// Re-append a peel's `trailing` components to `base`, outermost first (they
+/// were collected while walking UP, so the walk back DOWN is `.rev()`).
+fn reapply(base: PathBuf, trailing: &[std::ffi::OsString]) -> PathBuf {
+    let mut result = base;
+    for component in trailing.iter().rev() {
+        result.push(component);
+    }
+    result
+}
+
+/// Canonicalize `path`, or — when it does not exist yet — canonicalize its
+/// deepest existing ancestor and re-append the components that lead to the
+/// missing target.
+///
+/// THE ONE implementation of the peel rules (the shape [`FsBackend::resolve`]
+/// has always used): anything else that has to canonicalize a
+/// not-yet-existing path MUST go through here, because a second canonicalizer
+/// that peeled differently would disagree with the executor about where a path
+/// lands — the classic gate-vs-executor split-brain.
+///
+/// Deliberately root-free: it does not know about containment, only about
+/// resolution, which is why `resolve` layers [`FsBackend::check_under_roots`]
+/// (and its dangling-symlink probe) on top of its result.
+///
+/// # Errors
+///
+/// * `PathEscape` for a trailing `..` under a missing parent — `file_name()`
+///   is `None` for `..`, so silently dropping it would turn
+///   `root/newdir/../file.txt` (missing `newdir`) into
+///   `root/newdir/file.txt` instead of `root/file.txt`: the caller would
+///   report one path and land another. (The exists-whole path resolves `..`
+///   correctly via `canonicalize`, so only the peel needs this.)
+/// * `Io` when no ancestor exists at all (the walk reached the filesystem
+///   root) — the path is not under any real directory.
+///
+/// Note what it does NOT do: it does not re-check the re-appended components
+/// for existence. A component that EXISTS here means the full path could not
+/// be canonicalized for another reason (a dangling symlink), and following it
+/// would land the caller outside wherever `canon` points. `resolve` rejects
+/// that (its probe); a non-I/O caller whose only move is a string comparison
+/// cannot be fooled into an UNSAFE allow by it — see
+/// [`crate::agent::tools::exec::protected_refusal_text`], the one caller that
+/// leans on this without the probe.
+fn peel_to_existing(path: &Path) -> Result<Peel, FsError> {
+    let mut ancestor = path.to_path_buf();
+    let mut trailing: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        match ancestor.canonicalize() {
+            Ok(canon) => return Ok(Peel { canon, trailing }),
+            Err(_) => {
+                // Peel off the last component and try the parent. Own it as
+                // an OsString so it does not borrow `ancestor`.
+                let last = ancestor.file_name().map(|n| n.to_os_string());
+                if let Some(last) = last {
+                    trailing.push(last);
+                } else if ancestor.ends_with("..") {
+                    return Err(FsError::PathEscape {
+                        path: ancestor.display().to_string(),
+                    });
+                }
+                if !ancestor.pop() {
+                    // Reached the filesystem root without finding an existing
+                    // ancestor: the path is not under a real dir.
+                    return Err(FsError::Io {
+                        detail: "path does not exist under the sandbox root".to_string(),
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Canonicalize `path` as far as the filesystem allows: its own canonical form
+/// when it exists, otherwise the canonical form of its deepest existing
+/// ancestor with the remaining components re-appended (the SAME peel rules
+/// [`FsBackend::resolve`] runs — one implementation, see [`peel_to_existing`]).
+///
+/// A path that cannot be resolved at all (no existing ancestor, or a `..`
+/// under a missing parent) comes back UNCHANGED: the caller then compares the
+/// raw spelling, which is the best available answer for a caller that cannot
+/// fail (unlike `resolve`, this has no error to return).
+///
+/// Idempotent on canonical input: a path that is already canonical
+/// canonicalizes to itself, so passing a resolved path through here is a
+/// no-op — which is what makes it safe to call from a seam shared by callers
+/// that hand over raw paths and callers that hand over resolved ones.
+pub(crate) fn canonicalize_lenient(path: &Path) -> PathBuf {
+    match peel_to_existing(path) {
+        Ok(peel) if peel.trailing.is_empty() => peel.canon,
+        Ok(peel) => reapply(peel.canon, &peel.trailing),
+        Err(_) => path.to_path_buf(),
     }
 }
 

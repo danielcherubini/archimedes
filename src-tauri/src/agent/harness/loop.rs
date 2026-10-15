@@ -8634,25 +8634,59 @@ mod tests {
     /// is refused by the GATE in the deny-list's own words (the same text the
     /// executor produces), even though `writes: Sandboxed` would otherwise
     /// read as an escape — the deny-list is the true reason there.
+    ///
+    /// `$HOME` is spelled through a SYMLINK on unix (the 3fd702f fixture trick
+    /// at the GATE seam): `boundary::protected_dirs()` hands the gate the
+    /// CANONICAL entries (through `real`) while the model's argument is the RAW
+    /// `$HOME` spelling (through `link`), and the target does not exist yet, so
+    /// the argument is exactly the shape `canonicalize_lenient` resolves. Linux
+    /// `temp_dir()` is already canonical, hence the manufactured symlink: without
+    /// the argument-side canonicalization this test is RED on all three
+    /// platforms (pre-fix it was green on Linux by luck and red on macOS CI —
+    /// `/var` → `/private/var` — and Windows, raw `C:\…` vs verbatim `\\?\C:\…`).
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_gate_denial_of_a_protected_dir_uses_the_protected_wording() {
-        let home = Tmp::new("protected-home");
+        let real = Tmp::new("protected-home");
+        // The `link` dir must OUTLIVE the test (it holds the `$HOME` symlink),
+        // so it is bound here rather than inside the `cfg` arm.
+        #[cfg(unix)]
+        let link = Tmp::new("protected-home-link");
+        #[cfg(unix)]
+        let home = {
+            // `link -> real`, and `$HOME` is the LINK: the deny-list entries
+            // come back canonical (`real/…`), the model's path is raw (`link/…`).
+            std::os::unix::fs::symlink(real.path(), link.path().join("home")).unwrap();
+            let home = link.path().join("home");
+            assert_ne!(
+                home.canonicalize().unwrap(),
+                home,
+                "the fixture must hand the gate a RAW `$HOME`"
+            );
+            home
+        };
+        #[cfg(not(unix))]
+        let home = {
+            // No symlink privileges: `temp_dir()`'s own spelling is already the
+            // raw one `canonicalize` rewrites (on Windows into the verbatim
+            // `\\?\…` form), so the raw-vs-canonical split is the platform's.
+            real.path().to_path_buf()
+        };
         for dir in [
             ".agents/skills",
             ".pi/agent/skills",
             ".agents/agents",
             ".pi/agent/agents",
         ] {
-            std::fs::create_dir_all(home.path().join(dir)).unwrap();
+            std::fs::create_dir_all(home.join(dir)).unwrap();
         }
         let _lock = crate::test_support::env_lock();
         let original = std::env::var_os("HOME");
         let _restore = RestoreHome(original.clone());
         // SAFETY: as above.
-        unsafe { std::env::set_var("HOME", home.path()) };
+        unsafe { std::env::set_var("HOME", &home) };
 
-        let target = home.path().join(".agents/skills/pwn/SKILL.md");
+        let target = home.join(".agents/skills/pwn/SKILL.md");
         let (provider, _calls) = ScriptedProvider::new(vec![
             Some(vec![
                 ProviderEvent::ToolCall(ToolCall {
