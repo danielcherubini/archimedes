@@ -9,30 +9,48 @@
 //! DOUBLE-DELIVER every `session-update`); the store frames are persisted
 //! to `messages` / `native_messages` (the `TranscriptPersister`).
 //!
-//! LINUX-ONLY, and the gate is ENVIRONMENTAL — stated so no one reads it
-//! as a behavioural exemption. This is the only test binary that links the
-//! Tauri mock runtime (`tauri::test` + `generate_context!`), i.e. the only
-//! one that pulls the real tauri/wry/tao link graph into a test process,
-//! and on the first runs that ever reached it on the other platforms
-//! (branch `feature/multi-platform-build-and-release`, run 38712419038) it
-//! crashed BEFORE any assertion of ours could run:
+//! THE GATE STORY, recorded here so the next reader finds it at the gate
+//! itself instead of re-litigating it: a `#![cfg(target_os = "linux")]`
+//! sits below (added in `5d87ecf` as an interim) because the first CI runs
+//! that ever reached this binary on the other platforms crashed BEFORE any
+//! assertion of ours ran — Windows at LOAD time with `0xc0000139
+//! STATUS_ENTRYPOINT_NOT_FOUND`, macOS `SIGSEGV` after two tests passed.
+//! Both were environmental/upstream, not assertion failures, and both have
+//! real fixes — see `docs/research/tauri-mock-runtime-test-crashes.md` for
+//! the full evidence. One fix has landed, one hasn't:
 //!
-//! * macOS — `signal: 11, SIGSEGV: invalid memory reference` after two
-//!   tests passed (a process-level crash inside the mock runtime, not in
-//!   this file's code); and
-//! * Windows — `exit code: 0xc0000139, STATUS_ENTRYPOINT_NOT_FOUND` at
-//!   LOAD time of the test binary: a DLL in the link graph is missing an
-//!   export the binary imports — nothing of ours executes.
+//! * Windows — FIXED HERE, in the build, not in this file: the
+//!   Common-Controls-v6 application manifest only ever reached the app binary
+//!   (`tauri-winres` → `embed_resource::compile()` prints
+//!   `cargo:rustc-link-arg-bins`, which is `[[bin]]`-scoped), so this test
+//!   binary imported `comctl32!TaskDialogIndirect` against System32 v5.82 and
+//!   the loader refused to start it (upstream tauri#13419). `build.rs` now
+//!   takes the manifest away from tauri-winres
+//!   (`WindowsAttributes::new_without_app_manifest()`) and re-emits it with
+//!   the UNSCOPED `cargo:rustc-link-arg=/MANIFEST:EMBED` +
+//!   `/MANIFESTINPUT:windows-app-manifest.xml` (+`/WX`) — the
+//!   lucasfernog-blessed workaround in tauri#13419, confirmed in #13948 — so
+//!   every target this package links (tests, benches, examples, cdylib)
+//!   carries the manifest. Nothing about the shipped app changes.
 //!
-//! Everything the file pins (command dispatch through the real ACL-free
-//! custom-command path, verbatim sink re-emission, no double-delivery,
-//! store persistence) is platform-neutral code, and the 892-test lib suite
-//! and the 8 platform-free integration binaries DO run on all three OSes;
-//! this file's coverage narrowing to Linux is the accepted cost, recorded
-//! here rather than in a tracker so the next reader finds it at the gate
-//! itself. The fix is upstream-shaped (whatever mock-runtime link failure
-//! a tauri/wry/tao release resolves), not ours-shaped; re-open by deleting
-//! the `cfg` and re-running the matrix.
+//! * macOS — NOT fixed yet, and THAT is why the Linux gate still sits
+//!   below: the old layout builds the mock app on the libtest worker while
+//!   pumping `app.run()` on a spawned thread and drives IPC from a
+//!   `spawn_blocking` thread, but `MockRuntime`'s `RuntimeContext` is
+//!   `unsafe impl Send + Sync` only on the promise that one thread touches
+//!   it — two threads borrowing the same non-atomic `RefCell` is the
+//!   SIGSEGV (evidence: `docs/research/tauri-mock-runtime-test-crashes.md`).
+//!   The harness rewrite (build + run + IPC on ONE thread per test) re-opens
+//!   this file by deleting the gate; the Windows half of the crash is
+//!   already fixed above.
+//!
+//! Everything this file pins (command dispatch through the real ACL-free
+//! custom-command path, verbatim sink re-emission, no double-delivery, store
+//! persistence) is platform-neutral code.
+
+// ENVIRONMENTAL GATE — delete when the one-thread harness lands (see the
+// macOS bullet in the header). The Windows half of the original crash is
+// fixed in `build.rs`, so macOS is the only platform still excluded.
 #![cfg(target_os = "linux")]
 
 use std::sync::{Arc, Mutex as StdMutex};

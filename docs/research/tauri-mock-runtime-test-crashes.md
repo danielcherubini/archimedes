@@ -31,6 +31,7 @@ Both are **environmental/upstream-shaped, not assertion failures** — and both 
 - `tauri` `default-features = false, features = ["test","wry","compression"]` (FabianLars' suggestion in #13954; what tauri-specta ships): works, but Cargo feature unification means it changes the **shipped** app too (loses the v6 TaskDialog about-menu; plugin-dialog still forces rfd's v6). Second choice only.
 - `mt.exe` post-link patch via a test-only cargo `runner`: works but fragile (`runner` also hijacks `cargo run`); upstream's own note says it needs a separate `--config` file to avoid breaking `tauri dev`.
 - Gating `ipc.rs` to Linux: what shipped as the interim; the honest cost is the mock-runtime IPC contract never executes on Windows. Superseded by the manifest fix.
+- A `webview2-com` **build-dependency** (reportedly `features = ["windows-pc"]`) "so every target embeds the PC manifest": dropped while implementing — `webview2-com` has NO feature table at all (verified: `webview2-com-0.39.1/Cargo.toml` declares only dependencies; `grep -ral windows-pc` over `~/.cargo/registry/index` and the vendored sources is empty), so `cargo` refuses to resolve the manifest ("depends on `webview2-com` with feature `windows-pc` but `webview2-com` does not have that feature"). The crate is also Windows-only and would need a `cfg(windows)` gate, and build-script link args of a *dependency* do not reach our targets anyway (the same non-propagation that makes `__TAURI_WORKSPACE__` a no-op). The unscoped `/MANIFESTINPUT` args in `build.rs` are what put the manifest on every target.
 
 **Upstream fix to watch/👍:** tauri#13419 (`tauri-winres` `compile` → `compile_for_everything` was declined as a default); also #14580, #13948.
 
@@ -49,7 +50,7 @@ Not AppKit, not WebKit, not leaks:
 ## Evidence
 
 - tauri#13419 (open; Sculas root-cause comment; dumpbin quote), #13954 (dup; FabianLars feature-recipe), #14580, #13948 (lucasfernog fix, confirmed), #11028, #13718/#13719, #6926/#12247/#10164 (manifest-in-shipped-apps history), rust-embed-resource#69 + cargo#10937 (`-link-arg-tests` broken for unit tests; `rustc-link-arg` unscoped is the working lever). Cargo book build-scripts (link-arg scoping table). MS docs: NTSTATUS 0xC0000139; ComCtl32 v5/v6 side-by-side. Upstream CI patterns: tauri `test-core.yml` (no mock-app integration binary on Windows), tao `ci.yml` (gated test steps), wry `build.yml` (WebView2 runtime provisioned). tauri-specta CI green on Windows with `default-features = false`.
-- Local: `src-tauri/build.rs` (plain `tauri_build::build()`), `src-tauri/tests/ipc.rs:125–152` (build-on-A/run-on-B layout), `src/lib.rs:262–268` (dialog plugin registration; lib never builds an App), vendored `tauri-winres-0.3.6/src/lib.rs:541`, `tauri-build-2.7.2/src/lib.rs:369` (`new_without_app_manifest`).
+- Local: `src-tauri/build.rs` (now `try_build` + `new_without_app_manifest()` + the unscoped `/MANIFEST:EMBED` `/MANIFESTINPUT:windows-app-manifest.xml` `/WX` args, gated on `windows`+`msvc`; the vendored `src-tauri/windows-app-manifest.xml` is md5-identical to `tauri-build/src/windows-app-manifest.xml`), `src-tauri/tests/ipc.rs:125–152` (build-on-A/run-on-B layout), `src/lib.rs:262–268` (dialog plugin registration; lib never builds an App), vendored `tauri-winres-0.3.6/src/lib.rs:541`, `tauri-build-2.7.2/src/lib.rs:369` (`new_without_app_manifest`).
 
 ## Gaps
 

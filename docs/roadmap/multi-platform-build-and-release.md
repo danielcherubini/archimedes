@@ -347,4 +347,4 @@ Published (not draft) release with all assets on Linux + Windows, a five-key `la
 
 ## Task 3 follow-ups (recorded at ship time)
 
-- `tests/ipc.rs` is `#![cfg(target_os = "linux")]` — the mock-runtime link graph crashes environmentally on macOS (SIGSEGV) and Windows (`STATUS_ENTRYPOINT_NOT_FOUND`) before any assertion runs (evidence quoted in the gate's doc-comment). Re-open by deleting the cfg when a tauri/wry/tao upgrade resolves it; until then the headless IPC-surface pin is Linux-only coverage.
+- `tests/ipc.rs` stays `#![cfg(target_os = "linux")]` for ONE platform now: the Windows `STATUS_ENTRYPOINT_NOT_FOUND` is FIXED at the build (the Common-Controls-v6 manifest never reached non-`[[bin]]` link targets — upstream tauri#13419 — `src-tauri/build.rs` now re-emits it unscoped, so the gate's Windows rationale is gone). The macOS `SIGSEGV` is a data race in our own harness against `MockRuntime`'s unsound `Send`/`Sync` — the gate deletes when the one-thread-per-test harness rewrite lands. Full analysis, evidence and rejected alternatives: `docs/research/tauri-mock-runtime-test-crashes.md`.
