@@ -277,6 +277,13 @@ impl SubagentCapture {
 pub struct SubagentLiveness {
     pub seq: u64,
     pub in_flight: std::collections::HashSet<String>,
+    /// The subset of `in_flight` whose tool opened a **gate** the user has not
+    /// answered (`PermissionRequest` / `InteractiveRequest` seen, tool not yet
+    /// closed). Drained at teardown to close the child's own cards (ADR 0055) —
+    /// on `SubagentLiveness`, NOT a second `SubagentDrive` field, so the pump
+    /// reaches it through the one `feed_capture` borrow; two overlapping sets on
+    /// the drive would drift.
+    pub open_gates: std::collections::HashSet<String>,
 }
 
 /// Bump the liveness clock for ONE frame the pump saw (ADR 0055). A
@@ -306,9 +313,36 @@ fn note_liveness_event(liveness: &mut SubagentLiveness, event: &RpcEvent) {
         }
         RpcEvent::tool_execution_end { tool_call_id, .. } => {
             liveness.in_flight.remove(tool_call_id);
+            // A gate the user ANSWERED closes its own tool call, so the same
+            // id removes it here — which is exactly why an answered gate is
+            // ABSENT at teardown and needs no separate drain (ADR 0055).
+            liveness.open_gates.remove(tool_call_id);
         }
         _ => {}
     }
+}
+
+/// Record one unanswered **gate** (ADR 0055): the child's
+/// `PermissionRequest` / `InteractiveRequest` frame announces a gate the user
+/// has not answered, and its id IS the `tool_call_id` of the tool the child is
+/// parked inside (`gate_tool` passes `&tc.id` to `native_permission_gate`; the
+/// `ask` flow's interactive `requestId` is the `toolCallId` too) — ONE id space,
+/// which is what lets `tool_execution_end` clear it.
+///
+/// The sudo sub-prompts are the exception: their `requestId`s are the DERIVED
+/// `"{request_id}:confirm"` / `":password"` forms, so the suffix is stripped
+/// here and the set holds tool-call ids only (both sub-prompts of one sudo tool
+/// are therefore ONE gate — correct, since the tool is one call).
+///
+/// Touches ONLY `open_gates`: the gate's tool call was already announced, so
+/// `in_flight` covers it, and the frame-count contract stays owned by the
+/// pump's `SinkFrame` / `Event` arms.
+fn note_liveness_gate(liveness: &mut SubagentLiveness, request_id: &str) {
+    let tool_call_id = request_id
+        .strip_suffix(":confirm")
+        .or_else(|| request_id.strip_suffix(":password"))
+        .unwrap_or(request_id);
+    liveness.open_gates.insert(tool_call_id.to_string());
 }
 
 /// The in-flight subagent dispatch's bookkeeping (the `drives` map
@@ -780,6 +814,24 @@ fn start_pump(
                         matches!(e, RpcEvent::agent_settled)
                     });
                 }
+                // (a2) A child's **gate** (ADR 0055): record the unanswered gate
+                // so `finish_subagent` can close the child's own card at
+                // teardown. This arm REPLACES nothing — the router already
+                // received this exact frame VERBATIM through the
+                // `(state.on_event)(delivery_id, is_subagent, evt)` call above
+                // (which is where the `permission-request` /
+                // `interactive-request` re-emission happens), and it still
+                // does: recording runs ALONGSIDE, never instead. These two
+                // variants used to fall through to the permissive `_` arm.
+                WorkerInboundEvent::PermissionRequest { id, .. }
+                | WorkerInboundEvent::InteractiveRequest { id, .. }
+                    if is_subagent =>
+                {
+                    feed_capture(&state, &session_id, |_c, liveness| {
+                        note_liveness_gate(liveness, &id);
+                        false
+                    });
+                }
                 // (b) The Supervisor-side subagent-dispatch flow (the
                 // `on_event` above already delivered the frame to the
                 // router).
@@ -1104,6 +1156,7 @@ fn dispatch_subagent(
     let (liveness_tx, liveness_rx) = watch::channel(SubagentLiveness {
         seq: 0,
         in_flight: Default::default(),
+        open_gates: Default::default(),
     });
     let capture = Arc::new(SubagentCapture::new());
     {
@@ -1417,6 +1470,51 @@ async fn finish_subagent(
     outcome: SubagentOutcome,
     sink: &SubagentOutcomeSink,
 ) {
+    // The child's own UNANSWERED gates (ADR 0055): drained BEFORE the
+    // `subagent-closed` emission, from the `drives` entry — which is still
+    // valid here, because the removal below happens AFTER the emissions. A
+    // gate the user ANSWERED is already gone (`tool_execution_end` cleared it
+    // through the shared tool-call-id space), so only parked gates are closed.
+    //
+    // Read here and NOT snapshotted in `drive_subagent`: a gate can open
+    // between that snapshot and this teardown, and this is the path that must
+    // be exact.
+    let open_gates: Vec<String> = {
+        let drives = state.drives.lock().unwrap_or_else(|p| p.into_inner());
+        match drives.get(child_id) {
+            Some(drive) => {
+                let mut ids: Vec<String> = drive
+                    .liveness_tx
+                    .borrow()
+                    .open_gates
+                    .iter()
+                    .cloned()
+                    .collect();
+                // Sorted for a deterministic emission order (a `HashSet`'s
+                // iteration order is unstable, and the emission order is
+                // observable on the wire).
+                ids.sort();
+                ids
+            }
+            // The drive is already gone (an early-failure teardown) → nothing
+            // was ever recorded.
+            None => Vec::new(),
+        }
+    };
+    // The guards are DROPPED before the emissions (a sink emission must never
+    // run under the `drives` lock, and the borrow above is the only one).
+    if let Some(sink) = (state.sink_for)(parent_session_id) {
+        for request_id in open_gates {
+            // ADR 0055: keyed to the CHILD id — the Client stored the gate under
+            // `payload.sessionId` (the child) in App.tsx's `interactive-request`
+            // listener, so a close keyed to the parent is a no-op on the child's
+            // slice and the card would live forever.
+            sink.emit(
+                "interactive-request-close",
+                json!({ "sessionId": child_id, "requestId": request_id }),
+            );
+        }
+    }
     // The `subagent-closed` UI lifecycle event (the PARENT session's
     // sink — the `subagent.rs:721/743` payload shapes).
     if let Some(sink) = (state.sink_for)(parent_session_id) {
@@ -1571,8 +1669,8 @@ mod tests {
     use crate::agent::subagent::{LaunchConfig, SubagentFailureReason, SubagentOutcome};
     use crate::agent::worker::client::{WorkerError, WorkerHandle, WorkerInboundEvent};
     use crate::agent::worker::manager::{
-        feed_capture, note_liveness_event, note_liveness_frame, SubagentCapture, SubagentDrive,
-        SubagentLiveness, WorkerFactory, WorkerManager,
+        feed_capture, note_liveness_event, note_liveness_frame, note_liveness_gate,
+        SubagentCapture, SubagentDrive, SubagentLiveness, WorkerFactory, WorkerManager,
     };
     use crate::agent::worker::protocol::{StartEnv, StartMode, SubagentDispatchWire};
 
@@ -1842,6 +1940,77 @@ mod tests {
             }
             if tokio::time::Instant::now() >= deadline {
                 panic!("the `subagent-closed` event never fired");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Every payload the parent's sink received under `name`, in emission
+    /// order (the observation point for the frames `finish_subagent` emits
+    /// BESIDES `subagent-closed` — the ADR 0055 `interactive-request-close`).
+    fn emitted(sink_events: &SinkEvents, name: &str) -> Vec<Value> {
+        sink_events
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter(|(e, _)| e == name)
+            .map(|(_, p)| p.clone())
+            .collect()
+    }
+
+    /// The CHILD session id (the `subagent-session-started` payload — the
+    /// only frame that names the child before the teardown; a dispatch whose
+    /// child id the test cannot guess still gets an exact assertion).
+    async fn wait_for_child_id(sink_events: &SinkEvents) -> String {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(p) = emitted(sink_events, "subagent-session-started").first() {
+                return p["sessionId"]
+                    .as_str()
+                    .expect("the started payload carries the child sessionId")
+                    .to_string();
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("the `subagent-session-started` event never fired");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// The drive's CURRENT unanswered-gate set (sorted) — the same value
+    /// `finish_subagent` drains at teardown, read through the pump's `watch`.
+    fn open_gates_view(manager: &WorkerManager, child_id: &str) -> Vec<String> {
+        let drives = manager
+            .state
+            .drives
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut ids: Vec<String> = drives
+            .get(child_id)
+            .expect("the drive is in flight")
+            .liveness_tx
+            .borrow()
+            .open_gates
+            .iter()
+            .cloned()
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// Bounded-wait until the drive has RECORDED `id` as an unanswered gate
+    /// (the pump records the frame in its own `match`, which runs AFTER the
+    /// router delivery a test would otherwise wait on — without this the
+    /// cancel could win the race against the recording and the test would be
+    /// flaky rather than false).
+    async fn wait_for_open_gate(manager: &WorkerManager, child_id: &str, id: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if open_gates_view(manager, child_id).iter().any(|g| g == id) {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("the pump never recorded `{id}` as an open gate");
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -2189,6 +2358,7 @@ mod tests {
                     liveness_tx: watch::channel(SubagentLiveness {
                         seq: 0,
                         in_flight: Default::default(),
+                        open_gates: Default::default(),
                     })
                     .0,
                     capture: Arc::new(SubagentCapture::new()),
@@ -2307,6 +2477,64 @@ mod tests {
             (1, Vec::new()),
             "an `end` without a `start` leaves the set EMPTY (no panic, no \
              underflow) and still counts as a frame"
+        );
+    }
+
+    /// (ADR 0055 — a torn-down child closes its own cards) The pump records
+    /// an unanswered **gate** as an outstanding gate, and the ANSWER of a gate
+    /// clears it through the tool boundary that the answer closes.
+    ///
+    /// The second half is the id-space invariant the whole feature rests on:
+    /// `gate_tool` passes `&tc.id` to `native_permission_gate` and the `ask`
+    /// flow's interactive `requestId` is the `toolCallId` too, so the gate's id
+    /// and the `tool_execution_end`'s `tool_call_id` are the SAME string —
+    /// which is why an answered gate is absent at teardown with no drain logic.
+    /// The sudo sub-prompts are the exception: they are the DERIVED
+    /// `"{request_id}:confirm"` / `":password"` forms, so the suffix is stripped
+    /// before recording and the set holds tool-call ids only.
+    #[test]
+    fn an_unanswered_gate_is_recorded_and_an_answered_one_is_cleared() {
+        let (manager, _crashes, _events, _sinks) = make_manager(None);
+        seed_drive(&manager, "gate1");
+
+        // The gate frame (the pump's own `PermissionRequest` /
+        // `InteractiveRequest` arms — NOT an `RpcEvent`, so NOT
+        // `note_liveness_event`).
+        feed_capture(&manager.state, "gate1", |_capture, liveness| {
+            note_liveness_gate(liveness, "tc1");
+            false
+        });
+        assert_eq!(
+            open_gates_view(&manager, "gate1"),
+            vec!["tc1".to_string()],
+            "an unanswered gate is outstanding"
+        );
+
+        // The user answers → the tool call closes (`tool_execution_end` with
+        // the SAME id — the one-id-space invariant).
+        let end = tool_end("tc1");
+        feed_capture(&manager.state, "gate1", |capture, liveness| {
+            note_liveness_event(liveness, &end);
+            capture.observe_event(&end);
+            false
+        });
+        assert_eq!(
+            open_gates_view(&manager, "gate1"),
+            Vec::<String>::new(),
+            "an ANSWERED gate is absent at teardown (the tool close clears it)"
+        );
+
+        // A sudo sub-prompt records the BARE tool-call id.
+        feed_capture(&manager.state, "gate1", |_capture, liveness| {
+            note_liveness_gate(liveness, "tc2:confirm");
+            note_liveness_gate(liveness, "tc2:password");
+            false
+        });
+        assert_eq!(
+            open_gates_view(&manager, "gate1"),
+            vec!["tc2".to_string()],
+            "the derived `:confirm` / `:password` suffixes are stripped, so the \
+             set holds tool-call ids only (both sub-prompts of one tool are ONE gate)"
         );
     }
 
@@ -2738,6 +2966,162 @@ mod tests {
             "the cancelled subagent is torn down (no Worker left behind)"
         );
         assert_eq!(manager.test_session_count(), 1, "the parent survives");
+    }
+
+    /// (ADR 0055 — the hole ADR 0040 recorded) A child torn down with an
+    /// ANSWERED gate leaves a card on screen forever: the child Worker emits NO
+    /// close frame for a gate it is merely parked on, `router.rs`'s
+    /// pending-modal cleanup never runs for a child (its `Exited` arm is gated
+    /// `!is_subagent`, and `cleanup_pending_modals` returns without a `live`
+    /// entry), and the gate was tracked under the PARENT's delivery id anyway.
+    /// So `finish_subagent` is the emitter, and the close MUST be keyed to the
+    /// CHILD id — the Client stored the gate under `payload.sessionId`, which is
+    /// the child's, so a parent-keyed close is a no-op on the child's slice.
+    ///
+    /// The teardown here is the CANCEL (a short bound cannot fire: the gate's
+    /// tool call is outstanding, so the ADR 0055 silence clock is DISARMED).
+    #[tokio::test]
+    async fn a_torn_down_child_closes_its_own_outstanding_gates() {
+        // A bound far longer than the test — only the cancel may end this.
+        let (manager, _crashes, events, sinks) = make_manager(Some(Duration::from_secs(30)));
+        let sink_events = register_sink(&sinks, "g1");
+        manager
+            .attach("g1", &test_env("g1", None))
+            .await
+            .expect("the parent attach completes");
+        // The `sub1` DISPATCH id — the `__cancel__` frame names that id (the
+        // cancel is routed by DISPATCH id, so a generated one is unroutable).
+        dispatch_child_task_with_id(&manager, "g1", "__permission__", "sub1");
+        let child_id = wait_for_child_id(&sink_events).await;
+
+        // The gate is parked (the fixture blocks until it is answered) and the
+        // pump has RECORDED it — the router also still sees the frame VERBATIM
+        // under the parent's delivery id (the recording is alongside, never
+        // instead).
+        wait_for_open_gate(&manager, &child_id, "p1").await;
+        let delivered = collect_now(&events, "g1");
+        let frame = delivered
+            .iter()
+            .find_map(|(is_sub, e)| match e {
+                WorkerInboundEvent::PermissionRequest { id, payload } if *is_sub => {
+                    Some((id.clone(), payload.clone()))
+                }
+                _ => None,
+            })
+            .expect("the router still receives the child's `PermissionRequest`");
+        assert_eq!(frame.0, "p1");
+        assert_eq!(
+            frame.1["sessionId"], child_id,
+            "the payload carries the CHILD sessionId (that is the key the \
+             Client stored the gate under)"
+        );
+
+        // The parent aborts the turn → the child is cancelled and torn down.
+        manager
+            .handle_for("g1")
+            .expect("the parent handle is reachable")
+            .send_prompt("__cancel__", &[])
+            .expect("the cancel prompt encodes");
+        let closed = wait_for_closed(&sink_events).await;
+        assert_eq!(closed["status"], "failed");
+        assert_eq!(
+            closed["reason"], "cancelled",
+            "the machine-readable why rides the close payload (the card's \
+             short line reads it, never `error`): {closed}"
+        );
+
+        let all = sink_events
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let gates: Vec<Value> = emitted(&sink_events, "interactive-request-close");
+        assert_eq!(
+            gates.len(),
+            1,
+            "the child's one unanswered gate is closed exactly once: {all:?}"
+        );
+        assert_eq!(
+            gates[0]["sessionId"], child_id,
+            "keyed to the CHILD id — a parent-keyed close is a no-op on the \
+             child's slice and the card lives forever"
+        );
+        assert_eq!(gates[0]["requestId"], "p1");
+        // The gate closes precede `subagent-closed` (the teardown drains the
+        // gates FIRST). Both are read from one snapshot of the collector.
+        let idx = |name: &str| {
+            all.iter()
+                .position(|(e, _)| e == name)
+                .unwrap_or_else(|| panic!("no `{name}` event: {all:?}"))
+        };
+        assert!(
+            idx("interactive-request-close") < idx("subagent-closed"),
+            "the gate closes precede the close frame: {all:?}"
+        );
+        // The `drives` removal runs AFTER the emissions in `finish_subagent`.
+        // Poll (rather than sleep a fixed 500 ms like the cancel test above):
+        // a child parked on a GATE swallows the reap's `Close` frame in its
+        // gate-response read loop, so its reap needs the full 2 s grace +
+        // `kill` — a child that is merely slow exits on the first frame.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while manager.test_drive_count() > 0 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            manager.test_drive_count(),
+            0,
+            "the cancelled child is torn down"
+        );
+        manager.detach("g1");
+    }
+
+    /// The NEGATIVE half: a child that ANSWERED its gate emits NO
+    /// `interactive-request-close` at teardown. The answer closes the tool call
+    /// (`tool_execution_end` carrying the SAME id — `gate_tool` passes
+    /// `&tc.id`), and that removal is what makes the gate absent, so a
+    /// completed child's card — which the user already answered — is never
+    /// retracted.
+    #[tokio::test]
+    async fn a_child_that_answered_its_gate_emits_no_close() {
+        let (manager, _crashes, _events, sinks) = make_manager(Some(Duration::from_secs(30)));
+        let sink_events = register_sink(&sinks, "g2");
+        manager
+            .attach("g2", &test_env("g2", None))
+            .await
+            .expect("the parent attach completes");
+        dispatch_child_task_with_id(&manager, "g2", "__permission__", "sub1");
+        let child_id = wait_for_child_id(&sink_events).await;
+        wait_for_open_gate(&manager, &child_id, "p1").await;
+
+        // The user ANSWERS (the response routes to the CHILD's handle —
+        // `handle_for` resolves the `drives` map's entry).
+        manager
+            .handle_for(&child_id)
+            .expect("the child handle is reachable")
+            .send_permission_response(
+                "p1",
+                &crate::agent::permission::PermissionOutcome::Selected {
+                    option_id: "allow".to_string(),
+                },
+            )
+            .expect("the permission response encodes");
+
+        // The child then closes the tool call and settles → `Completed`.
+        let closed = wait_for_closed(&sink_events).await;
+        assert_eq!(
+            closed["status"], "completed",
+            "the answered child settles: {closed}"
+        );
+        assert!(
+            closed.get("reason").is_none(),
+            "a `Completed` payload carries NO failure reason: {closed}"
+        );
+        assert_eq!(
+            emitted(&sink_events, "interactive-request-close"),
+            Vec::<Value>::new(),
+            "an ANSWERED gate is absent at teardown — nothing may retract a \
+             card the user already answered"
+        );
+        manager.detach("g2");
     }
 
     /// The `subagent-session-started` + `subagent-closed` UI lifecycle

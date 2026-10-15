@@ -342,13 +342,21 @@ fn emit_canned_turn<W: Write>(stdout: &mut W, session_id: &str, incarnation: &st
 /// The tool-execution events + `agent_settled` (the
 /// `__permission__` round-trip's post-response stream — the
 /// tool-execution events arrive AFTER the `PermissionResponse`).
+///
+/// The `tool_call_id` is the GATE's `requestId` (`p1`), NOT an independent
+/// `t1`: in production `gate_tool` passes `&tc.id` to `native_permission_gate`,
+/// so a **gate**'s id and the `tool_call_id` of the tool it is parked inside are
+/// the SAME string. The Supervisor's ADR 0055 teardown depends on that one id
+/// space — `tool_execution_end` removes the gate from the outstanding-gate set,
+/// which is how an ANSWERED gate is absent at teardown — so a fixture that
+/// invented a second id would model a Worker that cannot exist.
 fn emit_tool_execution_and_settle<W: Write>(stdout: &mut W, session_id: &str) {
     let _ = session_id;
     emit(
         stdout,
         &Outbound::Event {
             event: RpcEvent::tool_execution_start {
-                tool_call_id: "t1".to_string(),
+                tool_call_id: "p1".to_string(),
                 tool_name: "bash".to_string(),
                 args: serde_json::json!({ "command": "ls" }),
             },
@@ -358,7 +366,7 @@ fn emit_tool_execution_and_settle<W: Write>(stdout: &mut W, session_id: &str) {
         stdout,
         &Outbound::Event {
             event: RpcEvent::tool_execution_end {
-                tool_call_id: "t1".to_string(),
+                tool_call_id: "p1".to_string(),
                 tool_name: "bash".to_string(),
                 result: serde_json::json!({
                     "content": [{ "type": "text", "text": "ok" }],
