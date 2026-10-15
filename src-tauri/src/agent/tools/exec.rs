@@ -1565,7 +1565,11 @@ mod tests {
         let r = execute_tool(&ctx(&cwd), "bash", &json!({ "command": "echo hi" })).await;
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["content"][0]["type"], "text");
-        assert_eq!(v["content"][0]["text"], "hi\n");
+        // The NEWLINE is the shell's, not the product's (`sh` writes `hi\n`,
+        // the Windows `cmd /C` branch writes `hi\r\n`), so the claim here is
+        // the TEXT and nothing else — trailing whitespace belongs to whichever
+        // shell the product picked for this OS.
+        assert_eq!(v["content"][0]["text"].as_str().unwrap().trim_end(), "hi");
         assert_eq!(v["details"]["exitCode"], 0);
         assert_eq!(v["details"]["truncated"], false);
         assert_eq!(v["details"]["cancelled"], false);
@@ -1646,6 +1650,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&cwd);
     }
 
+    /// The fixture is a POSIX-SHELL fixture, so it runs where a POSIX shell
+    /// is the one the product picks: `1>&2` + `;` sequencing + `exit 3` are
+    /// `sh` syntax, and the Windows branch of `exec_bash` spawns `cmd /C`,
+    /// which reads the same string as one `echo` with a bogus redirect — it
+    /// exits 0, so `is_error` was false on the Windows runner. The exit-code
+    /// DECISION is not unix-specific and stays covered everywhere by
+    /// `bash_exit_report_nonzero_exit_is_an_error_with_its_real_code`.
+    #[cfg(unix)]
     #[tokio::test]
     async fn bash_nonzero_exit_is_error() {
         let cwd = temp_cwd("bash-err");
@@ -1709,6 +1721,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&cwd);
     }
 
+    /// The fixture is POSIX through and through: `( … ) &` backgrounding and
+    /// the process-group kill it exists to prove (`kill_bash_process_group`
+    /// SIGKILLs `-pid`, and on Windows there IS no process group — the
+    /// product's own Windows branch kills the direct child only). Under
+    /// `cmd /C` the command line does not even parse as written, so the
+    /// marker got written by a survivor and the assertion inverted.
+    #[cfg(unix)]
     #[tokio::test]
     async fn bash_backgrounded_grandchild_killed_with_group() {
         // Regression test for the unbounded-hang / orphaned-grandchild hole:
@@ -1753,6 +1772,13 @@ mod tests {
     /// process-group kill entirely, so `exec_bash` returned while the child
     /// was still running — with a note claiming it "was killed at its
     /// deadline". The marker is written only by a SURVIVING child.
+    /// `exec >&- 2>&-` is the fixture — POSIX fd redirection with no `cmd`
+    /// equivalent (`cmd` rejected the whole line: ">& was unexpected at this
+    /// time."), so there is no closed-pipe child to reap on Windows and the
+    /// run reported a parse error instead of a deadline. The Windows kill
+    /// path itself is covered by `bash_timeout_kills_child`, which passes
+    /// there with a shell-neutral `sleep 5`.
+    #[cfg(unix)]
     #[tokio::test]
     async fn bash_timeout_kills_a_child_that_closed_its_pipes() {
         let cwd = temp_cwd("bash-closed-pipes-timeout");
@@ -1797,6 +1823,12 @@ mod tests {
     /// The cancel path applies the same rule: a cancelled child that had
     /// already closed its pipes is still alive (pipe EOF is not an exit)
     /// and must be killed with its group, not left running.
+    /// The cancel half of the same `exec >&- 2>&-` fixture (see
+    /// `bash_timeout_kills_a_child_that_closed_its_pipes`): `cmd /C` refuses
+    /// the redirection, so the child exited at once with `cancelled: false`
+    /// and the cancel never had a live process to race. The cancel path is
+    /// covered on Windows by `bash_cancel_kills_child` (`sleep 5`).
+    #[cfg(unix)]
     #[tokio::test]
     async fn bash_cancel_kills_a_child_that_closed_its_pipes() {
         let cwd = temp_cwd("bash-closed-pipes-cancel");
@@ -1990,6 +2022,13 @@ mod tests {
     /// EXPLICITLY (`>&-`) and then stays alive briefly, which is that same
     /// window made deterministic: the output is complete, the pipes are
     /// closed, and the process has NOT exited yet.
+    /// Same `exec >&- 2>&-` fixture (the POSIX fd-close whose EOF-before-exit
+    /// window the test makes deterministic); `cmd` parses it as a malformed
+    /// redirect and exits 1, so the run never reached the exit-status path
+    /// under test. The DECISION — a child already exited 0 is a success, no
+    /// fabricated -1 — is platform-neutral and stays covered everywhere by
+    /// `bash_exit_report_success_is_not_an_error`.
+    #[cfg(unix)]
     #[tokio::test]
     async fn bash_success_after_closing_its_pipes_is_not_an_error() {
         let cwd = temp_cwd("bash-closed-pipes");
@@ -2033,6 +2072,14 @@ mod tests {
     /// read loop's OWN EOF break: it must wait for the exit status itself
     /// instead of leaning on the post-loop reap, which expires under CPU
     /// contention and reports a run that really exited 7 as "unknown".
+    /// Both shapes here are `exec >&- 2>&-; sleep 0.2`-style POSIX (the
+    /// fd-close, and a fractional `sleep` `cmd` cannot run either) — under
+    /// `cmd /C` the child exited 1 on its parse error, which is exactly the
+    /// fabricated-code confusion this test exists to forbid, reported as a
+    /// real 7-vs-1 mismatch. The real-code rule itself is covered on every
+    /// platform by
+    /// `bash_exit_report_nonzero_exit_is_an_error_with_its_real_code`.
+    #[cfg(unix)]
     #[tokio::test]
     async fn bash_nonzero_exit_after_closing_its_pipes_reports_its_real_code() {
         let cwd = temp_cwd("bash-closed-pipes-nz");
@@ -2359,7 +2406,10 @@ mod tests {
 
     // ── find ─────────────────────────────────────────────────────────────
 
-    /// `fd` is available (spawn `fd --version`).
+    /// `fd` is available (spawn `fd --version`). Only the gated
+    /// POSIX-shape fixture below reads it — hence the same `cfg`, or it is
+    /// dead code on a Windows build.
+    #[cfg(unix)]
     fn fd_available() -> bool {
         std::process::Command::new("fd")
             .arg("--version")
@@ -2367,6 +2417,14 @@ mod tests {
             .is_ok()
     }
 
+    /// The fixture asserts POSIX PATH SHAPE on both halves: the expected
+    /// result is the literal `"sub/c.txt"`, and the `**/c.txt` pattern's `/`
+    /// is what `glob_match` compares against the walkdir fallback's
+    /// platform-relative path — on Windows that is `sub\c.txt`, so `**/…`
+    /// matches nothing and the run reported `matches: 0`. The separator is
+    /// `find`'s product behavior, not a fixture bug: gating keeps it honest
+    /// rather than asserting a shape the tool does not produce on Windows.
+    #[cfg(unix)]
     #[tokio::test]
     async fn find_matches_fixture() {
         let cwd = temp_cwd("find");
