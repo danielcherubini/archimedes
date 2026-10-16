@@ -1483,6 +1483,10 @@ pub async fn execute_tool(ctx: &ToolCtx, tool: &str, params: &Value) -> ToolResu
         "list_skills" => exec_list_skills(ctx, params).await,
         "read_skill" => exec_read_skill(ctx, params).await,
         "web_search" => crate::agent::web::tools::exec_web_search(ctx, params).await,
+        "fetch_content" => crate::agent::web::tools::exec_fetch_content(ctx, params).await,
+        "get_search_content" => {
+            crate::agent::web::tools::exec_get_search_content(ctx, params).await
+        }
         other => ToolResult::fail(format!("unknown tool: {other}"), None),
     }
 }
@@ -3754,6 +3758,19 @@ mod tests {
         // Missing query returns error result from exec_web_search, not "unknown tool"
         assert!(r.is_error);
         assert!(text_of(&r).contains("web_search requires 'query' or 'queries'"));
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[tokio::test]
+    async fn fetch_content_and_get_search_content_dispatch_via_execute_tool() {
+        let cwd = temp_cwd("web-fetch");
+        let r1 = execute_tool(&ctx(&cwd), "fetch_content", &json!({})).await;
+        assert!(r1.is_error);
+        assert!(text_of(&r1).contains("fetch_content: missing `url` parameter"));
+
+        let r2 = execute_tool(&ctx(&cwd), "get_search_content", &json!({})).await;
+        assert!(r2.is_error);
+        assert!(text_of(&r2).contains("get_search_content: missing `response_id` parameter"));
         let _ = std::fs::remove_dir_all(&cwd);
     }
 }

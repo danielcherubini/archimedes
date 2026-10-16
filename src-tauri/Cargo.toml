@@ -80,6 +80,8 @@ arboard = { version = "3.6", features = ["wayland-data-control"] }
 image = { version = "0.25", features = ["png"] }
 dom_query = "0.28"
 ipnet = "2"
+pdf-extract = "0.12"
+regex = "1"
 
 [dev-dependencies]
 serde_json = "1"

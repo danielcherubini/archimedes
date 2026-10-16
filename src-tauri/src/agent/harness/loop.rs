@@ -66,8 +66,9 @@ use crate::agent::tools::{execute_tool, ContentBlock, ImageRef, ToolCtx, ToolRes
 ///
 /// Deliberately absent: `read_skill` / `list_skills` (their own per-skill
 /// containment, ADR 0029 — a skill may never read a sibling skill, so the
-/// session boundary is not their judge), `web_search` (network calls are not
-/// filesystem operations and are not policy-gated, ADR 0056), `subagent` / `mcp` /
+/// session boundary is not their judge), `web_search` / `fetch_content` /
+/// `get_search_content` (network calls and cache reads are not filesystem
+/// operations and are not policy-gated, ADR 0056), `subagent` / `mcp` /
 /// `manage_todo_list` / the interactive flows (no argument of theirs reaches
 /// the filesystem in a way this policy describes).
 const POLICIED_TOOLS: &[(&str, PolicyDirection)] = &[
@@ -1647,7 +1648,7 @@ impl AgentLoop {
         }
         match tc.name.as_str() {
             "bash" | "read" | "write" | "edit" | "find" | "grep" | "ls" | "list_skills"
-            | "read_skill" | "web_search" => {
+            | "read_skill" | "web_search" | "fetch_content" | "get_search_content" => {
                 execute_tool(
                     &ToolCtx {
                         cwd: self.space_cwd.clone(),
@@ -2443,6 +2444,40 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                         "description": "List of domains to restrict results to"
                     }
                 }
+            }),
+        },
+        ToolSpec {
+            name: "fetch_content".into(),
+            description: "Fetch web content from a URL and extract readable markdown or raw content.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "URL to fetch and extract content from" },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["readable", "raw"],
+                        "description": "Extraction mode: readable (default, converted to Markdown) or raw (original body)"
+                    },
+                    "max_chars": {
+                        "type": "number",
+                        "description": "Maximum characters to return in head (default 20,000, clamp 200..=200,000)"
+                    }
+                },
+                "required": ["url"]
+            }),
+        },
+        ToolSpec {
+            name: "get_search_content".into(),
+            description: "Get cached search content or full document from a previous fetch/search by responseId.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "response_id": { "type": "string", "description": "Response ID returned by web_search or fetch_content" },
+                    "offset": { "type": "number", "description": "Character offset to start reading from (default 0)" },
+                    "limit": { "type": "number", "description": "Maximum characters to read (capped at 20,000)" },
+                    "find_text": { "type": "string", "description": "Substring to search for in cached content" }
+                },
+                "required": ["response_id"]
             }),
         },
     ]
@@ -6027,7 +6062,7 @@ mod tests {
     /// schema must match this EXACTLY: a drift makes the model send
     /// params the executor never reads (a dead tool) or omit ones it
     /// does (an undiscoverable feature).
-    fn exec_param_keys() -> [(&'static str, &'static [&'static str]); 10] {
+    fn exec_param_keys() -> [(&'static str, &'static [&'static str]); 12] {
         [
             ("bash", &["command", "timeout_ms"]),
             ("read", &["path", "offset", "limit"]),
@@ -6048,6 +6083,11 @@ mod tests {
                     "recency_filter",
                     "domain_filter",
                 ],
+            ),
+            ("fetch_content", &["url", "mode", "max_chars"]),
+            (
+                "get_search_content",
+                &["response_id", "offset", "limit", "find_text"],
             ),
         ]
     }
