@@ -409,25 +409,55 @@ impl Db {
         Ok(row)
     }
 
-    /// All stored sessions, newest first.
+    /// All stored sessions, MOST RECENTLY ACTIVE FIRST.
+    ///
+    /// The key is the session's LAST PERSISTED MESSAGE, falling back to
+    /// `created_at` when it has none: the sidebar orders its rows by last
+    /// activity and prints each row's relative time from the same last
+    /// message, so the two must be the same fact or a list can be sorted by
+    /// one thing and labelled by another. Ordering by `created_at` alone made a
+    /// session started weeks ago but used a minute ago sit below one created
+    /// yesterday and never used, which is what read as "no order at all".
+    ///
+    /// The fallback is why `COALESCE` is on the subquery and not on a
+    /// `left_join … max()`: a session with an empty transcript is a session
+    /// nobody has used yet, and `MAX()` over no rows is `NULL`, which SQLite
+    /// would sort LAST in a `DESC` list — burying the newest thing on the list.
+    ///
+    /// The subquery rides `idx_messages_session` (the `(session_id, id)` index
+    /// covers the lookup), and `list_sessions` runs once per boot and once per
+    /// archive/delete, not per token — a desktop-sized history is not a
+    /// performance question here.
     ///
     /// `include_archived = false` (the default) excludes archived rows — the
     /// sidebar's Space groups render stored sessions only; the boot fetches
-    /// with `true` and splits client-side by the flag (ADR 0016).
+    /// with `true` and splits client-side by the flag (ADR 0016). BOTH arms
+    /// order identically: the Archived section reads the same recency.
     pub fn list_sessions(&self, include_archived: bool) -> Result<Vec<SessionRow>, DbError> {
         let guard = self.conn.lock().expect("db mutex poisoned");
+        // ONE ordering expression, shared by both arms — two copies of a
+        // three-line `COALESCE` is two things that can drift, and a drifted
+        // Archived section reads as a random order.
+        const RECENT_FIRST: &str = "ORDER BY \
+             COALESCE((SELECT MAX(m.created_at) FROM messages m \
+                       WHERE m.session_id = sessions.id), sessions.created_at) DESC, \
+             id DESC";
         let sql = if include_archived {
-            "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent
-             FROM sessions
-             WHERE is_subagent = 0
-             ORDER BY created_at DESC, id DESC"
+            format!(
+                "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent
+                 FROM sessions
+                 WHERE is_subagent = 0
+                 {RECENT_FIRST}"
+            )
         } else {
-            "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent
-             FROM sessions
-             WHERE archived = 0 AND is_subagent = 0
-             ORDER BY created_at DESC, id DESC"
+            format!(
+                "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent
+                 FROM sessions
+                 WHERE archived = 0 AND is_subagent = 0
+                 {RECENT_FIRST}"
+            )
         };
-        let mut stmt = guard.prepare(sql)?;
+        let mut stmt = guard.prepare(&sql)?;
         let rows = stmt
             .query_map([], |row| {
                 Ok(SessionRow {
@@ -1301,6 +1331,73 @@ mod tests {
             !db.set_session_archived("no-such-session", true)
                 .expect("should not error"),
             "a missing row is a no-op returning false"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The list is ordered by LAST ACTIVITY, not by creation: the session with
+    /// the newest persisted message comes first, and a session with NO messages
+    /// falls back to `created_at` rather than to nothing.
+    ///
+    /// The two halves both matter. Ordering by `created_at` alone (the old rule)
+    /// put a session started weeks ago but used a minute ago BELOW one created
+    /// yesterday and never used — which is what read as "no order at all". And
+    /// ordering by `MAX(messages.created_at)` alone with a left join would sort
+    /// a never-used session's `NULL` LAST in a `DESC` list, burying the newest
+    /// thing on the list; the `COALESCE` is what stops that.
+    #[test]
+    fn list_sessions_orders_by_last_message_then_created_at() {
+        let dir = std::env::temp_dir().join(format!("db-recency-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).expect("db should open");
+        // `created_at` written EXPLICITLY (hours apart): `record_session` stamps
+        // `now_ms()`, and three inserts inside one millisecond would make the
+        // fallback order a coin flip between `created_at` and the `id DESC`
+        // tiebreak — a test that passes on a fast machine is not a test.
+        {
+            let conn = db.conn.lock().expect("db mutex poisoned");
+            for (id, created) in [
+                ("old-but-used", 1_000_i64),
+                ("fresh-unused", 3_000_i64),
+                ("stale-unused", 2_000_i64),
+            ] {
+                conn.execute(
+                    "INSERT INTO sessions (id, cwd, created_at, capabilities_json, is_subagent) \
+                     VALUES (?1, '/tmp/proj', ?2, '{}', 0)",
+                    params![id, created],
+                )
+                .expect("insert should succeed");
+            }
+        }
+        // The OLDEST-created session gets a message. `record_message` stamps
+        // `now_ms()`, which is strictly after every `created_at` above.
+        db.record_message("old-but-used", "user", None, "{\"text\":\"hi\"}")
+            .expect("record_message should succeed");
+        let ids: Vec<String> = db
+            .list_sessions(false)
+            .expect("list_sessions should succeed")
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["old-but-used", "fresh-unused", "stale-unused"],
+            "the used session leads on its message; the never-used ones keep \
+             `created_at` desc (the COALESCE fallback), not a NULL last"
+        );
+        // The archived arm orders identically — the Archived section reads the
+        // same recency (one shared `ORDER BY`, so it cannot drift).
+        db.set_session_archived("fresh-unused", true).unwrap();
+        let ids: Vec<String> = db
+            .list_sessions(true)
+            .expect("list_sessions(true) should succeed")
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["old-but-used", "fresh-unused", "stale-unused"],
+            "the archived-inclusive list orders the same way"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

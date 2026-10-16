@@ -433,12 +433,19 @@ export function rowToMessages(row: MessageRow): Message[] {
  * `{ sessionId, cwd, capabilities }` — the Rust `SessionInfo` struct has no
  * such field). So we CANNOT sort by `createdAt`.
  * We rely on SERVER order instead: `Db::list_sessions` returns
- * `ORDER BY created_at DESC, id DESC` and `Db::list_spaces` returns
+ * `ORDER BY COALESCE(last message's created_at, created_at) DESC, id DESC` —
+ * LAST ACTIVITY, so the head of a space's `historySessions` subsequence is the
+ * session of that space the user used most recently, not the one they started
+ * most recently — and `Db::list_spaces` returns
  * `ORDER BY last_opened_at DESC, path ASC`, and the store slices only
- * `filter`/`map` those rows (preserving order). Therefore "newest-first"
- * **is** the input order — `spaces[0]` is the most recently opened space,
- * and within a space the head of its `historySessions` subsequence is its
- * newest stored session. Do NOT re-sort by a field that doesn't exist.
+ * `filter`/`map` those rows (preserving order). Therefore "most recently active
+ * first" **is** the input order — `spaces[0]` is the most recently opened space.
+ * Do NOT re-sort by a field that doesn't exist.
+ *
+ * (The SIDEBAR additionally re-sorts by the loaded transcript's last stamp —
+ * `lib/sessionActivity` — because a session that CLOSED this boot is appended
+ * to `historySessions` by `handleSessionClosed` and no server order can know
+ * about it.)
  */
 
 /**
@@ -513,11 +520,16 @@ export interface SpaceView {
   path: string;
   /** Display label (base name; `""` if the base name is empty — the UI falls back to `path`). */
   title: string;
-  /** All live sessions in this space, newest-first (most recently started at index 0). */
+  /** All live sessions in this space, most recently STARTED at index 0
+   * (reverse insertion order). The SIDEBAR re-sorts this by last ACTIVITY for
+   * display — `lib/sessionActivity` — because "started last" and "used last"
+   * are different facts once a space holds more than one Worker. */
   liveSessionIds: string[];
   /** The most recent live session in this space, or `null`. */
   liveSessionId: string | null;
-  /** Stored sessions of this space, in history order (newest-first). Do NOT re-sort. */
+  /** Stored sessions of this space, in `list_sessions` order (most recently
+   * ACTIVE first — see the ordering note above). Do NOT re-sort here; the
+   * sidebar re-sorts what it can prove (`lib/sessionActivity`). */
   storedSessionIds: string[];
   /**
    * Archived sessions of this space (NOT rendered in the Space group —
@@ -549,11 +561,13 @@ export function spaceViewFor(
   const archivedSessionIds = archivedSessions
     .filter((s) => s.cwd === space.path)
     .map((s) => s.sessionId);
-  // The newest session's close reason: the live one, else the head of the
-  // stored subsequence, else the head of the archived subsequence (an
-  // archived session is still the space's newest stored session — the
-  // close-reason banner must not silently vanish for an archived-only
-  // space); nothing when the space has no sessions.
+  // The close reason of the session the user would LAND on: the live one, else
+  // the head of the stored subsequence (which `list_sessions` puts there by last
+  // ACTIVITY, so this is the session the boot would open, not the one created
+  // last), else the head of the archived subsequence (an archived session is
+  // still the space's most recent stored session — the close-reason banner must
+  // not silently vanish for an archived-only space); nothing when the space has
+  // no sessions.
   const newestId =
     liveSessionId ?? storedSessionIds[0] ?? archivedSessionIds[0];
   return {

@@ -36,9 +36,10 @@ describe("SessionRail (the session list as icons, for the collapsed left rail)",
       />,
     );
     expect(screen.getAllByTestId("session-row")).toHaveLength(3);
-    // ORDER is the list's order (live first, then stored — the sidebar does
-    // NOT re-sort). The rail is a POSITIONAL map of the list: the Nth mark is
-    // the Nth row, which is the only reason a dotless column means anything.
+    // ORDER is the list's order, exactly as the caller passes it (live first,
+    // then stored, each group most-recently-active first). The rail never
+    // re-sorts: it is a POSITIONAL map of the list, and the Nth mark is the Nth
+    // row — which is the only reason a textless column means anything.
     const rows = [...container.querySelectorAll("[data-testid='session-row']")];
     expect(rows[1]!.querySelector("svg")!.getAttribute("class")).toContain("animate-spin");
     expect(rows[2]!.querySelector("[data-dot]")).toBeTruthy();    expect(container.textContent).toBe("");
@@ -50,13 +51,17 @@ describe("SessionRail (the session list as icons, for the collapsed left rail)",
     // One glyph for "this session is working" in the rail AND the list (the
     // open row's leading slot is the same `Spinner`), so the two views of the
     // same fact cannot look like two different facts.
-    expect(mark.getAttribute("role")).toBe("status");
+    expect(mark.tagName).toBe("svg");
     expect(mark.getAttribute("class")).toContain("animate-spin");
-    // No folder behind it: the row IS the activity, and 12px cannot hold both.
+    // `Spinner`'s own `role="status"` is silenced HERE (the rail's marks are
+    // decoration under one summarising `role="img"` — see the a11y test below),
+    // so the spin is a visual fact, not a second announcement.
+    expect(mark.getAttribute("role")).toBe("presentation");
+    // No folder behind it: the row IS the activity, and 10px cannot hold both.
     expect(screen.getAllByTestId("session-mark")).toHaveLength(1);
   });
 
-  it("tells the four states apart — spinner / warning dot / live dot / bare dot", () => {
+  it("tells the four states apart — spinner / ? / live ring / stored ring", () => {
     render(
       <SessionRail
         rows={[
@@ -68,32 +73,57 @@ describe("SessionRail (the session list as icons, for the collapsed left rail)",
       />,
     );
     const [run, wait, live, stored] = screen.getAllByTestId("session-row");
-    // Running: the spinner.
-    expect(run!.querySelector('[role="status"]')).toBeTruthy();
-    // Waiting (a pending permission / ask / password): the warning dot — the
-    // app's own attention cue, the same `bg-warning` the toggle dots and the
-    // board's `◉` carry. The attribute is the STATUS, so a test can name the
-    // state rather than the colour it happens to paint with.
+    // Running: the spinner (silent — see the a11y test; the spin is the cue).
+    expect(run!.querySelector('[data-testid="session-mark"]')!.tagName).toBe("svg");
+    // Waiting (a pending permission / ask / password): the QUESTION MARK — the
+    // same glyph the open row and the tab draw, in the app's attention ink
+    // (`text-warning`, the token the toggle dots and the board's `◉` carry).
+    // It replaced the warning DOT: a blocked session is asking you something,
+    // and "?" survives being 10px and colour-blind while a tinted dot does not.
+    // The attribute is the STATUS, so a test can name the state rather than the
+    // colour it happens to paint with.
     const waiting = wait!.querySelector('[data-dot="waiting"]');
     expect(waiting).toBeTruthy();
-    expect(waiting!.className).toContain("bg-warning");
+    expect(waiting!.getAttribute("class")).toContain("text-warning");
     expect(wait!.querySelector('[role="status"]')).toBeNull();
-    // Live and idle: the filled live dot.
+    // Live and idle: the filled live ring.
     expect(live!.querySelector('[data-dot="live"]')).toBeTruthy();
-    // Stored: a bare, dimmed dot — the session exists, nothing is happening.
+    // Stored: a bare, dimmed ring — the session exists, nothing is happening.
     expect(stored!.querySelector('[data-dot="stored"]')).toBeTruthy();
   });
 
   it("marks the ACTIVE session, by weight rather than a new colour", () => {
     render(<SessionRail rows={[row({ key: "a", active: true }), row({ key: "b" })]} />);
     const [a, b] = screen.getAllByTestId("session-mark");
-    expect(a!.className).not.toBe(b!.className);
+    expect(a!.getAttribute("class")).not.toBe(b!.getAttribute("class"));
     // The open list marks the active row with `bg-selected` (a fill); a 12px
     // dot has no room for a fill, so it takes the brighter INK instead — and
     // both values are existing tokens, not a rail-only colour.
-    expect(a!.className).toContain("text-foreground");
-    expect(a!.className).not.toContain("text-foreground-subtlest");
-    expect(b!.className).toContain("text-foreground-subtlest");
+    expect(a!.getAttribute("class")).toContain("text-foreground");
+    expect(a!.getAttribute("class")).not.toContain("text-foreground-subtlest");
+    expect(b!.getAttribute("class")).toContain("text-foreground-subtlest");
+  });
+
+  it("announces the SUMMARY only — the marks themselves are silent", () => {
+    // The marks sit inside a `role="img"` container whose label is the whole
+    // summary. A mark carrying its own name would be either dead weight (an AT
+    // that prunes children of `role="img"`) or a doubled announcement (one that
+    // does not) — so the rail asks for presentation explicitly.
+    render(
+      <SessionRail
+        rows={[
+          row({ key: "wait", status: "waiting" }),
+          row({ key: "run", status: "running" }),
+        ]}
+      />,
+    );
+    // The summary is the ONE image in the tree…
+    expect(screen.getAllByRole("img")).toHaveLength(1);
+    expect(screen.getByRole("img", { name: "Sessions 2, 1 running, 1 waiting" })).toBeTruthy();
+    // …and the waiting glyph exists without being named.
+    const marks = screen.getAllByTestId("session-mark");
+    expect(marks[0]!.getAttribute("data-dot")).toBe("waiting");
+    expect(marks[0]!.getAttribute("aria-label")).toBeNull();
   });
 
   it("clips instead of scrolling, and keeps the strip clear of the footer toggle", () => {

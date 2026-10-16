@@ -201,13 +201,17 @@ describe("SpacesList", () => {
   });
 
 
-  it("renders no spinner for a stored session row, with its relative time", () => {
+  it("renders the stored row's stored ring and its relative time, and NO spinner", () => {
     render(<SpacesList />);
     const row = screen
       .getByText("Refactor the parser")
       .closest('[role="button"]');
     expect(row).not.toBeNull();
     expect(row!.querySelector('[role="status"]')).toBeNull();
+    // A STORED session wears the dim ring — the idle cue the collapsed rail has
+    // always had and the expanded list used to omit entirely (an empty slot
+    // unless the session was in a turn).
+    expect(row!.querySelector('[data-dot="stored"]')).toBeTruthy();
     // Last message ~1h ago → `1h`.
     expect(row!.textContent).toContain("1h");
   });
@@ -225,28 +229,35 @@ describe("SpacesList", () => {
     render(<SpacesList />);
     const alphas = screen.getAllByText("alpha");
     // `h3`'s row (the third `alpha` — `s1`'s + `h1`'s rows have loaded
-    // messages, `h3`'s does not → its title is the base name).
+    // messages, `h3`'s does not → its title is the base name). It is also
+    // LAST: no loaded transcript is no evidence, and the stored group puts
+    // evidence-free below a session it can prove was used an hour ago.
     const row = alphas[alphas.length - 1].closest('[role="button"]');
     expect(row).not.toBeNull();
     // Title only — no time text.
     expect(row!.textContent).toBe("alpha");
   });
 
-  it("renders the Waiting pill (not the relative time) for a session with a pending permission prompt", () => {
+  it("marks a pending-permission row with the ? and KEEPS its relative time", () => {
     usePermissions.setState({
       prompts: {
         s1: [{ requestId: "r1", toolTitle: "Run a tool", options: [] }],
       },
     });
     render(<SpacesList />);
-    expect(screen.getByText("Waiting")).toBeTruthy();
     const row = screen
       .getByText("Fix the login bug")
       .closest('[role="button"]');
-    expect(row!.textContent).not.toContain("now");
+    // The `?` replaces the green "Waiting" PILL: the pill and the rail's dot
+    // were one fact in two shapes, and the pill's cost was the time — while a
+    // session waited you could not see how long ago it had been active.
+    expect(screen.queryByText("Waiting")).toBeNull();
+    expect(row!.querySelector('[data-dot="waiting"]')).toBeTruthy();
+    expect(row!.querySelector('[role="status"]')).toBeNull();
+    expect(row!.textContent).toContain("now");
   });
 
-  it("renders the Waiting pill for a pending interactive ask/confirm/password request", () => {
+  it("marks a pending interactive ask/confirm/password row with the ? too", () => {
     useInteractive.setState({
       requests: {
         h1: [
@@ -260,11 +271,12 @@ describe("SpacesList", () => {
       },
     });
     render(<SpacesList />);
-    expect(screen.getByText("Waiting")).toBeTruthy();
     const row = screen
       .getByText("Refactor the parser")
       .closest('[role="button"]');
-    expect(row!.textContent).not.toContain("1h");
+    // `password` included: a pending sudo password had no cue anywhere else.
+    expect(row!.querySelector('[data-dot="waiting"]')).toBeTruthy();
+    expect(row!.textContent).toContain("1h");
   });
 
   it("opens a session on row click (the store's activeSessionId + the selection styling)", () => {
@@ -278,7 +290,31 @@ describe("SpacesList", () => {
     expect(row!.className).toContain("bg-selected");
   });
 
-  it("renders multiple live sessions in the active space (newest-first) above stored sessions and allows switching", () => {
+  it("shows the IDLE mark in the EXPANDED list too (the cue the collapsed rail has always had)", () => {
+    // The bug this pins: the open row's leading slot was empty unless the
+    // session was in a turn, while the collapsed rail drew a dot for every
+    // session — so EXPANDING the sidebar deleted the idle mark the user could
+    // see when it was collapsed.
+    useSessions.setState({
+      sessions: [
+        { sessionId: "s1", cwd: "/tmp/alpha", capabilities: {}, archived: false },
+      ],
+      activeSessionId: "s1",
+      inTurn: {},
+      messages: {
+        s1: [{ kind: "user", text: "Fix the login bug", at: Date.now() - 10_000 }],
+      },
+    });
+    render(<SpacesList />);
+    const row = screen
+      .getByText("Fix the login bug")
+      .closest('[role="button"]');
+    // Live and NOT in a turn → the filled live ring, and no spinner.
+    expect(row!.querySelector('[data-dot="live"]')).toBeTruthy();
+    expect(row!.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it("orders the LIVE group by last activity, above the STORED group", () => {
     const now = Date.now();
     const s1 = { sessionId: "s1", cwd: "/tmp/alpha", capabilities: {}, archived: false };
     const s2 = { sessionId: "s2", cwd: "/tmp/alpha", capabilities: {}, archived: false };
@@ -314,6 +350,100 @@ describe("SpacesList", () => {
     // Clicking Task 1 switches activeSessionId to s1
     fireEvent.click(task1El);
     expect(useSessions.getState().activeSessionId).toBe("s1");
+  });
+
+  it("ranks a live session by ITS ACTIVITY, not by which was started last", () => {
+    // The old live order was reverse-INSERTION (`liveSessionsInSpace` reverses
+    // the store's array), so the session started last sat on top even when it
+    // had been idle for an hour and its sibling had just answered. `s1` was
+    // started FIRST and is the one with the recent message — under the old rule
+    // this assertion is red.
+    const now = Date.now();
+    useSessions.setState({
+      sessions: [
+        { sessionId: "s1", cwd: "/tmp/alpha", capabilities: {}, archived: false },
+        { sessionId: "s2", cwd: "/tmp/alpha", capabilities: {}, archived: false },
+      ],
+      activeSpacePath: "/tmp/alpha",
+      activeSessionId: "s2",
+      messages: {
+        s1: [{ kind: "user", text: "Busy moments ago", at: now - 5_000 }],
+        s2: [{ kind: "user", text: "Started later, idle for hours", at: now - 7_200_000 }],
+      },
+    });
+    render(<SpacesList />);
+    const busy = screen.getByText("Busy moments ago");
+    const idle = screen.getByText("Started later, idle for hours");
+    expect(
+      busy.compareDocumentPosition(idle) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("keeps a brand-new live session (no transcript yet) at the TOP of the live group", () => {
+    // `addSession` gives a fresh session an EMPTY transcript, so "no loaded
+    // messages" in the live group means JUST CREATED — the most recent activity
+    // there. Sinking it below a session idle for an hour would hide the session
+    // the user just made ⌘N.
+    // A generated `title` labels the row, because with no messages the title
+    // would otherwise fall back to the Space's name — which the fixture's
+    // stored sessions also answer to.
+    const now = Date.now();
+    useSessions.setState({
+      sessions: [
+        { sessionId: "s1", cwd: "/tmp/alpha", capabilities: {}, archived: false },
+        {
+          sessionId: "s-new",
+          cwd: "/tmp/alpha",
+          capabilities: {},
+          archived: false,
+          title: "Just created",
+        },
+      ],
+      activeSpacePath: "/tmp/alpha",
+      activeSessionId: "s-new",
+      messages: {
+        s1: [{ kind: "user", text: "Idle for an hour", at: now - 3_600_000 }],
+        "s-new": [],
+      },
+    });
+    render(<SpacesList />);
+    const freshRow = screen
+      .getByText("Just created")
+      .closest('[role="button"]');
+    const idleRow = screen
+      .getByText("Idle for an hour")
+      .closest('[role="button"]');
+    expect(freshRow).toBeTruthy();
+    expect(idleRow).toBeTruthy();
+    expect(
+      freshRow!.compareDocumentPosition(idleRow!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("sorts a session that CLOSED this boot to the top of the stored group", () => {
+    // `handleSessionClosed` APPENDS the closed session to `historySessions`, so
+    // the array's own order files the most recently used stored session LAST —
+    // the exact inversion the ordering removes.
+    const now = Date.now();
+    useSessions.setState({
+      sessions: [],
+      historySessions: [
+        { sessionId: "h1", cwd: "/tmp/alpha", capabilities: {}, archived: false },
+        { sessionId: "h9", cwd: "/tmp/alpha", capabilities: {}, archived: false },
+      ],
+      activeSpacePath: "/tmp/alpha",
+      activeSessionId: "h9",
+      messages: {
+        h1: [{ kind: "user", text: "Used an hour ago", at: now - 3_600_000 }],
+        h9: [{ kind: "user", text: "Used a second ago", at: now - 1_000 }],
+      },
+    });
+    render(<SpacesList />);
+    const recent = screen.getByText("Used a second ago");
+    const older = screen.getByText("Used an hour ago");
+    expect(
+      recent.compareDocumentPosition(older) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it("truncates a long title on a single line (the fade mask is the sole cue)", () => {
@@ -787,7 +917,12 @@ describe("SpacesList (archive, ADR 0016)", () => {
     expect(frame.style.width).toBe("260px");
   });
 
-  it("holds NO bg-warning dot while EXPANDED, even with a pending request (the dot belongs to the collapsed rail alone)", () => {
+  it("holds NO bg-warning toggle dot while EXPANDED, even with a pending request (the dot belongs to the collapsed toggle alone)", () => {
+    // The TOGGLE's dot, not "no warning ink anywhere": the row now wears the
+    // `?` in `text-warning` in BOTH sidebar states, so a pane-wide
+    // "no warning anywhere" assertion would be false by design. What stays
+    // collapsed-only is the FILL on the pane's toggle — its meaning is
+    // "something needs you behind the hidden pane".
     useSessions.setState({
       sessions: [
         { sessionId: "s1", cwd: "/tmp/alpha", capabilities: {}, archived: false },
@@ -801,6 +936,10 @@ describe("SpacesList (archive, ADR 0016)", () => {
     });
     const { container } = render(<SpacesList />);
     expect(container.querySelector(".bg-warning")).toBeNull();
+    // And the row DOES carry the cue while expanded — the other half of the
+    // pair, so the two assertions above cannot both be satisfied by a pane
+    // that simply shows nothing.
+    expect(container.querySelector('[data-dot="waiting"]')).toBeTruthy();
   });
 
   it("collapses to the sliver: the session marks show, and NO text bleeds in", () => {
@@ -820,8 +959,12 @@ describe("SpacesList (archive, ADR 0016)", () => {
     const rail = screen.getByTestId("session-rail");
     expect(screen.getAllByTestId("session-row")).toHaveLength(2);
     // Running first (the list's own order: live, then stored) — the SPINNER,
-    // the glyph the open row uses for the same fact.
-    expect(rail.querySelector('[role="status"]')).toBeTruthy();
+    // the glyph the open row uses for the same fact. Queried by test id rather
+    // than `[role="status"]`: the rail's marks are decoration under one
+    // summarising `role="img"`, so the spinner's own role is silenced here.
+    const marks = screen.getAllByTestId("session-mark");
+    expect(marks[0]!.tagName).toBe("svg");
+    expect(marks[0]!.getAttribute("class")).toContain("animate-spin");
     expect(rail.textContent).toBe("");
     expect(screen.getByRole("img", { name: "Sessions 2, 1 running" })).toBeTruthy();
     // Nothing that carries text is painted in the sliver: `visibility: hidden`
@@ -848,6 +991,66 @@ describe("SpacesList (archive, ADR 0016)", () => {
     expect(screen.queryByTestId("session-rail")).toBeNull();
   });
 
+  it("keeps the rail's marks POSITIONALLY equal to the rows after the activity sort", () => {
+    // The rail's whole meaning is "the Nth mark is the Nth row". The sort is the
+    // new thing that could break that silently, by giving the rail one order and
+    // the list another. `s2` is the most-recently-STARTED live session and the
+    // least-recently-ACTIVE one, so the two orders differ and the assertion can
+    // tell them apart.
+    const now = Date.now();
+    useSessions.setState({
+      sessions: [
+        { sessionId: "s1", cwd: "/tmp/alpha", capabilities: {}, archived: false },
+        { sessionId: "s2", cwd: "/tmp/alpha", capabilities: {}, archived: false },
+      ],
+      activeSpacePath: "/tmp/alpha",
+      activeSessionId: "s2",
+      // `s1` is the most recently ACTIVE live session and the one WAITING; `s2`
+      // was started later (so the old reverse-insertion order put it first) and
+      // is RUNNING. The marks therefore differ BY POSITION between the two
+      // orders — a rail that sorted itself differently shows `running` first.
+      inTurn: { s2: true },
+      messages: {
+        s1: [{ kind: "user", text: "Row one", at: now - 5_000 }],
+        s2: [{ kind: "user", text: "Row two", at: now - 90_000 }],
+        h1: [{ kind: "user", text: "Row three", at: now - 3_600_000 }],
+      },
+    });
+    usePermissions.setState({
+      prompts: { s1: [{ requestId: "r1", toolTitle: "bash", options: [] }] },
+    });
+    const { unmount } = render(<SpacesList />);
+    const one = screen.getByText("Row one");
+    const two = screen.getByText("Row two");
+    const three = screen.getByText("Row three");
+    // Activity order (one, two, three) — NOT insertion order (two would lead).
+    expect(
+      one.compareDocumentPosition(two) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      two.compareDocumentPosition(three) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    unmount();
+
+    act(() => {
+      setLeftPaneCollapsed(true);
+    });
+    render(<SpacesList />);
+    const marks = [
+      ...screen.getByTestId("session-rail-marks").querySelectorAll(
+        "[data-testid='session-mark']",
+      ),
+    ];
+    // Same COUNT as the rows, and per position the SAME GLYPH the row above it
+    // wears: `?`, spinner, stored. A rail that ordered itself a second way would
+    // lead with the spinner.
+    expect(marks.map((m) => m.getAttribute("data-dot") ?? "running")).toEqual([
+      "waiting",
+      "running",
+      "stored",
+    ]);
+  });
+
   it("shows the marks ONLY while collapsed (the open list is the readout)", () => {
     render(<SpacesList />);
     expect(screen.queryByTestId("session-rail")).toBeNull();
@@ -855,8 +1058,9 @@ describe("SpacesList (archive, ADR 0016)", () => {
 
   it("marks a session WAITING in the rail with the app's attention cue", () => {
     // The cue that matters most behind a collapsed pane: a session blocked on
-    // the user. Same `bg-warning` as the toggle dots, and it outranks the
-    // spinner (a blocked session is not working — see `useSessionStatus`).
+    // the user. The `?` in the attention ink (see `SessionStatusMark`), and it
+    // outranks the spinner (a blocked session is not working — see
+    // `useSessionStatus`).
     usePermissions.setState({
       prompts: { s1: [{ requestId: "r1", toolTitle: "bash", options: [] }] },
     });
@@ -866,7 +1070,7 @@ describe("SpacesList (archive, ADR 0016)", () => {
     render(<SpacesList />);
     const dot = screen.getByTestId("session-rail").querySelector('[data-dot="waiting"]');
     expect(dot).toBeTruthy();
-    expect(dot!.className).toContain("bg-warning");
+    expect(dot!.getAttribute("class")).toContain("text-warning");
     expect(screen.getByRole("img", { name: "Sessions 2, 1 waiting" })).toBeTruthy();
   });
 

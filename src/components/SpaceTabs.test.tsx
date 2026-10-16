@@ -106,19 +106,19 @@ describe("SpaceTabs (the Spaces as browser-style tabs at the top of the chat)", 
     const betaTab = screen.getByRole("tab", { name: "beta" });
 
     // alpha has no running session -> no spinner
-    expect(alphaTab.querySelector('[data-testid="space-tab-spinner"]')).toBeNull();
+    expect(alphaTab.querySelector('[data-testid="space-tab-mark"]')).toBeNull();
 
     // beta has a running session -> spinner rendered
-    expect(betaTab.querySelector('[data-testid="space-tab-spinner"]')).toBeTruthy();
+    expect(betaTab.querySelector('[data-testid="space-tab-mark"]')).toBeTruthy();
 
     // When beta's turn ends, the spinner disappears
     act(() => {
       useSessions.setState({ inTurn: { "s-beta": false } });
     });
-    expect(betaTab.querySelector('[data-testid="space-tab-spinner"]')).toBeNull();
+    expect(betaTab.querySelector('[data-testid="space-tab-mark"]')).toBeNull();
   });
 
-  it("does not render running spinner on tab when session is waiting for user prompt", () => {
+  it("shows the QUESTION instead of the spinner when the Space's session is waiting on the user", () => {
     useSessions.setState({
       spaces: [space("/w/alpha")],
       activeSpacePath: "/w/alpha",
@@ -138,7 +138,32 @@ describe("SpaceTabs (the Spaces as browser-style tabs at the top of the chat)", 
     });
     render(<SpaceTabs />);
     const tab = screen.getByRole("tab", { name: "alpha" });
-    expect(tab.querySelector('[data-testid="space-tab-spinner"]')).toBeNull();
+    // A blocked Space is NOT working, so it must not claim to be: the spinner
+    // is gone and the `?` is there (`waiting` outranks `running`, the same
+    // precedence `sessionStatusOf` gives a Session).
+    expect(tab.querySelector('[role="status"]')).toBeNull();
+    expect(tab.querySelector('[data-dot="waiting"]')).toBeTruthy();
+  });
+
+  it("shows the QUESTION on the tab when ANY of the Space's live sessions is waiting", () => {
+    // One Worker streaming, one blocked on a permission: the Space needs you,
+    // and that outranks "something is busy".
+    useSessions.setState({
+      spaces: [space("/w/alpha")],
+      activeSpacePath: "/w/alpha",
+      sessions: [info("s1", "/w/alpha"), info("s2", "/w/alpha")],
+      inTurn: { s1: true, s2: false },
+    });
+    usePermissions.setState({
+      prompts: {
+        s2: [{ requestId: "p1", toolTitle: "bash", options: [] }],
+      },
+    });
+    render(<SpaceTabs />);
+    const tab = screen.getByRole("tab", { name: "alpha" });
+    expect(tab.querySelector('[data-dot="waiting"]')).toBeTruthy();
+    expect(tab.querySelector('[role="status"]')).toBeNull();
+    expect(tab.getAttribute("title")).toContain("waiting for you");
   });
 
   it("renders spinner if any of multiple live sessions in the space is running", () => {
@@ -150,7 +175,7 @@ describe("SpaceTabs (the Spaces as browser-style tabs at the top of the chat)", 
     });
     render(<SpaceTabs />);
     const tab = screen.getByRole("tab", { name: "alpha" });
-    expect(tab.querySelector('[data-testid="space-tab-spinner"]')).toBeTruthy();
+    expect(tab.querySelector('[data-testid="space-tab-mark"]')).toBeTruthy();
   });
 
   it("clicking a tab selects the space (the store's `selectSpace`)", () => {
