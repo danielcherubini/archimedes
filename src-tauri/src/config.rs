@@ -96,6 +96,23 @@ fn default_attention_delay_secs() -> u64 {
     15
 }
 
+/// The `web_search` / `fetch_content` configuration (the settings' `web`
+/// block). Every field is optional; an unset key means "this Search provider
+/// is not available" (or, for `defaultProvider`/`proxy`, "auto"/"none").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WebSettings {
+    pub brave_api_key: String,
+    pub tavily_api_key: String,
+    pub perplexity_api_key: String,
+    /// The self-hosted SearXNG instance base URL.
+    pub searxng_url: String,
+    /// `"auto"` (default) or one of `brave|tavily|perplexity|searxng|duckduckgo`.
+    pub default_provider: String,
+    /// An explicit proxy URL. Empty = fall back to `HTTPS_PROXY`/`HTTP_PROXY`.
+    pub proxy: String,
+}
+
 /// The persisted app settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -133,6 +150,11 @@ pub struct Settings {
     /// makes ADR 0010's prompt opt-in). Intentional; see the plan's Deviation 2.
     #[serde(default)]
     pub file_policy: FilePolicy,
+    /// The web tools' configuration (ADR-less; see `docs/roadmap/web-search-and-fetch.md`).
+    /// `#[serde(default)]` — a pre-feature file parses to `WebSettings::default()`
+    /// (all empty ⇒ only the keyless `duckduckgo` Search provider is available).
+    #[serde(default)]
+    pub web: WebSettings,
     /// `"provider/id"`; `None` = system default.
     #[serde(default)]
     pub default_model: Option<String>,
@@ -225,6 +247,7 @@ impl Default for Settings {
             default_trust_new_spaces: false,
             mcp_mentions_enabled: false,
             file_policy: FilePolicy::default(),
+            web: WebSettings::default(),
             default_model: None,
             default_thinking_level: None,
             enabled_tools: Vec::new(),
@@ -978,6 +1001,14 @@ mod tests {
                 writes: AccessPolicy::Ask,
                 shell: AccessPolicy::Allow,
             },
+            web: WebSettings {
+                brave_api_key: "b".to_string(),
+                tavily_api_key: "t".to_string(),
+                perplexity_api_key: "p".to_string(),
+                searxng_url: "s".to_string(),
+                default_provider: "brave".to_string(),
+                proxy: "px".to_string(),
+            },
         };
         let json = serde_json::to_string(&settings).unwrap();
         for key in [
@@ -994,6 +1025,7 @@ mod tests {
             "\"subagentModels\"",
             "\"spinnerStyle\"",
             "\"filePolicy\"",
+            "\"web\"",
             "\"mcpMentionsEnabled\"",
             "\"sessionNamingEnabled\"",
             "\"sessionNamingModel\"",
@@ -1139,5 +1171,52 @@ mod tests {
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.theme, "light");
         assert_eq!(back.pane_layout["chatWidth"], 480);
+    }
+
+    #[test]
+    fn web_block_defaults_to_empty_when_absent() {
+        assert_eq!(Settings::default().web, WebSettings::default());
+        assert_eq!(WebSettings::default().brave_api_key, "");
+        assert_eq!(WebSettings::default().tavily_api_key, "");
+        assert_eq!(WebSettings::default().perplexity_api_key, "");
+        assert_eq!(WebSettings::default().searxng_url, "");
+        assert_eq!(WebSettings::default().default_provider, "");
+        assert_eq!(WebSettings::default().proxy, "");
+
+        // A pre-feature file (WITHOUT the web field) parses to WebSettings::default()
+        let settings: Settings = serde_json::from_str(r#"{ "theme": "dark" }"#).unwrap();
+        assert_eq!(settings.web, WebSettings::default());
+    }
+
+    #[test]
+    fn web_block_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            web: WebSettings {
+                brave_api_key: "brave-key-123".to_string(),
+                tavily_api_key: "tvly-xyz".to_string(),
+                perplexity_api_key: "pplx-abc".to_string(),
+                searxng_url: "https://searx.example.com".to_string(),
+                default_provider: "brave".to_string(),
+                proxy: "http://127.0.0.1:8080".to_string(),
+            },
+            ..Settings::default()
+        };
+        write_settings(dir.path(), &settings).unwrap();
+        let raw = fs::read_to_string(dir.path().join("settings.json")).unwrap();
+        assert!(raw.contains("\"web\""), "web key present: {raw}");
+        for key in [
+            "\"braveApiKey\"",
+            "\"tavilyApiKey\"",
+            "\"perplexityApiKey\"",
+            "\"searxngUrl\"",
+            "\"defaultProvider\"",
+            "\"proxy\"",
+        ] {
+            assert!(raw.contains(key), "missing {key} in {raw}");
+        }
+        let back = load_settings(dir.path());
+        assert_eq!(back.web, settings.web);
+        assert_eq!(back, settings);
     }
 }

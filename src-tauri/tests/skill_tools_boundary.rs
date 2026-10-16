@@ -114,6 +114,7 @@ fn ctx(cwd: &Path, roots: &[&Path]) -> ToolCtx {
                 .map(|r| (r.to_path_buf(), SkillScope::User))
                 .collect(),
         ),
+        web: Default::default(),
     }
 }
 
@@ -585,6 +586,7 @@ THE-SKILL-BODY",
         skill_roots: None,
         cwd: cwd.path().to_path_buf(),
         cancel: CancellationToken::new(),
+        web: Default::default(),
     };
     let via_link = home_link.join(".agents/skills/alpha/SKILL.md");
     let r = execute_tool(

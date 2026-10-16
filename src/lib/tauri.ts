@@ -481,6 +481,22 @@ export interface FilePolicy {
 }
 
 /**
+ * Configuration for the web tools (`web_search` and `fetch_content`).
+ * Mirrors the Rust `WebSettings` struct's camelCase shape.
+ */
+export interface WebSettings {
+  braveApiKey: string;
+  tavilyApiKey: string;
+  perplexityApiKey: string;
+  /** The self-hosted SearXNG instance base URL. */
+  searxngUrl: string;
+  /** "auto" (default) or one of brave|tavily|perplexity|searxng|duckduckgo. */
+  defaultProvider: string;
+  /** An explicit proxy URL. Empty = fall back to HTTPS_PROXY/HTTP_PROXY. */
+  proxy: string;
+}
+
+/**
  * The persisted app settings (`settings.json` in the config dir).
  * Mirrors the Rust `Settings` struct's camelCase shape exactly (a
  * `saveSettings` round-trip loses no field).
@@ -509,6 +525,8 @@ export interface AppSettings {
   spinnerStyle: string | null;
   /** (ADR 0030) The per-direction file-access policies. The backend ALWAYS emits it (`#[serde(default)]` fills all-`allow` for a pre-feature file), so it is required here; the UI still falls back to all-`allow` if the key is ever absent. */
   filePolicy: FilePolicy;
+  /** The web tools' configuration (search API keys, proxy, default Search provider). */
+  web: WebSettings;
   /**
    * (ADR 0031 follow-up) Whether the composer's `#` trigger names an MCP
    * server. OFF by default: `#` is the ONE prefix that collides with pasted

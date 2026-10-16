@@ -20,6 +20,7 @@ pub mod subagent;
 pub mod todo;
 pub mod tools;
 pub mod types;
+pub mod web;
 pub mod worker;
 
 pub use crate::types::SessionInfo;

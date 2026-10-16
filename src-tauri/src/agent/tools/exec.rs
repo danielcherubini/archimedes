@@ -181,6 +181,11 @@ pub struct ToolCtx {
     /// (ADR 0030) The write deny-list (`boundary::protected_dirs()`, frozen
     /// at session start; `vec![]` in tests).
     pub protected: Vec<PathBuf>,
+    /// The web tools' configuration for this turn (Task 1). Read once per turn
+    /// from `settings.json` + the environment — NOT re-read per call, so a
+    /// key added mid-turn lands next turn. `WebConfig::default()` in tests
+    /// (HERMETIC: never read `$HOME` here — the same rule as `boundary`).
+    pub web: crate::agent::web::config::WebConfig,
 }
 
 /// The read-direction backend for this context (ADR 0030): the executor's
@@ -1514,6 +1519,7 @@ mod tests {
                 shell: crate::agent::policy::AccessPolicy::Allow,
             },
             protected: Vec::new(),
+            web: Default::default(),
         }
     }
 
@@ -1769,6 +1775,7 @@ mod tests {
             boundary: vec![cwd.clone()],
             file_policy: crate::agent::policy::FilePolicy::default(),
             protected: Vec::new(),
+            web: Default::default(),
         };
         let handle = tokio::spawn(async move {
             let start = std::time::Instant::now();
@@ -1925,6 +1932,7 @@ mod tests {
             boundary: vec![cwd.clone()],
             file_policy: crate::agent::policy::FilePolicy::default(),
             protected: Vec::new(),
+            web: Default::default(),
         };
         let handle = tokio::spawn(async move {
             execute_tool(

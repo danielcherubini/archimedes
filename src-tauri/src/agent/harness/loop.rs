@@ -292,6 +292,10 @@ pub struct AgentLoop {
     /// Handed to every `ToolCtx` so the executor enforces the SAME tier the
     /// gate decided, and read by the gate itself.
     file_policy: FilePolicy,
+    /// The web tools' configuration IN FORCE for the current turn —
+    /// refreshed from `settings.json` + env at the top of every
+    /// `handle_prompt` alongside `file_policy` (one read per turn).
+    web: crate::agent::web::config::WebConfig,
 }
 
 impl AgentLoop {
@@ -383,6 +387,7 @@ impl AgentLoop {
             // construction value only covers a tool call made BEFORE the
             // first prompt, of which there are none.
             file_policy: FilePolicy::default(),
+            web: crate::agent::web::config::WebConfig::default(),
         }
     }
 
@@ -643,20 +648,19 @@ impl AgentLoop {
     /// blocks — when images are present; a text-only prompt keeps the
     /// `Text` shape).
     pub async fn handle_prompt(&mut self, prompt: &Prompt) {
-        // (ADR 0030 Task 3, Deviation 4) The policy is re-read from
-        // `settings.json` ONCE per turn — the same in-process read
+        // (ADR 0030 Task 3, Deviation 4) The policy and web config are
+        // re-read from `settings.json` ONCE per turn — the same in-process read
         // `launch.rs` does per dispatch, so a user who flips a select in
         // Settings affects an ALREADY-RUNNING session at its next prompt
         // (no restart, no relaunch). ONE read per turn (not per tool call):
         // every tool call in a turn must agree, or a half-asked batch would
         // be a policy the user never chose. `config_dir: None` → the
-        // all-`Allow` default (no settings layer).
-        self.file_policy = self
-            .config_dir
-            .as_deref()
-            .map(crate::config::load_settings)
-            .map(|s| s.file_policy)
-            .unwrap_or_default();
+        // all-`Allow` default (no settings layer) + env-only web config.
+        let settings = self.config_dir.as_deref().map(crate::config::load_settings);
+        self.file_policy = settings.as_ref().map(|s| s.file_policy).unwrap_or_default();
+        self.web = crate::agent::web::config::WebConfig::from_web_settings(
+            settings.as_ref().map(|s| &s.web),
+        );
         // A Stop is pending (the turn token is cancelled — `NativeHandle::cancel`
         // cancelled it): a queued prompt must not start a FRESH turn after the
         // user pressed Stop. Drain the queue + skip this prompt (the token is
@@ -1658,6 +1662,7 @@ impl AgentLoop {
                         // re-decide differently from the gate (it enforces
                         // the `Sandboxed` floor and confines `bash`).
                         file_policy: self.file_policy,
+                        web: self.web.clone(),
                     },
                     &tc.name,
                     &tc.arguments,
