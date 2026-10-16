@@ -299,6 +299,7 @@ pub fn run() {
             commands::settings::shell_sandbox_available,
             commands::settings::test_mcp_server,
             commands::settings::auth_mcp_server,
+            commands::settings::test_search_provider,
             commands::mcp::list_mcp_servers_effective,
             commands::agents::list_agent_definitions,
             commands::agents::list_agent_definitions_for_space,

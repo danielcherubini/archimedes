@@ -140,6 +140,72 @@ pub async fn auth_mcp_server(name: String, entry: Value) -> Result<String, Strin
     crate::agent::mcp::manager::authenticate_server(&name, &def).await
 }
 
+/// Test ONE Search provider: one canned query, reporting the hit count or the
+/// error. Mirrors `test_mcp_server` — a 10 s bound, the error text
+/// surfaced VERBATIM (it is the actionable one: a 401, a 429, a SearXNG
+/// instance without `json` in `enabled_formats`).
+#[tauri::command]
+pub async fn test_search_provider(
+    provider: String,
+    settings: serde_json::Value,
+) -> Result<usize, String> {
+    use crate::agent::web::config::{WebConfig, SEARCH_PROVIDERS};
+    use crate::config::WebSettings;
+
+    if !SEARCH_PROVIDERS.contains(&provider.as_str()) {
+        return Err(format!(
+            "Unknown search provider '{provider}'. Valid providers: {}",
+            SEARCH_PROVIDERS.join(", ")
+        ));
+    }
+
+    let web_settings: WebSettings = if let Some(web_val) = settings.get("web") {
+        serde_json::from_value(web_val.clone()).unwrap_or_default()
+    } else {
+        serde_json::from_value(settings.clone()).unwrap_or_default()
+    };
+
+    let web_config = WebConfig::from_web_settings(Some(&web_settings));
+
+    let providers = crate::agent::web::providers::registry::all_providers();
+    let target = providers
+        .iter()
+        .find(|p| p.id() == provider)
+        .ok_or_else(|| {
+            format!(
+                "Unknown search provider '{provider}'. Valid providers: {}",
+                SEARCH_PROVIDERS.join(", ")
+            )
+        })?;
+
+    if !target.is_available(&web_config) {
+        return Err(format!(
+            "Search provider '{provider}' is not configured with an API key or URL"
+        ));
+    }
+
+    let timeout = std::time::Duration::from_secs(10);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let opts = crate::agent::web::providers::types::SearchOpts {
+        provider: Some(provider.clone()),
+        ..Default::default()
+    };
+
+    let outcome = tokio::time::timeout(
+        timeout,
+        crate::agent::web::providers::registry::execute_search(
+            &["archimedes".to_string()],
+            &opts,
+            &web_config,
+            &cancel,
+        ),
+    )
+    .await
+    .map_err(|_| format!("Search provider '{provider}' timed out after 10s"))??;
+
+    Ok(outcome.results.len())
+}
+
 /// (ADR 0030 Task 5) Whether a `Sandboxed` `bash` can actually be confined
 /// here: Linux + a kernel that enforces Landlock. Everywhere else `false`
 /// (the sandbox module is not even compiled), and the tier FAILS CLOSED — so
@@ -325,5 +391,42 @@ mod tests {
         assert_eq!(v["thinkingLevels"], serde_json::json!(["low"]));
         // NOT snake_case on the wire.
         assert!(v.get("context_window").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_search_provider_unknown_provider_names_valid_set() {
+        let err = test_search_provider("unknown_engine".into(), serde_json::json!({}))
+            .await
+            .expect_err("unknown provider must fail");
+        assert!(
+            err.contains("Valid providers: brave, tavily, perplexity, searxng, duckduckgo"),
+            "error should list valid providers: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_provider_unconfigured_provider_is_err() {
+        // Temporarily clear any env vars that could configure perplexity
+        let prev = std::env::var("PERPLEXITY_API_KEY").ok();
+        // SAFETY: test-only env manipulation
+        unsafe { std::env::remove_var("PERPLEXITY_API_KEY") };
+        let result = test_search_provider(
+            "perplexity".into(),
+            serde_json::json!({
+                "web": {
+                    "perplexityApiKey": ""
+                }
+            }),
+        )
+        .await;
+        if let Some(val) = prev {
+            // SAFETY: test-only env manipulation
+            unsafe { std::env::set_var("PERPLEXITY_API_KEY", val) };
+        }
+        let err = result.expect_err("unconfigured provider must fail");
+        assert_eq!(
+            err,
+            "Search provider 'perplexity' is not configured with an API key or URL"
+        );
     }
 }

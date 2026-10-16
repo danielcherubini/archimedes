@@ -4,6 +4,7 @@ import {
   ArrowLeftIcon,
   BotIcon,
   DownloadIcon,
+  GlobeIcon,
   PackageIcon,
   PaletteIcon,
   ServerIcon,
@@ -37,6 +38,7 @@ import ProviderSection from "./ProviderSection";
 import SubagentSection from "./SubagentSection";
 import UpdateSection from "./UpdateSection";
 import McpSection, { type McpDraft } from "./McpSection";
+import WebSearchSection from "./WebSearchSection";
 
 type Section =
   | "general"
@@ -44,6 +46,7 @@ type Section =
   | "providers"
   | "subagents"
   | "mcp"
+  | "web-search"
   | "updates";
 
 /** A ZCode-style slug: lowercase alphanumeric + `-`. */
@@ -391,6 +394,10 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
     />
   );
 
+  const webSearchSection = (
+    <WebSearchSection settings={settings} onSave={update} />
+  );
+
   // The Updates section takes no props: its version row reads `getAppInfo`
   // itself and its state machine is entirely local (no settings document is
   // involved — an update is not a preference).
@@ -446,6 +453,12 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
                 onClick={() => setSection("mcp")}
               />
               <SettingsSidebarButton
+                icon={GlobeIcon}
+                label="Web search"
+                active={section === "web-search"}
+                onClick={() => setSection("web-search")}
+              />
+              <SettingsSidebarButton
                 icon={DownloadIcon}
                 label="Updates"
                 active={section === "updates"}
@@ -467,7 +480,9 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
                   ? subagentsSection
                   : section === "mcp"
                     ? mcpSection
-                    : updatesSection}
+                    : section === "web-search"
+                      ? webSearchSection
+                      : updatesSection}
         </div>
       </section>
     </div>

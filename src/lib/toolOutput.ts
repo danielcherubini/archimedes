@@ -17,6 +17,7 @@ import {
   BotIcon,
   PlugIcon,
   WrenchIcon,
+  ArchiveIcon,
 } from "lucide-react";
 
 /** Truncate to `max` chars, appending an ellipsis when cut. */
@@ -71,6 +72,18 @@ export function summarizeToolCall(title: string, rawInput: unknown): string | un
       return str("query");
     case "fetch_content":
       return str("url");
+    case "get_search_content": {
+      const id = str("response_id") ?? str("responseId");
+      if (!id) return undefined;
+      const handle = truncate(id, 40);
+      const findText = str("find_text") ?? str("findText");
+      if (findText) return `${handle} (${findText})`;
+      const offset = typeof input.offset === "number" ? input.offset : undefined;
+      const limit = typeof input.limit === "number" ? input.limit : undefined;
+      if (offset !== undefined && limit !== undefined)
+        return `${handle} (${offset}–${offset + limit})`;
+      return handle;
+    }
     case "ask": {
       const questions = input.questions;
       const first =
@@ -467,6 +480,7 @@ const VERBS: Record<string, { completed: string; running: string }> = {
   web_search: { completed: "Searched", running: "Searching" },
   ls: { completed: "Listed", running: "Listing" },
   fetch_content: { completed: "Fetched", running: "Fetching" },
+  get_search_content: { completed: "Read", running: "Reading" },
   ask: { completed: "Asked", running: "Asking" },
   manage_todo_list: { completed: "Todos", running: "Updating todos" },
   list_skills: { completed: "Skills", running: "Listing skills" },
@@ -501,6 +515,7 @@ const TOOL_ICONS: Record<string, LucideIcon> = {
   web_search: GlobeIcon,
   ls: ListIcon,
   fetch_content: DownloadIcon,
+  get_search_content: ArchiveIcon,
   ask: MessageCircleQuestionIcon,
   manage_todo_list: ListTodoIcon,
   list_skills: SparklesIcon,

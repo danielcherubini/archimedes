@@ -23,6 +23,7 @@ import {
   SquareTerminalIcon,
   PencilIcon,
   WrenchIcon,
+  ArchiveIcon,
 } from "lucide-react";
 
 describe("toolVerb", () => {
@@ -34,12 +35,14 @@ describe("toolVerb", () => {
     expect(toolVerb("web_search", "completed")).toBe("Searched");
     expect(toolVerb("ask", "completed")).toBe("Asked");
     expect(toolVerb("manage_todo_list", "completed")).toBe("Todos");
+    expect(toolVerb("get_search_content", "completed")).toBe("Read");
   });
   it("returns the present-tense verb for pending calls", () => {
     expect(toolVerb("bash", "pending")).toBe("Running");
     expect(toolVerb("write", "pending")).toBe("Writing");
     expect(toolVerb("grep", "pending")).toBe("Searching");
     expect(toolVerb("fetch_content", "pending")).toBe("Fetching");
+    expect(toolVerb("get_search_content", "pending")).toBe("Reading");
     expect(toolVerb("subagent", "pending")).toBe("Delegating");
   });
   it("returns the past tense for failed calls (the Failed word is the signal)", () => {
@@ -59,6 +62,7 @@ describe("toolIcon", () => {
   it("returns the per-tool icon", () => {
     expect(toolIcon("bash")).toBe(SquareTerminalIcon);
     expect(toolIcon("edit")).toBe(PencilIcon);
+    expect(toolIcon("get_search_content")).toBe(ArchiveIcon);
   });
   it("gives the skill tools an icon (not the unknown-tool wrench)", () => {
     expect(toolIcon("list_skills")).not.toBe(WrenchIcon);
@@ -437,6 +441,33 @@ describe("summarizeToolCall", () => {
     expect(summarizeToolCall("grep", { pattern: "foo", path: "/bar" })).toBe(
       "foo in /bar",
     );
+  });
+  it("shows the web_search query and fetch_content url", () => {
+    expect(summarizeToolCall("web_search", { query: "archimedes" })).toBe("archimedes");
+    expect(summarizeToolCall("fetch_content", { url: "https://example.com" })).toBe("https://example.com");
+  });
+  it("shows get_search_content with bare response_id, find_text, or offset/limit", () => {
+    expect(summarizeToolCall("get_search_content", { response_id: "resp-123" })).toBe("resp-123");
+    expect(summarizeToolCall("get_search_content", { responseId: "resp-123" })).toBe("resp-123");
+    expect(
+      summarizeToolCall("get_search_content", {
+        response_id: "resp-123",
+        find_text: "needle in haystack",
+      }),
+    ).toBe("resp-123 (needle in haystack)");
+    expect(
+      summarizeToolCall("get_search_content", {
+        response_id: "resp-123",
+        offset: 100,
+        limit: 50,
+      }),
+    ).toBe("resp-123 (100–150)");
+    expect(
+      summarizeToolCall("get_search_content", {
+        response_id: "a".repeat(50),
+      }),
+    ).toBe("a".repeat(40) + "…");
+    expect(summarizeToolCall("get_search_content", {})).toBeUndefined();
   });
   it("shows the subagent task (truncated)", () => {
     expect(summarizeToolCall("subagent", { task: "a".repeat(80) })).toBe(

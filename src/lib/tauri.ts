@@ -819,6 +819,11 @@ export async function authMcpServer(name: string, entry: McpServerEntry): Promis
   return invoke("auth_mcp_server", { name, entry });
 }
 
+/** Test ONE Search provider (Settings → Web search): one canned query, reporting the hit count or error. */
+export async function testSearchProvider(provider: string, settings: AppSettings): Promise<number> {
+  return invoke("test_search_provider", { provider, settings });
+}
+
 // ---------------------------------------------------------------------------
 // Spaces commands (boot, the new-session dialog, "forget this space")
 // ---------------------------------------------------------------------------

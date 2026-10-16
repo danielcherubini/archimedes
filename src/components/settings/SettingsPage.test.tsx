@@ -355,7 +355,7 @@ async function loaded(): Promise<void> {
 
 /** Navigate to a section (click its sidebar button) and wait for it. */
 async function go(
-  section: "Appearance" | "Providers" | "Subagents" | "MCP",
+  section: "Appearance" | "Providers" | "Subagents" | "MCP" | "Web search",
 ): Promise<void> {
   fireEvent.click(screen.getByRole("button", { name: section }));
   if (section === "Appearance") await screen.findByText("Theme");
@@ -365,6 +365,10 @@ async function go(
   // agents list renders a nearly empty card) — the per-test `findByText`
   // on a row handles the wait.
   else if (section === "Subagents") return;
+  else if (section === "Web search")
+    await screen.findByText(
+      "Configure Search providers and proxy for web_search and fetch_content tools.",
+    );
   // The "Add server" button is always in the MCP section (below the card).
   else await screen.findByRole("button", { name: "Add server" });
 }
@@ -1440,6 +1444,7 @@ describe("SettingsPage (the Updates section — ADR 0053)", () => {
       "Providers",
       "Subagents",
       "MCP",
+      "Web search",
       "Updates",
     ]);
   });
@@ -1462,6 +1467,18 @@ describe("SettingsPage (the Updates section — ADR 0053)", () => {
     expect(
       screen.queryByRole("button", { name: "Check for updates" }),
     ).toBeNull();
+  });
+
+  it("the_web_search_section_renders_when_clicked", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    expect(screen.getByRole("button", { name: "Web search" })).toBeTruthy();
+    await go("Web search");
+    expect(
+      await screen.findByText(
+        "Configure Search providers and proxy for web_search and fetch_content tools.",
+      ),
+    ).toBeTruthy();
   });
 });
 
