@@ -134,6 +134,11 @@ pub fn setup_dirs_with_factory<R: tauri::Runtime>(
         )
     };
     manager.attach_worker_manager(wm.clone());
+    // The AppHandle for Supervisor-side webview rendering (Task 7).
+    let handle_any = Box::new(app.handle().clone()) as Box<dyn std::any::Any>;
+    if let Ok(handle) = handle_any.downcast::<tauri::AppHandle<tauri::Wry>>() {
+        manager.attach_app_handle(*handle);
+    }
     // The `WorkerManager` is managed state (the `set_space_trusted`
     // command's running-Workers `Config` push + the `test_support`
     // registry accessor).
@@ -260,11 +265,12 @@ pub fn run() {
     // for what is allowed, and why (the app's own url, and IPC, must not be
     // refused).
     let dev_host = std::env::var("TAURI_DEV_HOST").ok();
-    // The turbofish is load-bearing: nothing else pins the plugin's `R` (the
-    // webview argument is unused) nor the config type `C`, so inference gives up.
+    // The turbofish is load-bearing: nothing else pins the plugin's `R` nor
+    // the config type `C`, so inference gives up.
     let navigation_guard = tauri::plugin::Builder::<tauri::Wry>::new("navigation-guard")
-        .on_navigation(move |_webview, url| {
-            crate::navigation_guard::is_app_url(url, dev_host.as_deref())
+        .on_navigation(move |webview, url| {
+            crate::navigation_guard::is_render_webview(webview.label())
+                || crate::navigation_guard::is_app_url(url, dev_host.as_deref())
         })
         .build();
     let app = tauri::Builder::default()
@@ -309,6 +315,7 @@ pub fn run() {
             commands::settings::shell_sandbox_available,
             commands::settings::test_mcp_server,
             commands::settings::auth_mcp_server,
+            commands::settings::test_search_provider,
             commands::mcp::list_mcp_servers_effective,
             commands::agents::list_agent_definitions,
             commands::agents::list_agent_definitions_for_space,

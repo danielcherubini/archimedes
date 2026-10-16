@@ -69,7 +69,9 @@
 //! already denies a new window, and ADR 0051 Task 7 removes the app's only
 //! `target="_blank"`. Subresource loads (`<img>`, `fetch`, XHR) are not
 //! navigations and are unaffected — CSP would be the tool for those, and
-//! `app.security.csp` is deliberately untouched.
+//! `app.security.csp` is deliberately untouched. Designated render webviews
+//! (matching [`RENDER_WEBVIEW_PREFIX`], ADR 0058) are exempted by label
+//! before `is_app_url`.
 //!
 //! [`is_app_url`] is pure (the env var is read once by the caller in `lib.rs`),
 //! so the whole decision table is unit-tested below — a refused initial load or
@@ -127,6 +129,17 @@ pub fn is_app_url(url: &Url, dev_host: Option<&str>) -> bool {
         "about" => url.path() == "blank",
         _ => false,
     }
+}
+
+pub const RENDER_WEBVIEW_PREFIX: &str = "web-fetch-";
+
+/// Is this webview one of ours — a designated render webview, which may
+/// navigate anywhere? This is a decision about the VIEWER, not the url, so
+/// `is_app_url` is untouched and the app's own window keeps the
+/// "can only navigate to itself" guarantee that makes a hijacked webview
+/// structurally impossible (ADR 0051).
+pub fn is_render_webview(label: &str) -> bool {
+    label.starts_with(RENDER_WEBVIEW_PREFIX)
 }
 
 #[cfg(test)]
@@ -293,5 +306,13 @@ mod tests {
             ("ws://example.com:1421/", false),
             ("wss://evil.com/", false),
         ]);
+    }
+
+    #[test]
+    fn identifies_render_webviews_by_label_prefix() {
+        assert!(is_render_webview("web-fetch-9a1c"));
+        assert!(!is_render_webview("main"));
+        assert!(!is_render_webview("webfetch-1"));
+        assert!(!is_render_webview(""));
     }
 }

@@ -472,6 +472,9 @@ pub struct SessionManager {
     /// The live, Worker-backed sessions (session_id → the coordinator state;
     /// replaces the main-session `LiveSession` / `driver.sessions` ownership).
     live: Arc<StdMutex<HashMap<String, LiveWorkerSession>>>,
+    /// The Tauri AppHandle (the Supervisor-side headless renderer uses it to
+    /// build hidden WebviewWindows on the platform main loop, Task 7).
+    app_handle: Arc<OnceLock<tauri::AppHandle>>,
     /// The stalled sessions (session_id → `StalledInfo` — a Worker crash
     /// marks the session stalled; the frontend reads it via `stalled_info`).
     stalled: Arc<StdMutex<HashMap<String, StalledInfo>>>,
@@ -512,7 +515,13 @@ impl SessionManager {
             naming: Arc::new(StdMutex::new(HashMap::new())),
             live: Arc::new(StdMutex::new(HashMap::new())),
             stalled: Arc::new(StdMutex::new(HashMap::new())),
+            app_handle: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// Attach the Tauri `AppHandle` (used for Supervisor-side web rendering).
+    pub fn attach_app_handle(&self, app: tauri::AppHandle) {
+        let _ = self.app_handle.set(app);
     }
 
     /// Inject the `WorkerManager` (the late-wire — the `setup_dirs` wiring

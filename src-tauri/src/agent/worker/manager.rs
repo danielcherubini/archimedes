@@ -932,6 +932,9 @@ fn start_pump(
                 WorkerInboundEvent::SubagentCancel { id } => {
                     cancel_subagent_by_dispatch_id(&state, &id);
                 }
+                WorkerInboundEvent::FetchRenderRequest { .. } => {
+                    // Handled by SessionManager router via on_event.
+                }
                 // (c) Crash detection: an UNEXPECTED `Exited` (no
                 // `detach` / `reap_all` / drive-task teardown in
                 // flight) fires `on_crash` exactly once (the
