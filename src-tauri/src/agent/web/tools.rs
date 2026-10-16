@@ -1,11 +1,21 @@
+use std::sync::Arc;
+
 use serde_json::{json, Value};
 
 use crate::agent::tools::exec::{ContentBlock, ToolCtx, ToolResult};
 use crate::agent::web::cache::{global_cache, StoredKind};
-use crate::agent::web::providers::registry::execute_search;
-use crate::agent::web::providers::types::SearchOpts;
+use crate::agent::web::providers::registry::{all_providers, execute_search_with_providers};
+use crate::agent::web::providers::types::{SearchOpts, SearchProvider};
 
 pub async fn exec_web_search(ctx: &ToolCtx, params: &Value) -> ToolResult {
+    exec_web_search_with_providers(ctx, params, &all_providers()).await
+}
+
+pub async fn exec_web_search_with_providers(
+    ctx: &ToolCtx,
+    params: &Value,
+    providers: &[Arc<dyn SearchProvider>],
+) -> ToolResult {
     let mut queries = Vec::new();
     if let Some(arr) = params.get("queries").and_then(Value::as_array) {
         for val in arr {
@@ -86,7 +96,7 @@ pub async fn exec_web_search(ctx: &ToolCtx, params: &Value) -> ToolResult {
         provider,
     };
 
-    match execute_search(&queries, &opts, &ctx.web, &ctx.cancel).await {
+    match execute_search_with_providers(providers, &queries, &opts, &ctx.web, &ctx.cancel).await {
         Ok(outcome) => {
             let summary = outcome
                 .results
@@ -153,6 +163,121 @@ mod tests {
         match &res.content[0] {
             ContentBlock::Text { text } => {
                 assert!(text.contains("web_search requires 'query' or 'queries'"));
+            }
+            _ => panic!("expected text block"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_exec_web_search_failover_to_duckduckgo_wiremock() {
+        use crate::agent::web::providers::brave::BraveProvider;
+        use crate::agent::web::providers::duckduckgo::DuckDuckGoProvider;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let brave_server = MockServer::start().await;
+        let ddg_server = MockServer::start().await;
+
+        // Brave fails with 429
+        Mock::given(method("GET"))
+            .and(path("/res/v1/web/search"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("Rate limited"))
+            .mount(&brave_server)
+            .await;
+
+        // DuckDuckGo succeeds with HTML fixture
+        let ddg_fixture = include_str!("fixtures/duckduckgo_results.html");
+        Mock::given(method("GET"))
+            .and(path("/html/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(ddg_fixture))
+            .mount(&ddg_server)
+            .await;
+
+        let providers: Vec<Arc<dyn SearchProvider>> = vec![
+            Arc::new(BraveProvider::with_base_url(format!(
+                "{}/res/v1/web/search",
+                brave_server.uri()
+            ))),
+            Arc::new(DuckDuckGoProvider::with_base_url(format!(
+                "{}/html/",
+                ddg_server.uri()
+            ))),
+        ];
+
+        let mut ctx = test_ctx();
+        ctx.web.brave_api_key = Some("test-brave-key".into());
+        ctx.web.default_provider = "auto".into();
+
+        let res = exec_web_search_with_providers(
+            &ctx,
+            &json!({ "query": "rust programming" }),
+            &providers,
+        )
+        .await;
+
+        assert!(
+            !res.is_error,
+            "expected success via failover, got error: {:?}",
+            res.content
+        );
+        let details = res.details.expect("details should exist");
+        assert_eq!(details["provider"], "duckduckgo");
+        assert_eq!(details["resultCount"], 3);
+    }
+
+    #[tokio::test]
+    async fn test_exec_web_search_explicit_provider_no_failover_wiremock() {
+        use crate::agent::web::providers::brave::BraveProvider;
+        use crate::agent::web::providers::duckduckgo::DuckDuckGoProvider;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let brave_server = MockServer::start().await;
+        let ddg_server = MockServer::start().await;
+
+        // Brave fails with 429
+        Mock::given(method("GET"))
+            .and(path("/res/v1/web/search"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("Rate limited"))
+            .mount(&brave_server)
+            .await;
+
+        // DuckDuckGo must NEVER be called
+        Mock::given(method("GET"))
+            .and(path("/html/"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&ddg_server)
+            .await;
+
+        let providers: Vec<Arc<dyn SearchProvider>> = vec![
+            Arc::new(BraveProvider::with_base_url(format!(
+                "{}/res/v1/web/search",
+                brave_server.uri()
+            ))),
+            Arc::new(DuckDuckGoProvider::with_base_url(format!(
+                "{}/html/",
+                ddg_server.uri()
+            ))),
+        ];
+
+        let mut ctx = test_ctx();
+        ctx.web.brave_api_key = Some("test-brave-key".into());
+
+        let res = exec_web_search_with_providers(
+            &ctx,
+            &json!({
+                "query": "rust programming",
+                "provider": "brave"
+            }),
+            &providers,
+        )
+        .await;
+
+        assert!(res.is_error, "expected explicit brave error");
+        match &res.content[0] {
+            ContentBlock::Text { text } => {
+                assert!(text.contains("[brave] error: HTTP 429"), "got: {text}");
             }
             _ => panic!("expected text block"),
         }

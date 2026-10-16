@@ -5,7 +5,11 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::agent::web::config::WebConfig;
+use crate::agent::web::providers::brave::BraveProvider;
 use crate::agent::web::providers::duckduckgo::DuckDuckGoProvider;
+use crate::agent::web::providers::perplexity::PerplexityProvider;
+use crate::agent::web::providers::searxng::SearXNGProvider;
+use crate::agent::web::providers::tavily::TavilyProvider;
 use crate::agent::web::providers::types::{SearchOpts, SearchProvider, SearchResultItem};
 
 pub const AVAILABILITY_ORDER: &[&str] = &["brave", "tavily", "perplexity", "searxng", "duckduckgo"];
@@ -22,7 +26,13 @@ pub struct SearchOutcome {
 }
 
 pub fn all_providers() -> Vec<Arc<dyn SearchProvider>> {
-    vec![Arc::new(DuckDuckGoProvider::new())]
+    vec![
+        Arc::new(BraveProvider::new()),
+        Arc::new(TavilyProvider::new()),
+        Arc::new(PerplexityProvider::new()),
+        Arc::new(SearXNGProvider::new()),
+        Arc::new(DuckDuckGoProvider::new()),
+    ]
 }
 
 pub fn resolve_provider(
@@ -49,15 +59,14 @@ pub fn resolve_provider_from(
     }
 
     // 2. If config specifies a default provider that isn't "auto"
-    if config.default_provider != "auto" {
+    if !config.default_provider.is_empty() && config.default_provider != "auto" {
         if let Some(p) = providers.iter().find(|p| p.id() == config.default_provider) {
-            if p.is_available(config) {
-                return Ok(ResolvedProvider {
-                    provider: p.clone(),
-                    was_auto_resolved: false,
-                });
-            }
+            return Ok(ResolvedProvider {
+                provider: p.clone(),
+                was_auto_resolved: false,
+            });
         }
+        return Err(format!("Unknown provider: {}", config.default_provider));
     }
 
     // 3. Fall back through AVAILABILITY_ORDER
@@ -253,6 +262,91 @@ mod tests {
                 Ok(self.results.clone())
             }
         }
+    }
+
+    #[test]
+    fn test_all_providers_registered() {
+        let providers = all_providers();
+        assert_eq!(providers.len(), 5);
+        let ids: Vec<&str> = providers.iter().map(|p| p.id()).collect();
+        assert_eq!(
+            ids,
+            vec!["brave", "tavily", "perplexity", "searxng", "duckduckgo"]
+        );
+    }
+
+    #[test]
+    fn test_providers_availability() {
+        let empty_config = WebConfig::default();
+        let providers = all_providers();
+
+        // With empty config, only DuckDuckGo is available
+        assert!(!providers
+            .iter()
+            .find(|p| p.id() == "brave")
+            .unwrap()
+            .is_available(&empty_config));
+        assert!(!providers
+            .iter()
+            .find(|p| p.id() == "tavily")
+            .unwrap()
+            .is_available(&empty_config));
+        assert!(!providers
+            .iter()
+            .find(|p| p.id() == "perplexity")
+            .unwrap()
+            .is_available(&empty_config));
+        assert!(!providers
+            .iter()
+            .find(|p| p.id() == "searxng")
+            .unwrap()
+            .is_available(&empty_config));
+        assert!(providers
+            .iter()
+            .find(|p| p.id() == "duckduckgo")
+            .unwrap()
+            .is_available(&empty_config));
+
+        // When configured, each is available
+        let brave_cfg = WebConfig {
+            brave_api_key: Some("k".into()),
+            ..Default::default()
+        };
+        assert!(providers
+            .iter()
+            .find(|p| p.id() == "brave")
+            .unwrap()
+            .is_available(&brave_cfg));
+
+        let tavily_cfg = WebConfig {
+            tavily_api_key: Some("k".into()),
+            ..Default::default()
+        };
+        assert!(providers
+            .iter()
+            .find(|p| p.id() == "tavily")
+            .unwrap()
+            .is_available(&tavily_cfg));
+
+        let pplx_cfg = WebConfig {
+            perplexity_api_key: Some("k".into()),
+            ..Default::default()
+        };
+        assert!(providers
+            .iter()
+            .find(|p| p.id() == "perplexity")
+            .unwrap()
+            .is_available(&pplx_cfg));
+
+        let searxng_cfg = WebConfig {
+            searxng_url: Some("http://localhost:8888".into()),
+            ..Default::default()
+        };
+        assert!(providers
+            .iter()
+            .find(|p| p.id() == "searxng")
+            .unwrap()
+            .is_available(&searxng_cfg));
     }
 
     #[test]

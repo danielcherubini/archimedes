@@ -242,6 +242,8 @@ async fn safe_fetch_inner(
 
         if let Some(ref proxy_str) = opts.proxy {
             builder = builder.proxy(reqwest::Proxy::all(proxy_str)?);
+        } else {
+            builder = builder.no_proxy();
         }
 
         let client = builder.build()?;
