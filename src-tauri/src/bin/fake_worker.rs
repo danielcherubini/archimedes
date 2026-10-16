@@ -54,6 +54,12 @@
 //! - a `prompt` whose text is `"__stream_then_crash__"`: the same partial
 //!   production, then exit 137 (a **Dead Subagent** by process death — the
 //!   crash path's salvage input).
+//! - a `prompt` whose text is `"__crash_burst__"`: a BURST of `agent_message_chunk`
+//!   `SinkFrame`s + a `message_update` `usage` frame flushed back-to-back, then
+//!   exit 137 with NO pause and NO `agent_settled` — the child dies while its
+//!   LAST frames are still queued in the pump. The salvage-ordering input (ADR
+//!   0055 review, thread 3): the drive must read the `SubagentCapture` only
+//!   AFTER the pump consumed every frame the child managed to write.
 //! - a `prompt` whose text is `"__cancel__"`: a `SubagentCancel` frame
 //!   (the `SubagentCancel` routing test).
 //! - a `prompt` whose text is `"__stderr__"`: a line on STDERR and NO
@@ -97,6 +103,19 @@ const IN_TOOL_HOLD: std::time::Duration = std::time::Duration::from_millis(1500)
 /// the **Dead bound** is the only thing that can end the dispatch, and a
 /// cancel mid-silence is unambiguously the cancel arm).
 const SILENCE_AFTER_STREAM: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The `__crash_burst__` chunk count (ADR 0055 review, thread 3). Enough frames
+/// that a salvage read while the pump is still draining the queue is GLARINGLY
+/// truncated — every chunk is a distinct word, so a lost tail shows up in the
+/// text — while staying far inside the client's 256-frame `broadcast` ring (a
+/// `Lagged` pump would be a DIFFERENT defect than the one under test).
+const CRASH_BURST_CHUNKS: u32 = 40;
+
+/// The `__crash_burst__` `usage` frame's tokens — deliberately NOT
+/// `emit_partial_progress`'s numbers, and deliberately the LAST frame before the
+/// exit: a salvage that reads the capture too early reports `0` output tokens
+/// for work that really cost money, the understatement the review named.
+const CRASH_BURST_USAGE: (u64, u64) = (777, 909);
 
 /// Emit one outbound frame (one JSONL line — the `protocol` encode).
 fn emit<W: Write>(stdout: &mut W, frame: &Outbound) {
@@ -181,6 +200,54 @@ fn emit_partial_progress<W: Write>(stdout: &mut W, session_id: &str) {
             },
         );
     }
+}
+
+/// The `__crash_burst__` body (ADR 0055 review, thread 3): `CRASH_BURST_CHUNKS`
+/// `agent_message_chunk` `SinkFrame`s on ONE `messageId` plus the closing
+/// `message_update` `usage` frame, written back-to-back with NO pauses, then the
+/// process exits 137 immediately.
+///
+/// The shape is deliberate: a child whose Provider is streaming fast does exactly
+/// this — many frames land in the client's `broadcast` ring in one go — and the
+/// exit is then published by the read task through the SEPARATE `exited` watch
+/// while those frames are still queued. The caller exits with NO pause and NO
+/// `agent_settled`, so the drive must not be able to reach the capture before the
+/// pump has drained everything the child wrote. Every chunk carries a distinct
+/// word so a truncated salvage names the lost tail in the assertion.
+fn emit_crash_burst<W: Write>(stdout: &mut W, session_id: &str) {
+    for i in 0..CRASH_BURST_CHUNKS {
+        emit(
+            stdout,
+            &Outbound::SinkFrame {
+                event: "session-update".to_string(),
+                payload: serde_json::json!({
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": "m7",
+                        "content": { "type": "text", "text": format!("chunk{i} ") }
+                    }
+                }),
+            },
+        );
+    }
+    // The `usage` frame LAST: it is the token count a too-early salvage loses.
+    emit(
+        stdout,
+        &Outbound::Event {
+            event: RpcEvent::message_update {
+                usage: serde_json::json!({
+                    "inputTokens": CRASH_BURST_USAGE.0,
+                    "outputTokens": CRASH_BURST_USAGE.1
+                }),
+                assistant_message_event: serde_json::json!({
+                    "type": "text_delta",
+                    "contentIndex": 0,
+                    "delta": "burst"
+                }),
+            },
+        },
+    );
 }
 
 /// The canned `RpcEvent` stream (the Supervisor's bookkeeping input —
@@ -653,6 +720,16 @@ fn main() {
                 "__stream_then_crash__" => {
                     emit_partial_progress(&mut stdout, &sid);
                     std::thread::sleep(std::time::Duration::from_millis(200));
+                    std::process::exit(137);
+                }
+                // The salvage-ORDERING input (ADR 0055 review, thread 3): a
+                // BURST of frames the child wrote before it died, then exit 137
+                // with NO pause (NO `agent_settled`). The child is gone while
+                // its last frames are still queued in the pump, so a drive that
+                // watches the process exit instead of the pump's `Exited` frame
+                // salvages a truncated capture.
+                "__crash_burst__" => {
+                    emit_crash_burst(&mut stdout, &sid);
                     std::process::exit(137);
                 }
                 // The `interactive-event` `SinkFrame` (the `todos_update`

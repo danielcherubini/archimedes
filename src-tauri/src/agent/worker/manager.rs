@@ -33,6 +33,20 @@
 pub const DEFAULT_SUBAGENT_DEAD_BOUND: std::time::Duration =
     std::time::Duration::from_secs(30 * 60);
 
+/// The drive's BOUNDED grace for the pump's exit signal (ADR 0055 review,
+/// thread 3): when the read task's `exited` watch fires FIRST, the drive waits
+/// this long for the pump to publish its OWN exit (the source that guarantees a
+/// fully-fed `SubagentCapture`) before salvaging what it has.
+///
+/// It is a grace, NOT a correctness window: in the normal case the pump's
+/// `Exited` is already queued behind frames the child wrote in one burst and
+/// lands within microseconds, so this timeout is only ever paid by a pump that
+/// is genuinely wedged (parked inside a router callback). The bound exists so
+/// such a pump cannot hold the child's teardown — and the parent's `SubagentResult`
+/// — open indefinitely. Test stalls MUST stay shorter than this, or a test
+/// exercises the fallback instead of the ordering it means to force.
+const PUMP_EXIT_GRACE: Duration = Duration::from_secs(1);
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -371,6 +385,23 @@ struct SubagentDrive {
     dispatch_id: String,
     settle_tx: watch::Sender<bool>,
     cancel_tx: watch::Sender<bool>,
+    /// The child's process exit, published BY THE PUMP (ADR 0055 review,
+    /// thread 3 — the crash salvage raced the pump).
+    ///
+    /// `WorkerHandle::exited()` is a DIFFERENT channel from the frame
+    /// `broadcast`: the read task publishes it the moment `child.wait()`
+    /// returns, which is BEFORE the frames the child wrote last have been
+    /// consumed. A drive that ends on that watch can therefore snapshot the
+    /// `SubagentCapture` mid-queue and freeze a TRUNCATED salvage (the lost
+    /// tail is unrecoverable — the `Failed` outcome is delivered once).
+    ///
+    /// THIS watch is fired from the pump's own `WorkerInboundEvent::Exited`
+    /// arm, i.e. after every frame the child managed to write has gone
+    /// through `feed_capture` — the `broadcast` is IN ORDER, so `Exited`
+    /// cannot arrive before a preceding `agent_message_chunk` /
+    /// `message_update`. Reading the salvage off this signal is what makes a
+    /// crashed child's complete output + real usage arrive at the parent.
+    exit_tx: watch::Sender<Option<i32>>,
     /// The child's liveness signal (ADR 0055 — the `SubagentLiveness`
     /// doc): the pump bumps it on EVERY frame it sees for this child
     /// and maintains the outstanding `tool_call_id` set. The drive
@@ -876,6 +907,18 @@ fn start_pump(
                 // an EXPECTED `Exited` (a `detach` / `reap_all` was in
                 // flight) fires NO `on_crash`.
                 WorkerInboundEvent::Exited(code) => {
+                    // The PUMP-FIRED exit signal (ADR 0055 review, thread 3):
+                    // publish the code through the drive's `exit` watch BEFORE
+                    // anything else in this arm — every frame the child wrote
+                    // has ALREADY been fed (the `broadcast` is IN ORDER, so
+                    // `Exited` is the last thing the pump sees), and the drive
+                    // reads the salvage the instant this fires. Firing it LATER
+                    // (after `on_crash`) would only delay the outcome; firing it
+                    // from the read task's `exited` watch instead would fire it
+                    // while frames were still queued — the truncation.
+                    if is_subagent {
+                        publish_pump_exit(&state, &session_id, code);
+                    }
                     // The lifecycle transition (the `ARCHIMEDES_DEBUG` log —
                     // a CRASH when the `Exited` is unexpected, a clean
                     // `exit` otherwise; the code + the session id).
@@ -928,6 +971,24 @@ fn feed_capture(
     });
     if settle {
         let _ = settle_tx.send(true);
+    }
+}
+
+/// Publish the child's process exit through the DRIVE's `exit` watch (the
+/// pump's `Exited` arm calls this AFTER it has fed every frame the child
+/// managed to write — see the `SubagentDrive::exit_tx` doc for why the pump
+/// and not the read task owns this signal).
+///
+/// A MISSING drive is a NO-OP and not a bug: the drive task removes its own
+/// entry at teardown, so an `Exited` that arrives after the dispatch is gone
+/// (the reap's own `Exited` — an EXPECTED exit) has nobody left to notify.
+/// `send_replace` (NOT `send` — the drive's receiver subscribes at dispatch
+/// time, but the value must land even if it had already dropped, and a stale
+/// code must never be readable as the current one).
+fn publish_pump_exit(state: &ManagerState, session_id: &str, code: Option<i32>) {
+    let drives = state.drives.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(drive) = drives.get(session_id) {
+        drive.exit_tx.send_replace(code);
     }
 }
 
@@ -1167,6 +1228,9 @@ fn dispatch_subagent(
     // frame it sees for this child).
     let (settle_tx, settle_rx) = watch::channel(false);
     let (cancel_tx, cancel_rx) = watch::channel(false);
+    // The PUMP-FIRED exit watch (ADR 0055 review, thread 3): `None` until the
+    // pump's own `Exited` arm publishes the code — see `SubagentDrive::exit_tx`.
+    let (exit_tx, exit_rx) = watch::channel(None);
     let (liveness_tx, liveness_rx) = watch::channel(SubagentLiveness {
         seq: 0,
         in_flight: Default::default(),
@@ -1182,6 +1246,7 @@ fn dispatch_subagent(
                 dispatch_id: wire.id.clone(),
                 settle_tx: settle_tx.clone(),
                 cancel_tx: cancel_tx.clone(),
+                exit_tx,
                 liveness_tx,
                 capture: capture.clone(),
                 handle: None,
@@ -1229,6 +1294,9 @@ fn dispatch_subagent(
                     start,
                     settle_rx,
                     cancel_rx,
+                    // The pump's exit signal (the crash arm reads THIS, not the
+                    // process watch — the salvage must see every frame first).
+                    exit_rx,
                     // The ADR 0055 liveness receiver (the drive's future
                     // silence bound reads it — this task only threads it,
                     // the race still runs on `dead_bound`).
@@ -1283,6 +1351,12 @@ async fn drive_subagent(
     start: std::time::Instant,
     mut settle_rx: watch::Receiver<bool>,
     mut cancel_rx: watch::Receiver<bool>,
+    // The child's exit AS THE PUMP SAW IT (ADR 0055 review, thread 3) — the
+    // drive's half of the `watch` the pump's `Exited` arm publishes. This is the
+    // arm that may end the race on a crash, because the pump fires it only AFTER
+    // `feed_capture` consumed every frame the child wrote (see
+    // `SubagentDrive::exit_tx`).
+    mut exit_rx: watch::Receiver<Option<i32>>,
     // The child's liveness signal (ADR 0055) — the drive's half of the
     // `watch` the pump feeds. Every frame bumps its `seq` (activity);
     // `in_flight` holds the `tool_call_id`s announced and not yet closed.
@@ -1332,6 +1406,14 @@ async fn drive_subagent(
     // The declared-outside binding is only a scope (the value is meaningless
     // before the loop's first pass, which is exactly where it is computed).
     let mut deadline;
+    // The SECOND receiver of the SAME pump-exit `watch` (ADR 0055 review,
+    // thread 3), for the safety net's bounded grace in `exited_with_pump_grace`:
+    // `select!` builds every arm's future up front, so the exit arm's
+    // `&mut exit_rx` borrow is live for the whole race and the grace wait cannot
+    // alias it. Both receivers read the SAME latest value (a `watch` is not a
+    // queue), so a code the pump published BEFORE the process watch won is still
+    // seen immediately by the safety net.
+    let mut pumped_exit_rx = exit_rx.clone();
     let race = loop {
         // EVERY pass of this loop was entered because something changed (the
         // first pass, or the `changed()` arm) — so the deadline is recomputed
@@ -1366,9 +1448,36 @@ async fn drive_subagent(
         let mut sleep = Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(
             deadline,
         )));
+        // The `select!` arms. The exit arms resolve to OWNED `Option<i32>`s (the
+        // safety net's grace await lives in `exited_with_pump_grace`, NOT in an
+        // arm body): `wait_for` yields a `watch::Ref` (a `std::sync::RwLockReadGuard`
+        // — NOT `Send`, and borrowing the receiver), and an `await` inside an arm
+        // body would hold the `select!` result tuple — every arm's value, guards
+        // included — across it, making the spawned future non-`Send` and aliasing
+        // the receiver borrow. A free future keeps the race loop in its original
+        // `break Race::…` shape.
         tokio::select! {
             _ = settle_rx.wait_for(|v| *v) => break Race::Settled,
-            code = handle.exited() => break Race::Exited(code),
+            // THE EXIT ARM (ADR 0055 review, thread 3): the PUMP's signal, NOT the
+            // process watch. The pump publishes this from its own
+            // `WorkerInboundEvent::Exited` arm, and the frame `broadcast` is IN
+            // ORDER — so `Exited` is only ever delivered AFTER every
+            // `agent_message_chunk` / `message_update` the child managed to write
+            // has passed through `feed_capture`. Ending the race here is therefore
+            // what makes the salvage below read a COMPLETE capture: the `Failed`
+            // outcome is frozen at delivery, so a snapshot taken while the pump is
+            // still mid-queue truncates the child's findings permanently and
+            // reports 0 tokens for work that really cost money.
+            //
+            // A `None` means the watch's sender is gone (the drive entry was
+            // already removed at teardown) — nothing more can be fed, so the
+            // salvage reads exactly what the pump had delivered.
+            code = exit_rx.wait_for(|v| v.is_some()) => break Race::Exited(code.ok().and_then(|v| *v)),
+            // THE SAFETY NET — see `exited_with_pump_grace`: the process watch may
+            // NOT end the drive directly (it fires before the pump is done), but a
+            // wedged pump must not hang teardown either, so it gets a bounded
+            // grace to publish its own exit first.
+            code = exited_with_pump_grace(&handle, &mut pumped_exit_rx) => break Race::Exited(code),
             _ = cancel_rx.changed() => break Race::Cancelled,
             // Activity (ADR 0055): any frame from the child — a streamed
             // token, a tool boundary, a control-plane reply — re-arms the
@@ -1379,7 +1488,7 @@ async fn drive_subagent(
             // awaiting its own nested Subagent is Active and has NO timeout.
             // In that state the bound is not "longer"; it does not run.
             _ = &mut sleep, if !in_flight => break Race::Dead,
-        }
+        };
     };
     // The outcome (the `SubagentCapture`'s final text — the
     // `SinkFrame` `agent_message_chunk` source; the `usage` from the
@@ -1423,6 +1532,39 @@ async fn drive_subagent(
         }
     };
     Some(outcome)
+}
+
+/// The SAFETY-NET exit future (ADR 0055 review, thread 3): the child's exit code
+/// as the PROCESS watch reports it, but only after the pump had its chance.
+///
+/// `WorkerHandle::exited()` is the read task's own `watch`, published the moment
+/// `child.wait()` returns — possibly while the child's last frames are STILL
+/// queued behind it in the frame `broadcast`. Ending the drive there is exactly
+/// the truncation this fix removes, so the process watch may NOT decide the
+/// outcome directly: when it wins, wait `PUMP_EXIT_GRACE` for the pump to
+/// publish its own exit (the source that guarantees a fully-fed
+/// `SubagentCapture`) and prefer that code.
+///
+/// It is a grace, not an unbounded await, because a pump that is genuinely
+/// wedged — parked inside a router callback — must not hold the child's teardown
+/// and the parent's `SubagentResult` open forever; past the grace the salvage
+/// reads whatever the pump had delivered. Lives in a free future rather than in
+/// the `select!` arm body because it awaits, and the arm bodies run while the
+/// `select!` result tuple (holding the other arms' non-`Send` `watch::Ref`s) is
+/// still alive.
+async fn exited_with_pump_grace(
+    handle: &WorkerHandle,
+    pumped_exit_rx: &mut watch::Receiver<Option<i32>>,
+) -> Option<i32> {
+    let code = handle.exited().await;
+    match tokio::time::timeout(PUMP_EXIT_GRACE, pumped_exit_rx.wait_for(|v| v.is_some())).await {
+        // The pump caught up inside the grace: take ITS code — the capture is
+        // fully fed at this point.
+        Ok(Ok(pumped)) => *pumped,
+        // Silent past the grace (a wedged pump) or the watch is gone: the process
+        // watch's code is all there is, and the capture is whatever the pump fed.
+        Ok(Err(_)) | Err(_) => code,
+    }
 }
 
 /// A **Dead Subagent**'s outcome (ADR 0055): `failed` in STATUS, but the
@@ -1821,6 +1963,119 @@ mod tests {
             None => manager,
         };
         (manager, crashes, events, sinks)
+    }
+
+    /// The self-releasing PUMP STALL (`make_stalling_manager`): the park length
+    /// (long enough that the child writes the rest of its burst, its process
+    /// dies and the `exited` WATCH fires WHILE the pump is parked, short enough
+    /// that a wrong fix fails an assertion instead of hanging the suite) and the
+    /// deadline past which the gate stops parking (so a scenario whose stall was
+    /// never reached cannot stall twice, and cannot park forever).
+    ///
+    /// `PUMP_STALL` MUST stay SHORTER than the drive's `PUMP_EXIT_GRACE`: the test
+    /// exists to force the pump's own exit arm, and a stall longer than the grace
+    /// would drive the wedged-pump FALLBACK instead — which deliberately salvages
+    /// the capture as-is.
+    const PUMP_STALL: Duration = Duration::from_millis(250);
+    const PUMP_STALL_DEADLINE: Duration = Duration::from_secs(10);
+
+    /// The one-shot pump-stall gate (the state `make_stalling_manager` closes
+    /// over): `armed` is flipped to `false` by the ONE frame it holds, and
+    /// `fired` records that the stall really happened — a test asserts it,
+    /// because a stall that never engaged forced no ordering at all.
+    struct StallGate {
+        armed: StdMutex<bool>,
+        fired: StdMutex<bool>,
+        started: StdMutex<Option<std::time::Instant>>,
+    }
+
+    impl StallGate {
+        fn new() -> Self {
+            Self {
+                armed: StdMutex::new(true),
+                fired: StdMutex::new(false),
+                started: StdMutex::new(None),
+            }
+        }
+
+        /// Park THIS pump frame: one shot, then disarm; a bounded park, and no
+        /// park at all once the deadline has passed. Returns `true` when this is
+        /// the frame the gate was armed for.
+        fn fire_once(&self) -> bool {
+            if !*self.armed.lock().unwrap_or_else(|p| p.into_inner()) {
+                return false;
+            }
+            let started = *self.started.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(t) = started {
+                if t.elapsed() > PUMP_STALL_DEADLINE {
+                    return false;
+                }
+            } else {
+                *self.started.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some(std::time::Instant::now());
+            }
+            *self.armed.lock().unwrap_or_else(|p| p.into_inner()) = false;
+            *self.fired.lock().unwrap_or_else(|p| p.into_inner()) = true;
+            // The park is BLOCKING inside the synchronous `on_event` callback —
+            // the pump's own loop cannot advance while it sits here, which is
+            // exactly the point: the child's queued frames stay UNCONSUMED while
+            // the drive races.
+            std::thread::sleep(PUMP_STALL);
+            true
+        }
+
+        fn fired(&self) -> bool {
+            *self.fired.lock().unwrap_or_else(|p| p.into_inner())
+        }
+    }
+
+    /// `make_manager`'s shape + a ONE-SHOT pump stall: the first child frame
+    /// matching `stall_on` parks the pump inside the router (`on_event` runs
+    /// BEFORE the pump's own `match`, so parking it leaves the child's remaining
+    /// frames unconsumed in the client's `broadcast` ring).
+    ///
+    /// This is how a test FORCES the ordering race ADR 0055 review thread 3
+    /// names — the client publishes the process exit through the `exited` WATCH,
+    /// a DIFFERENT channel from the frame `broadcast` — instead of merely
+    /// observing a favourable interleaving and hoping it recurs.
+    fn make_stalling_manager(
+        dead_bound: Duration,
+        stall_on: impl (Fn(&WorkerInboundEvent) -> bool) + Send + Sync + 'static,
+        gate: Arc<StallGate>,
+    ) -> (WorkerManager, EventLog, SinkMap) {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let sinks: SinkMap = Arc::new(StdMutex::new(HashMap::new()));
+        let factory: Arc<dyn WorkerFactory> = Arc::new(FakeWorkerFactory);
+        let events_c = events.clone();
+        let sinks_c = sinks.clone();
+        let manager = WorkerManager::new(
+            factory,
+            Arc::new(|_id: String, _code: Option<i32>| {}),
+            Arc::new(
+                move |id: String, is_subagent: bool, evt: WorkerInboundEvent| {
+                    // ONLY a child frame parks the pump, so the parent's own
+                    // stream — the `subagent-result-ack` included — keeps flowing
+                    // while the child's is stuck, and the test can still observe
+                    // the outcome the drive delivered.
+                    if is_subagent && stall_on(&evt) {
+                        gate.fire_once();
+                    }
+                    events_c
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .push((id, is_subagent, evt));
+                },
+            ),
+            Arc::new(move |id: &str| {
+                sinks_c
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get(id)
+                    .cloned()
+                    .map(|s| s as Arc<dyn EventSink>)
+            }),
+        );
+        (manager.with_dead_bound(dead_bound), events, sinks)
     }
 
     /// A parent-scope sink (registered under `session_id`).
@@ -2367,6 +2622,7 @@ mod tests {
                     dispatch_id: "live-dispatch".to_string(),
                     settle_tx: watch::channel(false).0,
                     cancel_tx: watch::channel(false).0,
+                    exit_tx: watch::channel(None).0,
                     liveness_tx: watch::channel(SubagentLiveness {
                         seq: 0,
                         in_flight: Default::default(),
@@ -2943,6 +3199,88 @@ mod tests {
             "the cancelled child is torn down"
         );
         manager.detach("k1");
+    }
+
+    /// (ADR 0055 review, thread 3 — the crash salvage races the pump) A child
+    /// that writes a BURST of frames and then dies immediately must still arrive
+    /// at the parent with EVERY chunk and the REAL usage, because the pump
+    /// delivers `Exited` through the frame `broadcast` — strictly AFTER every
+    /// frame that preceded it — while `handle.exited()` is a SEPARATE `watch`
+    /// that the read task publishes as soon as `child.wait()` returns. Watching
+    /// the watch is what truncated the salvage: the drive reached
+    /// `failed_with_salvage` while the pump was still mid-queue, and the `Failed`
+    /// outcome is FROZEN, so the missing findings could never be repaired.
+    ///
+    /// The stall makes the race DETERMINISTIC rather than merely likely: the pump
+    /// parks on the child's FIRST frame, the child finishes writing its burst and
+    /// exits 137 during the park, so the `exited` watch is already set with the
+    /// whole burst still queued. Only the pump's own exit signal may end the drive
+    /// here — the bounded `handle.exited()` fallback is the SECOND arm, and if it
+    /// won (the pre-fix behaviour) the salvage would be truncated.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_crashed_childs_salvage_waits_for_the_pump_to_consume_every_frame() {
+        // A bound far longer than the test — only the exit may end this dispatch.
+        let gate = Arc::new(StallGate::new());
+        let (manager, events, sinks) = make_stalling_manager(
+            Duration::from_secs(30),
+            // The burst's FIRST frame (the child's first `SinkFrame`) is the
+            // parked one — everything after it stays in the ring.
+            |evt| matches!(evt, WorkerInboundEvent::SinkFrame { .. }),
+            gate.clone(),
+        );
+        let sink_events = register_sink(&sinks, "b1");
+        manager
+            .attach("b1", &test_env("b1", None))
+            .await
+            .expect("the parent attach completes");
+        dispatch_child_task(&manager, "b1", "__crash_burst__");
+        let outcome = subagent_result_outcome_after_ack(&events, "b1").await;
+        match outcome {
+            SubagentOutcome::Failed {
+                reason,
+                error,
+                output,
+                metrics,
+            } => {
+                assert_eq!(reason, SubagentFailureReason::Crashed);
+                assert_eq!(error, "subagent worker exited unexpectedly (code 137)");
+                // EVERY chunk, in order — the truncation this fix removes loses
+                // the tail, and the assertion names how much.
+                let mut expected = String::new();
+                for i in 0..40 {
+                    expected.push_str(&format!("chunk{i} "));
+                }
+                assert_eq!(
+                    output.trim(),
+                    expected.trim(),
+                    "the crashed child's COMPLETE output ({} chars salvaged of {} \
+                     expected — a shortfall means the drive read the capture \
+                     before the pump had consumed the queued frames)",
+                    output.trim().chars().count(),
+                    expected.trim().chars().count()
+                );
+                assert_eq!(
+                    (metrics.input_tokens, metrics.output_tokens),
+                    (777, 909),
+                    "the usage frame the child wrote LAST is in the salvage (a \
+                     too-early read reports 0 for work that really cost tokens)"
+                );
+            }
+            other => panic!("expected a salvaged `Failed` (crash), got {other:?}"),
+        }
+        assert!(
+            gate.fired(),
+            "the stall engaged — without it this test forced no ordering at all"
+        );
+        let closed = wait_for_closed(&sink_events).await;
+        assert_eq!(closed["reason"], "crashed");
+        assert_eq!(closed["metrics"]["outputTokens"], 909);
+        assert_eq!(
+            manager.test_drive_count(),
+            0,
+            "the crashed child is torn down"
+        );
+        manager.detach("b1");
     }
 
     /// A parent's `SubagentCancel` frame (the `IpcDispatcher`'s
