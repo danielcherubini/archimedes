@@ -542,7 +542,53 @@ export default memo(
   }) {
     switch (message.kind) {
       case "user": {
-        // The design reference: a plain row — no bubble, no avatar.
+        // THE USER'S TEXT RIDES A BAND on the composer's own fill
+        // (`bg-composer`): these were the only words in the transcript with no
+        // surface of their own, so they read as part of the column rather than
+        // as something the user put there. The TOKEN is deliberate, not
+        // `bg-input` and not a one-off hex — the palette gives `--color-composer`
+        // and `--color-input` the same value today and splits them on purpose so
+        // a theme can move one without dragging the other. The user's text is
+        // the composer's text coming back, so it wears the composer's token and
+        // matches the box it was typed in under every palette.
+        //
+        // FULL WIDTH, and that width is FREE: `MessageList`'s row wrapper is a
+        // `flex-col`, whose children stretch by default, so a plain block-level
+        // `div` spans the chat column and ends where the column's `p-4` ends.
+        // The earlier shrink-wrap — `inline-block`, `self-start`, `max-w-[85%]`
+        // — is all gone, and none of the three may creep back: each ONE
+        // silently re-narrows the band (`self-start` alone overrides the
+        // stretch; `inline-block` makes the box shrink-to-fit even in a flex
+        // column that is not). `rounded-xl` stays — a full-width band with
+        // square corners would read as a table row, not as the user's message.
+        // NO border (asked for). Measured in a real browser against the built
+        // CSS, sampling the rendered pixels — the fill against the chat column
+        // is 1.11 (Dracula), 1.12 (zai dark) and 1.08 (zai light, `#ffffff` on
+        // a `#f6f6f6` column). All three are faint boundaries — well under the
+        // 3:1 a non-text boundary ideally wants — and zai light is the weakest:
+        // there the band reads as a barely-there tint. That is the cost of the
+        // border going, and no existing token avoids it (`--color-card`,
+        // `--color-input` and `--color-header` are all the same `#ffffff` in
+        // that palette), so strengthening it further would need a border back or
+        // a new token. Accepted knowingly — do not "fix" it unasked.
+        //
+        // ONLY the text is in the band. The mention rows below stay where
+        // they were, on the column, because `SkillBlockCard` /
+        // `NamedResourceChip` paint `bg-input` — in the zai palettes that is the
+        // SAME colour as `bg-composer`, so inside the band each card's edge
+        // would vanish. The band is the user's sentence; the rows are
+        // annotations about it.
+        //
+        // `my-5` = 20px (this repo's `--spacing` is `.25rem`, root font-size is
+        // never overridden) separates the band from the transcript around it.
+        // The OBSERVED gaps are larger than 20px because a flex item's margins
+        // do not collapse, so they stack on the container's own rhythm —
+        // measured in a browser against the built CSS: 32px (20 + the `gap-3`
+        // 12px) between plain neighbours, 48px (20 + 12 + the breathing
+        // `mt-4` 16px) beside a tool row. That is the transcript saying "a new
+        // kind of row starts here" twice over; only the band gets these
+        // margins, every other row type keeps its existing rhythm.
+        //
         // `expandMentions` appends `<skill>` / `<agent>` / `<mcp>` blocks
         // after the user's text; render the blocks as a collapsible card
         // (skill — collapsed by default) or a compact soft-hint chip
@@ -552,8 +598,35 @@ export default memo(
         // `data:` URLs are safe here: the transcript is local.
         const { text, blocks } = splitMentionBlocks(message.text);
         return (
-          <div className="whitespace-pre-wrap [overflow-wrap:anywhere] text-ui-base text-foreground">
-            {text}
+          // THE UNIT carries the 20px, not the band. The mention rows and the
+          // image grid below are SIBLINGS of the band (annotations of this
+          // message, 8px under it via `mt-2`), so a `my-5` on the BAND would
+          // land between a sentence and its own annotations: measured, they sat
+          // 28px from the sentence they describe and 12px from the next row of
+          // the NEXT message — the association inverts. On the unit the band
+          // keeps its 8px neighbours (re-measured: 8px) and the whole user
+          // message stands apart.
+          // This div is a flex ITEM of `MessageList`'s row wrapper, so it
+          // starts a new formatting context and its children's `mt-2` stays
+          // INSIDE it rather than collapsing out — hence a text-only message
+          // begins exactly at the band (measured: unit.top == band.top, 32px
+          // under a plain neighbour = 20 + the container's `gap-3`), and a
+          // text-less one (images only) begins 20px down with its images a
+          // further 8px below that. The 20px also stacks on the breathing
+          // `mt-4` next to a tool row: 48px, measured.
+          <div className="my-5" data-testid="user-message">
+            {text === "" ? null : (
+              // An image-only message has no text: an empty band would be a
+              // padded stripe with nothing in it — a paint artefact, not a
+              // message. See the block comment above for the width, the fill
+              // and the no-border decision.
+              <div
+                data-testid="user-band"
+                className="whitespace-pre-wrap rounded-xl bg-composer px-3 py-2 [overflow-wrap:anywhere] text-ui-base text-foreground"
+              >
+                {text}
+              </div>
+            )}
             {blocks.length > 0 && (
               <div className="mt-2 flex flex-col gap-2">
                 {blocks.map((block, i) =>

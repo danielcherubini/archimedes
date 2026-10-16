@@ -130,12 +130,93 @@ describe("MessageBubble", () => {
 
   it("renders a plain user message (no images) without an <img>", () => {
     const message: Message = { kind: "user", text: "hello", at: 1 };
-    const { container } = render(<MessageBubble message={message} />);
+    render(<MessageBubble message={message} />);
     expect(screen.getByText("hello")).toBeTruthy();
     expect(screen.queryByRole("img")).toBeNull();
-    const userContainer = container.firstElementChild as HTMLElement;
+    // The wrapping lives on the BAND, not on the unit wrapper (`firstElementChild`
+    // is now the wrapper, so reaching by position would assert nothing).
+    const userContainer = screen.getByTestId("user-band");
     expect(userContainer.className).toContain("[overflow-wrap:anywhere]");
     expect(userContainer.className).not.toContain("break-words");
+  });
+
+  // --- The user's text sits on the composer's own surface (item 4) -----------
+
+  it("paints the user's text on the COMPOSER's fill, with NO shrink-wrap of its own", () => {
+    // WHAT MAKES IT FULL WIDTH is the ABSENCE of three classes, so that is
+    // what this asserts — jsdom has no layout engine, so measuring the band is
+    // not possible here. The width itself comes from `MessageList`'s `flex-col`
+    // row wrapper (children stretch), which the bubble must not override; the
+    // rendered band was checked in a real browser against the built CSS.
+    const message: Message = { kind: "user", text: "hello", at: 1 };
+    render(<MessageBubble message={message} />);
+    const band = screen.getByTestId("user-band");
+    // `bg-composer` and not `bg-input`: the palettes give them the same value
+    // TODAY and split them so a theme can move one without the other, and this
+    // surface must follow the box the text was typed in.
+    expect(band.className).toContain("bg-composer");
+    // `inline-block` shrink-wraps even inside a flex column, `self-start`
+    // overrides the stretch, `max-w-[85%]` caps the band — none of the three
+    // may creep back, because each ONE silently re-narrows it.
+    expect(band.className).not.toContain("inline-block");
+    expect(band.className).not.toContain("self-start");
+    expect(band.className).not.toContain("max-w");
+    // NO border: the user asked for the plain fill. The cost, MEASURED from
+    // rendered pixels in a real browser: fill vs chat column is 1.11 (Dracula),
+    // 1.12 (zai dark), 1.08 (zai light — `#ffffff` on a `#f6f6f6` column). All
+    // faint, zai light faintest. Accepted knowingly; do not "fix" it by
+    // re-adding a border without asking.
+    expect(band.className).not.toContain("border");
+    // The corners STAY: the user asked to lose the border and the width cap,
+    // not the shape — a full-width band with square corners would read as a
+    // table row rather than as their message.
+    expect(band.className).toContain("rounded-xl");
+  });
+
+  it("puts the 20px on the USER MESSAGE, not on the band", () => {
+    // `my-5` = 20px on this scale (`--spacing` is `.25rem`; the root font-size
+    // is never overridden, and `--ui-font-size` drives only the text tokens).
+    // The margin belongs on the UNIT because the mention rows and the image
+    // grid are SIBLINGS of the band — 8px below it via `mt-2` — so a margin on
+    // the band would push a sentence away from its OWN annotations while
+    // leaving those annotations 12px from the next message. Measured both ways
+    // in a browser: on the band, band→annotation = 28px and annotation→next =
+    // 12px (the association inverts); on the unit, band→annotation = 8px and
+    // the whole message stands 32px from a plain neighbour (48px beside a tool
+    // row, where the breathing `mt-4` stacks).
+    const message: Message = {
+      kind: "user",
+      text: expandMentions("ping @scout", {
+        skills: [],
+        agents: [makeAgent()],
+        mcpServers: [],
+      }),
+      at: 1,
+    };
+    render(<MessageBubble message={message} />);
+    expect(screen.getByTestId("user-message").className).toContain("my-5");
+    // The band itself carries NO margin, so the annotation row keeps its 8px.
+    expect(screen.getByTestId("user-band").className).not.toContain("my-");
+  });
+
+  it("keeps the mention rows OUT of the band (they paint bg-input, which would vanish in it)", () => {
+    const message: Message = {
+      kind: "user",
+      text: expandMentions("ping @scout", {
+        skills: [],
+        agents: [makeAgent()],
+        mcpServers: [],
+      }),
+      at: 1,
+    };
+    const { container } = render(<MessageBubble message={message} />);
+    const band = screen.getByTestId("user-band");
+    expect(screen.getByText("Agent")).toBeTruthy();
+    // The chip row is a SIBLING of the band, never a descendant: in the zai
+    // palettes `--color-input` == `--color-composer`, so a `bg-input` card
+    // inside the band would have an edge of exactly the band's colour.
+    expect(band.textContent).toBe("ping @scout");
+    expect(container.querySelector(".bg-input")!.closest('[data-testid="user-band"]')).toBeNull();
   });
 
   it("skips re-rendering when the message reference is unchanged (streaming perf)", () => {
