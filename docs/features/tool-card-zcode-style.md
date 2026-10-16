@@ -36,14 +36,20 @@ failure cue when any member failed; while any member is pending, the chip list
 is replaced by the latest member's chip. Expanded: the per-file cards indented
 under a left border.
 
-**Auto behaviors** (both edge-triggered and one-shot):
+**Auto behaviors**:
 
-- A single (non-grouped) `write`/`edit` card **auto-opens once** on the
-  `pending → finished` edge (the result is visible without clicking; the user's
-  close sticks — `hasAutoOpenedRef` guard). A `Changes` group starts open when
-  any member is already finished (so a standalone card that becomes a group
-  doesn't lose its visible state) and edge-auto-opens once if it formed while
-  all members were pending — with the same manual-close-sticks guard.
+- **Nothing opens itself.** Every tool card starts collapsed, whatever its tool
+  or status, and the `Changes` group is a `N files` row until clicked. (A single
+  `write`/`edit` card used to auto-open ONCE on the `pending → finished` edge —
+  ZCode's one-shot `autoOpen` — and the group mirrored it, starting open when
+  any member was already finished. A turn touching several files therefore
+  dumped several diffs into the transcript unasked and pushed everything below
+  them down. The header row already carries the same facts at a glance — verb +
+  path + `+N -M` — and the body is one click away, so the removal takes away
+  the surprise and not the information. `ToolCallCard` and `ChangesGroupCard`
+  now hold `open` as plain `useState(false)` mutated only by the header toggle,
+  which is why no one-shot `hasAutoOpenedRef` guard is needed any more: there
+  is no auto-open to outrun a manual click.)
 - A `SubagentSection` starts **open while running**, auto-collapses once on the
   `running → terminal` edge, starts collapsed when already finished, and
   re-opens on header click/Enter/Space (the header is `role="button"` +

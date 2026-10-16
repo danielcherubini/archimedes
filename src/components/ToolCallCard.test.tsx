@@ -321,7 +321,7 @@ describe("ToolCallCard (rendering)", () => {
     expect(spy).toHaveBeenCalledTimes(1);
     spy.mockRestore();
   });
-  it("auto-opens a single file edit once when it finishes", () => {
+  it("stays COLLAPSED when a file edit finishes (no auto-open)", () => {
     const input = {
       path: "/a/b/c.ts",
       edits: [{ oldText: "a", newText: "b" }],
@@ -329,10 +329,12 @@ describe("ToolCallCard (rendering)", () => {
     const { container, rerender } = render(
       <ToolCallCard title="edit" status="pending" rawInput={input} />,
     );
-    // Not visible yet while pending.
     expect(screen.queryByText("No output.")).toBeNull();
     expect(container.querySelector(".bg-panel")).toBeNull();
-    // Finishes → the card opens itself (one-shot auto-open).
+    // Finishes → and NOTHING opens. The card used to open itself once on this
+    // edge (ZCode's one-shot `autoOpen`), which meant a run of edits each
+    // dumped its diff into the transcript unasked; the user asked for the
+    // rows to stay rows.
     rerender(
       <ToolCallCard
         title="edit"
@@ -341,20 +343,31 @@ describe("ToolCallCard (rendering)", () => {
         rawOutput={{ content: [{ type: "text", text: "done" }] }}
       />,
     );
+    expect(container.querySelector(".bg-panel")).toBeNull();
+    // The content is not rendered while collapsed (output normalization stays
+    // deferred — the reason the body is conditional rather than hidden).
+    expect(screen.queryByText("done")).toBeNull();
+    // ONE click opens it, and the body is the same body auto-open used to show
+    // (so this change removes the SURPRISE, not the feature).
+    // NOTE the optional space: the header's accessible name is its inline
+    // spans concatenated WITHOUT a separator ("Editedc.ts+1-1").
+    fireEvent.click(screen.getByRole("button", { name: /^Edited\s?c\.ts/ }));
     expect(container.querySelector(".bg-panel")).not.toBeNull();
     expect(screen.getByText("done")).toBeTruthy();
-    // The user closes it → a later status change never re-opens it. The
-    // auto-opened body carries its own buttons (the file chip is one), so the
-    // toggle is picked by name. NOTE the optional space: the header's
-    // accessible name is its inline spans concatenated WITHOUT a separator
-    // ("Editedc.ts+1-1"), so an exact "Edited c.ts" phrase never matches.
-    fireEvent.click(screen.getByRole("button", { name: /^Edited\s?c\.ts/ }));
+  });
+  it("does not auto-open a completed WRITE either (the rule matched both)", () => {
+    // The removed auto-open keyed on `title === "write" || "edit"`, so a write
+    // needs its own guard: a future "restore the diff reveal" change could
+    // re-add one title and still pass the edit test above.
+    const { container, rerender } = render(
+      <ToolCallCard title="write" status="pending" rawInput={{ path: "/a/b/c.ts" }} />,
+    );
     rerender(
       <ToolCallCard
-        title="edit"
+        title="write"
         status="completed"
-        rawInput={input}
-        rawOutput={{ content: [{ type: "text", text: "done" }] }}
+        rawInput={{ path: "/a/b/c.ts" }}
+        rawOutput={{ content: [{ type: "text", text: "created" }] }}
       />,
     );
     expect(container.querySelector(".bg-panel")).toBeNull();

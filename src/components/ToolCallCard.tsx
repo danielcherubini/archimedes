@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import type { DiffRef, ToolCallUiStatus } from "../store/sessions";
 import {
   editChangeStat,
@@ -49,25 +49,14 @@ export default function ToolCallCard({
   // The Space folder to resolve a relative file path against (hoisted — a hook
   // may not sit inside the conditional JSX branch that renders the chip).
   const cwd = useSpaceCwd();
-  // Auto-open a single file edit once when it finishes (ZCode's
-  // one-shot `autoOpen`): the user sees the result without clicking;
-  // they can close it, and it never re-opens on later updates.
-  const prevStatusRef = useRef(status);
-  const hasAutoOpenedRef = useRef(false);
-  useEffect(() => {
-    const was = prevStatusRef.current;
-    prevStatusRef.current = status;
-    const isFileTool = title === "write" || title === "edit";
-    if (
-      isFileTool &&
-      was === "pending" &&
-      status !== "pending" &&
-      !hasAutoOpenedRef.current
-    ) {
-      hasAutoOpenedRef.current = true;
-      setOpen(true);
-    }
-  }, [status, title]);
+  // NO auto-open. A single `write`/`edit` card used to open ITSELF once on the
+  // `pending → finished` edge (ZCode's one-shot `autoOpen`, "the user sees the
+  // result without clicking"), and `ChangesGroupCard` mirrored it for a RUN of
+  // them — so a turn that touched several files left their diffs open on
+  // arrival and pushed everything below down, and the transcript read as a wall
+  // of patches rather than as a list of what happened. The header row carries
+  // the same information at a glance (verb + path + `+N -M`), and the body is
+  // one click away — the disclosure below is unchanged.
   const files = fileSummaries(title, rawInput);
   const stat = editChangeStat(title, rawInput);
   const range = readLineRange(rawInput);

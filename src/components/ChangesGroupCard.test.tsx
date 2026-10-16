@@ -173,7 +173,7 @@ describe("ChangesGroupCard", () => {
     expect(container.querySelector(".border-l")).not.toBeNull();
   });
 
-  it("starts open when it forms with an already-finished member", () => {
+  it("starts COLLAPSED even when every member is already finished", () => {
     const { container } = render(
       <ChangesGroupCard
         messages={[
@@ -182,46 +182,19 @@ describe("ChangesGroupCard", () => {
         ]}
       />,
     );
-    // All members finished on first render → the group starts OPEN — the
-    // member cards are visible without clicking.
-    expect(screen.getAllByText("Wrote").length).toBe(2);
-    expect(container.querySelector(".border-l")).not.toBeNull();
-  });
-
-  it("keeps a manual close when the group already started open", () => {
-    const input = {
-      t1: { path: "/a/b/c.ts" },
-      t2: { path: "/a/b/d.ts" },
-    };
-    const { container, rerender } = render(
-      <ChangesGroupCard
-        messages={[
-          tool("t1", "write", 1, "completed", input.t1),
-          tool("t2", "write", 2, "pending", input.t2),
-        ]}
-      />,
-    );
-    // One member already finished → the group starts OPEN — the member
-    // cards are visible without clicking.
-    expect(container.querySelector(".border-l")).not.toBeNull();
-    // The user closes it.
+    // The group used to start OPEN here so a standalone card that had
+    // auto-opened would not lose its visible state on being folded into a
+    // group. With the auto-open gone the premise is gone too: a finished run
+    // of edits is a `N files` row, and nothing else.
+    expect(container.querySelector(".border-l")).toBeNull();
+    expect(screen.queryByText("Wrote")).toBeNull();
+    // One click reveals the member cards.
     fireEvent.click(screen.getByRole("button", { name: /Changes/ }));
-    expect(container.querySelector(".border-l")).toBeNull();
-    // The pending member finishes (`anyPending` true → false edge) — a
-    // group that started open has already "auto-opened", so the edge
-    // effect must NOT re-open it: the manual close sticks.
-    rerender(
-      <ChangesGroupCard
-        messages={[
-          tool("t1", "write", 1, "completed", input.t1),
-          tool("t2", "write", 2, "completed", input.t2),
-        ]}
-      />,
-    );
-    expect(container.querySelector(".border-l")).toBeNull();
+    expect(container.querySelector(".border-l")).not.toBeNull();
+    expect(screen.getAllByText("Wrote").length).toBe(2);
   });
 
-  it("auto-opens once when the last pending member finishes", () => {
+  it("stays collapsed across the pending → finished edge", () => {
     const input = {
       t1: { path: "/a/b/c.ts" },
       t2: { path: "/a/b/d.ts" },
@@ -234,21 +207,23 @@ describe("ChangesGroupCard", () => {
         ]}
       />,
     );
-    // All pending → starts CLOSED.
-    expect(screen.queryByText("Writing")).toBeNull();
     expect(container.querySelector(".border-l")).toBeNull();
-    // The FIRST member finishes (others still pending) — `anyPending` is
-    // still true → still closed.
+    // The LAST member finishes (`anyPending` true → false) — the edge that
+    // used to auto-open the group once. Now nothing opens it at any point.
     rerender(
       <ChangesGroupCard
         messages={[
           tool("t1", "write", 1, "completed", input.t1),
-          tool("t2", "write", 2, "pending", input.t2),
+          tool("t2", "write", 2, "completed", input.t2),
         ]}
       />,
     );
     expect(container.querySelector(".border-l")).toBeNull();
-    // The LAST member finishes (`anyPending` → false) → opens once.
+    // And a manual open works afterwards and STICKS across re-renders (what
+    // the old `hasAutoOpenedRef` guard protected: the user's click, not the
+    // status edge, owns the state).
+    fireEvent.click(screen.getByRole("button", { name: /Changes/ }));
+    expect(container.querySelector(".border-l")).not.toBeNull();
     rerender(
       <ChangesGroupCard
         messages={[
@@ -258,8 +233,7 @@ describe("ChangesGroupCard", () => {
       />,
     );
     expect(container.querySelector(".border-l")).not.toBeNull();
-    expect(screen.getAllByText("Wrote").length).toBe(2);
-    // The user closes it → it never re-opens (one-shot).
+    // A manual close sticks too.
     fireEvent.click(screen.getByRole("button", { name: /Changes/ }));
     rerender(
       <ChangesGroupCard

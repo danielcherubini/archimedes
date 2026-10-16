@@ -27,7 +27,7 @@ import {
  * The `verb`/`Icon`/`summary`/`failure` derivations + the failure-tooltip
  * `copied` state live HERE (moved from `ToolCallCard`). The toggle is
  * delegated to the caller via `onToggle` (the `open` state stays in the
- * `ToolCallCard` — its auto-open logic owns it).
+ * `ToolCallCard`, which starts collapsed and changes it only on this toggle).
  */
 export function ToolCallCardHeader({
   title,
