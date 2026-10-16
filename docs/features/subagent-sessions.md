@@ -160,7 +160,7 @@ Four legitimately-silent states, each covered by a frame the pump already sees:
 | --- | --- |
 | inside a tool (`bash` / `edit` / an MCP call) | its `tool_execution_start` has no matching `tool_execution_end` — the id is outstanding |
 | parked on an `ask` | the `InteractiveRequest`'s id IS that tool-call id, open for the whole human wait |
-| parked on a **Permission prompt** or a sudo `:confirm` / `:password` prompt | `gate_tool` blocks INSIDE the announced call (the derived prompt suffix is stripped, so one id space) |
+| parked on a **Permission prompt** or a sudo `:confirm` / `:password` prompt | `gate_tool` blocks INSIDE the announced call; a prompt's `requestId` is recorded VERBATIM (`p1`, or the derived `t2:confirm`), which is the same announced call it blocks inside |
 | awaiting a nested **Subagent** | `tool_execution_start { tool_name: "subagent" }` would stay open across the whole nested run, whose frames the pump already relays into the parent's stream — DEFENSIVE today: the recursion guard (`subagent_enabled: false` on a child's `StartEnv`, pinned by `a_child_excludes_subagent_and_list_agents_tools`) means a child cannot dispatch one, so this row documents the invariant a future un-guard would need, not a reachable state |
 
 A gate is ALWAYS an outstanding id: `tool_execution_start` fires at ANNOUNCE time
@@ -180,9 +180,14 @@ so the exposure is a hung MCP tool call, and that bound belongs in the tool laye
 Dead bound; no value cuts a working child. A torn-down child closes its OWN gate
 cards (`finish_subagent` drains `open_gates` into child-id-keyed
 `interactive-request-close` frames; `App.tsx`'s listener clears both the
-`useInteractive` and `usePermissions` stores), and failure cards carry a
-structured `reason` (`unresponsive` / `crashed` / `cancelled` / `other`) instead
-of string-matched `error`.
+`useInteractive` and `usePermissions` stores). The drained ids are the gate's
+`requestId` VERBATIM — including the sudo flow's derived `:confirm` / `:password`
+forms, which is what the Client filed the card under — and a record is retired
+only by the ANSWER (`WorkerManager::note_gate_answered`, relayed from
+`respond_permission` / `respond_interactive_request`), never by the gate's
+`tool_execution_end`: a cancelled gate closes its tool call too, while its card
+stays on screen. Failure cards carry a structured `reason`
+(`unresponsive` / `crashed` / `cancelled` / `other`) instead of string-matched `error`.
 
 ## Trust inheritance
 

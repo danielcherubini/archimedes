@@ -1597,6 +1597,11 @@ impl SessionManager {
                         .unwrap_or_else(|p| p.into_inner())
                         .remove(request_id);
                 }
+                // (ADR 0055 review) The child-side twin: the answer clears the
+                // child's OWN outstanding-gate record, so `finish_subagent` does
+                // not retract a card the user already answered. A main session has
+                // no `drives` entry — a no-op there.
+                wm.note_gate_answered(session_id, request_id);
                 Ok(true)
             }
             Err(_) => Ok(false),
@@ -1639,6 +1644,11 @@ impl SessionManager {
                         .unwrap_or_else(|p| p.into_inner())
                         .remove(request_id);
                 }
+                // (ADR 0055 review) The child-side twin — THIS is the relay that
+                // answers a child's sudo sub-prompt, whose card the Client filed
+                // under the DERIVED id (`"{tool_call_id}:confirm"`): the exact id
+                // `note_liveness_gate` recorded, so the removal matches.
+                wm.note_gate_answered(session_id, request_id);
                 Ok(true)
             }
             Err(_) => Ok(false),

@@ -25,6 +25,11 @@
 //!   mirroring `permission.rs:135-158`); on a `PermissionResponse`
 //!   (ANY `outcome`) → the tool-execution events + `agent_settled`
 //!   (the round-trip test).
+//! - a `prompt` whose text is `"__sudo__"`: the TWO sudo sub-prompt
+//!   `InteractiveRequest` frames with the DERIVED ids (`t2:confirm` /
+//!   `t2:password` — the exact `requestId`s `sudo_run_flow` emits), then parks
+//!   forever with NO settle and NO answer (the ADR 0055 review's RAW-id input:
+//!   a torn-down child must close BOTH cards by those raw ids).
 //! - a `prompt` whose text is `"__slow__"`: sleeps 10 s before
 //!   settling (the **Dead bound** tests).
 //! - a `prompt` whose text is `"__subagent__"` /
@@ -629,6 +634,45 @@ fn main() {
                     // (the round-trip completes — the
                     // `PermissionOutcome` was delivered verbatim).
                     emit_tool_execution_and_settle(&mut stdout, &sid);
+                }
+                // The SUDO sub-prompt pair (ADR 0055 review — the RAW id
+                // contract): TWO `InteractiveRequest` frames carrying the
+                // DERIVED `"{tool_call_id}:confirm"` / `":password"`
+                // `requestId`s exactly as `sudo_run_flow` emits them, then
+                // park forever (NO settle, NO answer). The Supervisor must
+                // close BOTH cards by those RAW ids at teardown — the Client
+                // filed them under exactly those ids.
+                "__sudo__" => {
+                    for phase in ["confirm", "password"] {
+                        let request_id = format!("t2:{phase}");
+                        emit(
+                            &mut stdout,
+                            &Outbound::InteractiveRequest {
+                                id: request_id.clone(),
+                                payload: serde_json::json!({
+                                    "sessionId": sid,
+                                    "requestId": request_id,
+                                    "method": phase,
+                                    "source": "bash",
+                                    "toolCallId": serde_json::Value::Null,
+                                    "params": { "command": "apt-get update", "reason": "install" }
+                                }),
+                            },
+                        );
+                    }
+                    // Park UNANSWERED — the read swallows every frame, the
+                    // reap's `Close` included, so the reap needs its full
+                    // grace + `kill` (the same shape the `__permission__`
+                    // park has, minus the answer).
+                    loop {
+                        let Ok(n) = reader.read_line(&mut line) else {
+                            std::process::exit(1); // the Supervisor is gone.
+                        };
+                        if n == 0 {
+                            std::process::exit(1); // EOF — the Supervisor is gone.
+                        }
+                        line.clear();
+                    }
                 }
                 // The slow settle (the **Dead bound** tests — a 10 s
                 // sleep before settling; the **Dead bound** is

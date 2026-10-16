@@ -294,12 +294,17 @@ impl SubagentCapture {
 pub struct SubagentLiveness {
     pub seq: u64,
     pub in_flight: std::collections::HashSet<String>,
-    /// The subset of `in_flight` whose tool opened a **gate** the user has not
-    /// answered (`PermissionRequest` / `InteractiveRequest` seen, tool not yet
-    /// closed). Drained at teardown to close the child's own cards (ADR 0055) —
-    /// on `SubagentLiveness`, NOT a second `SubagentDrive` field, so the pump
+    /// The **gates** this child opened that the user has not answered
+    /// (`PermissionRequest` / `InteractiveRequest` seen, answer not yet relayed).
+    /// Drained at teardown to close the child's own cards (ADR 0055) — on
+    /// `SubagentLiveness`, NOT a second `SubagentDrive` field, so the pump
     /// reaches it through the one `feed_capture` borrow; two overlapping sets on
     /// the drive would drift.
+    ///
+    /// The ids are the gate's `requestId` VERBATIM (see `note_liveness_gate`),
+    /// which is NOT the same set as `in_flight`'s tool-call ids: the sudo flow's
+    /// sub-prompts carry the DERIVED `"{tool_call_id}:confirm"` / `":password"`
+    /// forms, and those are exactly the ids the Client stored its card under.
     pub open_gates: std::collections::HashSet<String>,
 }
 
@@ -330,10 +335,14 @@ fn note_liveness_event(liveness: &mut SubagentLiveness, event: &RpcEvent) {
         }
         RpcEvent::tool_execution_end { tool_call_id, .. } => {
             liveness.in_flight.remove(tool_call_id);
-            // A gate the user ANSWERED closes its own tool call, so the same
-            // id removes it here — which is exactly why an answered gate is
-            // ABSENT at teardown and needs no separate drain (ADR 0055).
-            liveness.open_gates.remove(tool_call_id);
+            // NO `open_gates` removal here (ADR 0055 review): a tool close is
+            // NOT an answer. On Stop the child's permission gate resolves
+            // `Cancelled`, the loop FABRICATES a "permission denied" tool
+            // result, and the matching `tool_execution_end` arrives for a card
+            // that was never closed — removing the gate here would decide, by a
+            // race between this pump arm and `finish_subagent`'s snapshot,
+            // whether the user's dialog leaks forever. Clearing happens ONLY at
+            // the true answer moment (`WorkerManager::note_gate_answered`).
         }
         _ => {}
     }
@@ -341,25 +350,24 @@ fn note_liveness_event(liveness: &mut SubagentLiveness, event: &RpcEvent) {
 
 /// Record one unanswered **gate** (ADR 0055): the child's
 /// `PermissionRequest` / `InteractiveRequest` frame announces a gate the user
-/// has not answered, and its id IS the `tool_call_id` of the tool the child is
-/// parked inside (`gate_tool` passes `&tc.id` to `native_permission_gate`; the
-/// `ask` flow's interactive `requestId` is the `toolCallId` too) — ONE id space,
-/// which is what lets `tool_execution_end` clear it.
+/// has not answered, so teardown must retract the card the Client rendered.
 ///
-/// The sudo sub-prompts are the exception: their `requestId`s are the DERIVED
-/// `"{request_id}:confirm"` / `":password"` forms, so the suffix is stripped
-/// here and the set holds tool-call ids only (both sub-prompts of one sudo tool
-/// are therefore ONE gate — correct, since the tool is one call).
+/// The id is recorded EXACTLY as it arrived, because `finish_subagent` emits
+/// these ids VERBATIM as `interactive-request-close` `requestId`s and the
+/// Client's `removeRequest` / `removePrompt` (`src/store/interactive.ts`) filter
+/// by an EXACT `requestId` match. A derived id is what the Client stored under:
+/// `sudo_run_flow` emits `requestId: "{tool_call_id}:confirm"` / `":password"`
+/// (`src/agent/interactive/mod.rs`), so stripping the suffix here would record
+/// an id no card was ever filed under — the sudo dialogs of a reaped child would
+/// survive forever. The permission gate's `requestId` IS the bare `tool_call_id`
+/// (`gate_tool` passes `&tc.id` to `native_permission_gate`), so it needs no
+/// transformation at all: one id space, one verbatim rule.
 ///
-/// Touches ONLY `open_gates`: the gate's tool call was already announced, so
-/// `in_flight` covers it, and the frame-count contract stays owned by the
-/// pump's `SinkFrame` / `Event` arms.
+/// Touches ONLY `open_gates`: the gate's tool call is already covered by
+/// `in_flight`, and the frame-count contract stays owned by the pump's
+/// `SinkFrame` / `Event` arms.
 fn note_liveness_gate(liveness: &mut SubagentLiveness, request_id: &str) {
-    let tool_call_id = request_id
-        .strip_suffix(":confirm")
-        .or_else(|| request_id.strip_suffix(":password"))
-        .unwrap_or(request_id);
-    liveness.open_gates.insert(tool_call_id.to_string());
+    liveness.open_gates.insert(request_id.to_string());
 }
 
 /// The in-flight subagent dispatch's bookkeeping (the `drives` map
@@ -775,6 +783,30 @@ impl WorkerManager {
             .unwrap_or_else(|p| p.into_inner())
             .get(session_id)
             .and_then(|d| d.handle.clone())
+    }
+
+    /// The TRUE answer moment for a **gate** (ADR 0055 review): the Supervisor's
+    /// `respond_permission` / `respond_interactive_request` relay the user's
+    /// answer to the session's Worker, and this clears the child's record of it
+    /// so teardown stops re-emitting a close for a card the user already
+    /// answered. The `session_id` is the CHILD id for a child gate (the gate
+    /// payload is stored child-keyed and the Client answers with that same
+    /// `sessionId`).
+    ///
+    /// A MISSING drive is a NO-OP — a main session has no `drives` entry at all,
+    /// and a child whose dispatch is already gone has nothing left to tear down.
+    ///
+    /// This is the ONLY place `open_gates` is cleared: inferring the answer from
+    /// the gate's `tool_execution_end` would be wrong, because a cancelled gate
+    /// also closes its tool call (the loop fabricates the "permission denied"
+    /// result) while the card stays on screen.
+    pub fn note_gate_answered(&self, session_id: &str, request_id: &str) {
+        let drives = self.state.drives.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(drive) = drives.get(session_id) {
+            drive.liveness_tx.send_modify(|l| {
+                l.open_gates.remove(request_id);
+            });
+        }
     }
 }
 
@@ -1630,9 +1662,11 @@ async fn finish_subagent(
 ) {
     // The child's own UNANSWERED gates (ADR 0055): drained BEFORE the
     // `subagent-closed` emission, from the `drives` entry — which is still
-    // valid here, because the removal below happens AFTER the emissions. A
-    // gate the user ANSWERED is already gone (`tool_execution_end` cleared it
-    // through the shared tool-call-id space), so only parked gates are closed.
+    // valid here, because the removal below happens AFTER the emissions. A gate
+    // the user ANSWERED is already gone (`WorkerManager::note_gate_answered`
+    // cleared it at the relay), so only parked gates are closed — and a gate the
+    // user never answered is closed HERE even though its tool call came to a
+    // close (a cancelled gate fabricates one).
     //
     // Read here and NOT snapshotted in `drive_subagent`: a gate can open
     // between that snapshot and this teardown, and this is the path that must
@@ -1827,8 +1861,9 @@ mod tests {
     use crate::agent::subagent::{LaunchConfig, SubagentFailureReason, SubagentOutcome};
     use crate::agent::worker::client::{WorkerError, WorkerHandle, WorkerInboundEvent};
     use crate::agent::worker::manager::{
-        feed_capture, note_liveness_event, note_liveness_frame, note_liveness_gate,
-        SubagentCapture, SubagentDrive, SubagentLiveness, WorkerFactory, WorkerManager,
+        feed_capture, finish_subagent, note_liveness_event, note_liveness_frame,
+        note_liveness_gate, SubagentCapture, SubagentDrive, SubagentLiveness, SubagentOutcomeSink,
+        WorkerFactory, WorkerManager,
     };
     use crate::agent::worker::protocol::{StartEnv, StartMode, SubagentDispatchWire};
 
@@ -2772,20 +2807,24 @@ mod tests {
         );
     }
 
-    /// (ADR 0055 — a torn-down child closes its own cards) The pump records
-    /// an unanswered **gate** as an outstanding gate, and the ANSWER of a gate
-    /// clears it through the tool boundary that the answer closes.
+    /// (ADR 0055 — a torn-down child closes its own cards) The pump records an
+    /// unanswered **gate** VERBATIM, and ONLY the answer clears it.
     ///
-    /// The second half is the id-space invariant the whole feature rests on:
-    /// `gate_tool` passes `&tc.id` to `native_permission_gate` and the `ask`
-    /// flow's interactive `requestId` is the `toolCallId` too, so the gate's id
-    /// and the `tool_execution_end`'s `tool_call_id` are the SAME string —
-    /// which is why an answered gate is absent at teardown with no drain logic.
-    /// The sudo sub-prompts are the exception: they are the DERIVED
-    /// `"{request_id}:confirm"` / `":password"` forms, so the suffix is stripped
-    /// before recording and the set holds tool-call ids only.
+    /// Two contracts the ADR 0055 review pinned, both about ids the Client can
+    /// actually match:
+    /// - `open_gates` holds the `requestId` exactly as the frame carried it,
+    ///   because `finish_subagent` emits it verbatim as a close `requestId` and
+    ///   `removeRequest` / `removePrompt` filter by an EXACT match. The sudo
+    ///   sub-prompts are filed under the DERIVED `"{tool_call_id}:confirm"` /
+    ///   `":password"` ids, so those two cards are TWO records — stripping made
+    ///   both closes unmatchable and the dialogs survived a reap forever.
+    /// - A `tool_execution_end` is a TOOL close, not an answer: a cancelled gate
+    ///   closes its tool call through the loop's fabricated "permission denied"
+    ///   result while the card stays on screen, so the removal the old code did
+    ///   here turned the leak into a race. `note_gate_answered` is the one
+    ///   clearing point.
     #[test]
-    fn an_unanswered_gate_is_recorded_and_an_answered_one_is_cleared() {
+    fn an_unanswered_gate_is_recorded_verbatim_and_only_the_answer_clears_it() {
         let (manager, _crashes, _events, _sinks) = make_manager(None);
         seed_drive(&manager, "gate1");
 
@@ -2802,8 +2841,9 @@ mod tests {
             "an unanswered gate is outstanding"
         );
 
-        // The user answers → the tool call closes (`tool_execution_end` with
-        // the SAME id — the one-id-space invariant).
+        // The tool call closes WITHOUT the user ever answering (the cancel path:
+        // the gate resolves `Cancelled` and the loop fabricates the result). The
+        // card is still on screen → the record SURVIVES, so teardown closes it.
         let end = tool_end("tc1");
         feed_capture(&manager.state, "gate1", |capture, liveness| {
             note_liveness_event(liveness, &end);
@@ -2812,11 +2852,28 @@ mod tests {
         });
         assert_eq!(
             open_gates_view(&manager, "gate1"),
-            Vec::<String>::new(),
-            "an ANSWERED gate is absent at teardown (the tool close clears it)"
+            vec!["tc1".to_string()],
+            "a tool close is NOT an answer — the unanswered gate stays \
+             outstanding so its card gets closed at teardown"
+        );
+        assert!(
+            liveness_view(&manager, "gate1").1.is_empty(),
+            "`in_flight` still tracks the TOOL boundary (the silence clock stays \
+             disarmed by a fabricated close): {:?}",
+            liveness_view(&manager, "gate1")
         );
 
-        // A sudo sub-prompt records the BARE tool-call id.
+        // The answer is what clears it.
+        manager.note_gate_answered("gate1", "tc1");
+        assert_eq!(
+            open_gates_view(&manager, "gate1"),
+            Vec::<String>::new(),
+            "the relayed answer retires the record (teardown must not retract a \
+             card the user already answered)"
+        );
+
+        // A sudo sub-prompt records the RAW derived id — one record per CARD,
+        // not per tool, because the Client filed two cards under two ids.
         feed_capture(&manager.state, "gate1", |_capture, liveness| {
             note_liveness_gate(liveness, "tc2:confirm");
             note_liveness_gate(liveness, "tc2:password");
@@ -2824,9 +2881,11 @@ mod tests {
         });
         assert_eq!(
             open_gates_view(&manager, "gate1"),
-            vec!["tc2".to_string()],
-            "the derived `:confirm` / `:password` suffixes are stripped, so the \
-             set holds tool-call ids only (both sub-prompts of one tool are ONE gate)"
+            vec!["tc2:confirm".to_string(), "tc2:password".to_string()],
+            "the gate ids are recorded EXACTLY as they arrived — `finish_subagent` \
+             emits them verbatim as close `requestId`s and the Client's \
+             `removeRequest` / `removePrompt` match on an EXACT id, so a stripped \
+             id would close nothing"
         );
     }
 
@@ -3464,14 +3523,134 @@ mod tests {
         manager.detach("g1");
     }
 
-    /// The NEGATIVE half: a child that ANSWERED its gate emits NO
-    /// `interactive-request-close` at teardown. The answer closes the tool call
-    /// (`tool_execution_end` carrying the SAME id — `gate_tool` passes
-    /// `&tc.id`), and that removal is what makes the gate absent, so a
-    /// completed child's card — which the user already answered — is never
-    /// retracted.
+    /// (ADR 0055 review, thread a — the RAW id contract, end to end) A child
+    /// torn down while parked on the sudo sub-prompts closes BOTH cards by their
+    /// RAW `requestId`s (`"{tool_call_id}:confirm"` / `":password"`), keyed to the
+    /// CHILD session. The Client stored each card under exactly that derived id
+    /// (`sudo_run_flow` emits `requestId: "{tc}:confirm"` / `":password"`;
+    /// `removeRequest` / `removePrompt` in `src/store/interactive.ts` filter on an
+    /// EXACT `requestId`), so the pre-fix stripping recorded `t2` — a close that
+    /// matched NOTHING, leaving both sudo dialogs on screen forever after a reap.
     #[tokio::test]
-    async fn a_child_that_answered_its_gate_emits_no_close() {
+    async fn a_torn_down_child_closes_the_raw_sudo_card_ids() {
+        let (manager, _crashes, _events, sinks) = make_manager(Some(Duration::from_secs(30)));
+        let sink_events = register_sink(&sinks, "s1");
+        manager
+            .attach("s1", &test_env("s1", None))
+            .await
+            .expect("the parent attach completes");
+        dispatch_child_task_with_id(&manager, "s1", "__sudo__", "sub1");
+        let child_id = wait_for_child_id(&sink_events).await;
+        // BOTH raw ids recorded (the pump records the frame `id` verbatim).
+        wait_for_open_gate(&manager, &child_id, "t2:confirm").await;
+        wait_for_open_gate(&manager, &child_id, "t2:password").await;
+
+        // Teardown: the parent aborts the turn → the child is cancelled.
+        manager
+            .handle_for("s1")
+            .expect("the parent handle is reachable")
+            .send_prompt("__cancel__", &[])
+            .expect("the cancel prompt encodes");
+        let closed = wait_for_closed(&sink_events).await;
+        assert_eq!(closed["status"], "failed");
+
+        let gates = emitted(&sink_events, "interactive-request-close");
+        let mut ids: Vec<String> = gates
+            .iter()
+            .map(|p| p["requestId"].as_str().unwrap_or_default().to_string())
+            .collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["t2:confirm".to_string(), "t2:password".to_string()],
+            "BOTH sudo cards are closed by their RAW derived ids — one record per \
+             card, since the Client filed two cards under two ids: {gates:?}"
+        );
+        for payload in &gates {
+            assert_eq!(
+                payload["sessionId"], child_id,
+                "keyed to the CHILD id (where the Client stored the card): {payload}"
+            );
+        }
+        manager.detach("s1");
+    }
+
+    /// (ADR 0055 review, thread b — the ordering hole) A gate whose TOOL closed
+    /// without an answer is STILL closed at teardown. This test FAILS on the old
+    /// code, which removed `open_gates` entries on `tool_execution_end`: on Stop
+    /// the child's permission gate resolves `Cancelled`, the loop FABRICATES a
+    /// "permission denied" tool result, and that `tool_execution_end` erased the
+    /// record — so whether the user's dialog leaked was decided by a race between
+    /// the pump arm and `finish_subagent`'s snapshot. "Tool closed" ≠ "answered".
+    ///
+    /// The order is FORCED through the pump's own feed (the same
+    /// `note_liveness_event` the pump runs), and the teardown is driven directly,
+    /// so no scheduler interleaving can hide the regression.
+    #[tokio::test]
+    async fn a_gate_whose_tool_closed_without_an_answer_is_still_closed() {
+        let (manager, _crashes, _events, sinks) = make_manager(Some(Duration::from_secs(30)));
+        let sink_events = register_sink(&sinks, "cancel-parent");
+        seed_drive(&manager, "cancel-child");
+        // Record the gate, then let the pump see the FABRICATED tool close for
+        // the same id (the cancel path's "permission denied" result).
+        feed_capture(&manager.state, "cancel-child", |_c, liveness| {
+            note_liveness_gate(liveness, "p9");
+            false
+        });
+        let end = tool_end("p9");
+        feed_capture(&manager.state, "cancel-child", |capture, liveness| {
+            note_liveness_event(liveness, &end);
+            capture.observe_event(&end);
+            false
+        });
+
+        // Teardown runs THROUGH the real emitter, with the drive still in place.
+        let wire = SubagentDispatchWire {
+            id: "live-dispatch".to_string(),
+            parent_session_id: "cancel-parent".to_string(),
+            parent_cwd: "/tmp/space".to_string(),
+            parent_enabled_tools: vec!["bash".to_string()],
+            agent_name: "tester".to_string(),
+            launch: crate::agent::subagent::LaunchConfig::default(),
+            task: "the parked task".to_string(),
+            model_key: "fake/m1".to_string(),
+        };
+        finish_subagent(
+            &manager.state,
+            "cancel-child",
+            "cancel-parent",
+            &wire,
+            SubagentOutcome::Failed {
+                reason: SubagentFailureReason::Cancelled,
+                error: "cancelled".to_string(),
+                output: String::new(),
+                metrics: Default::default(),
+            },
+            &SubagentOutcomeSink::Requester,
+        )
+        .await;
+
+        let gates = emitted(&sink_events, "interactive-request-close");
+        assert_eq!(
+            gates.len(),
+            1,
+            "the unanswered gate survives its own tool close and is closed: {gates:?}"
+        );
+        assert_eq!(gates[0]["requestId"], "p9");
+        assert_eq!(gates[0]["sessionId"], "cancel-child");
+    }
+
+    /// (ADR 0055 review) The ANSWERED half: an answer relayed through the
+    /// Supervisor retires the record (`note_gate_answered`), so teardown emits NO
+    /// close for a card the user already answered. The pre-fix contract — "no
+    /// close because the tool close cleared it" — was UNSOUND: it inferred the
+    /// user's answer from a tool boundary that a CANCELLED gate also produces, so
+    /// the same logic silently un-closed unanswered cards. Clearing now happens at
+    /// the true answer moment; and a duplicate close would in any case be a
+    /// proven no-op (the Client's listener calls both stores' exact-id `remove`
+    /// fns, which filter — removing an absent id changes nothing).
+    #[tokio::test]
+    async fn an_answered_gates_card_is_not_closed_again_at_teardown() {
         let (manager, _crashes, _events, sinks) = make_manager(Some(Duration::from_secs(30)));
         let sink_events = register_sink(&sinks, "g2");
         manager
@@ -3494,6 +3673,9 @@ mod tests {
                 },
             )
             .expect("the permission response encodes");
+        // The CHILD-side half of the answer relay — what
+        // `SessionManager::respond_permission` does next to the relay above.
+        manager.note_gate_answered(&child_id, "p1");
 
         // The child then closes the tool call and settles → `Completed`.
         let closed = wait_for_closed(&sink_events).await;
@@ -3508,7 +3690,7 @@ mod tests {
         assert_eq!(
             emitted(&sink_events, "interactive-request-close"),
             Vec::<Value>::new(),
-            "an ANSWERED gate is absent at teardown — nothing may retract a \
+            "the ANSWERED gate is absent at teardown — nothing may retract a \
              card the user already answered"
         );
         manager.detach("g2");
