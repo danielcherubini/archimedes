@@ -79,6 +79,53 @@ impl SessionManager {
                 }
                 self.track_modal(session_id, &id);
             }
+            WorkerInboundEvent::FetchRenderRequest { id, payload } => {
+                // Internal machine call (ADR 0058 Task 7): do NOT call track_modal!
+                let session_id = payload
+                    .get("sessionId")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(session_id)
+                    .to_string();
+                let wm = self.worker_manager.get().cloned();
+                let app = self.app_handle.get().cloned();
+                tokio::spawn(async move {
+                    let reply_value = match app {
+                        Some(app_handle) => {
+                            let req = crate::agent::web::render::RenderRequest {
+                                session_id: session_id.clone(),
+                                request_id: id.clone(),
+                                url: payload
+                                    .get("url")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                timeout_ms: payload
+                                    .get("timeoutMs")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(30_000),
+                            };
+                            let reply = crate::agent::web::render::render(&app_handle, req).await;
+                            if let Some(err) = reply.error {
+                                json!({ "error": err })
+                            } else {
+                                json!({
+                                    "html": reply.html.unwrap_or_default(),
+                                    "status": reply.status,
+                                    "finalUrl": reply.final_url.unwrap_or_default(),
+                                })
+                            }
+                        }
+                        None => {
+                            json!({ "error": "Supervisor AppHandle not available" })
+                        }
+                    };
+                    if let Some(wm) = wm {
+                        if let Some(handle) = wm.handle_for(&session_id) {
+                            let _ = handle.send_fetch_render_response(&id, &reply_value);
+                        }
+                    }
+                });
+            }
             WorkerInboundEvent::Exited(code) => {
                 // EXPECTED (a `detach` / `reap_all` was in flight) → the
                 // `session-closed` cleanup. UNEXPECTED (a crash — the `WorkerManager`
@@ -420,5 +467,45 @@ mod tests {
         // The parent's session must still be live and pending turn untouched!
         assert!(manager.live.lock().unwrap().contains_key(sid));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn fetch_render_request_does_not_track_modal() {
+        let manager = SessionManager::new(PathBuf::from("/tmp"));
+        let sid = "main-session";
+        manager.live.lock().unwrap().insert(
+            sid.to_string(),
+            LiveWorkerSession {
+                cwd: PathBuf::from("/tmp"),
+                close_kind: Arc::new(StdMutex::new(None)),
+                pending_turn: Arc::new(StdMutex::new(None)),
+                cancel_requested: Arc::new(StdMutex::new(false)),
+                pending_modal_ids: StdMutex::new(HashSet::new()),
+            },
+        );
+
+        manager.route_event(
+            sid,
+            false,
+            WorkerInboundEvent::FetchRenderRequest {
+                id: "render-1".to_string(),
+                payload: serde_json::json!({
+                    "sessionId": sid,
+                    "requestId": "render-1",
+                    "url": "https://example.com",
+                    "timeoutMs": 5000,
+                }),
+            },
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let live = manager.live.lock().unwrap();
+        let session = live.get(sid).unwrap();
+        let modals = session.pending_modal_ids.lock().unwrap();
+        assert!(
+            !modals.contains("render-1"),
+            "fetch render request must NOT be tracked as a user modal"
+        );
     }
 }

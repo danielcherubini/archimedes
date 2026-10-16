@@ -11,4 +11,21 @@ pub mod config;
 pub mod extract;
 pub mod net;
 pub mod providers;
+pub mod render;
 pub mod tools;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderedPage {
+    pub html: String,
+    pub status: u16,
+    pub final_url: String,
+}
+
+pub trait RenderRequester: Send + Sync {
+    fn request_render(
+        &self,
+        url: &str,
+        timeout_ms: u64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RenderedPage, String>> + Send>>;
+}

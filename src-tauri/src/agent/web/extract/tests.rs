@@ -22,6 +22,7 @@ fn test_ctx() -> ToolCtx {
         },
         protected: vec![],
         web: crate::agent::web::config::WebConfig::default(),
+        render_requester: None,
     }
 }
 
@@ -200,4 +201,64 @@ async fn test_extract_pdf_detection_wiremock() {
     assert_eq!(doc.extractor, "pdf");
     assert_eq!(doc.title, "PDF Document");
     assert!(doc.markdown.contains("Hello PDF World"));
+}
+
+#[test]
+fn test_looks_blocked_status_codes() {
+    use super::ExtractedDoc;
+
+    let doc_403 = ExtractedDoc {
+        title: "Forbidden".into(),
+        url: "https://example.com".into(),
+        markdown: "word ".repeat(100),
+        word_count: 100,
+        status: 403,
+        extractor: "article",
+    };
+    assert!(super::looks_blocked(&doc_403));
+
+    let doc_429 = ExtractedDoc {
+        title: "Too Many Requests".into(),
+        url: "https://example.com".into(),
+        markdown: "word ".repeat(100),
+        word_count: 100,
+        status: 429,
+        extractor: "article",
+    };
+    assert!(super::looks_blocked(&doc_429));
+
+    let doc_503 = ExtractedDoc {
+        title: "Service Unavailable".into(),
+        url: "https://example.com".into(),
+        markdown: "word ".repeat(100),
+        word_count: 100,
+        status: 503,
+        extractor: "article",
+    };
+    assert!(super::looks_blocked(&doc_503));
+}
+
+#[test]
+fn test_looks_blocked_short_content() {
+    use super::ExtractedDoc;
+
+    let doc_short = ExtractedDoc {
+        title: "Empty Shell".into(),
+        url: "https://example.com".into(),
+        markdown: "Please enable JavaScript to view this site.".into(),
+        word_count: 7,
+        status: 200,
+        extractor: "article",
+    };
+    assert!(super::looks_blocked(&doc_short));
+
+    let doc_long = ExtractedDoc {
+        title: "Full Article".into(),
+        url: "https://example.com".into(),
+        markdown: "word ".repeat(85),
+        word_count: 85,
+        status: 200,
+        extractor: "article",
+    };
+    assert!(!super::looks_blocked(&doc_long));
 }

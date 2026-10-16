@@ -103,3 +103,8 @@ fn extract_raw_title(html: &str) -> Option<String> {
         Some(title)
     }
 }
+
+/// Check if an extracted document looks blocked or empty (needs headless render escalation).
+pub fn looks_blocked(doc: &ExtractedDoc) -> bool {
+    matches!(doc.status, 403 | 429 | 503) || doc.markdown.split_whitespace().count() < 80
+}

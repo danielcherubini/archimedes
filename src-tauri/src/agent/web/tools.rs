@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 
 use crate::agent::tools::exec::{ContentBlock, ToolCtx, ToolResult};
 use crate::agent::web::cache::{global_cache, StoredKind};
+use crate::agent::web::extract::Mode;
 use crate::agent::web::providers::registry::{all_providers, execute_search_with_providers};
 use crate::agent::web::providers::types::{SearchOpts, SearchProvider};
 
@@ -179,7 +180,30 @@ pub async fn exec_fetch_content(ctx: &ToolCtx, params: &Value) -> ToolResult {
         .unwrap_or(20_000);
 
     match crate::agent::web::extract::extract(url, mode, ctx).await {
-        Ok(doc) => {
+        Ok(mut doc) => {
+            let mut renderer_note: Option<String> = None;
+            let mut renderer_used: Option<&'static str> = None;
+
+            if mode != Mode::Raw && crate::agent::web::extract::looks_blocked(&doc) {
+                if let Some(requester) = &ctx.render_requester {
+                    match requester.request_render(url, 30_000).await {
+                        Ok(rendered) => {
+                            let mut rendered_doc = crate::agent::web::extract::article::extract(
+                                &rendered.html,
+                                &rendered.final_url,
+                                rendered.status,
+                            );
+                            rendered_doc.extractor = "webview";
+                            doc = rendered_doc;
+                            renderer_used = Some("webview");
+                        }
+                        Err(err) => {
+                            renderer_note = Some(format!("render failed: {err}"));
+                        }
+                    }
+                }
+            }
+
             let response_id = global_cache().store(
                 StoredKind::Fetch,
                 doc.markdown.clone(),
@@ -205,17 +229,25 @@ pub async fn exec_fetch_content(ctx: &ToolCtx, params: &Value) -> ToolResult {
                 (doc.markdown.clone(), false)
             };
 
+            let mut details = json!({
+                "responseId": response_id,
+                "url": doc.url,
+                "title": doc.title,
+                "wordCount": doc.word_count,
+                "status": doc.status,
+                "extractor": doc.extractor,
+                "truncated": truncated,
+            });
+            if let Some(r) = renderer_used {
+                details["renderer"] = json!(r);
+            }
+            if let Some(note) = renderer_note {
+                details["rendererNote"] = json!(note);
+            }
+
             ToolResult {
                 content: vec![ContentBlock::Text { text: head_text }],
-                details: Some(json!({
-                    "responseId": response_id,
-                    "url": doc.url,
-                    "title": doc.title,
-                    "wordCount": doc.word_count,
-                    "status": doc.status,
-                    "extractor": doc.extractor,
-                    "truncated": truncated,
-                })),
+                details: Some(details),
                 is_error: false,
             }
         }
@@ -387,6 +419,7 @@ mod tests {
             },
             protected: vec![],
             web: crate::agent::web::config::WebConfig::default(),
+            render_requester: None,
         }
     }
 
@@ -706,5 +739,142 @@ mod tests {
             }
             _ => panic!("expected text block"),
         }
+    }
+
+    struct MockRenderRequester {
+        reply: Result<crate::agent::web::RenderedPage, String>,
+    }
+
+    impl crate::agent::web::RenderRequester for MockRenderRequester {
+        fn request_render(
+            &self,
+            _url: &str,
+            _timeout_ms: u64,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<crate::agent::web::RenderedPage, String>>
+                    + Send,
+            >,
+        > {
+            let reply = self.reply.clone();
+            Box::pin(async move { reply })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_exec_fetch_content_escalates_to_rendered_fetch_when_blocked() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/blocked"))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_string("<html><body>Forbidden</body></html>"),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/blocked", server.uri());
+        let mut ctx = test_ctx();
+        let rendered_html = format!(
+            "<html><head><title>Rendered Page</title></head><body><article><p>{}</p></article></body></html>",
+            "word ".repeat(90)
+        );
+        ctx.render_requester = Some(Arc::new(MockRenderRequester {
+            reply: Ok(crate::agent::web::RenderedPage {
+                html: rendered_html,
+                status: 200,
+                final_url: url.clone(),
+            }),
+        }));
+
+        let res = exec_fetch_content(
+            &ctx,
+            &json!({
+                "url": url,
+            }),
+        )
+        .await;
+
+        assert!(!res.is_error);
+        let details = res.details.expect("details");
+        assert_eq!(details["extractor"], "webview");
+        assert_eq!(details["renderer"], "webview");
+    }
+
+    #[tokio::test]
+    async fn test_exec_fetch_content_raw_mode_does_not_escalate() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/blocked-raw"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Forbidden raw"))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/blocked-raw", server.uri());
+        let mut ctx = test_ctx();
+        ctx.render_requester = Some(Arc::new(MockRenderRequester {
+            reply: Ok(crate::agent::web::RenderedPage {
+                html: "<html><body>Rendered</body></html>".into(),
+                status: 200,
+                final_url: url.clone(),
+            }),
+        }));
+
+        let res = exec_fetch_content(
+            &ctx,
+            &json!({
+                "url": url,
+                "mode": "raw",
+            }),
+        )
+        .await;
+
+        assert!(!res.is_error);
+        let details = res.details.expect("details");
+        assert_eq!(details["extractor"], "raw");
+        assert!(details.get("renderer").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_exec_fetch_content_escalation_failure_falls_back_to_plain_doc() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/short"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("<html><body>Short shell</body></html>"),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/short", server.uri());
+        let mut ctx = test_ctx();
+        ctx.render_requester = Some(Arc::new(MockRenderRequester {
+            reply: Err("connection timed out".into()),
+        }));
+
+        let res = exec_fetch_content(
+            &ctx,
+            &json!({
+                "url": url,
+            }),
+        )
+        .await;
+
+        assert!(!res.is_error);
+        let details = res.details.expect("details");
+        assert_eq!(details["extractor"], "article");
+        assert_eq!(
+            details["rendererNote"],
+            "render failed: connection timed out"
+        );
+        assert!(details.get("renderer").is_none());
     }
 }

@@ -902,6 +902,7 @@ mod tests {
             },
             protected: Vec::new(),
             web: Default::default(),
+            render_requester: None,
         }
     }
 

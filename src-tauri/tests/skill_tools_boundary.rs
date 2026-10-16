@@ -115,6 +115,7 @@ fn ctx(cwd: &Path, roots: &[&Path]) -> ToolCtx {
                 .collect(),
         ),
         web: Default::default(),
+        render_requester: None,
     }
 }
 
@@ -587,6 +588,7 @@ THE-SKILL-BODY",
         cwd: cwd.path().to_path_buf(),
         cancel: CancellationToken::new(),
         web: Default::default(),
+        render_requester: None,
     };
     let via_link = home_link.join(".agents/skills/alpha/SKILL.md");
     let r = execute_tool(

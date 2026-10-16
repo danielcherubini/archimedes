@@ -124,6 +124,11 @@ pub fn setup_dirs_with_factory<R: tauri::Runtime>(
         ))
     };
     manager.attach_worker_manager(wm.clone());
+    // The AppHandle for Supervisor-side webview rendering (Task 7).
+    let handle_any = Box::new(app.handle().clone()) as Box<dyn std::any::Any>;
+    if let Ok(handle) = handle_any.downcast::<tauri::AppHandle<tauri::Wry>>() {
+        manager.attach_app_handle(*handle);
+    }
     // The `WorkerManager` is managed state (the `set_space_trusted`
     // command's running-Workers `Config` push + the `test_support`
     // registry accessor).

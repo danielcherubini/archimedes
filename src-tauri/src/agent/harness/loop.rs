@@ -298,6 +298,8 @@ pub struct AgentLoop {
     /// refreshed from `settings.json` + env at the top of every
     /// `handle_prompt` alongside `file_policy` (one read per turn).
     web: crate::agent::web::config::WebConfig,
+    /// Render requester for escalated web fetches (Task 7).
+    pub render_requester: Option<Arc<dyn crate::agent::web::RenderRequester>>,
 }
 
 impl AgentLoop {
@@ -390,7 +392,15 @@ impl AgentLoop {
             // first prompt, of which there are none.
             file_policy: FilePolicy::default(),
             web: crate::agent::web::config::WebConfig::default(),
+            render_requester: None,
         }
+    }
+
+    pub fn set_render_requester(
+        &mut self,
+        requester: Option<Arc<dyn crate::agent::web::RenderRequester>>,
+    ) {
+        self.render_requester = requester;
     }
 
     /// Emit the `context_usage_update` frame (the frontend's
@@ -1665,6 +1675,7 @@ impl AgentLoop {
                         // the `Sandboxed` floor and confines `bash`).
                         file_policy: self.file_policy,
                         web: self.web.clone(),
+                        render_requester: self.render_requester.clone(),
                     },
                     &tc.name,
                     &tc.arguments,

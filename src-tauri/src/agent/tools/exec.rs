@@ -186,6 +186,8 @@ pub struct ToolCtx {
     /// key added mid-turn lands next turn. `WebConfig::default()` in tests
     /// (HERMETIC: never read `$HOME` here — the same rule as `boundary`).
     pub web: crate::agent::web::config::WebConfig,
+    /// Render requester for escalated headless webview fetches (Task 7).
+    pub render_requester: Option<std::sync::Arc<dyn crate::agent::web::RenderRequester>>,
 }
 
 /// The read-direction backend for this context (ADR 0030): the executor's
@@ -1525,6 +1527,7 @@ mod tests {
             },
             protected: Vec::new(),
             web: Default::default(),
+            render_requester: None,
         }
     }
 
@@ -1781,6 +1784,7 @@ mod tests {
             file_policy: crate::agent::policy::FilePolicy::default(),
             protected: Vec::new(),
             web: Default::default(),
+            render_requester: None,
         };
         let handle = tokio::spawn(async move {
             let start = std::time::Instant::now();
@@ -1938,6 +1942,7 @@ mod tests {
             file_policy: crate::agent::policy::FilePolicy::default(),
             protected: Vec::new(),
             web: Default::default(),
+            render_requester: None,
         };
         let handle = tokio::spawn(async move {
             execute_tool(
