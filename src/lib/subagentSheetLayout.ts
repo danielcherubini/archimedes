@@ -66,8 +66,9 @@ export const GATE_PANEL_MIN_WIDTH = 280;
  * viewport minus that offset, so the panel gets `min(480, 100vw - 480)`): 320px
  * of panel at 800, 120px at 600, a ~40px sliver at 520, and at ≤ 480 the cap
  * clamps to 0 while the 480px offset pushes the box off-viewport — a gate that is
- * MOUNTED AND UNREACHABLE, which strands the child for its 30-minute
- * `settle_timeout` just as surely as a gate that was never rendered. Below this
+ * MOUNTED AND UNREACHABLE, which strands the child just as surely as a gate
+ * that was never rendered (and since ADR 0055, forever: a gate-parked child is
+ * an Active Subagent, so no clock ends the delegation). Below this
  * breakpoint the panel therefore keeps its corner geometry (right edge, capped at
  * 90% of the viewport): BURIED behind the sheet is degraded but recoverable
  * (closing the sheet — X, or Esc with focus in it — reveals a fully-rendered,

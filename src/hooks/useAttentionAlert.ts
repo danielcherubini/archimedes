@@ -247,10 +247,13 @@ export function useAttentionAlert(): void {
     //   follow-up outstanding (ADR 0040's amendment records it). So a CRASHED
     //   CHILD's open `ask` / Permission prompt is NOT auto-closed today: the card
     //   stays on screen. The DELEGATION still resolves — on the Worker's own exit
-    //   for a crash, or at the 30-minute `settle_timeout`
-    //   (`DEFAULT_SUBAGENT_SETTLE_TIMEOUT`, `src-tauri/src/agent/worker/manager.rs`)
-    //   for a child parked on an unanswered gate — but no close frame reaches the
-    //   gate either way. The only Rust close frame that DOES reach a
+    //   for a crash — but for a child parked on an unanswered gate NOTHING
+    //   resolves it on a clock since ADR 0055: the child holds its
+    //   `tool_call_id` open, so it is an **Active Subagent** and
+    //   `DEFAULT_SUBAGENT_DEAD_BOUND` (`src-tauri/src/agent/worker/manager.rs`)
+    //   never runs while a tool call is outstanding. No close frame reaches the
+    //   gate either way (the teardown's child-keyed
+    //   `interactive-request-close` is the exception that does). The only Rust close frame that DOES reach a
     //   child's slice is `SudoPromptCleanup`'s
     //   (`src-tauri/src/agent/interactive/sudo_exec.rs`) — and only for a DROPPED
     //   sudo flow (a cancel), and only for `confirm` / `password`. What the JS side

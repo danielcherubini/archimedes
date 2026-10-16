@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use archimedes_lib::agent::harness::{Model, ModelCatalog};
 use archimedes_lib::agent::subagent::{
-    LaunchConfig, SubagentCancel, SubagentOutcome, SubagentSessionManager,
+    LaunchConfig, SubagentCancel, SubagentFailureReason, SubagentOutcome, SubagentSessionManager,
 };
 use archimedes_lib::agent::worker::client::{WorkerError, WorkerHandle, WorkerInboundEvent};
 use archimedes_lib::agent::worker::manager::{WorkerFactory, WorkerManager};
@@ -64,13 +64,13 @@ fn test_model(id: &str, provider: &str, thinking_levels: Vec<String>) -> Model {
 /// process): the parent `p1` is `attach`ed with the given `catalog`
 /// (the `dispatch_subagent` flow resolves the child's `model` against
 /// it) + the given `trusted` flag (the trust-inheritance test) + a
-/// settle bound. The `sink_for` lookup delivers the lifecycle events on
+/// **Dead bound**. The `sink_for` lookup delivers the lifecycle events on
 /// the given sink; the `on_event` closure re-emits the CHILD's
 /// `SinkFrame`s on the sink too (the `session_info` Start echo — the
 /// `systemPrompt` / `trusted` envelope assertion).
 async fn make_manager(
     catalog: ModelCatalog,
-    settle_timeout: Duration,
+    dead_bound: Duration,
     sink: Arc<dyn EventSink>,
     trusted: bool,
 ) -> Arc<SubagentSessionManager> {
@@ -90,7 +90,7 @@ async fn make_manager(
         ),
         Arc::new(move |id: &str| (id == "p1").then(|| sink.clone())),
     )
-    .with_settle_timeout(settle_timeout);
+    .with_dead_bound(dead_bound);
     let wm = Arc::new(wm);
     let env = StartEnv::from_parts(
         "p1".to_string(),
@@ -250,7 +250,7 @@ async fn dispatch_native_a_crashed_child_is_failed_with_the_exit_code() {
     let (dispatch_rx, _cancel) = dispatch(&manager, default_launch(), "__crash__", &m1);
     let outcome = outcome(dispatch_rx, Duration::from_secs(30)).await;
     match outcome {
-        SubagentOutcome::Failed { error } => {
+        SubagentOutcome::Failed { error, .. } => {
             assert!(
                 error.contains("137"),
                 "the error carries the exit code — got: {error}"
@@ -260,12 +260,12 @@ async fn dispatch_native_a_crashed_child_is_failed_with_the_exit_code() {
     }
 }
 
-/// (3) **timeout**: a child that HANGS (the `fake_worker`'s
-/// `"__slow__"` prompt — a 10 s sleep before settling) + a SHORT
-/// `settle_timeout` → `Failed { error: "timed out" }` (the
-/// `settle_timeout` bound wins — the child is reaped).
+/// (3) **Dead**: a child that is SILENT with nothing in flight (the
+/// `fake_worker`'s `"__slow__"` prompt — a 10 s sleep before settling) + a
+/// SHORT **Dead bound** → `Failed { reason: Unresponsive, error:
+/// "unresponsive" }` (the silence bound wins — the child is reaped as Dead).
 #[tokio::test]
-async fn dispatch_native_times_out_and_reaps_a_hanging_child() {
+async fn dispatch_native_reaps_a_silent_child_at_the_dead_bound() {
     let (sink, _sink_rx) = rec_sink();
     let m1 = test_model("m1", "fake", Vec::new());
     let catalog = ModelCatalog {
@@ -276,10 +276,15 @@ async fn dispatch_native_times_out_and_reaps_a_hanging_child() {
     let (dispatch_rx, _cancel) = dispatch(&manager, default_launch(), "__slow__", &m1);
     let outcome = outcome(dispatch_rx, Duration::from_secs(30)).await;
     match outcome {
-        SubagentOutcome::Failed { error } => {
-            assert_eq!(error, "timed out", "the current timeout outcome");
+        SubagentOutcome::Failed { reason, error, .. } => {
+            assert_eq!(error, "unresponsive", "the **Dead bound** outcome");
+            assert_eq!(
+                reason,
+                SubagentFailureReason::Unresponsive,
+                "the reason is DATA (ADR 0055) — set from `Race::Dead`"
+            );
         }
-        other => panic!("expected `Failed {{ timed out }}`, got {other:?}"),
+        other => panic!("expected `Failed {{ unresponsive }}`, got {other:?}"),
     }
 }
 
@@ -303,7 +308,7 @@ async fn dispatch_native_cancel_cancels_the_dispatch() {
     cancel.cancel();
     let outcome = outcome(dispatch_rx, Duration::from_secs(30)).await;
     match outcome {
-        SubagentOutcome::Failed { error } => {
+        SubagentOutcome::Failed { error, .. } => {
             assert_eq!(error, "cancelled", "the cancel outcome");
         }
         other => panic!("expected `Failed {{ cancelled }}`, got {other:?}"),
@@ -335,7 +340,7 @@ fn dispatch_native_without_a_worker_manager_fails_immediately() {
         .try_recv()
         .expect("the oneshot is already resolved (not configured)");
     match outcome {
-        SubagentOutcome::Failed { error } => {
+        SubagentOutcome::Failed { error, .. } => {
             assert!(
                 error.contains("not configured"),
                 "the error says the dispatch is not configured — got: {error}"
@@ -570,7 +575,7 @@ async fn dispatch_native_an_unknown_model_is_failed() {
     );
     let outcome = outcome(dispatch_rx, Duration::from_secs(30)).await;
     match outcome {
-        SubagentOutcome::Failed { error } => {
+        SubagentOutcome::Failed { error, .. } => {
             assert!(
                 error.contains("unknown model"),
                 "the error says the model is unknown — got: {error}"

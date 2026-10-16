@@ -27,7 +27,7 @@ pub mod store;
 pub use client::{WorkerError, WorkerErrorKind, WorkerHandle, WorkerInboundEvent};
 pub use core::{default_build_loop, LoopControl, LoopHandles, WorkerCore};
 pub use dispatch::IpcDispatcher;
-pub use manager::{SubagentCapture, WorkerFactory, WorkerManager, DEFAULT_SUBAGENT_SETTLE_TIMEOUT};
+pub use manager::{SubagentCapture, WorkerFactory, WorkerManager, DEFAULT_SUBAGENT_DEAD_BOUND};
 pub use protocol::{
     decode_inbound, decode_outbound, encode_inbound, encode_outbound, Inbound, Outbound,
     ProtoError, StartEnv, StartMode, StoreFrame, SubagentDispatchWire,
@@ -221,7 +221,7 @@ pub async fn run_worker_inner() {
 /// cancellation-safe.
 ///
 /// The bug this prevents (a subagent stuck on "Starting…" until the
-/// settle timeout): the Supervisor writes `start` and `prompt` BACK TO
+/// **Dead bound**): the Supervisor writes `start` and `prompt` BACK TO
 /// BACK, and handling `start` pushes the seq-0 `transcript-insert` onto
 /// `outbound_rx` — the competing arm is ready at exactly the moment a
 /// `prompt` frame LARGER than the pipe's atomic-write bound (`PIPE_BUF`,

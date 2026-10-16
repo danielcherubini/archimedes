@@ -1,17 +1,22 @@
 ---
 status: live
-last-verified: 2026-10-13
-verified-by: pnpm test (1784 passed / 81 files) + pnpm build, measured on main once the side-pane todo boards and the Space-tab close had both landed — THE CLIENT HALF ONLY: the Presentation section's render-site partition, the Side pane todo boards, the sheet-vs-panel geometry, and the Settings round-trip keeping the sheet. The Rust sections above are NOT covered by this stamp. They date from the subagent-model-overrides plan (shipped 2026-10-03, verified then by cargo test — the subagent.rs native-dispatch, throwaway-Db, and cancel suites) and have not been re-read since: they cite `ExternalClose`, `NativeDeps`, `TempFileGuard` and `agent/interactive.rs`, none of which exist under `src-tauri/src` any more, and describe the metrics as a self-emitted per-turn `cost_update` (source `"main"`) when `SubagentCapture` in fact accumulates them from the child's `message_update` frames and no `cost_update` is emitted at all. Treat that half as unverified prose pending its own pass — history in git
+last-verified: 2026-10-16
+verified-by: feature/subagent-liveness-bound — cargo test 1067 + clippy 0 warnings + fmt; pnpm test 1979 + tsc; ADR 0055
 ---
 
 # Subagent sessions
 
-> **Unverified below this line (the Rust half).** Everything from here down to
-> the `Presentation` section predates the current stamps and has NOT been
-> re-read against the code — the `verified-by` stamp in this file's frontmatter
-> covers the client half only, and the section headings below ("Metrics are
-> real", "The driver task") read as authority they have not earned. Treat the
-> symbol names there as claims pending their own pass.
+> **Stale below this line (parts of the Rust half).** The stamp above covers
+> the **liveness** rule (ADR 0055 — the drive's race, the `SubagentLiveness`
+> signal, the gate-close and failure-`reason` wiring) and the client half; it
+> does NOT redeem the **pre-ADR 0025** driver prose below. The intro paragraph,
+> the numbered list in "The driver task", the "Metrics are real" paragraph and
+> the "Trust inheritance" section still describe the IN-PROCESS driver — a
+> throwaway
+> `:memory:` `Db`, the `TempFileGuard`, `NativeDeps`, `ExternalClose`,
+> `agent/interactive.rs` — none of which exist under `src-tauri/src` any more
+> since the drive moved Supervisor-side into `WorkerManager` (ADR 0025). Read
+> them as history; the fix is a separate pass — history in git.
 
 A **Subagent session** is a native `AgentLoop` child the desktop spawns **in
 process** — the SAME in-process runtime (the main tokio runtime) and the
@@ -81,8 +86,9 @@ oneshot is the observation point; the `JoinHandle` is detached). The task:
    FK — the child is ephemeral, never archived, ADR 0016),
 4. Builds the child `AgentLoop` with FRESH channels / tokens (NOT the
    parent's), the `CapturingSink`, the manager's **SHARED `pending_*` maps**
-   (the UI's `respond_*` searches the shared maps — fresh maps would hang
-   the child until `settle_timeout`), and `trust_db` threaded from
+   (the UI's `respond_*` searches the shared maps — fresh maps would park the
+   child on a gate nobody can answer, which the liveness rule below then reads
+   as a perfectly **Active** child), and `trust_db` threaded from
    `NativeDeps` (below),
 5. Seeds the system message, spawns the loop, emits
    `subagent-session-started` on the parent's REAL sink (NOT the
@@ -90,17 +96,31 @@ oneshot is the observation point; the `JoinHandle` is detached). The task:
    `enabledTools` make the child's config observable), and sends the task
    prompt (a `SendError` preflight failure = the child died before the turn
    started → `Failed`),
-6. Races: the child's **settle** vs the **`settle_timeout`** (default 30
-   min — a hung turn is torn down and reported `failed "timed out"` instead
-   of lingering as a zombie) vs the **`SubagentCancel`** handle vs the child
-   loop task **dying** (a `settle_tx` drop → `Failed`, NOT `Completed`),
+6. Races: the child's **settle** vs the **Dead bound** (`dead_bound` /
+   `DEFAULT_SUBAGENT_DEAD_BOUND`, `src-tauri/src/agent/worker/manager.rs`) vs
+   the **`SubagentCancel`** handle vs the child Worker process **exiting**
+   unexpectedly (→ `Failed { reason: Crashed }`; a `settle_tx` drop → `Failed`,
+   NOT `Completed`). The bound is a **self-rearming silence clock**, not a
+   ceiling on the delegation: it is rearmed on EVERY frame the pump sees for
+   the child and is NOT armed at all while a `tool_call_id` is outstanding, so
+   an **Active Subagent** is never reaped and only a **Dead** one — silent with
+   nothing in flight — is torn down and reported `Failed { reason:
+   Unresponsive }` with its partial output + real usage (ADR 0055 — see
+   **Liveness: Active vs Dead** below),
 7. Tears down **unconditionally on EVERY exit** (session + turn tokens,
    `abort()` — the belt-and-braces for a child hung inside a provider HTTP
    read that ignores cancellation, the `events_rx` drain, the throwaway
    `Db` / temp file via the `TempFileGuard`),
 8. Resolves the `SubagentOutcome` (`Completed { output, metrics }` /
-   `Failed { error }` — a cancel is `Failed "cancelled"`) and emits
+   `Failed { reason, error, output, metrics }` — a cancel is
+   `Failed { reason: Cancelled }`, and EVERY `Failed` carries the
+   `SubagentCapture`'s partial output + real usage) and emits
    `subagent-closed` on the parent's real sink.
+
+**Steps 1–8 are the PRE-ADR 0025 driver:** the drive now runs **Supervisor-side**
+in `WorkerManager` (`dispatch_subagent` → `drive_subagent`) against a Worker
+PROCESS — no throwaway `Db`, no `TempFileGuard`, no `dispatch_native_inner`. Only
+step 6's race survived the move; **Liveness: Active vs Dead** below documents it.
 
 **Cancel — the `SubagentCancel` / `ExternalClose` pair:** despite the
 `ExternalClose` type name (a harness-neutral rename survivor, ADR 0022),
@@ -125,6 +145,49 @@ cache fields flow in the payload but are not in the wire shape — YAGNI). The
 exhausted-retry model call) settles "successfully" via a bare
 `agent_settled` and reports `Completed { output: "" }` — a documented
 follow-up, not a bug to fix here.
+
+## Liveness: Active vs Dead
+
+A **Subagent session** is **Active** — NO timeout of any kind — while it produces
+frames OR holds an outstanding `tool_call_id`, and **Dead** only after
+`DEFAULT_SUBAGENT_DEAD_BOUND` of silence with NOTHING in flight: only a Dead
+child is reaped, as `Failed { reason: Unresponsive }` with its partial output +
+REAL usage (ADR 0055, whose rationale stays there).
+
+Four legitimately-silent states, each covered by a frame the pump already sees:
+
+| Silent because the child is… | What keeps it **Active** |
+| --- | --- |
+| inside a tool (`bash` / `edit` / an MCP call) | its `tool_execution_start` has no matching `tool_execution_end` — the id is outstanding |
+| parked on an `ask` | the `InteractiveRequest`'s id IS that tool-call id, open for the whole human wait |
+| parked on a **Permission prompt** or a sudo `:confirm` / `:password` prompt | `gate_tool` blocks INSIDE the announced call; a prompt's `requestId` is recorded VERBATIM (`p1`, or the derived `t2:confirm`), which is the same announced call it blocks inside |
+| awaiting a nested **Subagent** | `tool_execution_start { tool_name: "subagent" }` would stay open across the whole nested run, whose frames the pump already relays into the parent's stream — DEFENSIVE today: the recursion guard (`subagent_enabled: false` on a child's `StartEnv`, pinned by `a_child_excludes_subagent_and_list_agents_tools`) means a child cannot dispatch one, so this row documents the invariant a future un-guard would need, not a reachable state |
+
+A gate is ALWAYS an outstanding id: `tool_execution_start` fires at ANNOUNCE time
+while the Provider still streams the `toolCall` (`loop.rs`), and `gate_tool`
+blocks later inside that SAME call. The wiring: the pump's `feed_capture` bumps
+`SubagentLiveness::seq` on every frame + maintains `in_flight` / `open_gates`
+under the one `drives` lock → the drive's race re-arms on `liveness_rx.changed()`
+→ the sleep arm is guarded off (`if !in_flight`) while `in_flight` is non-empty —
+there, the bound is not longer, it does not run.
+
+**Accepted non-goal:** a child deadlocked INSIDE a tool holds an outstanding id,
+so it is Active forever and never reaped — deliberately: reaping it re-arms a
+ceiling over an Active child, the removed defect. `bash` bounds itself (300 s),
+so the exposure is a hung MCP tool call, and that bound belongs in the tool layer.
+
+**Operators:** `subagentDeadBoundSecs` (`settings.json`, default **1800**) is the
+Dead bound; no value cuts a working child. A torn-down child closes its OWN gate
+cards (`finish_subagent` drains `open_gates` into child-id-keyed
+`interactive-request-close` frames; `App.tsx`'s listener clears both the
+`useInteractive` and `usePermissions` stores). The drained ids are the gate's
+`requestId` VERBATIM — including the sudo flow's derived `:confirm` / `:password`
+forms, which is what the Client filed the card under — and a record is retired
+only by the ANSWER (`WorkerManager::note_gate_answered`, relayed from
+`respond_permission` / `respond_interactive_request`), never by the gate's
+`tool_execution_end`: a cancelled gate closes its tool call too, while its card
+stays on screen. Failure cards carry a structured `reason`
+(`unresponsive` / `crashed` / `cancelled` / `other`) instead of string-matched `error`.
 
 ## Trust inheritance
 
@@ -157,7 +220,9 @@ answer: the caps this used to carry — 330 s interactive, 300 s `ask` /
 permission — resolved as a cancel, which the UI showed as
 "User cancelled the question." and the permission gate mapped to a silent
 DENY). Only the `sudo` RUN that follows is time-bounded, by the caller's
-`timeoutMs`.
+`timeoutMs`. The drive-side bound now AGREES with that: a child parked on a gate
+holds its tool call open, so it is an **Active Subagent** and the **Dead bound**
+never runs on a human wait (ADR 0055).
 
 ## Presentation
 
@@ -221,7 +286,9 @@ active Session's board FIRST, then one labelled block per child:
   belong to.
 - **A child's board is freed at `subagent-closed`** (`App.tsx`), and narrowly:
   `applyTodoClear(childSessionId)` — todos only, never its gates or permission
-  prompts, which stay exactly as ADR 0040 records them. No `session-closed`
+  prompts (those are closed by `finish_subagent`'s own child-id-keyed
+  `interactive-request-close` frames, ADR 0055, never by the todo handler). No
+  `session-closed`
   ever names a child id and `src-tauri/src/` emits no `todos_clear` frame, so
   that handler is the ONLY thing that reclaims a child's slice.
 - **Collapsed, the rail draws ONE MARK PER BOARD** (`TodoRail`, the **Todo
@@ -277,15 +344,21 @@ exception is the Settings view with the gate's parent the active Session — the
 hole the accepted-geometry list below names, pinned by `App.test.tsx`'s
 `KNOWN HOLE (accepted, documented)` test.
 
-**The never-nowhere invariant (the guarantee is unchanged; the mechanism
-is new).** A gate MUST be rendered by a mounted component — while the
+**The never-nowhere invariant (the guarantee is unchanged; nothing rescues a
+breach).** A gate MUST be rendered by a mounted component — while the
 workspace view is mounted, with the one accepted Settings-view exception the
 list below records. The interactive
-wait carries no deadline (above), so an unrendered gate waits on an answer
-that can never arrive and strands the child until the drive's 30-minute
-`settle_timeout` (`DEFAULT_SUBAGENT_SETTLE_TIMEOUT`,
-`src-tauri/src/agent/worker/manager.rs`) — which surfaces as a child
-`Failed "timed out"`, NOT as a forgotten question. The old design held this
+wait carries no deadline (above), and neither does the drive: a child parked on
+an unrendered gate holds its `tool_call_id` open, so it is an **Active
+Subagent** and NO clock resolves it — the child is stranded **indefinitely**,
+still running and still costing tokens, until something else ends the
+delegation. The escape is not a timer: leave Settings (the gate becomes
+renderable and answerable again) or Stop the parent (a `SubagentCancel` →
+`Failed { reason: Cancelled }`, carrying the partial output). This is the
+intended trade for ADR 0055 — the question is no longer silently killed after 30
+minutes and reported as a dead child, it waits as long as the user takes — and
+`App.test.tsx`'s `KNOWN HOLE (accepted, documented)` pin still records the hole
+rather than closing it. The old design held this
 by mounting EVERY child's `SubagentTranscript` and keeping the unselected
 ones hidden; that host is deleted, because the guarantee now comes from the
 partition instead: the overlay is mounted at the `App` root as a SIBLING of
@@ -326,8 +399,11 @@ named):
   the 280px floor a card needs — `src/lib/subagentSheetLayout.ts`). Below it the
   dodge is the WORSE option: `min(480, 100vw − 480)` is a 120px strip at 600px
   and, at ≤ 480px, a zero-width box placed off-viewport — a gate that is mounted
-  and UNREACHABLE until the child's 30-minute `settle_timeout`, which is worse
-  than buried-behind-the-sheet and recoverable (close the sheet, the card is
+  and UNREACHABLE, which since ADR 0055 strands the child FOREVER (a
+  gate-parked child is an **Active Subagent**, so no clock ends the delegation):
+  worse
+  than buried-behind-the-sheet, which is at least recoverable (close the sheet,
+  the card is
   there). Those classes live as literals in `src/lib/subagentSheetLayout.ts`
   alone — the sheet's width class and the dodge pair — and both surfaces
   interpolate them, so the two cannot be widened independently; each literal is
@@ -359,10 +435,11 @@ named):
   hosting the active session's own cards. Accepted: it is the pre-existing
   main-session hole, reachable by the same two clicks and escaped the same
   way — leave Settings, which re-mounts the transcript. Nothing closes the gate
-  in the meantime: the only bound on an unanswered one is the child's
-  `DEFAULT_SUBAGENT_SETTLE_TIMEOUT` (30 min,
-  `src-tauri/src/agent/worker/manager.rs`), and that ends the DELEGATION (a
-  `Failed "timed out"`), it does not close the gate. The overlay's
+  in the meantime: since ADR 0055 there is NO bound on an unanswered one at all
+  (a gate-parked child is an **Active Subagent**, so the **Dead bound** is not
+  armed), and the delegation simply waits. The card finally disappears only at
+  teardown, where `finish_subagent` drains `open_gates` into a child-id-keyed
+  `interactive-request-close`. The overlay's
   own half — every NON-active parent's gates — is pinned answerable with
   Settings open, which is why it lives outside that ternary.
 - Navigating away from the active parent moves its child's `ask` to a
@@ -404,9 +481,11 @@ named):
   emits a `todos_clear` frame at all today. Both writes now land on
   `todos[sessionId]`; `applyTodoClear` takes ONE argument (a clear names a
   Session, never a label) and drops that session's whole board; and the
-  `subagent-closed` handler frees a child's slice — todos only, so ADR 0040's
-  rule that a closed child keeps its gate card on screen until its entry is
-  evicted is untouched. Rendering followed, so the half this entry left as
+  `subagent-closed` handler frees a child's slice — todos only, so that handler
+  still never touches a gate card; the card itself is now closed by
+  `finish_subagent`'s child-id-keyed `interactive-request-close` (ADR 0055)
+  rather than lingering until the entry is evicted, as ADR 0040 used to record.
+  Rendering followed, so the half this entry left as
   remaining work is closed: a child's board lands in the CHILD's own slice
   while `TodoBoardPanel` draws only the session it is handed, and the pane's
   child blocks come from `useTodoBoards` (see **Side pane todo boards**
@@ -416,18 +495,33 @@ named):
   use), so the fix here is a decision, not a deletion: either make the emitter
   name the child (and give a main `ask` a real `toolCallId` so it can anchor),
   or delete the two branches and the seeds with them.
-- **A child's `interactive-request-close` frames are mis-keyed.** The pump
-  relays a Subagent's frames under the PARENT's delivery id (`delivery_id` in
+- **A child's `interactive-request-close` frames are mis-keyed.** **RESOLVED by
+  ADR 0055.** The defect was real: the pump relays a Subagent's frames under the
+  PARENT's delivery id (`delivery_id` in
   `src-tauri/src/agent/worker/manager.rs`, routed into `route_event`, which is
-  what `track_modal` records), so any close frame that IS emitted for one
-  carries `sessionId = parent` and reaches `App`'s `interactive-request-close`
+  what `track_modal` records), so any close frame emitted that way carried
+  `sessionId = parent` and reached `App`'s `interactive-request-close`
   listener as `removeRequest(parent, <the child's request id>)` — a no-op on the
   child's slice, leaving the card mounted with nothing behind it. ADR 0040
-  records this as a known upstream defect with the follow-up outstanding; this
-  is the durable ticket. The one emitter that gets the key right is
-  `SudoPromptCleanup` (`src-tauri/src/agent/interactive/sudo_exec.rs`), and it
-  covers only a DROPPED sudo flow's `confirm` / `password` — never an `ask` or a
-  Permission prompt.
+  recorded it as a known upstream defect with the 30-minute bound as the
+  backstop; ADR 0055 removed the backstop, so the emitter had to be fixed.
+  `finish_subagent` now drains the drive's `open_gates` and emits
+  `interactive-request-close` keyed to the CHILD id for every gate still
+  unanswered, and `App.tsx`'s one listener clears BOTH stores
+  (`useInteractive.removeRequest` + `usePermissions.removePrompt` — the
+  permission store previously had NO listener for this event at all, so a
+  Permission card was unclosable by every emitter, including
+  `cleanup_pending_modals`). `track_modal` / `cleanup_pending_modals` stay out of
+  it: a child's `Exited` never reaches them. `SudoPromptCleanup`
+  (`src-tauri/src/agent/interactive/sudo_exec.rs`) still keys its own closes for
+  a DROPPED sudo flow correctly.
+- **A tool deadlocked INSIDE a tool call is Active forever — a hung MCP tool
+  call needs its own bound in the tool layer (ADR 0055 non-goal).** Such a child
+  holds an outstanding `tool_call_id`, so the **Dead bound** is never armed and
+  no Supervisor-side value can end it; `bash` already bounds itself (300 s) and
+  the MCP call does not. The fix belongs where the hang is — re-arming any
+  ceiling in the drive would recreate the defect ADR 0055 removed. Stop on the
+  parent (`SubagentCancel` → `cancel_drive` → reap) is the escape hatch today.
 - 2026-09-15 hang (two concurrent sessions on one tokio runtime):
   **no longer reproduces** on current versions (resolved 2026-09-22 — root
   cause never confirmed, likely version/environment-specific); the one-live

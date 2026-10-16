@@ -104,6 +104,31 @@ describe("markClosed", () => {
     expect(useSubagents.getState().entries["sub1"].metrics).toEqual(metrics);
   });
 
+  it("stores the machine-readable `reason` (ADR 0055 — the card's short line)", () => {
+    useSubagents.getState().addSession(A1);
+    useSubagents.getState().markClosed(
+      "sub1",
+      "failed",
+      "the subagent worker exited unexpectedly (code 137)",
+      undefined,
+      "crashed",
+    );
+    expect(useSubagents.getState().entries["sub1"]).toMatchObject({
+      status: "failed",
+      reason: "crashed",
+    });
+  });
+
+  it("leaves `reason` unset when the payload omits it (an older backend)", () => {
+    // `reason` is OPTIONAL on the wire: a `subagent-closed` from a backend
+    // predating ADR 0055 carries only `error`, and the card must then fall back
+    // to rendering that. Storing `undefined` is what makes the fallback arm fire.
+    useSubagents.getState().addSession(A1);
+    useSubagents.getState().markClosed("sub1", "failed", "boom");
+    expect(useSubagents.getState().entries["sub1"].reason).toBeUndefined();
+    expect(useSubagents.getState().entries["sub1"].error).toBe("boom");
+  });
+
   it("is a no-op for an unknown session id", () => {
     useSubagents.getState().markClosed("unknown", "completed");
     expect(useSubagents.getState().entries["unknown"]).toBeUndefined();

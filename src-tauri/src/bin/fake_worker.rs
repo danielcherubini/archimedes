@@ -25,8 +25,13 @@
 //!   mirroring `permission.rs:135-158`); on a `PermissionResponse`
 //!   (ANY `outcome`) → the tool-execution events + `agent_settled`
 //!   (the round-trip test).
+//! - a `prompt` whose text is `"__sudo__"`: the TWO sudo sub-prompt
+//!   `InteractiveRequest` frames with the DERIVED ids (`t2:confirm` /
+//!   `t2:password` — the exact `requestId`s `sudo_run_flow` emits), then parks
+//!   forever with NO settle and NO answer (the ADR 0055 review's RAW-id input:
+//!   a torn-down child must close BOTH cards by those raw ids).
 //! - a `prompt` whose text is `"__slow__"`: sleeps 10 s before
-//!   settling (the `settle_timeout` tests).
+//!   settling (the **Dead bound** tests).
 //! - a `prompt` whose text is `"__subagent__"` /
 //!   `"__slow_subagent__"` / `"__subagent_tools__"`: a canned
 //!   `SubagentDispatch` frame (the Supervisor-side dispatch-flow test
@@ -35,6 +40,31 @@
 //!   frame with the SLOW child task; `__subagent_tools__` is the
 //!   frame with `launch.tools: Some(["subagent"])` — the
 //!   empties-out-after-the-guard-minus case).
+//! - a `prompt` whose text is `"__long_stream__"`: a LONG `SinkFrame`
+//!   `session-update` `agent_message_chunk` stream (the chunks land ~100 ms
+//!   apart for ~1.5 s of CONTINUOUS production) and ONLY then the canned
+//!   turn + `agent_settled` (the ADR 0055 regression input — a child that
+//!   keeps PRODUCING far past a SHORT injected bound must COMPLETE, not be
+//!   reaped mid-answer).
+//! - a `prompt` whose text is `"__in_tool__"`: a `tool_execution_start`
+//!   held OPEN for ~1.5 s before its `tool_execution_end` +
+//!   `agent_settled` (the "child inside a tool call, producing NOTHING"
+//!   state — legitimately silent, so a duration bound must never cut it).
+//! - a `prompt` whose text is `"__stream_then_silence__"`: a SHORT
+//!   `agent_message_chunk` stream + a `message_update` `usage` frame (real
+//!   capture text AND real tokens), then ~10 s of SILENCE and NO
+//!   `agent_settled` — a **Dead Subagent** (the **Dead bound** reaps it, and
+//!   a cancel reaches it mid-silence). The salvage input: the drive must
+//!   carry the partial text + the real usage instead of discarding them.
+//! - a `prompt` whose text is `"__stream_then_crash__"`: the same partial
+//!   production, then exit 137 (a **Dead Subagent** by process death — the
+//!   crash path's salvage input).
+//! - a `prompt` whose text is `"__crash_burst__"`: a BURST of `agent_message_chunk`
+//!   `SinkFrame`s + a `message_update` `usage` frame flushed back-to-back, then
+//!   exit 137 with NO pause and NO `agent_settled` — the child dies while its
+//!   LAST frames are still queued in the pump. The salvage-ordering input (ADR
+//!   0055 review, thread 3): the drive must read the `SubagentCapture` only
+//!   AFTER the pump consumed every frame the child managed to write.
 //! - a `prompt` whose text is `"__cancel__"`: a `SubagentCancel` frame
 //!   (the `SubagentCancel` routing test).
 //! - a `prompt` whose text is `"__stderr__"`: a line on STDERR and NO
@@ -57,11 +87,172 @@ use archimedes_lib::agent::worker::protocol::{decode_inbound, encode_outbound, I
 /// The fixture version (the `ready` frame's `version` field).
 const VERSION: &str = "fake-worker-0.0.0";
 
+/// The `__long_stream__` chunk count (ADR 0055) — `LONG_STREAM_CHUNKS` ×
+/// `LONG_STREAM_GAP` ≈ 1.5 s of CONTINUOUS production: long enough to blow
+/// the tests' injected 300 ms bound by 5×, short enough to keep the suite
+/// fast (the whole scenario stays under ~2 s).
+const LONG_STREAM_CHUNKS: u32 = 15;
+
+/// The gap between two `__long_stream__` chunks (~100 ms — a chunk arrives
+/// well INSIDE the tests' 300 ms bound, so a self-rearming silence clock can
+/// never expire while the child is talking).
+const LONG_STREAM_GAP: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How long the `__in_tool__` scenario holds its `tool_execution_start`
+/// open (~1.5 s — the child is silent for 5× the injected bound while it is
+/// legitimately blocked inside the tool).
+const IN_TOOL_HOLD: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// How long the `__stream_then_silence__` scenario stays SILENT after its
+/// partial production (~10 s — LONGER than any bound the tests inject, so
+/// the **Dead bound** is the only thing that can end the dispatch, and a
+/// cancel mid-silence is unambiguously the cancel arm).
+const SILENCE_AFTER_STREAM: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The `__crash_burst__` chunk count (ADR 0055 review, thread 3). Enough frames
+/// that a salvage read while the pump is still draining the queue is GLARINGLY
+/// truncated — every chunk is a distinct word, so a lost tail shows up in the
+/// text — while staying far inside the client's 256-frame `broadcast` ring (a
+/// `Lagged` pump would be a DIFFERENT defect than the one under test).
+const CRASH_BURST_CHUNKS: u32 = 40;
+
+/// The `__crash_burst__` `usage` frame's tokens — deliberately NOT
+/// `emit_partial_progress`'s numbers, and deliberately the LAST frame before the
+/// exit: a salvage that reads the capture too early reports `0` output tokens
+/// for work that really cost money, the understatement the review named.
+const CRASH_BURST_USAGE: (u64, u64) = (777, 909);
+
 /// Emit one outbound frame (one JSONL line — the `protocol` encode).
 fn emit<W: Write>(stdout: &mut W, frame: &Outbound) {
     let line = encode_outbound(frame);
     let _ = stdout.write_all(line.as_bytes());
     let _ = stdout.flush();
+}
+
+/// The long `agent_message_chunk` stream (ADR 0055 — the `__long_stream__`
+/// scenario's body): `LONG_STREAM_CHUNKS` `SinkFrame` `session-update`
+/// frames ~100 ms apart (~1.5 s of CONTINUOUS production). They ride
+/// `messageId: "m2"` — a DIFFERENT id from `emit_canned_turn`'s canned `m1` —
+/// so the stream is an INTERMEDIATE message in the capture's
+/// last-`messageId`-with-non-empty-text rule and never concatenates into the
+/// child's final answer (exactly the shape a real tool-using turn has); the
+/// `messageId` values are literal because the `SubagentCapture` keys on the
+/// frame's id, not on the stamped display row's.
+///
+/// Ordering invariant (the same one `emit_canned_turn` documents): this is
+/// only the child's PRODUCTION phase — `agent_settled` is emitted by
+/// `emit_canned_turn`, LAST, after the whole stream, so the `SubagentCapture`
+/// is fully fed before the settle signal (no drive-teardown race).
+fn emit_long_chunk_stream<W: Write>(stdout: &mut W, session_id: &str) {
+    for i in 0..LONG_STREAM_CHUNKS {
+        emit(
+            stdout,
+            &Outbound::SinkFrame {
+                event: "session-update".to_string(),
+                payload: serde_json::json!({
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": "m2",
+                        "content": { "type": "text", "text": if i == 0 { "streamed" } else { "…" } }
+                    }
+                }),
+            },
+        );
+        std::thread::sleep(LONG_STREAM_GAP);
+    }
+}
+
+/// The PARTIAL production both salvage scenarios emit before they die: a
+/// `message_update` `usage` frame (so `SubagentCapture::usage()` reports REAL
+/// tokens — the failed path used to report 0 for work that really cost money)
+/// followed by three `agent_message_chunk` `SinkFrame`s on one `messageId`
+/// (so `SubagentCapture::captured_text()` is non-empty — the salvage the
+/// parent must receive).
+///
+/// The `messageId` is `m9` — neither `emit_canned_turn`'s `m1` nor
+/// `emit_long_chunk_stream`'s `m2` — and it is NOT a bookkeeping id, so the
+/// capture's last-`messageId`-with-non-empty-text rule picks it up. Neither
+/// scenario emits `agent_settled`: a **Dead Subagent** never decided it was
+/// finished, and a settle frame here would erase the very failure being tested.
+fn emit_partial_progress<W: Write>(stdout: &mut W, session_id: &str) {
+    emit(
+        stdout,
+        &Outbound::Event {
+            event: RpcEvent::message_update {
+                usage: serde_json::json!({ "inputTokens": 120, "outputTokens": 34 }),
+                assistant_message_event: serde_json::json!({
+                    "type": "text_delta",
+                    "contentIndex": 0,
+                    "delta": "partial "
+                }),
+            },
+        },
+    );
+    for text in ["Finding one. ", "Finding two. ", "Finding three."] {
+        emit(
+            stdout,
+            &Outbound::SinkFrame {
+                event: "session-update".to_string(),
+                payload: serde_json::json!({
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": "m9",
+                        "content": { "type": "text", "text": text }
+                    }
+                }),
+            },
+        );
+    }
+}
+
+/// The `__crash_burst__` body (ADR 0055 review, thread 3): `CRASH_BURST_CHUNKS`
+/// `agent_message_chunk` `SinkFrame`s on ONE `messageId` plus the closing
+/// `message_update` `usage` frame, written back-to-back with NO pauses, then the
+/// process exits 137 immediately.
+///
+/// The shape is deliberate: a child whose Provider is streaming fast does exactly
+/// this — many frames land in the client's `broadcast` ring in one go — and the
+/// exit is then published by the read task through the SEPARATE `exited` watch
+/// while those frames are still queued. The caller exits with NO pause and NO
+/// `agent_settled`, so the drive must not be able to reach the capture before the
+/// pump has drained everything the child wrote. Every chunk carries a distinct
+/// word so a truncated salvage names the lost tail in the assertion.
+fn emit_crash_burst<W: Write>(stdout: &mut W, session_id: &str) {
+    for i in 0..CRASH_BURST_CHUNKS {
+        emit(
+            stdout,
+            &Outbound::SinkFrame {
+                event: "session-update".to_string(),
+                payload: serde_json::json!({
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": "m7",
+                        "content": { "type": "text", "text": format!("chunk{i} ") }
+                    }
+                }),
+            },
+        );
+    }
+    // The `usage` frame LAST: it is the token count a too-early salvage loses.
+    emit(
+        stdout,
+        &Outbound::Event {
+            event: RpcEvent::message_update {
+                usage: serde_json::json!({
+                    "inputTokens": CRASH_BURST_USAGE.0,
+                    "outputTokens": CRASH_BURST_USAGE.1
+                }),
+                assistant_message_event: serde_json::json!({
+                    "type": "text_delta",
+                    "contentIndex": 0,
+                    "delta": "burst"
+                }),
+            },
+        },
+    );
 }
 
 /// The canned `RpcEvent` stream (the Supervisor's bookkeeping input —
@@ -223,13 +414,21 @@ fn emit_canned_turn<W: Write>(stdout: &mut W, session_id: &str, incarnation: &st
 /// The tool-execution events + `agent_settled` (the
 /// `__permission__` round-trip's post-response stream — the
 /// tool-execution events arrive AFTER the `PermissionResponse`).
+///
+/// The `tool_call_id` is the GATE's `requestId` (`p1`), NOT an independent
+/// `t1`: in production `gate_tool` passes `&tc.id` to `native_permission_gate`,
+/// so a **gate**'s id and the `tool_call_id` of the tool it is parked inside are
+/// the SAME string. The Supervisor's ADR 0055 teardown depends on that one id
+/// space — `tool_execution_end` removes the gate from the outstanding-gate set,
+/// which is how an ANSWERED gate is absent at teardown — so a fixture that
+/// invented a second id would model a Worker that cannot exist.
 fn emit_tool_execution_and_settle<W: Write>(stdout: &mut W, session_id: &str) {
     let _ = session_id;
     emit(
         stdout,
         &Outbound::Event {
             event: RpcEvent::tool_execution_start {
-                tool_call_id: "t1".to_string(),
+                tool_call_id: "p1".to_string(),
                 tool_name: "bash".to_string(),
                 args: serde_json::json!({ "command": "ls" }),
             },
@@ -239,7 +438,7 @@ fn emit_tool_execution_and_settle<W: Write>(stdout: &mut W, session_id: &str) {
         stdout,
         &Outbound::Event {
             event: RpcEvent::tool_execution_end {
-                tool_call_id: "t1".to_string(),
+                tool_call_id: "p1".to_string(),
                 tool_name: "bash".to_string(),
                 result: serde_json::json!({
                     "content": [{ "type": "text", "text": "ok" }],
@@ -261,7 +460,7 @@ fn emit_tool_execution_and_settle<W: Write>(stdout: &mut W, session_id: &str) {
 /// The canned `SubagentDispatch` frame (the Supervisor-side
 /// dispatch-flow test input — the `model_key` — `fake/m1` — resolves
 /// against the parent's `StartEnv` catalog; the `task` is the
-/// subagent's initial prompt — `"__slow__"` for the `settle_timeout`
+/// subagent's initial prompt — `"__slow__"` for the **Dead bound**
 /// tests, `"__subagent_tools__"`'s `launch.tools` is
 /// `Some(["subagent"])` — the empties-out-after-the-guard-minus
 /// case).
@@ -436,12 +635,146 @@ fn main() {
                     // `PermissionOutcome` was delivered verbatim).
                     emit_tool_execution_and_settle(&mut stdout, &sid);
                 }
-                // The slow settle (the `settle_timeout` tests — a 10 s
-                // sleep before settling; the `settle_timeout` bound is
-                // shorter, so the timeout wins).
+                // The SUDO sub-prompt pair (ADR 0055 review — the RAW id
+                // contract): TWO `InteractiveRequest` frames carrying the
+                // DERIVED `"{tool_call_id}:confirm"` / `":password"`
+                // `requestId`s exactly as `sudo_run_flow` emits them, then
+                // park forever (NO settle, NO answer). The Supervisor must
+                // close BOTH cards by those RAW ids at teardown — the Client
+                // filed them under exactly those ids.
+                "__sudo__" => {
+                    for phase in ["confirm", "password"] {
+                        let request_id = format!("t2:{phase}");
+                        emit(
+                            &mut stdout,
+                            &Outbound::InteractiveRequest {
+                                id: request_id.clone(),
+                                payload: serde_json::json!({
+                                    "sessionId": sid,
+                                    "requestId": request_id,
+                                    "method": phase,
+                                    "source": "bash",
+                                    "toolCallId": serde_json::Value::Null,
+                                    "params": { "command": "apt-get update", "reason": "install" }
+                                }),
+                            },
+                        );
+                    }
+                    // Park UNANSWERED — the read swallows every frame, the
+                    // reap's `Close` included, so the reap needs its full
+                    // grace + `kill` (the same shape the `__permission__`
+                    // park has, minus the answer).
+                    loop {
+                        let Ok(n) = reader.read_line(&mut line) else {
+                            std::process::exit(1); // the Supervisor is gone.
+                        };
+                        if n == 0 {
+                            std::process::exit(1); // EOF — the Supervisor is gone.
+                        }
+                        line.clear();
+                    }
+                }
+                // The slow settle (the **Dead bound** tests — a 10 s
+                // sleep before settling; the **Dead bound** is
+                // shorter, so the child is reaped as Dead).
                 "__slow__" => {
                     std::thread::sleep(std::time::Duration::from_secs(10));
                     emit_canned_turn(&mut stdout, &sid, &incarnation);
+                }
+                // The LONG stream (ADR 0055 — the
+                // `a_streaming_subagent_outlives_the_dead_bound` regression
+                // input): ~1.5 s of CONTINUOUS `agent_message_chunk`
+                // production — 5× the tests' injected 300 ms bound — and
+                // ONLY THEN the canned turn (whose `agent_settled` stays
+                // LAST, after the whole stream, so the `SubagentCapture` is
+                // fully fed before the settle). A child that keeps
+                // PRODUCING must COMPLETE, not be reaped mid-answer.
+                "__long_stream__" => {
+                    emit_long_chunk_stream(&mut stdout, &sid);
+                    emit_canned_turn(&mut stdout, &sid, &incarnation);
+                }
+                // A tool call held OPEN (ADR 0055 — the
+                // `a_child_inside_a_tool_call_is_never_reaped` regression
+                // input): the `tool_execution_start` ANNOUNCE, then
+                // NOTHING for ~1.5 s (the tool runs — the child is silent
+                // BY CONSTRUCTION and legitimately blocked), then the
+                // matching `tool_execution_end` + `agent_settled`. The
+                // frames mirror `emit_tool_execution_and_settle`'s shapes
+                // (the same `t1` / `bash`), split around the hold.
+                "__in_tool__" => {
+                    emit(
+                        &mut stdout,
+                        &Outbound::Event {
+                            event: RpcEvent::tool_execution_start {
+                                tool_call_id: "t1".to_string(),
+                                tool_name: "bash".to_string(),
+                                args: serde_json::json!({ "command": "sleep 1.5" }),
+                            },
+                        },
+                    );
+                    std::thread::sleep(IN_TOOL_HOLD);
+                    emit(
+                        &mut stdout,
+                        &Outbound::Event {
+                            event: RpcEvent::tool_execution_end {
+                                tool_call_id: "t1".to_string(),
+                                tool_name: "bash".to_string(),
+                                result: serde_json::json!({
+                                    "content": [{ "type": "text", "text": "ok" }],
+                                    "details": { "exitCode": 0 },
+                                    "isError": false
+                                }),
+                                is_error: false,
+                            },
+                        },
+                    );
+                    // The settle (LAST — the invariant: NOTHING the
+                    // `SubagentCapture` reads arrives after it).
+                    emit(
+                        &mut stdout,
+                        &Outbound::Event {
+                            event: RpcEvent::agent_settled,
+                        },
+                    );
+                }
+                // The salvage input for the **Dead bound** / cancel paths: a
+                // little REAL production (capture text + a `usage` frame),
+                // then ~10 s of SILENCE and NO `agent_settled`. With a short
+                // injected bound the drive arms its silence clock (the chunks
+                // are not inside a tool call, so nothing blocks it) and reaps
+                // the child — the capture must be non-empty at that moment.
+                // The same scenario also serves the CANCEL case (cancel it
+                // mid-silence).
+                "__stream_then_silence__" => {
+                    emit_partial_progress(&mut stdout, &sid);
+                    std::thread::sleep(SILENCE_AFTER_STREAM);
+                    // Never reached in the tests (the bound / the cancel wins
+                    // long before); the settle keeps the fixture well-formed
+                    // if the sleep ever does complete.
+                    emit(
+                        &mut stdout,
+                        &Outbound::Event {
+                            event: RpcEvent::agent_settled,
+                        },
+                    );
+                }
+                // The salvage input for the CRASH path: the same partial
+                // production, then exit 137 (NO `agent_settled` — the process
+                // death is the failure).
+                "__stream_then_crash__" => {
+                    emit_partial_progress(&mut stdout, &sid);
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    std::process::exit(137);
+                }
+                // The salvage-ORDERING input (ADR 0055 review, thread 3): a
+                // BURST of frames the child wrote before it died, then exit 137
+                // with NO pause (NO `agent_settled`). The child is gone while
+                // its last frames are still queued in the pump, so a drive that
+                // watches the process exit instead of the pump's `Exited` frame
+                // salvages a truncated capture.
+                "__crash_burst__" => {
+                    emit_crash_burst(&mut stdout, &sid);
+                    std::process::exit(137);
                 }
                 // The `interactive-event` `SinkFrame` (the `todos_update`
                 // push — the frontend's `useInteractive.applyTodoUpdate`
@@ -496,7 +829,7 @@ fn main() {
                         },
                     );
                 }
-                // The `settle_timeout` test input (the same frame with
+                // The **Dead bound** test input (the same frame with
                 // the SLOW child task — the subagent's initial
                 // prompt is `"__slow__"` → the 10 s settle).
                 "__slow_subagent__" => {
