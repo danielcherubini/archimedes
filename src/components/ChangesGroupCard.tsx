@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { ChevronRightIcon, PencilIcon, XCircleIcon } from "lucide-react";
 import type { ToolCallMessage } from "../lib/toolGroups";
 import {
@@ -56,17 +56,12 @@ export default function ChangesGroupCard({
 }: {
   messages: ToolCallMessage[];
 }) {
-  // A group that forms with an already-finished member starts OPEN
-  // (mirrors the standalone card's auto-open — the user sees the result
-  // without clicking). A group that forms while ALL members are pending
-  // starts collapsed, then auto-opens ONCE when the last pending member
-  // finishes (the `anyPending` true → false edge, same one-shot pattern
-  // as `ToolCallCard`'s auto-open; the group is always file tools, so no
-  // title check is needed). A user close sticks — the refs guard the
-  // auto-open, never a manual toggle.
-  const [open, setOpen] = useState(
-    () => messages.some((m) => m.status !== "pending"),
-  );
+  // NO auto-open — see `ToolCallCard` for why the self-reveal was removed. A
+  // group is a collapsed `N files` row until the user clicks it, whatever
+  // status its members arrive with. (`ToolCallCard` used to auto-open a single
+  // card and this mirrored it, so a finished run of edits was open either way;
+  // with both gone the transcript is a list of rows in every case.)
+  const [open, setOpen] = useState(false);
   const files = dedupeFiles(
     messages.flatMap((m) => fileSummaries(m.title, m.rawInput)),
   );
@@ -75,21 +70,6 @@ export default function ChangesGroupCard({
   );
   const anyPending = messages.some((m) => m.status === "pending");
   const anyFailed = messages.some((m) => m.status === "failed");
-  const prevAnyPendingRef = useRef(anyPending);
-  // A group that STARTS OPEN has already "auto-opened" — the `anyPending`
-  // edge must never re-open it (a user close sticks). A group that starts
-  // closed keeps `false` and can edge-auto-open exactly once.
-  const hasAutoOpenedRef = useRef(
-    messages.some((m) => m.status !== "pending"),
-  );
-  useEffect(() => {
-    const was = prevAnyPendingRef.current;
-    prevAnyPendingRef.current = anyPending;
-    if (was && !anyPending && !hasAutoOpenedRef.current) {
-      hasAutoOpenedRef.current = true;
-      setOpen(true);
-    }
-  }, [anyPending]);
   const latest = anyPending
     ? messages.reduce((a, b) => (b.at >= a.at ? b : a))
     : undefined;
