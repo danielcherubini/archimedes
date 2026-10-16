@@ -96,6 +96,13 @@ fn default_attention_delay_secs() -> u64 {
     15
 }
 
+/// The serde missing-field default for `subagent_dead_bound_secs`: 1800 s (the
+/// 30 minutes the ADR 0055 **Dead bound** shipped with). SECONDS, not millis —
+/// the same unit rule as `attention_alert_delay_secs`.
+fn default_subagent_dead_bound_secs() -> u64 {
+    1800
+}
+
 /// The `web_search` / `fetch_content` configuration (the settings' `web`
 /// block). Every field is optional; an unset key means "this Search provider
 /// is not available" (or, for `defaultProvider`/`proxy`, "auto"/"none").
@@ -236,6 +243,18 @@ pub struct Settings {
     /// sanity ceiling in `commands::attention`.
     #[serde(default = "default_attention_delay_secs")]
     pub attention_alert_delay_secs: u64,
+    /// The ADR 0055 **Dead bound**: SECONDS a **Subagent session** may stay
+    /// silent with no tool execution outstanding before it is reaped as Dead.
+    /// It bounds UNEXPLAINED SILENCE, never the length of the delegation — an
+    /// **Active Subagent** (producing frames, or holding an outstanding
+    /// `tool_call_id`) has no timeout of any kind, so no value here can cut a
+    /// working child. 1800 s: the provider layer already self-bounds a stalled
+    /// stream at a 5-minute idle `read_timeout`, so silence past twice that
+    /// with nothing in flight is a wedged Worker, not a slow model.
+    /// `settings.json`-only (no Settings-UI control, deliberately — the
+    /// `session_naming_reasoning` precedent).
+    #[serde(default = "default_subagent_dead_bound_secs")]
+    pub subagent_dead_bound_secs: u64,
 }
 
 impl Default for Settings {
@@ -262,6 +281,7 @@ impl Default for Settings {
             session_naming_reasoning: None,
             attention_alerts_enabled: true,
             attention_alert_delay_secs: default_attention_delay_secs(),
+            subagent_dead_bound_secs: default_subagent_dead_bound_secs(),
         }
     }
 }
@@ -727,6 +747,46 @@ mod tests {
     }
 
     #[test]
+    fn subagent_dead_bound_secs_defaults_to_1800() {
+        // The ADR 0055 **Dead bound** (the subagent silence bound): a
+        // `settings.json` written before this key existed reads as 1800 s with
+        // no migration (the `attention_alert_delay_secs` pattern — a
+        // non-`false` default needs a named `default_*` fn, `#[serde(default)]`
+        // alone would mean `0`).
+        let pre_feature: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(pre_feature.subagent_dead_bound_secs, 1800);
+        assert_eq!(Settings::default().subagent_dead_bound_secs, 1800);
+        // A first-run file (no file at all) is WRITTEN with the key present, so
+        // the user can hand-edit it without guessing the name.
+        let fresh = tempfile::tempdir().unwrap();
+        assert_eq!(load_settings(fresh.path()).subagent_dead_bound_secs, 1800);
+        let written = fs::read_to_string(fresh.path().join("settings.json")).unwrap();
+        assert!(
+            written.contains("\"subagentDeadBoundSecs\""),
+            "missing subagentDeadBoundSecs in {written}"
+        );
+        // An explicit value round-trips through the real file in camelCase
+        // (`write_settings` → `load_settings`), verbatim — there is no clamping
+        // layer, deliberately (the bound is `settings.json`-only: NO Settings-UI
+        // control, the `session_naming_reasoning` precedent).
+        let settings = Settings {
+            subagent_dead_bound_secs: 45,
+            ..Settings::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        write_settings(dir.path(), &settings).unwrap();
+        let raw = fs::read_to_string(dir.path().join("settings.json")).unwrap();
+        assert!(raw.contains("\"subagentDeadBoundSecs\": 45"), "got {raw}");
+        let back = load_settings(dir.path());
+        assert_eq!(back.subagent_dead_bound_secs, 45);
+        assert_eq!(back, settings);
+        // A hand-edited value is read VERBATIM (the same no-clamping rule).
+        let hand_edited: Settings =
+            serde_json::from_str(r#"{ "subagentDeadBoundSecs": 90 }"#).unwrap();
+        assert_eq!(hand_edited.subagent_dead_bound_secs, 90);
+    }
+
+    #[test]
     fn spinner_style_defaults_to_none_and_round_trips() {
         // A pre-feature file (no `spinnerStyle`) parses to `None` (the
         // frontend falls back to the `typing` default); an explicit choice
@@ -995,6 +1055,7 @@ mod tests {
             session_naming_reasoning: Some("minimal".to_string()),
             attention_alerts_enabled: false,
             attention_alert_delay_secs: 60,
+            subagent_dead_bound_secs: 300,
             mcp_mentions_enabled: true,
             file_policy: FilePolicy {
                 reads: AccessPolicy::Sandboxed,
@@ -1032,6 +1093,7 @@ mod tests {
             "\"sessionNamingReasoning\"",
             "\"attentionAlertsEnabled\"",
             "\"attentionAlertDelaySecs\"",
+            "\"subagentDeadBoundSecs\"",
         ] {
             assert!(json.contains(key), "missing {key} in {json}");
         }

@@ -6108,8 +6108,8 @@ describe("ChatStream (a child gate renders inline in the PARENT's transcript)", 
     // the same id DOES recur across siblings of one parent — and this is the
     // surface the whole feature exists to serve, so it needs its own pin.
     // A bare-`requestId` key makes React drop one of the two rows: a dropped
-    // card is a gate that renders NOWHERE and strands the child until its
-    // 30-minute `settle_timeout`.
+    // card is a gate that renders NOWHERE and strands the child INDEFINITELY
+    // (ADR 0055: a gate-parked child is an Active Subagent, so no clock ends it).
     seedLiveSession();
     useSubagents.getState().addSession(childEntry);
     useSubagents.getState().addSession({

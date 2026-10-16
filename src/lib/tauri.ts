@@ -319,11 +319,15 @@ export type InteractiveResponseDto =
  * `the_subagent_capture_captures_the_final_text_from_the_sink_frames` pins that
  * accumulation. `durationMs` is the drive task's wall clock.
  *
- * `cost` is the ONE constant: `drive_subagent`'s `Completed` arm builds the
- * struct with `cost: 0.0` literally, because nothing prices a child's usage.
- * And a FAILED child carries `SubagentMetrics::default()` (`finish_subagent`),
- * whose token fields ARE 0 — the turn never settled, so nothing was read off
- * the accumulator.
+ * `cost` is the ONE constant: `drive_subagent` builds the struct with `cost:
+ * 0.0` literally, because nothing prices a child's usage.
+ *
+ * On a FAILED child these fields are REAL TOO (ADR 0055): `drive_subagent`'s
+ * non-settled arms read the same `SubagentCapture` the completed arm does, so a
+ * reaped / crashed / cancelled child reports the tokens it actually burned
+ * before it died, and `finish_subagent` forwards that payload instead of a
+ * `SubagentMetrics::default()`. Tokens are 0 on a failed child only when it
+ * genuinely produced nothing (a preflight failure — the child never started).
  */
 export interface SubagentMetrics {
   inputTokens: number;
@@ -378,7 +382,39 @@ export interface SubagentClosedPayload {
   status: "completed" | "failed";
   error?: string;
   metrics?: SubagentMetrics;
+  /**
+   * WHY a `failed` child failed — the machine-readable code, NOT prose. It
+   * exists because the card under the `subagent` tool call renders ONE short
+   * line, while `error` is the SALVAGE TEXT the parent model reads (ADR 0055:
+   * every failure path carries the partial output and a sentence like
+   * "subagent worker exited unexpectedly (code 137)"). Rendering `error` in
+   * that row put parent-facing prose in the user's compact view, so the row
+   * reads this code and maps it to a label.
+   *
+   * The values are `SubagentFailureReason`
+   * (`src-tauri/src/agent/subagent.rs`) serialised by serde
+   * (`#[serde(rename_all = "snake_case")]`) — all four variants are single
+   * words, so snake_case and camelCase and bare lowercase coincide.
+   *
+   * OPTIONAL, not because it is incidental but because a payload written by a
+   * backend predating it omits the field; the card then falls back to `error`
+   * rather than showing nothing. Absent on a `completed` payload.
+   */
+  reason?: SubagentFailureReason;
 }
+
+/**
+ * The Rust `SubagentFailureReason` (ADR 0055) over the wire: `unresponsive` =
+ * the **Dead bound** won (silent, nothing in flight), `crashed` = the Worker
+ * process exited, `cancelled` = a Stop on the parent, `other` = anything else
+ * (a preflight failure — the child never started). Nothing may infer these by
+ * string-matching `error`.
+ */
+export type SubagentFailureReason =
+  | "unresponsive"
+  | "crashed"
+  | "cancelled"
+  | "other";
 
 /** A row from the app's SQLite `messages` table (camelCase over IPC). */
 export interface MessageRow {

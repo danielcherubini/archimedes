@@ -1218,7 +1218,10 @@ mod tests {
         core.handle(Inbound::SubagentResult {
             id: "sub1".to_string(),
             outcome: SubagentOutcome::Failed {
+                reason: crate::agent::subagent::SubagentFailureReason::Other,
                 error: "boom".to_string(),
+                output: "partial thought".to_string(),
+                metrics: crate::agent::subagent::SubagentMetrics::default(),
             },
         })
         .await;
@@ -1226,7 +1229,10 @@ mod tests {
         assert_eq!(
             outcome,
             SubagentOutcome::Failed {
-                error: "boom".to_string()
+                reason: crate::agent::subagent::SubagentFailureReason::Other,
+                error: "boom".to_string(),
+                output: "partial thought".to_string(),
+                metrics: crate::agent::subagent::SubagentMetrics::default(),
             }
         );
         assert!(

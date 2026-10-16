@@ -17,7 +17,7 @@
 //! bound (`PIPE_BUF`, 4 KiB) is mid-delivery. The half-read `prompt`
 //! vanished, the child never started its turn, no `agent_settled` ever
 //! came, and the parent's `subagent` tool call hung on "Starting…" until
-//! the settle timeout. (A `prompt` under 4 KiB is written atomically,
+//! the **Dead bound**. (A `prompt` under 4 KiB is written atomically,
 //! which is why only the long subagent tasks hung.)
 
 use std::sync::{Arc, Mutex};

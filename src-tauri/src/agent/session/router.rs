@@ -363,6 +363,12 @@ impl SessionManager {
     /// `pending_modal_ids` set — the pending-modal cleanup's source). The `id` is the
     /// request's `requestId` (the payload's key — the `interactive-request-close`
     /// frame's `requestId` field).
+    ///
+    /// A SUBAGENT's gates are NOT closed here: this set is reached only through
+    /// `on_session_exited_expected` → `cleanup_pending_modals`, which a child's
+    /// `Exited` never reaches (the arm is gated `!is_subagent`) and which returns
+    /// without a `live` entry that a child never has. A torn-down child closes
+    /// its OWN cards from `finish_subagent` (`worker/manager.rs`, ADR 0055).
     fn track_modal(&self, session_id: &str, id: &str) {
         let mut live = self.live.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(live) = live.get_mut(session_id) {

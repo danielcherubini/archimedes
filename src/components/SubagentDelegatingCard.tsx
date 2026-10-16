@@ -3,6 +3,7 @@ import { useSubagents } from "../store/subagents";
 import { useSubagentSelection } from "../store/subagentSelection";
 import { useInteractive } from "../store/interactive";
 import { useSessions, type Message, type ToolCallUiStatus } from "../store/sessions";
+import type { SubagentFailureReason } from "../lib/tauri";
 import {
   cleanModelName,
   extractThinkingFromModel,
@@ -163,18 +164,47 @@ interface ActivityInfo {
   colorClass: string;
 }
 
+/**
+ * The card's short line for a **Dead / crashed / cancelled Subagent session**
+ * (ADR 0055): a label per `SubagentFailureReason`, keyed to the four values the
+ * Rust enum serialises to.
+ *
+ * It exists because `error` is NOT a display string: every failure path carries
+ * SALVAGE prose addressed to the PARENT model ("subagent worker exited
+ * unexpectedly (code 137)", "unresponsive"), and this row is one truncated line in
+ * a compact list — the prose is unreadable there and duplicates what the
+ * parent's own tool result already says. The code is data, so nothing here
+ * string-matches `error`.
+ */
+const FAILURE_LABELS: Record<SubagentFailureReason, string> = {
+  unresponsive: "Unresponsive — no output for a long period",
+  crashed: "Crashed",
+  cancelled: "Cancelled",
+  other: "Failed",
+};
+
 function getActivityDisplay(
   row: {
     status: "running" | "completed" | "failed";
     error?: string;
+    reason?: SubagentFailureReason;
     progress?: RawProgressItem;
     result?: RawResultItem;
   },
   sessionMessages: Message[] | undefined,
   now: number,
 ): ActivityInfo | undefined {
-  if (row.error) {
-    return { glyph: "✗", text: row.error, colorClass: "text-destructive" };
+  // The short reason line (ADR 0055), and ONLY when there is something to say.
+  // `error` is the FALLBACK, not the primary: a payload from a backend that
+  // predates `reason` (or a `progress`/`result` row that never carried it) still
+  // shows why. Note the order — `reason` first, so the code wins over prose
+  // whenever both exist; `error` second, so a failed row with neither is not
+  // silently swallowed and falls through to the `status === "failed"` arm.
+  if (row.error || row.reason) {
+    const text = (row.reason && FAILURE_LABELS[row.reason]) || row.error;
+    if (text) {
+      return { glyph: "✗", text, colorClass: "text-destructive" };
+    }
   }
   if (row.status === "completed") {
     return { glyph: "✓", text: "Done", colorClass: "text-success" };
@@ -496,6 +526,10 @@ export default function SubagentDelegatingCard({
                 : undefined));
 
           const error = storeEntry?.error ?? result?.error ?? progress?.error;
+          // `reason` exists ONLY on the store entry (the `subagent-closed`
+          // payload): the `progress` / `result` shapes are the older tool-result
+          // detail stream and never carried a code.
+          const reason = storeEntry?.reason;
 
           return {
             key: resolvedSessionId ?? `${taskKey}-${idx}`,
@@ -511,6 +545,7 @@ export default function SubagentDelegatingCard({
             toolCount,
             durationMs,
             error,
+            reason,
             progress,
             result,
             sessionMessages,
@@ -605,6 +640,7 @@ export default function SubagentDelegatingCard({
             toolCount,
             durationMs,
             error: storeEntry.error ?? result?.error ?? progress?.error,
+            reason: storeEntry.reason,
             progress,
             result,
             sessionMessages,

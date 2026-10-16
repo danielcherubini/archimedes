@@ -236,3 +236,15 @@ inserted first`), a parent named only by `historySessions` is still
 announceable (`announces a child of a parent that lives ONLY in historySessions (never
 unannounceable)`), and a child's gate ranks at its PARENT's position (`ranks a child's
 gate at its PARENT's position, not last`).
+
+## Amendment (2026-10-16) — the 30-minute bound no longer resolves a parked child
+
+The bound this decision named as what resolves a **Subagent session** parked on an
+unanswered gate is superseded by ADR 0055: the drive's race became a silence
+bound, and a child holding a gate holds its tool call open — it is an **Active
+Subagent** and no clock resolves it. The orphaned-card hole recorded above is
+now closed from the other side: `finish_subagent` emits
+`interactive-request-close` under the CHILD id for every unanswered gate at
+teardown, and `App.tsx`'s one close listener clears BOTH the interactive and
+the permission store. The ladder itself — question-over-`settled`, positional
+rank, oldest-wins, the child-rides-at-parent's-rank amendment — is unchanged.

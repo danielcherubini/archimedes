@@ -38,9 +38,14 @@ import PermissionPrompt from "./PermissionPrompt";
  * - `ask` / Permission prompt of a child whose parent is NOT active → HERE.
  *   `ChatStream` renders only `activeSessionId`, so a child of a Session you
  *   navigated away from has no transcript to render into, and an unrendered
- *   gate strands the child until the drive's 30-minute `settle_timeout`
- *   (`DEFAULT_SUBAGENT_SETTLE_TIMEOUT`, `src-tauri/src/agent/worker/manager.rs`)
- *   — which reads as a child failure, not as a forgotten question.
+ *   gate strands that child. Since ADR 0055 it strands it INDEFINITELY: a child
+ *   parked on a gate holds its `tool_call_id` open, so it is an **Active
+ *   Subagent** and NO clock bounds it — the drive's bound is a silence bound
+ *   that does not run at all while a tool call is outstanding
+ *   (`DEFAULT_SUBAGENT_DEAD_BOUND`, `src-tauri/src/agent/worker/manager.rs`).
+ *   That is the deliberate trade: a forgotten question is no longer silently
+ *   killed off as a child failure after 30 minutes; the escape hatches are
+ *   leaving Settings (the gate becomes renderable and answerable) or Stop.
  * - `confirm` / `password` of EVERY child, active parent or not → HERE, always.
  *   `SudoConfirmModal`/`SudoPasswordModal` are Radix `Dialog`s; a modal
  *   `Dialog` inlined into a scrolling transcript is not on the menu, so these
@@ -100,11 +105,16 @@ import PermissionPrompt from "./PermissionPrompt";
  * one gate unrendered: the transcript is unmounted and this host stands down
  * for it. Accepted, and NOT a new class of bug — it is the pre-existing
  * main-session hole, reachable by the same two clicks and escaped the same
- * way: leave Settings. Nothing closes the gate in the meantime — the only
- * bound on an unanswered one is the child's
- * `DEFAULT_SUBAGENT_SETTLE_TIMEOUT` (`src-tauri/src/agent/worker/manager.rs`),
- * and that ends the DELEGATION (a `Failed "timed out"` after 30 minutes), it
- * does not close the gate. Closing it means
+ * way: leave Settings. Nothing closes the gate in the meantime, and since
+ * ADR 0055 NOTHING times it out either: a child parked on a gate holds its
+ * `tool_call_id` open, so it is an **Active Subagent** and the drive's
+ * `DEFAULT_SUBAGENT_DEAD_BOUND` (`src-tauri/src/agent/worker/manager.rs`) does
+ * not run at all while a tool call is outstanding. The hole is therefore
+ * unbounded in time and is closed from the other side instead — at teardown
+ * `finish_subagent` emits `interactive-request-close` under the CHILD id for
+ * every unanswered gate, and `App.tsx`'s one close listener clears BOTH the
+ * interactive and the permission stores. Closing it in the meantime still
+ * means
  * either moving the chat column out of the ternary or making this host
  * conditionally re-adopt the active parent's cards while the workspace is
  * unmounted, and this component must not be asked to host the ACTIVE
@@ -140,7 +150,8 @@ import PermissionPrompt from "./PermissionPrompt";
  * breakpoint the panel prefers the corner, where a gate is buried but RENDERED
  * and answerable
  * the moment the sheet closes, over a dodge that would squeeze it toward zero
- * width and make it unreachable for the child's 30-minute `settle_timeout`.
+ * width and leave the gate unreachable forever — a child buried this way is
+ * an **Active Subagent** (ADR 0055), so no clock ever resolves it either.
  *
  * WHY THE HOST NEEDS THE `sheetMounted` PROP. The dodge fires when a sheet is
  * actually ON SCREEN, and that is TWO facts the overlay cannot derive on its own:
@@ -227,7 +238,9 @@ export function SubagentModals({ sheetMounted = true }: { sheetMounted?: boolean
   //     viewport corner, where a gate is at least RENDERED. The dodge's own math
   //     there is `min(480, 100vw - 480)` — a 120px strip at 600px and, at
   //     ≤ 480px, a ZERO-width box positioned off-viewport: a gate that is
-  //     mounted and UNREACHABLE until the child's 30-minute `settle_timeout`.
+  //     mounted and UNREACHABLE — and since ADR 0055 nothing else rescues it
+  //     either, because a child parked on a gate is Active and no clock bounds
+  //     it.
   //     Buried-but-rendered is the better failure: it is the geometry this
   //     branch had before the dodge, and closing the sheet reveals a card you
   //     can answer. Right-anchored as the base also means a variant that failed
