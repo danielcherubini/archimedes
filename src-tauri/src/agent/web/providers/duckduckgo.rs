@@ -174,8 +174,18 @@ fn extract_target_url(raw_href: &str) -> Option<String> {
     }
 }
 
+pub fn is_ddg_challenge(doc: &dom_query::Document) -> bool {
+    doc.select(".anomaly-modal, [class*='anomaly-modal'], #challenge-form, form[action*='anomaly']")
+        .length()
+        > 0
+}
+
 pub fn parse_ddg_html(html: &str) -> Vec<SearchResultItem> {
     let doc = dom_query::Document::fragment(html);
+    parse_ddg_document(&doc)
+}
+
+pub fn parse_ddg_document(doc: &dom_query::Document) -> Vec<SearchResultItem> {
     let mut results = Vec::new();
 
     let elements = {
@@ -344,10 +354,11 @@ impl SearchProvider for DuckDuckGoProvider {
             Ok(outcome) => {
                 if outcome.status == 200 {
                     let html = String::from_utf8_lossy(&outcome.body);
-                    if html.contains("anomaly-modal") || html.contains("bots use DuckDuckGo too") {
+                    let doc = dom_query::Document::fragment(html.as_ref());
+                    if is_ddg_challenge(&doc) {
                         "[duckduckgo] error: bot detection or rate limit challenge (anomaly challenge)".to_string()
                     } else {
-                        let mut results = parse_ddg_html(&html);
+                        let mut results = parse_ddg_document(&doc);
                         if opts.num_results > 0 && results.len() > opts.num_results {
                             results.truncate(opts.num_results);
                         }
@@ -596,6 +607,44 @@ mod tests {
     }
 
     #[test]
+    fn test_is_ddg_challenge_detects_elements_not_substrings() {
+        let challenge_html_modal =
+            r#"<html><body><div class="anomaly-modal"><p>Please verify</p></div></body></html>"#;
+        assert!(is_ddg_challenge(&dom_query::Document::fragment(
+            challenge_html_modal
+        )));
+
+        let challenge_html_class_variant =
+            r#"<html><body><div class="anomaly-modal__title">Bots detected</div></body></html>"#;
+        assert!(is_ddg_challenge(&dom_query::Document::fragment(
+            challenge_html_class_variant
+        )));
+
+        let challenge_html_form =
+            r#"<html><body><form id="challenge-form" action="/verify"></form></body></html>"#;
+        assert!(is_ddg_challenge(&dom_query::Document::fragment(
+            challenge_html_form
+        )));
+
+        let challenge_html_action =
+            r#"<html><body><form action="//duckduckgo.com/anomaly.js"></form></body></html>"#;
+        assert!(is_ddg_challenge(&dom_query::Document::fragment(
+            challenge_html_action
+        )));
+
+        // Normal HTML with words "anomaly-modal" and "bots use DuckDuckGo too" in content
+        let normal_html = r#"<html><body>
+            <div class="result">
+                <a class="result__a" href="https://example.com">bots use DuckDuckGo too explanation</a>
+                <div class="result__snippet">Discussion about anomaly-modal and bots use DuckDuckGo too</div>
+            </div>
+        </body></html>"#;
+        assert!(!is_ddg_challenge(&dom_query::Document::fragment(
+            normal_html
+        )));
+    }
+
+    #[test]
     fn test_parse_ddg_html_fallback_shapes() {
         // Fallback 1: result__title without result__a, and result__body without result__snippet
         let html_fallback = r#"
@@ -630,6 +679,88 @@ mod tests {
         assert_eq!(lite_results[0].title, "Lite Title");
         assert_eq!(lite_results[0].url, "https://lite.example.com/");
         assert_eq!(lite_results[0].snippet, "Lite snippet text");
+    }
+
+    #[tokio::test]
+    async fn test_ddg_provider_search_content_mentioning_bots_or_anomaly_modal_succeeds() {
+        let server = MockServer::start().await;
+
+        let html = r#"<!DOCTYPE html>
+<html>
+<head><title>bots use DuckDuckGo too at DuckDuckGo</title></head>
+<body>
+<div class="result results_links results_links_deep web-result">
+    <div class="links_main result__body">
+        <h2 class="result__title">
+            <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fbot-article">bots use DuckDuckGo too explained</a>
+        </h2>
+        <div class="result__snippet">
+            This article discusses the anomaly-modal challenge and bots use DuckDuckGo too message.
+        </div>
+    </div>
+</div>
+</body>
+</html>"#;
+
+        Mock::given(method("GET"))
+            .and(path("/html/"))
+            .and(query_param("q", "bots use DuckDuckGo too"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(html))
+            .mount(&server)
+            .await;
+
+        let provider = DuckDuckGoProvider::with_base_url(format!("{}/html/", server.uri()))
+            .with_fallback_mock(|_, _, _, _| Err("fallback should not be called".into()));
+        let cancel = CancellationToken::new();
+        let config = WebConfig::default();
+        let opts = SearchOpts::default();
+
+        let results = provider
+            .search("bots use DuckDuckGo too", &opts, &config, &cancel)
+            .await
+            .expect("Search should succeed and not falsely trigger challenge detection");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "bots use DuckDuckGo too explained");
+        assert_eq!(results[0].url, "https://example.com/bot-article");
+        assert!(results[0].snippet.contains("anomaly-modal"));
+    }
+
+    #[tokio::test]
+    async fn test_ddg_provider_search_anomaly_200_detected_as_challenge() {
+        let server = MockServer::start().await;
+
+        let anomaly_html = r#"<!DOCTYPE html>
+<html>
+<head><title>DuckDuckGo</title></head>
+<body>
+<div class="anomaly-modal">
+    <div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>
+    <form id="challenge-form" action="//duckduckgo.com/anomaly.js"></form>
+</div>
+</body>
+</html>"#;
+
+        Mock::given(method("GET"))
+            .and(path("/html/"))
+            .and(query_param("q", "rust programming"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(anomaly_html))
+            .mount(&server)
+            .await;
+
+        let provider = DuckDuckGoProvider::with_base_url(format!("{}/html/", server.uri()))
+            .with_fallback_mock(|_, _, _, _| Err("fallback failed".into()));
+        let cancel = CancellationToken::new();
+        let config = WebConfig::default();
+        let opts = SearchOpts::default();
+
+        let err = provider
+            .search("rust programming", &opts, &config, &cancel)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("bot detection") || err.contains("anomaly"),
+            "Expected bot detection challenge error, got: {err}"
+        );
     }
 
     #[tokio::test]
