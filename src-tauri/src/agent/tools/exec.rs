@@ -1482,6 +1482,7 @@ pub async fn execute_tool(ctx: &ToolCtx, tool: &str, params: &Value) -> ToolResu
         "ls" => exec_ls(ctx, params).await,
         "list_skills" => exec_list_skills(ctx, params).await,
         "read_skill" => exec_read_skill(ctx, params).await,
+        "web_search" => crate::agent::web::tools::exec_web_search(ctx, params).await,
         other => ToolResult::fail(format!("unknown tool: {other}"), None),
     }
 }
@@ -3743,6 +3744,16 @@ mod tests {
         let r = execute_tool(&ctx(&cwd), "nope", &json!({})).await;
         assert!(r.is_error);
         assert_eq!(text_of(&r), "unknown tool: nope");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[tokio::test]
+    async fn web_search_dispatches_via_execute_tool() {
+        let cwd = temp_cwd("web-search");
+        let r = execute_tool(&ctx(&cwd), "web_search", &json!({})).await;
+        // Missing query returns error result from exec_web_search, not "unknown tool"
+        assert!(r.is_error);
+        assert!(text_of(&r).contains("web_search requires 'query' or 'queries'"));
         let _ = std::fs::remove_dir_all(&cwd);
     }
 }

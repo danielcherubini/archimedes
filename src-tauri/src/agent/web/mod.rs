@@ -6,4 +6,8 @@
 //! calls, not file system operations, and do not pass through `FilePolicy`.
 //! Later tasks add net, providers, extract, cache, tools, and render here.
 
+pub mod cache;
 pub mod config;
+pub mod net;
+pub mod providers;
+pub mod tools;

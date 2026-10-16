@@ -66,7 +66,8 @@ use crate::agent::tools::{execute_tool, ContentBlock, ImageRef, ToolCtx, ToolRes
 ///
 /// Deliberately absent: `read_skill` / `list_skills` (their own per-skill
 /// containment, ADR 0029 — a skill may never read a sibling skill, so the
-/// session boundary is not their judge), `subagent` / `mcp` /
+/// session boundary is not their judge), `web_search` (network calls are not
+/// filesystem operations and are not policy-gated, ADR 0056), `subagent` / `mcp` /
 /// `manage_todo_list` / the interactive flows (no argument of theirs reaches
 /// the filesystem in a way this policy describes).
 const POLICIED_TOOLS: &[(&str, PolicyDirection)] = &[
@@ -1646,7 +1647,7 @@ impl AgentLoop {
         }
         match tc.name.as_str() {
             "bash" | "read" | "write" | "edit" | "find" | "grep" | "ls" | "list_skills"
-            | "read_skill" => {
+            | "read_skill" | "web_search" => {
                 execute_tool(
                     &ToolCtx {
                         cwd: self.space_cwd.clone(),
@@ -2418,6 +2419,29 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                     "connect": { "type": "string", "description": "Server name to eagerly connect" },
                     "server": { "type": "string", "description": "Filter to a specific server (for list, search, or disambiguating calls)" },
                     "action": { "type": "string", "description": "Action string ('status' or 'auth')" }
+                }
+            }),
+        },
+        ToolSpec {
+            name: "web_search".into(),
+            description: "Search the web using DuckDuckGo or configured search providers.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Single search query string" },
+                    "queries": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Multiple search queries executed concurrently"
+                    },
+                    "num_results": { "type": "number", "description": "Maximum number of results to return (1-20, default 5)" },
+                    "provider": { "type": "string", "description": "Search provider to use (default: auto)" },
+                    "recency_filter": { "type": "string", "description": "Time filter for results" },
+                    "domain_filter": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of domains to restrict results to"
+                    }
                 }
             }),
         },
@@ -6003,7 +6027,7 @@ mod tests {
     /// schema must match this EXACTLY: a drift makes the model send
     /// params the executor never reads (a dead tool) or omit ones it
     /// does (an undiscoverable feature).
-    fn exec_param_keys() -> [(&'static str, &'static [&'static str]); 9] {
+    fn exec_param_keys() -> [(&'static str, &'static [&'static str]); 10] {
         [
             ("bash", &["command", "timeout_ms"]),
             ("read", &["path", "offset", "limit"]),
@@ -6014,7 +6038,41 @@ mod tests {
             ("ls", &["path", "long"]),
             ("list_skills", &[]),
             ("read_skill", &["name", "path"]),
+            (
+                "web_search",
+                &[
+                    "query",
+                    "queries",
+                    "num_results",
+                    "provider",
+                    "recency_filter",
+                    "domain_filter",
+                ],
+            ),
         ]
+    }
+
+    #[test]
+    fn every_tool_spec_is_in_the_param_key_table() {
+        const LOOP_INTERNAL_TOOLS: &[&str] = &[
+            "ask",
+            "sudo_exec",
+            "manage_todo_list",
+            "subagent",
+            "list_agents",
+            "mcp",
+        ];
+        let param_keys = exec_param_keys();
+        for spec in tool_specs() {
+            if LOOP_INTERNAL_TOOLS.contains(&spec.name.as_str()) {
+                continue;
+            }
+            assert!(
+                param_keys.iter().any(|(name, _)| *name == spec.name),
+                "tool `{}` from `tool_specs()` is missing from `exec_param_keys()`",
+                spec.name
+            );
+        }
     }
 
     #[test]
