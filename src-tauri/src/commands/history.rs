@@ -13,7 +13,8 @@ use tauri::State;
 use crate::agent::{SessionInfo, SessionManager};
 use crate::storage::{Db, MessageRow};
 
-/// All stored sessions, newest first, as `SessionInfo` (camelCase over IPC).
+/// All stored sessions, MOST RECENTLY ACTIVE FIRST (see `Db::list_sessions`),
+/// as `SessionInfo` (camelCase over IPC).
 ///
 /// `include_archived` (ADR 0016, `Option` → the frontend may omit the
 /// argument): `false` (the default) hides archived sessions; `true`

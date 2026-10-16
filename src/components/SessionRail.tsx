@@ -1,4 +1,4 @@
-import { Spinner } from "./ui/spinner";
+import { SessionStatusMark } from "./SessionStatusMark";
 import type { SessionStatus } from "../hooks/useSessionStatus";
 
 /** One command, offered as an icon button at the head of the rail. */
@@ -31,13 +31,14 @@ export interface SessionRailRow {
  * are a collapsed section in the list, and stay out of the rail.)
  *
  * THE STATES COME FROM `useSessionStatus` — the SAME hook the open rows use —
- * so the rail and the list cannot disagree about what "running" means.
- * Spinner = live + in a turn (the row's own spinner, the one glyph the user
- * asked for); warning dot = a pending permission / ask / password (the app's
- * attention colour, the one the toggle dots carry); filled dot = live and
- * idle; dim dot = stored. Waiting outranks running: a blocked session is not
+ * so the rail and the list cannot disagree about what "running" means, and the
+ * GLYPHS come from `SessionStatusMark` for the same reason: the rail is the
+ * open row's own mark set at 10px, not a second visual language. Spinner =
+ * live + in a turn; `?` = a pending permission / ask / password (the app's
+ * attention ink, the one the toggle dots carry); filled ring = live and idle;
+ * dim ring = stored. Waiting outranks running: a blocked session is not
  * working, it is waiting on YOU. The active session's mark takes the brighter
- * ink — the open row marks it with a `bg-selected` FILL, which a 10px dot has
+ * ink — the open row marks it with a `bg-selected` FILL, which a 10px mark has
  * no room for, so it is weight, not a rail-only colour.
  *
  * THE ACTIONS RIDE ALONG, and that is a deliberate reversal of the rail's
@@ -78,6 +79,14 @@ export interface SessionRailRow {
 /** The mark box (a hair under the open row's 16px status slot). */
 const MARK_PX = 10;
 
+/**
+ * One session's mark. The GLYPH is `SessionStatusMark`'s — the same component
+ * the open row and the tab draw — so the rail cannot drift from the list it
+ * summarises; this file owns only the SIZE and the fact that a mark is a mark.
+ * NO `title` anywhere in the rail: the strip is `pointer-events-none`, so a
+ * tooltip could never appear, and `role="img"` on the marks container makes the
+ * marks decoration to AT — the summary carries the count.
+ */
 function SessionMark({
   status,
   active,
@@ -85,35 +94,20 @@ function SessionMark({
   status: SessionStatus;
   active: boolean;
 }) {
-  const ink = active ? "text-foreground" : "text-foreground-subtlest";
-  if (status === "running") {
-    // The row's own spinner at rail size. NO `title` anywhere in the rail:
-    // the strip is `pointer-events-none`, so a tooltip could never appear, and
-    // `role="img"` on the parent makes the marks decoration to AT — the
-    // summary carries the count.
-    return (
-      <Spinner
-        data-testid="session-mark"
-        style={{ width: MARK_PX, height: MARK_PX }}
-        className={`animate-spin ${ink}`}
-      />
-    );
-  }
-  const dot =
-    status === "waiting"
-      ? // The attention cue: the warning FILL (the toggle dots' idiom), which
-        // outranks the live/stored RING so a blocked session reads hot even
-        // while live.
-        "bg-warning"
-      : status === "live"
-        ? `border-2 ${ink}`
-        : `border ${ink}`;
   return (
-    <span
-      data-testid="session-mark"
-      data-dot={status}
-      style={{ width: MARK_PX, height: MARK_PX }}
-      className={`shrink-0 rounded-full ${dot}`}
+    <SessionStatusMark
+      status={status}
+      active={active}
+      size={MARK_PX}
+      testId="session-mark"
+      // Silent by design, and stated rather than inherited: the marks sit
+      // inside a `role="img"` container whose label is the whole summary
+      // ("Sessions 3, 1 running, 1 waiting"), and children of `role="img"` are
+      // presentational per ARIA. An `aria-label` on a mark would then be dead
+      // weight at best and a doubled announcement on an AT that does not prune
+      // at worst — so the marks ask for presentation explicitly and the summary
+      // alone carries the counts.
+      announce={false}
     />
   );
 }

@@ -14,6 +14,11 @@ import {
 } from "lucide-react";
 import { type SessionInfo } from "../lib/tauri";
 import { basenameOfPath } from "../lib/paths";
+import {
+  activityFromKey,
+  activityKeyOf,
+  sortByActivity,
+} from "../lib/sessionActivity";
 import { titleFor } from "../lib/sessionTitle";
 import {
   getLeftPaneCollapsed,
@@ -35,8 +40,8 @@ import { useSkillCatalog } from "../hooks/useSkillCatalog";
 import NewSpaceDialog from "./NewSpaceDialog";
 import SkillsDialog from "./SkillsDialog";
 import DeleteSessionDialog from "./DeleteSessionDialog";
-import { Spinner } from "./ui/spinner";
 import SessionRail, { type SessionRailAction } from "./SessionRail";
+import { SessionStatusMark } from "./SessionStatusMark";
 import { Kbd } from "./ui/kbd";
 import { Button } from "./ui/button";
 import {
@@ -115,19 +120,56 @@ export default function SpacesList({
   // view, so the routing is the only behavior that matters here.)
   const activeView = views.find((v) => v.path === activeSpacePath);
   const newSession = useStartNewConversation(activeView);
+  // The active space's sessions in the list's own order (live then stored) —
+  // the ids whose activity and status are read below, so the subscription and
+  // the rail are derived from the SAME membership the rows render.
+  const viewIds = useMemo(
+    () =>
+      activeView
+        ? [...activeView.liveSessionIds, ...activeView.storedSessionIds]
+        : [],
+    [activeView],
+  );
+  // LAST ACTIVITY per session, subscribed as ONE primitive key (see
+  // `activityKeyOf`): the session's own relative time is already
+  // `messages[id]`'s last stamp, and the ORDER now reads the same field — so
+  // a row's time and its position in the list can never disagree. The key (and
+  // not the `messages` map) is what keeps a streaming turn from re-sorting the
+  // list on every token: growing a message replaces the array without moving
+  // its stamp.
+  const activityKey = useSessions((s) => activityKeyOf(viewIds, s.messages));
+  const activity = useMemo(() => activityFromKey(activityKey), [activityKey]);
+  // Most recently active first, WITHIN each group. The two groups need
+  // OPPOSITE rules for "no evidence" (a session with no transcript loaded this
+  // boot), and getting that wrong is exactly the annoyance being fixed:
+  //
+  // - LIVE, `unknowns: "first"` (the default): no transcript means the session
+  //   was JUST started (`addSession` gives it an empty array) — the newest
+  //   activity there.
+  // - STORED, `unknowns: "last"`: no transcript means it has not been opened
+  //   since boot, i.e. nothing says it is recent, so it must not outrank a
+  //   session we can PROVE was used. `Db::list_sessions` already returns this
+  //   group most-recently-active-first, so the unknowns keep that order among
+  //   themselves; the sort's only real work here is a session that CLOSED this
+  //   boot — `handleSessionClosed` appends it to the tail of the array, which
+  //   would otherwise file the most recently used session at the BOTTOM.
+  const liveIds = useMemo(
+    () => sortByActivity(activeView?.liveSessionIds ?? [], activity),
+    [activeView, activity],
+  );
+  const storedIds = useMemo(
+    () => sortByActivity(activeView?.storedSessionIds ?? [], activity, "last"),
+    [activeView, activity],
+  );
   // The rail's statuses, derived by the SAME rule the rows use (one
   // subscription for the whole list — see `useSessionStatuses`). Read
   // unconditionally: the rail only paints while collapsed, but the ids are the
-  // active view's either way and a hook cannot be conditional.
+  // active view's either way and a hook cannot be conditional. ORDER IS THE
+  // RAIL'S CONTRACT (the Nth mark is the Nth row), so it takes the ORDERED
+  // lists, never the membership list above.
   const railIds = useMemo(
-    () =>
-      activeView
-        ? [
-            ...activeView.liveSessionIds,
-            ...activeView.storedSessionIds,
-          ]
-        : [],
-    [activeView],
+    () => [...liveIds, ...storedIds],
+    [liveIds, storedIds],
   );
   const statuses = useSessionStatuses(railIds);
 
@@ -354,11 +396,12 @@ export default function SpacesList({
         {/* The ACTIVE space's sessions (the Spaces are the top TABS —
             the sidebar is sessions-only: no group headers, no folder
             icons, no `+`, no trust shield, no collapse chevrons — the
-            list just scrolls). Live sessions first (newest-first), then stored
-            (input order — do NOT re-sort). */}
+            list just scrolls). Live sessions first, then stored; within each
+            group, MOST RECENTLY ACTIVE FIRST (`sortByActivity` — the same last
+            message the row's time prints, so the order and the label agree). */}
         {activeView && (
           <div className="flex flex-col gap-0.5">
-            {activeView.liveSessionIds.map((id) => (
+            {liveIds.map((id) => (
               <SessionRow
                 key={id}
                 sessionId={id}
@@ -367,7 +410,7 @@ export default function SpacesList({
                 onOpen={openSession}
               />
             ))}
-            {activeView.storedSessionIds.map((id) => (
+            {storedIds.map((id) => (
               <SessionRow
                 key={id}
                 sessionId={id}
@@ -489,17 +532,23 @@ export default function SpacesList({
 }
 
 /**
- * One session row: leading 16px slot (live + in-turn → the circular
- * `LoaderIcon` spinner, else an empty placeholder), the title with a
- * gradient-fade mask (applied to the text ITSELF — background-agnostic, so
- * it works over `bg-frame` / `bg-selected` / `bg-surface-hover` alike;
- * the text is NOT `truncate`-ellipsized, it overflows under the fade), and
- * the right slot: the relative time of last activity, the green "Waiting"
- * attention pill (a pending permission prompt OR a pending interactive
- * `ask`/`confirm`/`password` request — `password` included: a pending sudo
- * password shows no "Waiting" cue anywhere else) — swapped on row hover
- * for an Archive button (stored sessions, reversible — no confirm; live
- * rows have no hover action — the pause concept is gone).
+ * One session row: the leading `SessionStatusMark` (spinner = in a turn,
+ * `?` = a pending permission / `ask` / sudo password or a child holding one,
+ * filled ring = live and idle, dim ring = stored — the SAME glyph set the
+ * collapsed rail and the tab draw), the title with a gradient-fade mask
+ * (applied to the text ITSELF — background-agnostic, so it works over
+ * `bg-frame` / `bg-selected` / `bg-surface-hover` alike; the text is NOT
+ * `truncate`-ellipsized, it overflows under the fade), and the right slot: the
+ * relative time of last activity — ALWAYS the time. Hover swaps it for an
+ * Archive button (stored sessions, reversible — no confirm; live rows have no
+ * hover action — the pause concept is gone).
+ *
+ * THE TRAILING "Waiting" PILL IS GONE, and the `?` in the leading slot is why.
+ * The pill and the rail's dot were the same fact drawn twice in two shapes,
+ * and the pill's price was the time: while a session waited you could not see
+ * how long ago it had been active. One attention glyph in the slot the spinner
+ * already occupies (where the eye already looks for "what is this session
+ * doing") says it in both sidebar states and leaves the time alone.
  */
 function SessionRow({
   sessionId,
@@ -532,23 +581,19 @@ function SessionRow({
       null
     );
   });
-  // The row's status (spinner / "Waiting" pill) comes from the SAME rule the
-  // collapsed rail marks with — see `useSessionStatus`.
+  // The row's mark (spinner / `?` / ring) comes from the SAME rule the
+  // collapsed rail and the tab use — see `useSessionStatus`.
   const status = useSessionStatus(sessionId);
-  const waiting = status === "waiting";
   const time = relativeTimeFor(messages);
   const title = titleFor(messages, spaceName, storedTitle);
 
-  const rightSlot = waiting ? (
-    <span className="rounded-full bg-success/14 px-2 text-ui-sm font-medium text-success">
-      Waiting
-    </span>
-  ) : time !== null ? (
-    <span className="text-ui-sm text-foreground-subtle">{time}</span>
-  ) : (
-    // Empty slot — keeps alignment when there is no loaded transcript.
-    <span className="size-4" />
-  );
+  const rightSlot =
+    time !== null ? (
+      <span className="text-ui-sm text-foreground-subtle">{time}</span>
+    ) : (
+      // Empty slot — keeps alignment when there is no loaded transcript.
+      <span className="size-4" />
+    );
 
   return (
     <div
@@ -562,11 +607,25 @@ function SessionRow({
         active ? "bg-selected" : "hover:bg-surface-hover"
       }`}
     >
-      {status === "running" ? (
-        <Spinner className="size-4 shrink-0 text-foreground-subtle" />
-      ) : (
-        <span className="size-4 shrink-0" />
-      )}
+      {/* The state glyph, in the slot the spinner already owned: a session that
+          is idle now wears a RING rather than nothing, which is the cue the
+          collapsed rail has always had and the expanded list has never shown.
+          16px = the slot's old `size-4`, so the title's indent is unchanged and
+          these rows still line up with `ArchivedSessionRow`, whose leading slot
+          is the same 16px. `dotSize={8}` halves the RING alone: the three
+          states are three different amounts of ink, and the ring is the only
+          one that reads as a solid chunk of paint, so at a shared 16px the
+          idle state outshouted the working state above it — inverting their
+          importance. The spinner and the `?` are outlines whose weight is what
+          makes them readable, and they keep the full slot. No `testId`: the
+          tests reach the mark through the STATE it paints (`[data-dot="…"]`) —
+          the hook that asserts what the user sees rather than which node
+          carried it. NO ink class either: the mark owns the ink
+          (`text-foreground` on the active row, `text-foreground-subtlest`
+          otherwise), and passing one from the row would fight it — which of two
+          same-specificity utility classes wins is a CSS source-order fact this
+          row cannot control. */}
+      <SessionStatusMark status={status} active={active} size={16} dotSize={8} />
       <span
         className="min-w-0 flex-1 overflow-hidden whitespace-nowrap text-ui-base text-foreground"
         style={{
@@ -580,11 +639,11 @@ function SessionRow({
       </span>
       {isLive ? (
         // Live row: NO hover action (the pause concept is gone — the
-        // session is never paused from the UI). The time/pill slot is
+        // session is never paused from the UI). The time slot is
         // always shown.
         rightSlot
       ) : (
-        // Stored row: the time/pill slot swaps for an Archive hover
+        // Stored row: the time slot swaps for an Archive hover
         // button (archive is reversible, so it needs no confirm). The
         // slot still renders when NOT hovering.
         <>

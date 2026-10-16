@@ -619,7 +619,7 @@ describe("rowToMessages — an empty retraction row (ADR 0048)", () => {
 
 describe("spaceViewFor (per-space grouping, pure)", () => {
   // Spaces arrive `lastOpenedAt`-desc from `list_spaces`; `historySessions`
-  // newest-first from `list_sessions` — input order is the semantics.
+  // most-recently-ACTIVE first from `list_sessions` — input order is the semantics.
   const spaces = [
     row("/workspaces/alpha", 3000),
     row("/workspaces/bravo", 2000),
@@ -792,7 +792,7 @@ describe("autoSelectActive (boot auto-select, pure)", () => {
       info("newest-1", "/a/space-one"),
       info("older-1", "/a/space-one"),
     ];
-    // `historySessions` is newest-first (server order): the head wins.
+    // `historySessions` is most-recently-active first (server order): the head wins.
     expect(autoSelectActive(spaces, [], stored)).toBe("newest-1");
   });
 

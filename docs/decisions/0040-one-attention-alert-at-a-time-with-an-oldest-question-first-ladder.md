@@ -94,6 +94,12 @@ card, which a **Subagent session**'s displaced pause now presents where the user
 already looking (its parent's transcript, or the overlay that covers every other
 parent while the workspace view is mounted) instead of inside the child's sheet.
 
+> **Amended 2026-10-16.** The pill and the rail's dot are now ONE glyph — a `?` in the
+> attention ink, drawn by `SessionStatusMark` in the session row's leading slot, in the
+> collapsed rail, and now in the Space's TAB as well (which had a spinner and no
+> waiting cue at all). One more surface carrying a displaced question, not one less;
+> see ADR 0038's amendment.
+
 **A rapid series of `settled` pulses can still slide the deadline,** since `settled`
 displaces `settled`. Accepted: it needs several Sessions finishing in succession,
 where choosing any one of them is arbitrary anyway, and questions — the pauses that

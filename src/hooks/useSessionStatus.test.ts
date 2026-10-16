@@ -36,7 +36,7 @@ beforeEach(() => {
 /**
  * The rail's whole job is to say the same thing the row says, in less space —
  * so the derivation is ONE hook with two consumers (the open `SessionRow`'s
- * spinner + Waiting pill, and the collapsed rail's mark). These tests pin the
+ * spinner + `?` mark, the collapsed rail and the tab). These tests pin the
  * four states, because a rail that disagrees with the list it summarises is
  * worse than no rail.
  */

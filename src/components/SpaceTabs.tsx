@@ -4,9 +4,33 @@ import { basenameOfPath } from "../lib/paths";
 import { titleFor } from "../lib/sessionTitle";
 import { useSessions } from "../store/sessions";
 import { useSessionStatuses } from "../hooks/useSessionStatus";
-import { Spinner } from "./ui/spinner";
+import { SessionStatusMark } from "./SessionStatusMark";
+import type { SessionStatus } from "../hooks/useSessionStatus";
 import CloseSpaceDialog from "./CloseSpaceDialog";
 import NewSpaceDialog from "./NewSpaceDialog";
+
+/**
+ * A Space's own status, folded out of its live Sessions' statuses with the SAME
+ * precedence `sessionStatusOf` gives one Session: `waiting` > `running` >
+ * nothing to show.
+ *
+ * WHY `null` FOR IDLE AND STORED: a tab is not a session's only home — the
+ * Space is a tab and its sessions are the rows below it, so the tab's job is
+ * only to say "look up here". The sidebar row is where the idle/stored ring
+ * belongs (it is the one place a stored session appears at all), and an idle
+ * tab has always been blank. `live`/`stored` therefore pass through as `null`:
+ * a Worker running and in an idle turn is not a fact the tab strip reports.
+ *
+ * Pure and exported so the precedence is assertable without the tab strip's
+ * store fixtures.
+ */
+export function tabStatusOf(
+  statuses: (SessionStatus | undefined)[],
+): SessionStatus | null {
+  if (statuses.includes("waiting")) return "waiting";
+  if (statuses.includes("running")) return "running";
+  return null;
+}
 
 /**
  * The Spaces as browser-style tabs (the top of the chat column — the old
@@ -40,6 +64,14 @@ import NewSpaceDialog from "./NewSpaceDialog";
  * button 0, so the two paths cannot both fire. It also opts out of the window's
  * drag region explicitly (see the `data-tauri-drag-region` note on the pill):
  * the bar it sits in is a drag region, and a control must never be chrome.
+ *
+ * THE LEADING MARK is `SessionStatusMark` — the spinner for a Space whose
+ * Worker is in a turn, the `?` for one blocked on the user (see
+ * `tabStatusOf`). It is the SAME component the sidebar row and the collapsed
+ * rail draw, which is the point: a `?` must not mean one thing in the tab and
+ * something else two hundred pixels below it. Before it, the tab had a spinner
+ * and NO waiting cue at all, so a Space parked on a permission looked identical
+ * to one nobody had used in an hour.
  */
 export default function SpaceTabs() {
   const spaces = useSessions((s) => s.spaces);
@@ -114,8 +146,19 @@ export default function SpaceTabs() {
       {spaces.map((s) => {
         const name = basenameOfPath(s.path) || s.path;
         const active = s.path === activeSpacePath;
-        const isRunning = sessions.some(
-          (sess) => sess.cwd === s.path && statuses[sess.sessionId] === "running",
+        // The Space's OWN status, folded out of its live Sessions with the
+        // SAME precedence `sessionStatusOf` uses for one Session: `waiting`
+        // beats `running`. A Space with two Workers, one blocked on a
+        // permission and one streaming, is blocked on YOU — and the spinner
+        // would be the lie. `null` = nothing to report (no live session, or
+        // live and idle), which is why the slot is a slot and not a dot: an
+        // idle tab has always been blank here, and a tab that is a TAB needs no
+        // idle mark (unlike a sidebar row, which is the only place its session
+        // is listed).
+        const tabStatus = tabStatusOf(
+          sessions
+            .filter((sess) => sess.cwd === s.path)
+            .map((sess) => statuses[sess.sessionId]),
         );
         // ALL TABS ARE INSET PILLS — active and inactive share the pill
         // geometry (`h-8` inside the `h-10` bar, `rounded-md`). The active one
@@ -187,7 +230,13 @@ export default function SpaceTabs() {
               role="tab"
               aria-selected={active}
               onClick={() => selectSpace(s.path)}
-              title={isRunning ? `${s.path} (working)` : s.path}
+              title={
+                tabStatus === "waiting"
+                  ? `${s.path} (waiting for you)`
+                  : tabStatus === "running"
+                    ? `${s.path} (working)`
+                    : s.path
+              }
               // `self-stretch` + `flex items-center`: the label owns the
               // pill's height and centres its own line (the wrapper centres the
               // OTHER child, not this one). `pl-3` is the pill's leading inset
@@ -204,11 +253,33 @@ export default function SpaceTabs() {
                   : "text-foreground-subtle"
               }`}
             >
-              {isRunning && (
-                <Spinner
-                  className="size-3.5 shrink-0 text-foreground-subtle"
-                  aria-hidden="true"
-                  data-testid="space-tab-spinner"
+              {tabStatus !== null && (
+                // The SAME glyph the sidebar row and the collapsed rail draw,
+                // so a `?` means one thing in all three places: the spinner for
+                // a Space that is working, the QUESTION for a Space blocked on
+                // you. Rendered ONLY when there is something to report — the
+                // spinner's rule before it — so an idle tab looks exactly as it
+                // always did (an always-present empty slot would indent every
+                // tab's label by a glyph's width).
+                //
+                // `active` drives the INK (brighter on the selected tab) rather
+                // than being the session's own activity — the tab is the Space,
+                // and the selected tab's glyph should not read dimmer than its
+                // own label.
+                //
+                // NOT `aria-hidden` by default, but the tab passes
+                // `announce={false}`: a name inside the tab button folds into
+                // the tab's accessible name ("beta Waiting for you") and renames
+                // the control mid-conversation, and this is the rule the tab's
+                // spinner already followed (`aria-hidden`). The tab still names
+                // the state, in its `title`. The sidebar ROW keeps the default
+                // announcement — its text "Waiting" pill is gone.
+                <SessionStatusMark
+                  status={tabStatus}
+                  active={active}
+                  size={14}
+                  testId="space-tab-mark"
+                  announce={false}
                 />
               )}
               <span className="truncate">{name}</span>

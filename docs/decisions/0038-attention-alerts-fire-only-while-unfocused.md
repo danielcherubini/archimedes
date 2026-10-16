@@ -55,6 +55,15 @@ the gap itself would need a per-Session notion of "seen", which the app does not
 have; this paragraph exists to keep the decision above from being read as narrower
 than it is.
 
+> **Amended 2026-10-16 (the `?` mark).** The two affordances named above are now ONE
+> glyph: `SessionStatusMark` (`src/components/SessionStatusMark.tsx`) draws a `?` in
+> the attention ink in the session row's leading slot — the slot the spinner occupies
+> — and the same glyph in the rail and in the Space's tab. The row's text "Waiting"
+> pill is gone (it hid the row's relative time while a Session waited, and it was the
+> rail's dot restated in a second shape). The argument in this paragraph is unchanged:
+> the cue still exists in the open list, the collapsed rail, AND the tab bar, and the
+> rail's accessible name still carries the waiting count.
+
 **One alert per pause is per renderer session, not per pause** (and which pause owns
 the single countdown when several are owed at once is ADR 0040). The record of which
 pauses have been announced lives in the renderer's memory (ADR 0039 — Rust is handed

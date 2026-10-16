@@ -1020,8 +1020,9 @@ impl SessionManager {
         Ok(info)
     }
 
-    /// All stored sessions (newest first), as `SessionInfo` (the
-    /// `list_sessions` command's shape): the row's `capabilities` (the
+    /// All stored sessions (most recently ACTIVE first — `Db::list_sessions`),
+    /// as `SessionInfo` (the `list_sessions` command's shape): the row's
+    /// `capabilities` (the
     /// `normalize_capabilities` camelCase envelope), `config_options`
     /// synthesized from the stored `model` / `thinkingLevel` (the same
     /// resolution as `resume_native_session` — the stored composed key →
