@@ -76,8 +76,9 @@ fn test_article_extract_table_fixture() {
 
 #[tokio::test]
 async fn test_pdf_extract_sample() {
+    let cancel = CancellationToken::new();
     let bytes = include_bytes!("../fixtures/pdf_sample.pdf").to_vec();
-    let doc = pdf::extract(bytes, "https://example.com/doc.pdf", 200)
+    let doc = pdf::extract(bytes, "https://example.com/doc.pdf", 200, &cancel)
         .await
         .expect("pdf extraction should succeed");
 
@@ -90,10 +91,20 @@ async fn test_pdf_extract_sample() {
 
 #[tokio::test]
 async fn test_pdf_extract_invalid_bytes_panic_containment() {
+    let cancel = CancellationToken::new();
     let garbage = vec![0x25, 0x50, 0x44, 0x46, 0xff, 0xff, 0x00, 0x01];
-    let res = pdf::extract(garbage, "https://example.com/bad.pdf", 200).await;
+    let res = pdf::extract(garbage, "https://example.com/bad.pdf", 200, &cancel).await;
     // Should return Err cleanly, never panic out of spawn_blocking
     assert!(res.is_err());
+}
+
+#[tokio::test]
+async fn test_pdf_extract_cancellation() {
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let bytes = include_bytes!("../fixtures/pdf_sample.pdf").to_vec();
+    let res = pdf::extract(bytes, "https://example.com/doc.pdf", 200, &cancel).await;
+    assert_eq!(res.unwrap_err(), "pdf extraction cancelled");
 }
 
 #[tokio::test]

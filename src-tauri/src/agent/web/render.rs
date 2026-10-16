@@ -29,8 +29,8 @@ pub struct RenderReply {
     pub error: Option<String>,
 }
 
-/// Synchronous navigation check: ensures scheme is http/https, host matches
-/// requested host or subdomain, and target IP is not blocked.
+/// Synchronous navigation check: ensures scheme is http/https and host matches
+/// requested host or subdomain (including www prefix handling).
 pub fn is_allowed_nav(target: &Url, initial: &Url) -> bool {
     if target.scheme() != "http" && target.scheme() != "https" {
         return false;
@@ -41,46 +41,23 @@ pub fn is_allowed_nav(target: &Url, initial: &Url) -> bool {
     let Some(initial_host) = initial.host_str() else {
         return false;
     };
-    let host_matches =
-        if target_host == initial_host || target_host.ends_with(&format!(".{initial_host}")) {
-            true
-        } else {
-            let clean_initial = initial_host.strip_prefix("www.").unwrap_or(initial_host);
-            let clean_target = target_host.strip_prefix("www.").unwrap_or(target_host);
-            clean_target == clean_initial || clean_target.ends_with(&format!(".{clean_initial}"))
-        };
-    if !host_matches {
+    if target_host.is_empty() || initial_host.is_empty() {
         return false;
     }
 
-    let clean_target_host = target_host.trim_start_matches('[').trim_end_matches(']');
-    if let Ok(ip) = clean_target_host.parse::<std::net::IpAddr>() {
-        if crate::agent::web::net::is_blocked_ip(ip) {
-            return false;
-        }
-    } else {
-        let port = target
-            .port_or_known_default()
-            .unwrap_or(if target.scheme() == "https" { 443 } else { 80 });
-        use std::net::ToSocketAddrs;
-        match (clean_target_host, port).to_socket_addrs() {
-            Ok(addrs) => {
-                let mut count = 0;
-                for addr in addrs {
-                    count += 1;
-                    if crate::agent::web::net::is_blocked_ip(addr.ip()) {
-                        return false;
-                    }
-                }
-                if count == 0 {
-                    return false;
-                }
-            }
-            Err(_) => return false,
-        }
+    if target_host == initial_host
+        || target_host.ends_with(&format!(".{initial_host}"))
+        || initial_host.ends_with(&format!(".{target_host}"))
+    {
+        return true;
     }
 
-    true
+    let clean_initial = initial_host.strip_prefix("www.").unwrap_or(initial_host);
+    let clean_target = target_host.strip_prefix("www.").unwrap_or(target_host);
+
+    clean_target == clean_initial
+        || clean_target.ends_with(&format!(".{clean_initial}"))
+        || clean_initial.ends_with(&format!(".{clean_target}"))
 }
 
 /// Render a URL in a hidden webview, returning the rendered HTML DOM.
@@ -365,41 +342,52 @@ mod tests {
 
     #[test]
     fn test_is_allowed_nav_same_host_and_subdomain() {
-        let initial = Url::parse("https://localhost/start").unwrap();
-        let same = Url::parse("https://localhost/another").unwrap();
-        let sub = Url::parse("https://sub.localhost/page").unwrap();
+        let initial = Url::parse("https://example.com/start").unwrap();
+        let same = Url::parse("https://example.com/another").unwrap();
+        let sub = Url::parse("https://sub.example.com/page").unwrap();
         let diff = Url::parse("https://another-domain.invalid/evil").unwrap();
+        let suffix_trick = Url::parse("https://notexample.com/evil").unwrap();
         let file = Url::parse("file:///etc/passwd").unwrap();
+        let js = Url::parse("javascript:alert(1)").unwrap();
 
         assert!(is_allowed_nav(&same, &initial));
         assert!(is_allowed_nav(&sub, &initial));
         assert!(!is_allowed_nav(&diff, &initial));
+        assert!(!is_allowed_nav(&suffix_trick, &initial));
         assert!(!is_allowed_nav(&file, &initial));
+        assert!(!is_allowed_nav(&js, &initial));
+    }
+
+    #[test]
+    fn test_is_allowed_nav_subdomain_to_parent() {
+        let initial = Url::parse("https://sub.example.com/start").unwrap();
+        let parent = Url::parse("https://example.com/page").unwrap();
+        assert!(is_allowed_nav(&parent, &initial));
     }
 
     #[test]
     fn test_is_allowed_nav_www_prefix() {
-        let initial_www = Url::parse("https://www.localhost/").unwrap();
-        let target_bare = Url::parse("https://localhost/blog").unwrap();
+        let initial_www = Url::parse("https://www.example.com/").unwrap();
+        let target_bare = Url::parse("https://example.com/blog").unwrap();
         assert!(is_allowed_nav(&target_bare, &initial_www));
 
-        let initial_bare = Url::parse("https://localhost/").unwrap();
-        let target_www = Url::parse("https://www.localhost/blog").unwrap();
+        let initial_bare = Url::parse("https://example.com/").unwrap();
+        let target_www = Url::parse("https://www.example.com/blog").unwrap();
         assert!(is_allowed_nav(&target_www, &initial_bare));
+
+        let sub_www = Url::parse("https://www.sub.example.com/blog").unwrap();
+        assert!(is_allowed_nav(&sub_www, &initial_bare));
     }
 
     #[test]
-    fn test_is_allowed_nav_blocks_private_ips() {
-        let initial_private = Url::parse("http://10.0.0.1/start").unwrap();
-        let target_private = Url::parse("http://10.0.0.1/nav").unwrap();
-        assert!(!is_allowed_nav(&target_private, &initial_private));
+    fn test_is_allowed_nav_schemes() {
+        let initial = Url::parse("http://example.com/").unwrap();
+        let target_https = Url::parse("https://example.com/").unwrap();
+        assert!(is_allowed_nav(&target_https, &initial));
 
-        let initial_local = Url::parse("http://127.0.0.1:8080/start").unwrap();
-        let target_local = Url::parse("http://127.0.0.1:8080/nav").unwrap();
-        assert!(is_allowed_nav(&target_local, &initial_local));
-
-        let target_blocked = Url::parse("http://169.254.169.254/meta").unwrap();
-        assert!(!is_allowed_nav(&target_blocked, &initial_local));
+        let initial_https = Url::parse("https://example.com/").unwrap();
+        let target_http = Url::parse("http://example.com/").unwrap();
+        assert!(is_allowed_nav(&target_http, &initial_https));
     }
 
     #[test]

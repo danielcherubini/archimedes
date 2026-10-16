@@ -106,7 +106,7 @@ impl SearchProvider for DuckDuckGoProvider {
         &self,
         query: &str,
         opts: &SearchOpts,
-        _config: &WebConfig,
+        cfg: &WebConfig,
         cancel: &CancellationToken,
     ) -> Result<Vec<SearchResultItem>, String> {
         let encoded_query =
@@ -127,7 +127,11 @@ impl SearchProvider for DuckDuckGoProvider {
             method: reqwest::Method::GET,
             headers,
             body: None,
-            proxy: opts.proxy.clone(),
+            proxy: opts
+                .proxy
+                .as_deref()
+                .or(cfg.proxy.as_deref())
+                .map(|s| s.to_string()),
         };
 
         let outcome = safe_fetch(&target_url, &fetch_opts, cancel)
@@ -199,5 +203,23 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].title, "Rust Programming Language");
         assert_eq!(results[1].title, "crates.io: Rust Package Registry");
+    }
+
+    #[tokio::test]
+    async fn test_ddg_provider_search_fallback_proxy() {
+        let server = MockServer::start().await;
+        let provider = DuckDuckGoProvider::with_base_url(format!("{}/html/", server.uri()));
+        let cancel = CancellationToken::new();
+        let config = WebConfig {
+            proxy: Some("http://10.0.0.1:8080".into()),
+            ..Default::default()
+        };
+        let opts = SearchOpts::default();
+
+        let err = provider
+            .search("rust programming", &opts, &config, &cancel)
+            .await
+            .unwrap_err();
+        assert!(err.contains("blocked IP"));
     }
 }

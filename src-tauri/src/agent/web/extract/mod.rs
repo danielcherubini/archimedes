@@ -85,7 +85,7 @@ pub async fn extract(url: &str, mode: Mode, ctx: &ToolCtx) -> Result<ExtractedDo
         || parsed_url.path().to_lowercase().ends_with(".pdf");
 
     if is_pdf {
-        return pdf::extract(outcome.body, url, outcome.status).await;
+        return pdf::extract(outcome.body, url, outcome.status, &ctx.cancel).await;
     }
 
     // 5. Article extraction fallback
