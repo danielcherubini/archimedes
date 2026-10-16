@@ -250,11 +250,12 @@ pub fn run() {
     // for what is allowed, and why (the app's own url, and IPC, must not be
     // refused).
     let dev_host = std::env::var("TAURI_DEV_HOST").ok();
-    // The turbofish is load-bearing: nothing else pins the plugin's `R` (the
-    // webview argument is unused) nor the config type `C`, so inference gives up.
+    // The turbofish is load-bearing: nothing else pins the plugin's `R` nor
+    // the config type `C`, so inference gives up.
     let navigation_guard = tauri::plugin::Builder::<tauri::Wry>::new("navigation-guard")
-        .on_navigation(move |_webview, url| {
-            crate::navigation_guard::is_app_url(url, dev_host.as_deref())
+        .on_navigation(move |webview, url| {
+            crate::navigation_guard::is_render_webview(webview.label())
+                || crate::navigation_guard::is_app_url(url, dev_host.as_deref())
         })
         .build();
     let app = tauri::Builder::default()
