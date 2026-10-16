@@ -907,22 +907,24 @@ fn start_pump(
                 // an EXPECTED `Exited` (a `detach` / `reap_all` was in
                 // flight) fires NO `on_crash`.
                 WorkerInboundEvent::Exited(code) => {
+                    // The lifecycle transition (the `ARCHIMEDES_DEBUG` log —
+                    // a CRASH when the `Exited` is unexpected, a clean
+                    // `exit` otherwise; the code + the session id). Computed
+                    // BEFORE the drive is woken (below): publishing first would
+                    // let the drive's teardown remove the `drives` entry in
+                    // between, and a genuinely crashed child would then read as
+                    // an EXPECTED exit and lose its `on_crash`.
+                    let crashed = unexpected_exit(&state, &session_id);
                     // The PUMP-FIRED exit signal (ADR 0055 review, thread 3):
-                    // publish the code through the drive's `exit` watch BEFORE
-                    // anything else in this arm — every frame the child wrote
-                    // has ALREADY been fed (the `broadcast` is IN ORDER, so
-                    // `Exited` is the last thing the pump sees), and the drive
-                    // reads the salvage the instant this fires. Firing it LATER
-                    // (after `on_crash`) would only delay the outcome; firing it
-                    // from the read task's `exited` watch instead would fire it
-                    // while frames were still queued — the truncation.
+                    // publish the code through the drive's `exit` watch once
+                    // every frame the child wrote has ALREADY been fed (the
+                    // `broadcast` is IN ORDER, so `Exited` is the last thing the
+                    // pump sees) — the drive reads the salvage the instant this
+                    // fires. Firing it from the read task's `exited` watch
+                    // instead is what truncated the capture.
                     if is_subagent {
                         publish_pump_exit(&state, &session_id, code);
                     }
-                    // The lifecycle transition (the `ARCHIMEDES_DEBUG` log —
-                    // a CRASH when the `Exited` is unexpected, a clean
-                    // `exit` otherwise; the code + the session id).
-                    let crashed = unexpected_exit(&state, &session_id);
                     debuglog::log(&format!(
                         "worker {}: {session_id} (code {code:?})",
                         if crashed { "crash" } else { "exit" }
