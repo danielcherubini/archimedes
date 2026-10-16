@@ -79,6 +79,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 image = { version = "0.25", features = ["png"] }
 dom_query = "0.28"
+ddgs = "0.1"
 ipnet = "2"
 pdf-extract = "0.12"
 regex = "1"

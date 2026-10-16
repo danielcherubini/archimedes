@@ -11,8 +11,23 @@ const DEFAULT_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36";
 const DEFAULT_DDG_URL: &str = "https://html.duckduckgo.com/html/?q=";
 
+#[cfg(test)]
+pub type FallbackMockFn = std::sync::Arc<
+    dyn Fn(
+            &str,
+            &SearchOpts,
+            &WebConfig,
+            &CancellationToken,
+        ) -> Result<Vec<SearchResultItem>, String>
+        + Send
+        + Sync,
+>;
+
+#[derive(Clone)]
 pub struct DuckDuckGoProvider {
     pub base_url: Option<String>,
+    #[cfg(test)]
+    pub fallback_mock: Option<FallbackMockFn>,
 }
 
 impl Default for DuckDuckGoProvider {
@@ -23,12 +38,116 @@ impl Default for DuckDuckGoProvider {
 
 impl DuckDuckGoProvider {
     pub fn new() -> Self {
-        Self { base_url: None }
+        Self {
+            base_url: None,
+            #[cfg(test)]
+            fallback_mock: None,
+        }
     }
 
     pub fn with_base_url(base_url: String) -> Self {
         Self {
             base_url: Some(base_url),
+            #[cfg(test)]
+            fallback_mock: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_fallback_mock<F>(mut self, mock: F) -> Self
+    where
+        F: Fn(
+                &str,
+                &SearchOpts,
+                &WebConfig,
+                &CancellationToken,
+            ) -> Result<Vec<SearchResultItem>, String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.fallback_mock = Some(std::sync::Arc::new(mock));
+        self
+    }
+
+    async fn run_fallback(
+        &self,
+        query: &str,
+        opts: &SearchOpts,
+        cfg: &WebConfig,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<SearchResultItem>, String> {
+        #[cfg(test)]
+        if let Some(ref mock) = self.fallback_mock {
+            return mock(query, opts, cfg, cancel);
+        }
+
+        run_ddgs_fallback(query, opts, cfg, cancel).await
+    }
+}
+
+async fn run_ddgs_fallback(
+    query: &str,
+    opts: &SearchOpts,
+    cfg: &WebConfig,
+    cancel: &CancellationToken,
+) -> Result<Vec<SearchResultItem>, String> {
+    if cancel.is_cancelled() {
+        return Err("[duckduckgo] operation cancelled".to_string());
+    }
+
+    let proxy_str = opts.proxy.as_deref().or(cfg.proxy.as_deref());
+
+    let mut headers = HeaderMap::new();
+    headers.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_USER_AGENT));
+    headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+    headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
+
+    let mut builder = reqwest::Client::builder()
+        .default_headers(headers)
+        .timeout(std::time::Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::limited(10));
+
+    if let Some(proxy_url) = proxy_str {
+        let p = reqwest::Proxy::all(proxy_url)
+            .map_err(|e| format!("[duckduckgo] invalid proxy `{proxy_url}`: {e}"))?;
+        builder = builder.proxy(p);
+    } else {
+        builder = builder.no_proxy();
+    }
+
+    let http_client = builder
+        .build()
+        .map_err(|e| format!("[duckduckgo] failed to build http client: {e}"))?;
+
+    let ddgs_client = ddgs::Ddgs::with_client(http_client);
+    let mut text_opts = ddgs::TextOptions {
+        backend: ddgs::TextBackend::Auto,
+        ..Default::default()
+    };
+    if opts.num_results > 0 {
+        text_opts.max_results = Some(opts.num_results);
+    }
+
+    let fut = ddgs_client.text_with_options(query, text_opts);
+
+    tokio::select! {
+        _ = cancel.cancelled() => Err("[duckduckgo] operation cancelled".to_string()),
+        res = fut => {
+            let items = res.map_err(|e| format!("[duckduckgo] ddgs fallback error: {e}"))?;
+            let mut results: Vec<SearchResultItem> = items
+                .into_iter()
+                .map(|item| SearchResultItem {
+                    title: item.title,
+                    url: item.href,
+                    snippet: item.body,
+                    published_date: None,
+                })
+                .collect();
+            if opts.num_results > 0 && results.len() > opts.num_results {
+                results.truncate(opts.num_results);
+            }
+            Ok(results)
         }
     }
 }
@@ -185,6 +304,10 @@ impl SearchProvider for DuckDuckGoProvider {
         cfg: &WebConfig,
         cancel: &CancellationToken,
     ) -> Result<Vec<SearchResultItem>, String> {
+        if cancel.is_cancelled() {
+            return Err("[duckduckgo] operation cancelled".to_string());
+        }
+
         let encoded_query =
             url::form_urlencoded::byte_serialize(query.as_bytes()).collect::<String>();
         let target_url = match &self.base_url {
@@ -217,28 +340,39 @@ impl SearchProvider for DuckDuckGoProvider {
                 .map(|s| s.to_string()),
         };
 
-        let outcome = safe_fetch(&target_url, &fetch_opts, cancel)
-            .await
-            .map_err(|e| format!("[duckduckgo] error: {e}"))?;
+        let primary_err = match safe_fetch(&target_url, &fetch_opts, cancel).await {
+            Ok(outcome) => {
+                if outcome.status == 200 {
+                    let html = String::from_utf8_lossy(&outcome.body);
+                    if html.contains("anomaly-modal") || html.contains("bots use DuckDuckGo too") {
+                        "[duckduckgo] error: bot detection or rate limit challenge (anomaly challenge)".to_string()
+                    } else {
+                        let mut results = parse_ddg_html(&html);
+                        if opts.num_results > 0 && results.len() > opts.num_results {
+                            results.truncate(opts.num_results);
+                        }
+                        return Ok(results);
+                    }
+                } else {
+                    format!("[duckduckgo] error: HTTP {}", outcome.status)
+                }
+            }
+            Err(e) => {
+                let err_str = format!("[duckduckgo] error: {e}");
+                if err_str.contains("blocked IP")
+                    || err_str.contains("denied scheme")
+                    || cancel.is_cancelled()
+                {
+                    return Err(err_str);
+                }
+                err_str
+            }
+        };
 
-        if outcome.status != 200 {
-            return Err(format!("[duckduckgo] error: HTTP {}", outcome.status));
+        match self.run_fallback(query, opts, cfg, cancel).await {
+            Ok(results) => Ok(results),
+            Err(fallback_err) => Err(format!("{primary_err} (fallback error: {fallback_err})")),
         }
-
-        let html = String::from_utf8_lossy(&outcome.body);
-        if html.contains("anomaly-modal") || html.contains("bots use DuckDuckGo too") {
-            return Err(
-                "[duckduckgo] error: bot detection or rate limit challenge (anomaly challenge)"
-                    .to_string(),
-            );
-        }
-
-        let mut results = parse_ddg_html(&html);
-        if opts.num_results > 0 && results.len() > opts.num_results {
-            results.truncate(opts.num_results);
-        }
-
-        Ok(results)
     }
 }
 
@@ -333,7 +467,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let provider = DuckDuckGoProvider::with_base_url(format!("{}/html/", server.uri()));
+        let provider = DuckDuckGoProvider::with_base_url(format!("{}/html/", server.uri()))
+            .with_fallback_mock(|_, _, _, _| Err("all fallback engines failed".into()));
         let cancel = CancellationToken::new();
         let config = WebConfig::default();
         let opts = SearchOpts::default();
@@ -346,6 +481,82 @@ mod tests {
             err.contains("202") || err.contains("bot detection") || err.contains("anomaly"),
             "Expected error about bot detection or 202, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_ddg_provider_search_anomaly_202_falls_back_seamlessly() {
+        let server = MockServer::start().await;
+
+        let anomaly_html = r#"<!DOCTYPE html>
+<html>
+<head><title>DuckDuckGo</title></head>
+<body>
+<div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>
+<form id="challenge-form" action="//duckduckgo.com/anomaly.js"></form>
+</body>
+</html>"#;
+
+        Mock::given(method("GET"))
+            .and(path("/html/"))
+            .and(query_param("q", "rust programming"))
+            .respond_with(ResponseTemplate::new(202).set_body_string(anomaly_html))
+            .mount(&server)
+            .await;
+
+        let provider = DuckDuckGoProvider::with_base_url(format!("{}/html/", server.uri()))
+            .with_fallback_mock(|_q, _opts, _cfg, _cancel| {
+                Ok(vec![SearchResultItem {
+                    title: "Fallback Rust Programming".into(),
+                    url: "https://example.com/fallback-rust".into(),
+                    snippet: "A language empowering everyone from fallback".into(),
+                    published_date: None,
+                }])
+            });
+
+        let cancel = CancellationToken::new();
+        let config = WebConfig::default();
+        let opts = SearchOpts::default();
+
+        let results = provider
+            .search("rust programming", &opts, &config, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Fallback Rust Programming");
+        assert_eq!(results[0].url, "https://example.com/fallback-rust");
+    }
+
+    #[tokio::test]
+    async fn test_ddg_provider_search_403_falls_back_seamlessly() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/html/"))
+            .and(query_param("q", "rust programming"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let provider = DuckDuckGoProvider::with_base_url(format!("{}/html/", server.uri()))
+            .with_fallback_mock(|_q, _opts, _cfg, _cancel| {
+                Ok(vec![SearchResultItem {
+                    title: "Fallback On 403".into(),
+                    url: "https://example.com/fallback-403".into(),
+                    snippet: "Recovered from 403".into(),
+                    published_date: None,
+                }])
+            });
+
+        let cancel = CancellationToken::new();
+        let config = WebConfig::default();
+        let opts = SearchOpts::default();
+
+        let results = provider
+            .search("rust programming", &opts, &config, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Fallback On 403");
     }
 
     #[tokio::test]
@@ -419,5 +630,44 @@ mod tests {
         assert_eq!(lite_results[0].title, "Lite Title");
         assert_eq!(lite_results[0].url, "https://lite.example.com/");
         assert_eq!(lite_results[0].snippet, "Lite snippet text");
+    }
+
+    #[tokio::test]
+    #[ignore = "live network query"]
+    async fn test_live_ddg_challenging_queries() {
+        let provider = DuckDuckGoProvider::new();
+        let cancel = CancellationToken::new();
+        let config = WebConfig::default();
+        let opts = SearchOpts {
+            num_results: 5,
+            ..Default::default()
+        };
+
+        let res1 = provider
+            .search(
+                "dog breeders oslo norway oppdretter hund",
+                &opts,
+                &config,
+                &cancel,
+            )
+            .await;
+        assert!(res1.is_ok(), "query 1 failed: {:?}", res1.err());
+        let hits1 = res1.unwrap();
+        assert!(!hits1.is_empty(), "query 1 returned empty hits");
+        println!("=== Hits for 'dog breeders oslo norway oppdretter hund': ===");
+        for (i, hit) in hits1.iter().enumerate() {
+            println!("{}. {} ({})", i + 1, hit.title, hit.url);
+        }
+
+        let res2 = provider
+            .search("oppdretter hund Oslo NKK", &opts, &config, &cancel)
+            .await;
+        assert!(res2.is_ok(), "query 2 failed: {:?}", res2.err());
+        let hits2 = res2.unwrap();
+        assert!(!hits2.is_empty(), "query 2 returned empty hits");
+        println!("=== Hits for 'oppdretter hund Oslo NKK': ===");
+        for (i, hit) in hits2.iter().enumerate() {
+            println!("{}. {} ({})", i + 1, hit.title, hit.url);
+        }
     }
 }
