@@ -47,8 +47,8 @@ pub fn resolve_provider_from(
     requested: Option<&str>,
     config: &WebConfig,
 ) -> Result<ResolvedProvider, String> {
-    // 1. If explicit provider requested
-    if let Some(req) = requested {
+    // 1. If explicit provider requested (excluding empty and "auto")
+    if let Some(req) = requested.filter(|r| !r.is_empty() && *r != "auto") {
         if let Some(p) = providers.iter().find(|p| p.id() == req) {
             return Ok(ResolvedProvider {
                 provider: p.clone(),
@@ -200,9 +200,9 @@ async fn execute_queries_for_provider(
         handles.push(fut);
     }
 
+    let query_results = futures_util::future::try_join_all(handles).await?;
     let mut merged = Vec::new();
-    for fut in handles {
-        let results = fut.await?;
+    for results in query_results {
         merged.extend(results);
     }
 
@@ -360,6 +360,10 @@ mod tests {
         assert_eq!(explicit.provider.id(), "duckduckgo");
         assert!(!explicit.was_auto_resolved);
 
+        let auto_explicit = resolve_provider(Some("auto"), &config).unwrap();
+        assert_eq!(auto_explicit.provider.id(), "duckduckgo");
+        assert!(auto_explicit.was_auto_resolved);
+
         assert!(resolve_provider(Some("nonexistent"), &config).is_err());
     }
 
@@ -468,5 +472,80 @@ mod tests {
         assert_eq!(outcome.provider, "duckduckgo");
         assert_eq!(outcome.results.len(), 1);
         assert_eq!(outcome.results[0].title, "DDG result");
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_queries_execution() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ConcurrentMockProvider {
+            active: AtomicUsize,
+            max_active: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl SearchProvider for ConcurrentMockProvider {
+            fn id(&self) -> &'static str {
+                "concurrent_mock"
+            }
+            fn name(&self) -> &'static str {
+                "Concurrent Mock"
+            }
+            fn is_available(&self, _config: &WebConfig) -> bool {
+                true
+            }
+            async fn search(
+                &self,
+                query: &str,
+                _opts: &SearchOpts,
+                _config: &WebConfig,
+                _cancel: &CancellationToken,
+            ) -> Result<Vec<SearchResultItem>, String> {
+                let current = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_active.fetch_max(current, Ordering::SeqCst);
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                Ok(vec![SearchResultItem {
+                    title: format!("Result for {query}"),
+                    url: format!("https://example.com/{query}"),
+                    snippet: "snippet".into(),
+                    published_date: None,
+                }])
+            }
+        }
+
+        let mock = Arc::new(ConcurrentMockProvider {
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+        });
+        let provider: Arc<dyn SearchProvider> = mock.clone();
+
+        let queries = vec!["q1".to_string(), "q2".to_string(), "q3".to_string()];
+        let opts = SearchOpts {
+            num_results: 5,
+            recency_filter: None,
+            domain_filter: vec![],
+            proxy: None,
+            provider: Some("concurrent_mock".into()),
+        };
+        let config = WebConfig::default();
+        let cancel = CancellationToken::new();
+
+        let outcome = execute_search_with_providers(
+            std::slice::from_ref(&provider),
+            &queries,
+            &opts,
+            &config,
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.results.len(), 3);
+        // Because queries are run concurrently, max_active should be > 1
+        assert!(
+            mock.max_active.load(Ordering::SeqCst) > 1,
+            "queries should run concurrently"
+        );
     }
 }

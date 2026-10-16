@@ -99,14 +99,29 @@ pub async fn exec_web_search_with_providers(
 
     match execute_search_with_providers(providers, &queries, &opts, &ctx.web, &ctx.cancel).await {
         Ok(outcome) => {
-            let summary = outcome
-                .results
-                .iter()
-                .map(|r| format!("[{}]({})", r.title, r.url))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let response_id = crate::agent::web::cache::generate_id();
 
-            let response_id = global_cache().store(
+            let mut formatted_entries = Vec::new();
+            for r in &outcome.results {
+                let mut entry = format!("[{}]({})", r.title, r.url);
+                if !r.snippet.trim().is_empty() {
+                    entry.push('\n');
+                    entry.push_str(r.snippet.trim());
+                }
+                formatted_entries.push(entry);
+            }
+
+            let summary = if formatted_entries.is_empty() {
+                format!("No search results found (responseId: {response_id})")
+            } else {
+                format!(
+                    "Search results (responseId: {response_id}):\n\n{}",
+                    formatted_entries.join("\n\n")
+                )
+            };
+
+            global_cache().store_with_id(
+                response_id.clone(),
                 StoredKind::Search,
                 summary.clone(),
                 json!({
@@ -186,19 +201,31 @@ pub async fn exec_fetch_content(ctx: &ToolCtx, params: &Value) -> ToolResult {
 
             if mode != Mode::Raw && crate::agent::web::extract::looks_blocked(&doc) {
                 if let Some(requester) = &ctx.render_requester {
-                    match requester.request_render(url, 30_000).await {
-                        Ok(rendered) => {
-                            let mut rendered_doc = crate::agent::web::extract::article::extract(
-                                &rendered.html,
-                                &rendered.final_url,
-                                rendered.status,
-                            );
-                            rendered_doc.extractor = "webview";
-                            doc = rendered_doc;
-                            renderer_used = Some("webview");
+                    tokio::select! {
+                        _ = ctx.cancel.cancelled() => {
+                            let err_msg = "fetch_content render cancelled".to_string();
+                            return ToolResult {
+                                content: vec![ContentBlock::Text { text: err_msg.clone() }],
+                                details: Some(json!({ "error": err_msg })),
+                                is_error: true,
+                            };
                         }
-                        Err(err) => {
-                            renderer_note = Some(format!("render failed: {err}"));
+                        render_res = requester.request_render(url, 30_000) => {
+                            match render_res {
+                                Ok(rendered) => {
+                                    let mut rendered_doc = crate::agent::web::extract::article::extract(
+                                        &rendered.html,
+                                        &rendered.final_url,
+                                        rendered.status,
+                                    );
+                                    rendered_doc.extractor = "webview";
+                                    doc = rendered_doc;
+                                    renderer_used = Some("webview");
+                                }
+                                Err(err) => {
+                                    renderer_note = Some(format!("render failed: {err}"));
+                                }
+                            }
                         }
                     }
                 }
@@ -300,37 +327,32 @@ pub async fn exec_get_search_content(_ctx: &ToolCtx, params: &Value) -> ToolResu
 
     if let Some(needle) = find_text {
         let content = &item.content;
-        let content_lower = content.to_lowercase();
-        let needle_lower = needle.to_lowercase();
-
         let mut matches = Vec::new();
-        let mut start_idx = 0;
 
-        while let Some(pos) = content_lower[start_idx..].find(&needle_lower) {
-            let match_idx = start_idx + pos;
-            let window_start = match_idx.saturating_sub(200);
-            let window_end = (match_idx + needle.len() + 200).min(content.len());
+        let pattern = format!("(?i){}", regex::escape(needle));
+        if let Ok(re) = regex::Regex::new(&pattern) {
+            for m in re.find_iter(content) {
+                let match_start = m.start();
+                let match_end = m.end();
+                let window_start = match_start.saturating_sub(200);
+                let window_end = (match_end + 200).min(content.len());
 
-            // Safely slice on char boundaries
-            let safe_start = floor_char_boundary(content, window_start);
-            let safe_end = ceil_char_boundary(content, window_end);
-            let safe_match_end = ceil_char_boundary(content, match_idx + needle.len());
+                // Safely slice on char boundaries
+                let safe_start = floor_char_boundary(content, window_start);
+                let safe_end = ceil_char_boundary(content, window_end);
 
-            let passage = &content[safe_start..safe_end];
-            let match_str = &content[match_idx..safe_match_end];
+                let passage = &content[safe_start..safe_end];
+                let match_str = m.as_str();
 
-            matches.push(json!({
-                "passage": passage,
-                "offset": match_idx,
-                "match": match_str,
-            }));
+                matches.push(json!({
+                    "passage": passage,
+                    "offset": match_start,
+                    "match": match_str,
+                }));
 
-            if matches.len() >= 20 {
-                break;
-            }
-            start_idx = match_idx + needle.len();
-            if start_idx >= content.len() {
-                break;
+                if matches.len() >= 20 {
+                    break;
+                }
             }
         }
 
@@ -692,6 +714,44 @@ mod tests {
             _ => panic!("expected text block"),
         }
 
+        // Test get_search_content find_text unicode case-insensitive match without panicking on length differences (e.g. Kelvin sign \u{212a})
+        let cached_unicode_id = global_cache().store(
+            StoredKind::Fetch,
+            "Dies ist Ké und ein ÉLÉGANT Kleid.".to_string(),
+            json!({}),
+        );
+        let kelvin_res = exec_get_search_content(
+            &ctx,
+            &json!({
+                "response_id": cached_unicode_id,
+                "find_text": "é"
+            }),
+        )
+        .await;
+        assert!(!kelvin_res.is_error);
+        match &kelvin_res.content[0] {
+            ContentBlock::Text { text } => {
+                assert!(text.contains("\"match\":\"é\"") || text.contains("\"match\":\"É\""));
+            }
+            _ => panic!("expected text block"),
+        }
+
+        let accent_res = exec_get_search_content(
+            &ctx,
+            &json!({
+                "response_id": cached_unicode_id,
+                "find_text": "élégant"
+            }),
+        )
+        .await;
+        assert!(!accent_res.is_error);
+        match &accent_res.content[0] {
+            ContentBlock::Text { text } => {
+                assert!(text.contains("ÉLÉGANT"));
+            }
+            _ => panic!("expected text block"),
+        }
+
         // Test get_search_content find_text no match is success
         let no_match_res = exec_get_search_content(
             &ctx,
@@ -876,5 +936,115 @@ mod tests {
             "render failed: connection timed out"
         );
         assert!(details.get("renderer").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_exec_web_search_content_formatting_and_cache() {
+        use crate::agent::web::providers::duckduckgo::DuckDuckGoProvider;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let ddg_server = MockServer::start().await;
+        let html_body = r#"
+        <div class="result">
+            <h2><a class="result__a" href="https://example.com/item1">Item One</a></h2>
+            <div class="result__snippet">This is the snippet for item one.</div>
+        </div>
+        "#;
+        Mock::given(method("GET"))
+            .and(path("/html/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(html_body))
+            .mount(&ddg_server)
+            .await;
+
+        let providers: Vec<Arc<dyn SearchProvider>> = vec![Arc::new(
+            DuckDuckGoProvider::with_base_url(format!("{}/html/", ddg_server.uri())),
+        )];
+
+        let mut ctx = test_ctx();
+        ctx.web.default_provider = "duckduckgo".into();
+
+        let res =
+            exec_web_search_with_providers(&ctx, &json!({ "query": "test query" }), &providers)
+                .await;
+
+        assert!(!res.is_error);
+        let text = match &res.content[0] {
+            ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text block"),
+        };
+
+        let details = res.details.expect("details should exist");
+        let response_id = details["responseId"]
+            .as_str()
+            .expect("responseId")
+            .to_string();
+
+        // Check model text contains markdown link, snippet, and responseId
+        assert!(text.contains("[Item One](https://example.com/item1)"));
+        assert!(text.contains("This is the snippet for item one."));
+        assert!(text.contains(&response_id));
+
+        // Check cache contains the exact same text
+        let cached = global_cache()
+            .get(&response_id)
+            .expect("cached item exists");
+        assert_eq!(cached.content, text);
+    }
+
+    #[tokio::test]
+    async fn test_exec_fetch_content_render_cancellation() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/slow-render"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Forbidden"))
+            .mount(&server)
+            .await;
+
+        struct HangingRenderRequester;
+        impl crate::agent::web::RenderRequester for HangingRenderRequester {
+            fn request_render(
+                &self,
+                _url: &str,
+                _timeout_ms: u64,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<crate::agent::web::RenderedPage, String>,
+                        > + Send,
+                >,
+            > {
+                Box::pin(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    Err("timeout".into())
+                })
+            }
+        }
+
+        let url = format!("{}/slow-render", server.uri());
+        let mut ctx = test_ctx();
+        ctx.render_requester = Some(Arc::new(HangingRenderRequester));
+
+        // Pre-cancel the context token
+        ctx.cancel.cancel();
+
+        let res = exec_fetch_content(
+            &ctx,
+            &json!({
+                "url": url,
+            }),
+        )
+        .await;
+
+        assert!(res.is_error);
+        match &res.content[0] {
+            ContentBlock::Text { text } => {
+                assert!(text.contains("cancelled"));
+            }
+            _ => panic!("expected text block"),
+        }
     }
 }

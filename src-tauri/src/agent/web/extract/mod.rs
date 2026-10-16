@@ -28,6 +28,30 @@ pub struct ExtractedDoc {
 
 pub async fn extract(url: &str, mode: Mode, ctx: &ToolCtx) -> Result<ExtractedDoc, String> {
     let parsed_url = Url::parse(url).map_err(|e| format!("invalid url `{url}`: {e}"))?;
+
+    // Raw mode check before GitHub, YouTube, or PDF routing
+    if mode == Mode::Raw {
+        let opts = FetchOpts {
+            proxy: ctx.web.proxy.clone(),
+            ..Default::default()
+        };
+        let outcome = safe_fetch(url, &opts, &ctx.cancel)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let body_str = String::from_utf8_lossy(&outcome.body).into_owned();
+        let title = extract_raw_title(&body_str).unwrap_or_else(|| "Raw Content".to_string());
+        let word_count = body_str.split_whitespace().count();
+        return Ok(ExtractedDoc {
+            title,
+            url: outcome.final_url.to_string(),
+            markdown: body_str,
+            word_count,
+            status: outcome.status,
+            extractor: "raw",
+        });
+    }
+
     let host = parsed_url.host_str().unwrap_or_default();
 
     // 1. GitHub routing
@@ -64,22 +88,7 @@ pub async fn extract(url: &str, mode: Mode, ctx: &ToolCtx) -> Result<ExtractedDo
         return pdf::extract(outcome.body, url, outcome.status).await;
     }
 
-    // 5. Raw mode check
-    if mode == Mode::Raw {
-        let body_str = String::from_utf8_lossy(&outcome.body).into_owned();
-        let title = extract_raw_title(&body_str).unwrap_or_else(|| "Raw Content".to_string());
-        let word_count = body_str.split_whitespace().count();
-        return Ok(ExtractedDoc {
-            title,
-            url: outcome.final_url.to_string(),
-            markdown: body_str,
-            word_count,
-            status: outcome.status,
-            extractor: "raw",
-        });
-    }
-
-    // 6. Article extraction fallback
+    // 5. Article extraction fallback
     let body_str = String::from_utf8_lossy(&outcome.body);
     Ok(article::extract(
         &body_str,

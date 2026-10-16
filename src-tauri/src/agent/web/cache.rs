@@ -58,15 +58,26 @@ impl ResponseCache {
     }
 
     pub fn store(&self, kind: StoredKind, content: String, metadata: Value) -> String {
+        let id = generate_id();
+        self.store_with_id(id, kind, content, metadata)
+    }
+
+    pub fn store_with_id(
+        &self,
+        id: String,
+        kind: StoredKind,
+        content: String,
+        metadata: Value,
+    ) -> String {
         let mut inner = self.inner.lock().unwrap();
 
-        let id = generate_id();
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
 
-        let item_bytes = content.len();
+        let meta_bytes = serde_json::to_vec(&metadata).map(|v| v.len()).unwrap_or(0);
+        let item_bytes = content.len() + meta_bytes;
         let item = StoredItem {
             id: id.clone(),
             kind,
@@ -85,7 +96,11 @@ impl ResponseCache {
         {
             if let Some(oldest_id) = inner.order.pop_front() {
                 if let Some(removed) = inner.items.remove(&oldest_id) {
-                    inner.total_bytes = inner.total_bytes.saturating_sub(removed.content.len());
+                    let removed_meta_bytes = serde_json::to_vec(&removed.metadata)
+                        .map(|v| v.len())
+                        .unwrap_or(0);
+                    let removed_bytes = removed.content.len() + removed_meta_bytes;
+                    inner.total_bytes = inner.total_bytes.saturating_sub(removed_bytes);
                 }
             }
         }
@@ -123,7 +138,7 @@ impl ResponseCache {
     }
 }
 
-fn generate_id() -> String {
+pub fn generate_id() -> String {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -224,7 +239,8 @@ mod tests {
             "a".repeat(5 * 1024 * 1024),
             serde_json::json!({}),
         );
-        assert_eq!(cache.stats().total_bytes, 5 * 1024 * 1024);
+        let empty_meta_len = serde_json::to_vec(&serde_json::json!({})).unwrap().len();
+        assert_eq!(cache.stats().total_bytes, 5 * 1024 * 1024 + empty_meta_len);
 
         // Insert another 4 MB item (total 9 MB > 8 MB)
         let id2 = cache.store(
@@ -237,7 +253,19 @@ mod tests {
         assert!(cache.get(&id1).is_none());
         assert!(cache.get(&id2).is_some());
         assert_eq!(cache.stats().count, 1);
-        assert_eq!(cache.stats().total_bytes, 4 * 1024 * 1024);
+        assert_eq!(cache.stats().total_bytes, 4 * 1024 * 1024 + empty_meta_len);
+    }
+
+    #[test]
+    fn test_metadata_bytes_accounting() {
+        let cache = ResponseCache::new();
+        let meta = serde_json::json!({"key": "value"});
+        let meta_len = serde_json::to_vec(&meta).unwrap().len();
+        let content = "hello";
+        let _id = cache.store(StoredKind::Search, content.into(), meta);
+        assert_eq!(cache.stats().total_bytes, content.len() + meta_len);
+        cache.clear();
+        assert_eq!(cache.stats().total_bytes, 0);
     }
 
     #[test]

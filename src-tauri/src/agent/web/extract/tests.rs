@@ -262,3 +262,20 @@ fn test_looks_blocked_short_content() {
     };
     assert!(!super::looks_blocked(&doc_long));
 }
+
+#[tokio::test]
+async fn test_extract_raw_mode_bypasses_specialized_extractors() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/file.pdf"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("%PDF-1.4 raw body bytes"))
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/file.pdf", server.uri());
+    let ctx = test_ctx();
+
+    let doc = extract(&url, Mode::Raw, &ctx).await.unwrap();
+    assert_eq!(doc.extractor, "raw");
+    assert_eq!(doc.markdown, "%PDF-1.4 raw body bytes");
+}

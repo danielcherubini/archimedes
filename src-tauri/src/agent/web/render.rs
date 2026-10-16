@@ -29,8 +29,8 @@ pub struct RenderReply {
     pub error: Option<String>,
 }
 
-/// Synchronous navigation check: ensures scheme is http/https and host matches
-/// requested host or subdomain.
+/// Synchronous navigation check: ensures scheme is http/https, host matches
+/// requested host or subdomain, and target IP is not blocked.
 pub fn is_allowed_nav(target: &Url, initial: &Url) -> bool {
     if target.scheme() != "http" && target.scheme() != "https" {
         return false;
@@ -41,15 +41,46 @@ pub fn is_allowed_nav(target: &Url, initial: &Url) -> bool {
     let Some(initial_host) = initial.host_str() else {
         return false;
     };
-    if target_host == initial_host {
-        return true;
+    let host_matches =
+        if target_host == initial_host || target_host.ends_with(&format!(".{initial_host}")) {
+            true
+        } else {
+            let clean_initial = initial_host.strip_prefix("www.").unwrap_or(initial_host);
+            let clean_target = target_host.strip_prefix("www.").unwrap_or(target_host);
+            clean_target == clean_initial || clean_target.ends_with(&format!(".{clean_initial}"))
+        };
+    if !host_matches {
+        return false;
     }
-    if target_host.ends_with(&format!(".{initial_host}")) {
-        return true;
+
+    let clean_target_host = target_host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = clean_target_host.parse::<std::net::IpAddr>() {
+        if crate::agent::web::net::is_blocked_ip(ip) {
+            return false;
+        }
+    } else {
+        let port = target
+            .port_or_known_default()
+            .unwrap_or(if target.scheme() == "https" { 443 } else { 80 });
+        use std::net::ToSocketAddrs;
+        match (clean_target_host, port).to_socket_addrs() {
+            Ok(addrs) => {
+                let mut count = 0;
+                for addr in addrs {
+                    count += 1;
+                    if crate::agent::web::net::is_blocked_ip(addr.ip()) {
+                        return false;
+                    }
+                }
+                if count == 0 {
+                    return false;
+                }
+            }
+            Err(_) => return false,
+        }
     }
-    let clean_initial = initial_host.strip_prefix("www.").unwrap_or(initial_host);
-    let clean_target = target_host.strip_prefix("www.").unwrap_or(target_host);
-    clean_target == clean_initial || clean_target.ends_with(&format!(".{clean_initial}"))
+
+    true
 }
 
 /// Render a URL in a hidden webview, returning the rendered HTML DOM.
@@ -72,6 +103,37 @@ pub async fn render(app: &tauri::AppHandle, req: RenderRequest) -> RenderReply {
             status: 0,
             final_url: None,
             error: Some("only http and https schemes are allowed".to_string()),
+        };
+    }
+
+    let initial_host = match parsed_initial.host_str() {
+        Some(h) => h,
+        None => {
+            return RenderReply {
+                html: None,
+                status: 0,
+                final_url: None,
+                error: Some("missing host in url".to_string()),
+            };
+        }
+    };
+    let initial_port =
+        parsed_initial
+            .port_or_known_default()
+            .unwrap_or(if parsed_initial.scheme() == "https" {
+                443
+            } else {
+                80
+            });
+
+    if let Err(e) =
+        crate::agent::web::net::resolve_and_verify_addrs(initial_host, initial_port).await
+    {
+        return RenderReply {
+            html: None,
+            status: 403,
+            final_url: None,
+            error: Some(e.to_string()),
         };
     }
 
@@ -200,6 +262,9 @@ pub async fn render(app: &tauri::AppHandle, req: RenderRequest) -> RenderReply {
         }
     };
 
+    // DOM stabilization delay after PageLoadEvent::Finished
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
     // Deferred security check against net::is_blocked_ip
     if let Some(host) = final_url.host_str() {
         let port = final_url.port_or_known_default().unwrap_or(80);
@@ -277,6 +342,15 @@ pub async fn render(app: &tauri::AppHandle, req: RenderRequest) -> RenderReply {
 
     drop(guard);
 
+    if html.len() > crate::agent::web::net::MAX_BODY_BYTES {
+        return RenderReply {
+            html: None,
+            status: 0,
+            final_url: Some(final_url.to_string()),
+            error: Some("response body exceeded limit of 5 MB".to_string()),
+        };
+    }
+
     RenderReply {
         html: Some(html),
         status: 200,
@@ -291,10 +365,10 @@ mod tests {
 
     #[test]
     fn test_is_allowed_nav_same_host_and_subdomain() {
-        let initial = Url::parse("https://example.com/start").unwrap();
-        let same = Url::parse("https://example.com/another").unwrap();
-        let sub = Url::parse("https://sub.example.com/page").unwrap();
-        let diff = Url::parse("https://another-domain.com/evil").unwrap();
+        let initial = Url::parse("https://localhost/start").unwrap();
+        let same = Url::parse("https://localhost/another").unwrap();
+        let sub = Url::parse("https://sub.localhost/page").unwrap();
+        let diff = Url::parse("https://another-domain.invalid/evil").unwrap();
         let file = Url::parse("file:///etc/passwd").unwrap();
 
         assert!(is_allowed_nav(&same, &initial));
@@ -305,13 +379,27 @@ mod tests {
 
     #[test]
     fn test_is_allowed_nav_www_prefix() {
-        let initial_www = Url::parse("https://www.example.com/").unwrap();
-        let target_bare = Url::parse("https://example.com/blog").unwrap();
+        let initial_www = Url::parse("https://www.localhost/").unwrap();
+        let target_bare = Url::parse("https://localhost/blog").unwrap();
         assert!(is_allowed_nav(&target_bare, &initial_www));
 
-        let initial_bare = Url::parse("https://example.com/").unwrap();
-        let target_www = Url::parse("https://www.example.com/blog").unwrap();
+        let initial_bare = Url::parse("https://localhost/").unwrap();
+        let target_www = Url::parse("https://www.localhost/blog").unwrap();
         assert!(is_allowed_nav(&target_www, &initial_bare));
+    }
+
+    #[test]
+    fn test_is_allowed_nav_blocks_private_ips() {
+        let initial_private = Url::parse("http://10.0.0.1/start").unwrap();
+        let target_private = Url::parse("http://10.0.0.1/nav").unwrap();
+        assert!(!is_allowed_nav(&target_private, &initial_private));
+
+        let initial_local = Url::parse("http://127.0.0.1:8080/start").unwrap();
+        let target_local = Url::parse("http://127.0.0.1:8080/nav").unwrap();
+        assert!(is_allowed_nav(&target_local, &initial_local));
+
+        let target_blocked = Url::parse("http://169.254.169.254/meta").unwrap();
+        assert!(!is_allowed_nav(&target_blocked, &initial_local));
     }
 
     #[test]

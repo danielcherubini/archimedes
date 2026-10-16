@@ -127,7 +127,7 @@ fn is_cross_origin(a: &Url, b: &Url) -> bool {
 }
 
 /// Resolve host to socket addresses and verify NONE of the addresses are blocked.
-async fn resolve_and_verify_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>, NetError> {
+pub async fn resolve_and_verify_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>, NetError> {
     // If host is an IPv6 literal with brackets, strip them for lookup_host if needed
     let clean_host = host.trim_start_matches('[').trim_end_matches(']');
 
@@ -190,7 +190,7 @@ async fn safe_fetch_inner(
     let mut current_body = opts.body.clone();
 
     // If proxy is given, verify it as well
-    if let Some(ref proxy_str) = opts.proxy {
+    let verified_proxy = if let Some(ref proxy_str) = opts.proxy {
         let proxy_url = Url::parse(proxy_str).map_err(|e| NetError::InvalidUrl(e.to_string()))?;
         if proxy_url.scheme() != "http" && proxy_url.scheme() != "https" {
             return Err(NetError::DeniedScheme(proxy_url.scheme().to_string()));
@@ -206,8 +206,15 @@ async fn safe_fetch_inner(
                 } else {
                     80
                 });
-        let _ = resolve_and_verify_addrs(proxy_host, proxy_port).await?;
-    }
+        let proxy_addrs = resolve_and_verify_addrs(proxy_host, proxy_port).await?;
+        let clean_proxy_host = proxy_host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string();
+        Some((clean_proxy_host, proxy_addrs))
+    } else {
+        None
+    };
 
     let mut redirects = 0;
 
@@ -242,6 +249,9 @@ async fn safe_fetch_inner(
 
         if let Some(ref proxy_str) = opts.proxy {
             builder = builder.proxy(reqwest::Proxy::all(proxy_str)?);
+            if let Some((clean_proxy_host, proxy_addrs)) = &verified_proxy {
+                builder = builder.resolve_to_addrs(clean_proxy_host, proxy_addrs);
+            }
         } else {
             builder = builder.no_proxy();
         }
@@ -541,6 +551,20 @@ mod tests {
         match res {
             Err(NetError::TooManyRedirects) => {}
             other => panic!("expected TooManyRedirects, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_safe_fetch_proxy_blocks_private_ip() {
+        let cancel = CancellationToken::new();
+        let opts = FetchOpts {
+            proxy: Some("http://10.0.0.1:8080".into()),
+            ..Default::default()
+        };
+        let res = safe_fetch("http://127.0.0.1/test", &opts, &cancel).await;
+        match res {
+            Err(NetError::BlockedAddress(addr)) => assert_eq!(addr, "10.0.0.1"),
+            other => panic!("expected BlockedAddress, got {other:?}"),
         }
     }
 
