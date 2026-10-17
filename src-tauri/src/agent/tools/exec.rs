@@ -351,6 +351,10 @@ pub(crate) fn protected_refusal_text(
 /// stack, and `node`/`git`/`tsc` fail inside the sandbox the user did not
 /// build.
 ///
+/// The child's Windows console belongs to [`crate::agent::childproc`] — both
+/// spawn branches below are built by its constructor, which carries
+/// `CREATE_NO_WINDOW` so a bundled run pops no `cmd.exe` window per command.
+///
 /// `params`: `{ command: String, timeout_ms?: u64 }`.
 pub async fn exec_bash(ctx: &ToolCtx, params: &Value) -> ToolResult {
     let command = match params.get("command").and_then(|v| v.as_str()) {
@@ -371,14 +375,14 @@ pub async fn exec_bash(ctx: &ToolCtx, params: &Value) -> ToolResult {
     // cancel; the orphaned grandchild outlives the call).
     #[cfg(unix)]
     let mut cmd = {
-        let mut c = tokio::process::Command::new("sh");
+        let mut c = crate::agent::childproc::command("sh");
         c.arg("-c");
         c.process_group(0);
         c
     };
     #[cfg(not(unix))]
     let mut cmd = {
-        let mut c = tokio::process::Command::new("cmd");
+        let mut c = crate::agent::childproc::command("cmd");
         c.arg("/C");
         c
     };
@@ -1045,7 +1049,10 @@ pub async fn exec_find(ctx: &ToolCtx, params: &Value) -> ToolResult {
     // mount. The env half is fixed; the cwd half is not, and a relative path in
     // a `find`/`grep` result can still surprise because of it (it is not a leak
     // of libraries — do not read the scrub as having fixed that).
-    let mut cmd = tokio::process::Command::new("fd");
+    //
+    // The constructor is `crate::agent::childproc`'s, which owns the child's
+    // Windows console window policy (`CREATE_NO_WINDOW`).
+    let mut cmd = crate::agent::childproc::command("fd");
     cmd.args([
         "--max-results",
         &max.to_string(),
@@ -1240,7 +1247,10 @@ pub async fn exec_grep(ctx: &ToolCtx, params: &Value) -> ToolResult {
     // the child's cwd stays the inherited one, which on a mounted host is
     // inside the mount (`AppRun.c`'s `chdir("$APPDIR/usr")`); the env is
     // scrubbed, the cwd is not.
-    let mut cmd = tokio::process::Command::new("rg");
+    //
+    // Same `crate::agent::childproc` constructor as `fd` — it owns the child's
+    // Windows console window policy (`CREATE_NO_WINDOW`).
+    let mut cmd = crate::agent::childproc::command("rg");
     cmd.args(&args);
     crate::agent::hostenv::for_child().apply(&mut cmd);
     match cmd.output().await {

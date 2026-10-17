@@ -542,6 +542,9 @@ fn owned_relaunch(
 /// The owned spawn, with the teardown `App::run` would have performed. Never
 /// returns: `std::process::exit(0)` is the last statement whatever the spawn
 /// did, mirroring `tauri::process::restart` (`process.rs:74-89`).
+///
+/// The spawn uses [`crate::agent::childproc`]`::command_std`, the owner of the
+/// Windows child-console window policy (`CREATE_NO_WINDOW`).
 #[cfg(target_os = "linux")]
 fn relaunch_through_the_mount(
     app: &AppHandle,
@@ -593,7 +596,7 @@ fn relaunch_through_the_mount(
     // (4) The spawn Tauri would have done — target, `args_os[1..]`, `spawn()`,
     //     `exit(0)` — plus the env patch Tauri does not apply, which is the
     //     whole point of doing it here.
-    let mut cmd = std::process::Command::new(path);
+    let mut cmd = crate::agent::childproc::command_std(path);
     cmd.args(args);
     patch.apply_std(&mut cmd);
     if let Err(e) = cmd.spawn() {
