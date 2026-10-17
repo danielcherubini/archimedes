@@ -35,6 +35,13 @@ import SettingsPage from "./components/settings/SettingsPage";
 import { SpaceCwdProvider } from "./components/SpaceCwd";
 import { cn } from "./components/lib/utils";
 import { useAttentionAlert } from "./hooks/useAttentionAlert";
+import { useAppShortcuts } from "./hooks/useAppShortcuts";
+import {
+  getNewSpaceDialogOpen,
+  setNewSpaceDialogOpen,
+  subscribeNewSpaceDialog,
+} from "./lib/newSpaceDialogState";
+import NewSpaceDialog from "./components/NewSpaceDialog";
 import { useActiveSpaceCwd } from "./hooks/useActiveSpaceCwd";
 import { useWindowMaximized } from "./hooks/useWindowMaximized";
 
@@ -45,6 +52,13 @@ function App() {
   // the workspace, so a pause still alerts while the Settings page is open (the
   // workspace unmounts there).
   useAttentionAlert();
+
+  // The ⌘N / ⌘O chords (app commands, so app-scoped). SAME reason as the hook
+  // above: the pane that used to own this listener (`SpacesList`) is unmounted
+  // while the Settings page is open, so a chord declared there does not exist
+  // there. See `useAppShortcuts` for what it claims and what it no longer yields
+  // to.
+  useAppShortcuts();
 
   // Register the Tauri event listeners once; dispatch into the stores.
   // `listen()` is async, so cleanup must await the pending registrations
@@ -286,6 +300,16 @@ function App() {
     subscribeLeftPane,
     getLeftPaneCollapsed,
   );
+  // The Open Space dialog's flag — the SHARED module's, read with the same
+  // two-arg `useSyncExternalStore` the pane flags above use. `App` is now the
+  // dialog's ONLY render site, so this read is what makes the dialog survive the
+  // Settings view: the raise sites are the root chord, the tab strip's `+` and
+  // the sidebar's buttons, and a flag with an owner inside the workspace could
+  // not be answered while the workspace is unmounted.
+  const newSpaceDialogOpen = useSyncExternalStore(
+    subscribeNewSpaceDialog,
+    getNewSpaceDialogOpen,
+  );
   const isMaximized = useWindowMaximized();
   useEffect(() => {
     Promise.all([listSessions(true), listSpaces()])
@@ -431,6 +455,17 @@ function App() {
               sheet's selection store (which survives the transition, so the
               user's open transcript survives it too). */}
           <SubagentModals sheetMounted={view === "workspace"} />
+          {/* The Open Space dialog — the ONE render site in the app (the
+              sidebar's copy is gone, and the tab strip never had one). A SIBLING
+              of the whole settings ternary for exactly the reason
+              `SubagentModals` above states: the else-branch renders NOTHING
+              while Settings is open, so a dialog mounted in there would be
+              raiseable-but-invisible on the page where the sidebar is unmounted
+              — the flag flips and nothing paints. A `fixed` Radix modal, so its
+              position in this flex row does not affect layout. */}
+          {newSpaceDialogOpen && (
+            <NewSpaceDialog onClose={() => setNewSpaceDialogOpen(false)} />
+          )}
         </SpaceCwdProvider>
       </div>
     </div>

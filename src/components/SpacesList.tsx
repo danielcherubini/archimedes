@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
 import {
   ArchiveIcon,
   ArchiveXIcon,
@@ -27,12 +27,7 @@ import {
   setLeftPaneCollapsed,
   subscribeLeftPane,
 } from "../lib/leftPaneState";
-import {
-  getNewSpaceDialogOpen,
-  openNewSpaceDialog,
-  setNewSpaceDialogOpen,
-  subscribeNewSpaceDialog,
-} from "../lib/newSpaceDialogState";
+import { openNewSpaceDialog } from "../lib/newSpaceDialogState";
 import {
   useSessions,
   spaceViewFor,
@@ -41,9 +36,7 @@ import {
 import { useHasPendingRequest } from "../hooks/useHasPendingRequest";
 import { useSessionStatus } from "../hooks/useSessionStatus";
 import { useSessionStatuses } from "../hooks/useSessionStatus";
-import { useStartNewConversation } from "../hooks/useStartNewConversation";
 import { useSkillCatalog } from "../hooks/useSkillCatalog";
-import NewSpaceDialog from "./NewSpaceDialog";
 import SkillsDialog from "./SkillsDialog";
 import DeleteSessionDialog from "./DeleteSessionDialog";
 import SessionRail, { type SessionRailAction } from "./SessionRail";
@@ -100,16 +93,13 @@ export default function SpacesList({
   const activeSpacePath = useSessions((s) => s.activeSpacePath);
   const openSession = useSessions((s) => s.openSession);
   const deleteSession = useSessions((s) => s.deleteSession);
-  // The Open Space dialog's open flag is the SHARED module's, not local
-  // state: the tab strip's `+` and the sidebar's own buttons raise the same
-  // flag, and a private copy in each is two owners of one dialog (which is
-  // how two dialogs get mounted at once). This component still READS the flag
-  // for its render below — the render site moves to `App` root in the next
-  // step of this plan, which is what makes the dialog survive the Settings
-  // view that unmounts this component.
-  const dialogOpen = useSyncExternalStore(
-    subscribeNewSpaceDialog,
-    getNewSpaceDialogOpen,
+  // THE new-session command (Task 2's store action). This pane no longer decides
+  // what "no Space selected" means — the command does, and it routes that case to
+  // the Open Space dialog itself. That is why every new-session surface below
+  // (the labelled button, the rail icon, the `…` menu item, and the root ⌘N
+  // chord) is now the same one call and cannot drift apart.
+  const startSessionInActiveSpace = useSessions(
+    (s) => s.startSessionInActiveSpace,
   );
   // The Skills modal (the left pane has NO skill list — ZCode parity: the
   // skills UI is a searchable modal, opened from the third button in the
@@ -127,15 +117,19 @@ export default function SpacesList({
       ),
     [spaces, sessions, historySessions, closeReasons, archivedSessions],
   );
-  // The ACTIVE SPACE's view (the `⌘N` / `New Session` button's target —
-  // the selected space, NOT the active session's space: the tabs are the
-  // space switch, and a new conversation starts in the selected space).
-  // `undefined` while no space is selected (no spaces yet, or the last
-  // one was removed) — the button routes that case to the Open Space
-  // dialog. (The `useStartNewConversation` hook no-ops on an undefined
-  // view, so the routing is the only behavior that matters here.)
+  // The ACTIVE SPACE's view — the ROW LIST's source (`viewIds`, `liveIds` /
+  // `storedIds`, the rows themselves and every row's Space name), NOT a
+  // new-session input any more. `⌘N` used to branch on it (`undefined` → the
+  // Open Space dialog); the store's `startSessionInActiveSpace` owns that
+  // routing now, so this is pure derivation for the list.
+  // `undefined` while no Space is selected (no Spaces yet, or the last one was
+  // removed) — which is also why the list renders nothing.
   const activeView = views.find((v) => v.path === activeSpacePath);
-  const newSession = useStartNewConversation(activeView);
+  // Why the last new-session attempt failed (`null` when it did not fail) — the
+  // actions-menu trigger's `title`, so a dead menu item says why. It replaced the
+  // deleted `useStartNewConversation` hook's local `error` state: the command
+  // lives in the store now, so its failure has to be readable from the store too.
+  const newSessionError = useSessions((s) => s.newSessionError);
   // The active space's sessions in the list's own order (live then stored) —
   // the ids whose activity and status are read below, so the subscription and
   // the rail are derived from the SAME membership the rows render.
@@ -227,23 +221,18 @@ export default function SpacesList({
     getLeftPaneCollapsed,
   );
 
-  // `handleOpenSpace` is stable forever; `handleNewSession` is stable only
-  // while `activeSessionId` and `newSession` are — but `useStartNewConversation`
-  // returns a FRESH object every render, so the keydown effect below
-  // re-subscribes on EVERY render. That is one cheap listener swap per
-  // render, and the `e.target` guard makes the churn harmless.
-  const handleNewSession = useCallback(() => {
-    // No space selected (no spaces yet, or the last one was removed), or
-    // the selected space has no view (a legacy cwd that is no longer a
-    // Space): open the Open Space dialog instead (the hook itself no-ops
-    // on an undefined view).
-    if (activeView === undefined) {
-      openNewSpaceDialog();
-      return;
-    }
-    void newSession.startNewConversation();
-  }, [activeView, newSession]);
-  const handleOpenSpace = useCallback(() => openNewSpaceDialog(), []);
+  // Both handlers are STABLE: `openNewSpaceDialog` is a zero-arg module function
+  // (so it is assignable to `SessionRailAction.onClick` and to a button's
+  // `MouseEventHandler`, which `setNewSpaceDialogOpen` — arity 1 — is not), and
+  // `startSessionInActiveSpace` is a store action, stable across renders. That
+  // replaces the old pair, where `useStartNewConversation` returned a FRESH
+  // object every render and so re-subscribed the pane's keydown listener on every
+  // render; the listener is gone (it lives at `App` root now) and so is the churn.
+  const handleOpenSpace = openNewSpaceDialog;
+  const handleNewSession = useCallback(
+    () => void startSessionInActiveSpace(),
+    [startSessionInActiveSpace],
+  );
 
   // The collapsed rail's command strips. These are the SAME handlers the open
   // pane's labelled buttons call — one closure each, referenced from both, so
@@ -285,35 +274,11 @@ export default function SpacesList({
     },
   ];
 
-  // ⌘N / Ctrl+N → New Session, ⌘O / Ctrl+O → Open Space. Ignored while the
-  // key is pressed in an input, textarea, editable element, or dialog (e.g.
-  // the composer or NewSpaceDialog's fields) so native shortcuts keep
-  // working there. The `contenteditable` match is spec-exact: per HTML,
-  // `contenteditable=""` and a bare `contenteditable` BOTH mean editable,
-  // so the guard matches the attribute's PRESENCE except `contenteditable="false"`.
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (!e.metaKey && !e.ctrlKey) return;
-      if (
-        e.target instanceof HTMLElement &&
-        e.target.closest(
-          "input, textarea, [contenteditable]:not([contenteditable='false']), [role='dialog']",
-        )
-      ) {
-        return;
-      }
-      const key = e.key.toLowerCase();
-      if (key === "n") {
-        e.preventDefault();
-        handleNewSession();
-      } else if (key === "o") {
-        e.preventDefault();
-        handleOpenSpace();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [handleNewSession, handleOpenSpace]);
+  // The ⌘N / ⌘O chord lives in `useAppShortcuts`, mounted at `App` root — NOT
+  // here. It sat in this component while, and this pane is inside the
+  // `view === "settings"` ternary's else-branch, so the Settings page unmounted
+  // the listener and both chords stopped existing there. `App.test.tsx` pins the
+  // chord from that view, and `useAppShortcuts.test.ts` owns the guard cases.
 
   return (
     // Collapse = `LEFT_PANE_RAIL` + `overflow: hidden` (a SLIVER, not 0 — the
@@ -387,14 +352,19 @@ export default function SpacesList({
               variant="ghost"
               size="icon-sm"
               aria-label="Session actions"
-              title={newSession.error ?? undefined}
+              title={newSessionError ?? undefined}
             >
               <MoreHorizontalIcon className="size-4" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent>
+            {/* The SAME command as the `New Session` button and the ⌘N chord now.
+                It used to call the (deleted) hook directly, which no-oped with no
+                Space selected — so this item was the one new-session surface with
+                no dialog fallback: with no Space it looked alive and did nothing.
+                Routing it through the store action gives it the fallback too. */}
             <DropdownMenuItem
-              onSelect={() => void newSession.startNewConversation()}
+              onSelect={() => void startSessionInActiveSpace()}
             >
               New Session in this Space
             </DropdownMenuItem>
@@ -470,9 +440,11 @@ export default function SpacesList({
           tailActions={railTailActions}
         />
       )}
-      {dialogOpen && (
-        <NewSpaceDialog onClose={() => setNewSpaceDialogOpen(false)} />
-      )}
+      {/* NO Open Space dialog here: the render site is `App` root (the else-branch
+          of the view ternary unmounts this pane while Settings is open, so a dialog
+          owned here was raiseable-but-invisible on that page). The Skills and
+          delete-confirm dialogs STAY — they are this pane's own, and raising them
+          from the Settings page is not a thing. */}
       {skillsOpen && (
         <SkillsDialog skills={skills} onClose={() => setSkillsOpen(false)} />
       )}
