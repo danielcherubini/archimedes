@@ -231,6 +231,67 @@ fn focus_probe_trace(window: Option<Result<bool, String>>) -> (bool, String) {
     }
 }
 
+/// The webview key-focus attempt, reduced to its log line.
+///
+/// PURE (no window, no `AppHandle`) so the wording is testable — the same
+/// `focus_probe_trace` shape one screen above, and for the same reason: the
+/// mock runtime has no widget, so this is the half headless can pin, and
+/// `tests/webview_key_focus.rs` owns the behaviour. `None` = no `WebviewWindow`
+/// labelled `"main"` was resolvable from the event-loop callback; `Err(msg)` =
+/// `Webview::set_focus()` refused, with its `Display`.
+///
+/// **Every arm returns a line** — nothing here is silent. A fix justified by a
+/// measurement has to be readable in the field: "keys are dead and there is no
+/// `focus:` line" must not be ambiguous between "the arm never ran" and "it ran
+/// and succeeded", which is the same reasoning that makes `focus_probe_trace`
+/// narrate its boring case. It is also what makes the deferred manual
+/// measurement in `tests/webview_key_focus.rs` self-reading.
+///
+/// The impure wrapper's `debuglog::log` call is covered by these three lines
+/// plus that ignored check — do NOT add a mock `App` to pin it: a second
+/// `generate_context!()` in this test binary duplicates `embed_plist`'s
+/// `_EMBED_INFO_PLIST` and reddens macOS `cargo test` while
+/// `cargo clippy`/`check` stay green (they emit metadata only).
+fn webview_focus_trace(lookup: Option<Result<(), String>>) -> Option<String> {
+    match lookup {
+        // Named BY LABEL: the label the config declares is `main`, so a `None`
+        // here is either a label mismatch or an arm that ran before the window
+        // existed — and those want different fixes.
+        None => Some("focus: no window labelled \"main\" — key focus not grabbed".into()),
+        Some(Err(e)) => Some(format!("focus: webview set_focus refused: {e}")),
+        // The boring case, still narrated (see the doc comment): this line is
+        // the evidence the manual measurement is waiting for.
+        Some(Ok(())) => Some("focus: webview key focus grabbed".into()),
+    }
+}
+
+/// Grab KEY focus for the webview WIDGET (not the window) — see ADR 0056.
+///
+/// ⚠ The MECHANISM IS UNVERIFIED. The symptom is user-confirmed (no key reaches
+/// JS at fresh launch until the window is clicked) but the reason is not: the
+/// earlier theory that wry's creation-time `grab_focus()` lands on an unmapped
+/// widget was REFUTED (see ADR 0056). This call is a candidate fix; the
+/// measurement is deferred to `tests/webview_key_focus.rs -- --ignored`.
+///
+/// `window.as_ref()` resolves through `AsRef<Webview<R>> for WebviewWindow<R>`
+/// — the only `AsRef`/`Deref` impl on that type, so it needs no disambiguation,
+/// and `Webview::set_focus()` is ungated. Note `WebviewWindow::set_focus` is the
+/// WRONG (window-level) sibling — the window-state plugin already calls that
+/// one, and it is precisely what does not move the widget's key focus. The
+/// ungated accessors are the only ones available: `Manager::get_webview`,
+/// `webviews` and `get_focused_window` are all `#[cfg(feature = "unstable")]`
+/// and this crate builds `tauri` with no features.
+fn grab_webview_key_focus<R: tauri::Runtime>(handle: &tauri::AppHandle<R>) {
+    let line = webview_focus_trace(
+        handle
+            .get_webview_window("main")
+            .map(|window| window.as_ref().set_focus().map_err(|e| e.to_string())),
+    );
+    if let Some(line) = line {
+        debuglog::log(&line);
+    }
+}
+
 /// The Worker mode (ADR 0025): a fresh tokio runtime + the stdio JSONL
 /// worker (`agent::worker::run_worker_inner`). Checked BEFORE Tauri
 /// init in `main` — the Tauri runtime never starts in a Worker.
@@ -376,6 +437,53 @@ pub fn run() {
     // current-thread runtime drives it (a short-lived, bounded block —
     // the process is exiting anyway).
     app.run(|handle, event| {
+        // The webview, not the window, must hold key focus or no key event reaches
+        // JS (ADR 0056 — mechanism UNVERIFIED, see the manual test). `&event`:
+        // RunEvent is owned here and `label` is a String, so a by-value `if let`
+        // partially moves `event` and the `Exit` arm below stops compiling (E0382).
+        // `..` is required — the variant is `#[non_exhaustive]`.
+        //
+        // THREE facts about these arms, each of which reads wrong without them:
+        //
+        // 1. `Ready` is here because tauri's OWN `setup()` — the one that creates
+        //    the config window — runs inside the `Ready` arm before this callback,
+        //    so the grab cannot precede the window's existence. ⚠ Do NOT also
+        //    claim it is ordered after the window-state plugin's reveal: the
+        //    plugin's `on_window_ready` goes through `run_on_main_thread`, which
+        //    executes inline, so that ordering is a coincidence of the inline
+        //    queue and not a guarantee.
+        //
+        // 2. `Focused(true)` is delivered on LINUX AND macOS and is suppressed
+        //    ONLY ON Windows for a window of our shape (one webview, no children):
+        //    the early return in `WindowEventWrapper::map_from_tao` is
+        //    `#[cfg(not(windows))]` and the `Self(None)` fall-through is
+        //    `#[cfg(windows)]`. ⚠ It is NOT "Linux-only". And on the platforms
+        //    where it does run it comes from WINDOW activation (tao's
+        //    `connect_focus_in_event` / `windowDidBecomeKey`), never from an
+        //    intra-window widget focus change — `add_focus_change_listeners` is
+        //    `#[cfg(windows)]`. So this re-assert cannot steal focus from a
+        //    sibling widget where it runs, and this window has exactly one
+        //    focusable widget anyway.
+        //
+        // 3. The macOS `Webview::focus()` implementation runs
+        //    `self.webview.window().unwrap()` before `makeFirstResponder`
+        //    (`wry-0.57.0/src/wkwebview/mod.rs:1057-1064`) — so a webview that
+        //    was ever detached from its window turns this arm into a PANIC inside
+        //    the event-loop callback. Accepted (tauri's own macOS build attaches
+        //    the webview to the window), but it is why this arm is not free.
+        //
+        // `label == "main"` is a CHEAP FILTER, not a necessity: the window lookup
+        // happens inside `grab_webview_key_focus` regardless, because no ungated
+        // API maps a label to a webview.
+        match &event {
+            tauri::RunEvent::Ready => grab_webview_key_focus(handle),
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Focused(true),
+                ..
+            } if label == "main" => grab_webview_key_focus(handle),
+            _ => {}
+        }
         if let tauri::RunEvent::Exit = event {
             if let Some(wm) = handle.try_state::<Arc<WorkerManager>>() {
                 let wm = wm.inner().clone();
@@ -391,7 +499,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::focus_probe_trace;
+    use super::{focus_probe_trace, webview_focus_trace};
 
     /// A window that cannot be FOUND is not a window the user is reading, so
     /// the probe fires (fail open) — and says it never got a window, BY LABEL,
@@ -444,4 +552,60 @@ mod tests {
     // itself (`the_success_line_carries_the_id_the_server_gave`,
     // `the_failure_line_names_the_error`, `the_plugin_line_admits_it_knows_nothing`)
     // — the claim it pins is now per-transport, so it lives with the transports.
+
+    // ── The webview KEY-focus seam (`webview_focus_trace`) ──────────────────
+    //
+    // The same pure-reduction shape as `focus_probe_trace` above, and for the
+    // same reason: the mock runtime has no widget, so the only half a headless
+    // test can pin is what the attempt SAYS. A second `generate_context!()` in
+    // this binary duplicates `embed_plist`'s `_EMBED_INFO_PLIST` and reddens
+    // macOS `cargo test` while clippy stays green — so there is deliberately no
+    // `App`/`mock_builder` here, and the behaviour itself belongs to the
+    // `#[ignore]`d human-read check in `tests/webview_key_focus.rs`.
+
+    /// A window that is not in the map means the grab never happened, and the
+    /// line has to say WHICH window it went looking for — `main` is the label
+    /// the config declares, so a mismatch there is the whole diagnosis.
+    #[test]
+    fn a_missing_window_says_which_window_was_missing() {
+        let line = webview_focus_trace(None).expect("a failed lookup always has something to say");
+        assert!(line.starts_with("focus:"), "the greppable prefix: {line}");
+        assert!(line.contains("main"), "the line names the label: {line}");
+        assert!(
+            line.contains("no window"),
+            "and says the lookup failed: {line}"
+        );
+    }
+
+    /// The widget refusing the grab is a DIFFERENT failure from there being no
+    /// widget to ask, so the line names the call and carries its `Display`.
+    #[test]
+    fn a_refused_focus_names_the_error() {
+        let line = webview_focus_trace(Some(Err("focus boom".into())))
+            .expect("a refused grab always has something to say");
+        assert!(line.starts_with("focus:"), "the greppable prefix: {line}");
+        assert!(
+            line.contains("set_focus"),
+            "the line names the call that refused: {line}"
+        );
+        assert!(line.contains("focus boom"), "and its Display: {line}");
+    }
+
+    /// The success case is NARRATED, and that is the deliberate divergence from
+    /// the plan, which had this arm silent. Three reasons, all real: a fix
+    /// justified by a measurement has to be readable in the field ("keys dead
+    /// and no `focus:` line" cannot tell "the arm never ran" from "it ran and
+    /// worked"); `focus_probe_trace` in this very file already narrates its
+    /// boring case for exactly that reason ("the boring case, still narrated");
+    /// and the deferred manual measurement in `tests/webview_key_focus.rs` is
+    /// only self-reading if a success leaves a trace. So NO arm of
+    /// `webview_focus_trace` is silent — an absent line always means the arm
+    /// never ran.
+    #[test]
+    fn a_successful_grab_says_so() {
+        let line = webview_focus_trace(Some(Ok(())))
+            .expect("a successful grab is narrated too — that line is the measurement's evidence");
+        assert!(line.starts_with("focus:"), "the greppable prefix: {line}");
+        assert!(line.contains("grabbed"), "and says the lever fired: {line}");
+    }
 }
