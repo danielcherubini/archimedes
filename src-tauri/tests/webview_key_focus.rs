@@ -16,7 +16,9 @@
 //! lands on an unmapped widget because the window is `visible: false` — was
 //! refuted outright (`WebviewAttributes::from(&WindowConfig)` never sets
 //! `visible`, wry defaults it true, so `show_all()` and `grab_focus()` both run
-//! on a realized widget; ADR 0056 records the refutation).
+//! on a realized widget; ADR 0056 records that refutation, and 0057 — which
+//! supersedes 0056 — inherits it. **The decision you are testing is 0057's**, so
+//! every instruction below names 0057.
 //!
 //! Nothing in the headless suite can settle it. The mock runtime has **no
 //! widget**: `MockRuntime` fakes window and webview handles, so `set_focus()` on
@@ -56,7 +58,7 @@ fn keys_reach_the_renderer_before_the_window_is_ever_clicked() {
         r#"MANUAL RECIPE — read the doc comment (this body never runs; the panic IS the recipe)
 
 WHAT YOU ARE MEASURING
-    Whether asserting the webview WIDGET's key focus (ADR 0056) is what makes key
+    Whether asserting the webview WIDGET's key focus (ADR 0057) is what makes key
     events reach the renderer on a window that has never been clicked. The fix is
     shipped as a CANDIDATE; the mechanism is UNVERIFIED. Your log lines settle it.
 
@@ -97,11 +99,11 @@ WHAT YOU ARE MEASURING
 
 THE FOUR VERDICTS (say which one, and quote the log lines)
   (a) Dialog OPENS at step 2, and the log shows `focus: webview key focus grabbed`
-      → the fix is CONFIRMED. Quote the line in the report; ADR 0056's
-        "Measurement, not mechanism" section is where the verdict belongs.
+      → the fix is CONFIRMED. Quote the line in the report; ADR 0057's first
+        consequence ("The fix ships as a candidate") is where the verdict belongs.
   (b) Dialog STILL DEAD at step 2, and the log shows `... grabbed`
       → the widget-focus hypothesis is WRONG. The lever fired and changed nothing.
-        Supersede ADR 0056 with whatever the actual cause is — do not "tweak and
+        Supersede ADR 0057 with whatever the actual cause is — do not "tweak and
         retry" a call that is known to have been made and to have had no effect.
   (c) STILL DEAD, and there is NO `focus:` line at all
       → the `Ready` arm never ran, so nothing was ever attempted. Re-plan: the fix
