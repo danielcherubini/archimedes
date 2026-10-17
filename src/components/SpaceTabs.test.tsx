@@ -3,6 +3,10 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { closeSession, deleteSpace } from "../lib/tauri";
 import { useSessions } from "../store/sessions";
 import { usePermissions } from "../store/permissions";
+import {
+  getNewSpaceDialogOpen,
+  setNewSpaceDialogOpen,
+} from "../lib/newSpaceDialogState";
 import type { SessionInfo, SpaceRow } from "../lib/tauri";
 import SpaceTabs from "./SpaceTabs";
 
@@ -70,6 +74,10 @@ beforeEach(() => {
     configOptions: {},
   });
   usePermissions.setState({ prompts: {} });
+  // The Open-Space-dialog flag is module-scoped and the `+` raises it: a
+  // leaked `true` would auto-mount a real Radix modal in every later render
+  // here (which `aria-hidden`s the rest of the document).
+  setNewSpaceDialogOpen(false);
   // Closing tabs is asserted with `not.toHaveBeenCalled()` too, so the command
   // mocks must not carry calls across cases.
   vi.clearAllMocks();
@@ -199,12 +207,27 @@ describe("SpaceTabs (the Spaces as browser-style tabs at the top of the chat)", 
     expect(useSessions.getState().activeSessionId).toBe("live-1");
   });
 
-  it("the `+` button opens the New Space dialog (picking a folder IS creating a space)", () => {
+  it("the `+` button raises the shared Open-Space-dialog flag (picking a folder IS creating a space)", () => {
+    // The flag, not the dialog: the tab strip only RAISES it now (one owner —
+    // see `newSpaceDialogState`), and it never owned the render, so there is
+    // no dialog in this component's DOM to query — the sidebar renders it
+    // today and the `App` root takes that over next.
+    useSessions.setState({ spaces: [space("/w/alpha")] });
+    render(<SpaceTabs />);
+    expect(getNewSpaceDialogOpen()).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "New space" }));
+    expect(getNewSpaceDialogOpen()).toBe(true);
+  });
+
+  it("renders NO NewSpaceDialog of its own (one dialog, one render site — two owners would mount a second)", () => {
+    // The tab strip used to hold a private `newSpaceOpen` AND its own
+    // `<NewSpaceDialog>`, which is the second owner this removes: with the
+    // sidebar also rendering on the shared flag, both would be true at once
+    // and `getByText("New space")` would become "Found multiple elements".
     useSessions.setState({ spaces: [space("/w/alpha")] });
     render(<SpaceTabs />);
     fireEvent.click(screen.getByRole("button", { name: "New space" }));
-    // The dialog (the `NewSpaceDialog` — its "New space" title).
-    expect(screen.getByText("New space")).toBeTruthy();
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("the tab bar holds NO `...` menu, NO pane toggle and NO warning dot (the menu lives in the sidebar's `Sessions` header; the pane toggles live in their panes in BOTH states — the chrome bar holds none)", () => {

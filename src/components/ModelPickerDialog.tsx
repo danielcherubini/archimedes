@@ -116,7 +116,7 @@ export default function ModelPickerDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[70vh] max-w-3xl">
+      <DialogContent className="max-h-[70vh] sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
         </DialogHeader>

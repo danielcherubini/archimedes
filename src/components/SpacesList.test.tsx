@@ -9,6 +9,10 @@ import {
   LEFT_PANE_RAIL,
   setLeftPaneCollapsed,
 } from "../lib/leftPaneState";
+import {
+  getNewSpaceDialogOpen,
+  setNewSpaceDialogOpen,
+} from "../lib/newSpaceDialogState";
 import { clearSkillCatalogCache } from "../hooks/useSkillCatalog";
 import SpacesList from "./SpacesList";
 
@@ -151,6 +155,16 @@ beforeEach(clearSkillCatalogCache);
 beforeEach(() => {
   setLeftPaneCollapsed(false);
 });
+// The Open-Space-dialog flag is module-scoped too, and THIS file can raise
+// it (the `Open Space` button, the rail icon, `⌘O`, the `…` menu). A leaked
+// `true` makes every later `render(<SpacesList/>)` auto-mount a real Radix
+// modal, which sets `document.body.style.pointerEvents = "none"` and
+// `aria-hidden`s its siblings — so unrelated `getByRole` queries further down
+// this file throw for a reason that has nothing to do with them. Reset at
+// FILE scope, not inside one `describe`.
+beforeEach(() => {
+  setNewSpaceDialogOpen(false);
+});
 
 describe("SpacesList", () => {
   it("renders the two action buttons with their labels and kbd hints", () => {
@@ -165,15 +179,34 @@ describe("SpacesList", () => {
   it("opens the Open Space dialog from the action button", () => {
     render(<SpacesList />);
     fireEvent.click(screen.getByRole("button", { name: /Open Space/ }));
-    // A fresh (unvalidated) folder renders the literal "New space" title.
-    expect(screen.getByText("New space")).toBeTruthy();
+    // Asserted on the SHARED FLAG, not on the dialog's "New space" title: this
+    // pane RAISES the flag and no longer renders the dialog (`App` root owns the
+    // render site), so a text query here can only ever fail. The dialog's own
+    // title is pinned in `NewSpaceDialog.test.tsx`, and its root render in
+    // `App.test.tsx`.
+    expect(getNewSpaceDialogOpen()).toBe(true);
   });
 
   it("opens the Open Space dialog from the New Session button when no space is selected", () => {
     useSessions.setState({ activeSpacePath: null });
     render(<SpacesList />);
     fireEvent.click(screen.getByRole("button", { name: /New Session/ }));
-    expect(screen.getByText("New space")).toBeTruthy();
+    // The no-Space routing is the STORE command's now (`startSessionInActiveSpace`
+    // → `openNewSpaceDialog`), so the button just delegates. Same flag assertion
+    // as above — the dialog itself is rendered at `App` root.
+    expect(getNewSpaceDialogOpen()).toBe(true);
+    expect(mockedStartSession).not.toHaveBeenCalled();
+  });
+
+  it("raises the flag but renders NO dialog of its own (the render site is `App` root)", () => {
+    // The one-dialog rule, pinned from this side: this pane is one of the flag's
+    // FOUR raisers, so if it also mounted a dialog the app would paint two (and
+    // `App.test.tsx` would see a doubled title). Put the flag-gated dialog render
+    // back in `SpacesList.tsx` and this goes red.
+    setNewSpaceDialogOpen(true);
+    render(<SpacesList />);
+    expect(getNewSpaceDialogOpen()).toBe(true);
+    expect(screen.queryByText("New space")).toBeNull();
   });
 
   it("starts a new session in the SELECTED space (not the active session's space)", async () => {
@@ -462,76 +495,45 @@ describe("SpacesList", () => {
     expect(title.className).toContain("min-w-0");
   });
 
-  it("ignores ⌘N / Ctrl+O while the target is an input or a dialog", async () => {
+  it("ignores nothing on its own: ⌘N on an <input> is the chord's business now, and a dialog is inert", () => {
+    // The chord left this component, so this file cannot test the guard — but it
+    // keeps the two facts that used to be entangled with it, and separates them:
+    // (1) the OLD input half is INVERTED. A text-field target no longer suppresses
+    // the chord; whether the chord fires is `useAppShortcuts.test.ts`'s case, and
+    // what belongs HERE is that this pane mounts no listener at all, so dispatching
+    // a chord against an input inside it starts nothing on its own.
+    // (2) the `role="dialog"` half survives as a statement about THIS pane: raising
+    // the flag while a keypress happens inside a dialog does not stack a second
+    // dialog, because the flag has one owner.
     render(<SpacesList />);
     const input = document.createElement("input");
     const dialog = document.createElement("div");
     dialog.setAttribute("role", "dialog");
     // Appended to `document.body` OUTSIDE RTL's render tree — RTL cleanup
-    // does not touch manually appended nodes, so remove them explicitly
-    // (cross-test pollution: a stray `[role="dialog"]` in the body would
-    // make later tests' shortcuts no-op via the `e.target` guard).
+    // does not touch manually appended nodes, so remove them explicitly.
     document.body.append(input, dialog);
     try {
-      // Ctrl+N on the input: hijacked by the guard (the target is an input).
       fireEvent.keyDown(input, { key: "n", ctrlKey: true });
-      await waitFor(() => expect(mockedStartSession).not.toHaveBeenCalled());
-      // Ctrl+O on a `[role="dialog"]`: also ignored.
+      // No listener in this pane any more: nothing this component owns reacts.
+      expect(mockedStartSession).not.toHaveBeenCalled();
+      expect(getNewSpaceDialogOpen()).toBe(false);
+      // A `[role="dialog"]` keypress raises nothing either — and the guard that
+      // makes the chord inert there is pinned in `useAppShortcuts.test.ts`.
       fireEvent.keyDown(dialog, { key: "o", metaKey: true });
-      expect(screen.queryByText("New space")).toBeNull();
+      expect(getNewSpaceDialogOpen()).toBe(false);
     } finally {
       input.remove();
       dialog.remove();
     }
   });
 
-  it("does NOT ignore ⌘N while the target is a contenteditable=\"false\" element (the guard matches `contenteditable` except `false`)", async () => {
-    render(<SpacesList />);
-    const div = document.createElement("div");
-    div.setAttribute("contenteditable", "false");
-    // Same manual-append caveat as the guard test above: remove it in
-    // `finally` (RTL cleanup does not touch it).
-    document.body.appendChild(div);
-    try {
-      // `contenteditable="false"` is NOT editable: the shortcut fires.
-      fireEvent.keyDown(div, { key: "n", metaKey: true });
-      await waitFor(() =>
-        expect(mockedStartSession).toHaveBeenCalledWith("/tmp/alpha"),
-      );
-    } finally {
-      div.remove();
-    }
-  });
-
-  it("⌘N / Ctrl+N trigger the New Session handler (a bare key does not)", async () => {
-    render(<SpacesList />);
-    // No modifier: ignored.
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "n" }));
-    expect(mockedStartSession).not.toHaveBeenCalled();
-    // ⌘N: the active session's view owns `s1` (cwd `/tmp/alpha`) →
-    // `startSession("/tmp/alpha")` (a native session — no agent to choose).
-    window.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "n", metaKey: true }),
-    );
-    await waitFor(() =>
-      expect(mockedStartSession).toHaveBeenCalledWith("/tmp/alpha"),
-    );
-    // Ctrl+N (uppercase key): the same handler.
-    window.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "N", ctrlKey: true }),
-    );
-    await waitFor(() => expect(mockedStartSession).toHaveBeenCalledTimes(2));
-  });
-
-  it("⌘O opens the Open Space dialog", () => {
-    render(<SpacesList />);
-    act(() => {
-      window.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "o", metaKey: true }),
-      );
-    });
-    expect(screen.getByText("New space")).toBeTruthy();
-  });
+  // The two chord tests that used to live here — `⌘N / Ctrl+N trigger the New
+  // Session handler (a bare key does not)` and `⌘O opens the Open Space dialog` —
+  // MOVED to `../hooks/useAppShortcuts.test.ts`. They dispatched on `window`, which
+  // was only reachable because this component subscribed on `window`; no listener
+  // remains here, so keeping them would mean they pass vacuously. Their coverage
+  // moved with them (plus the `contenteditable="false"` case, the textarea cases,
+  // the auto-repeat case and the dialog/alertdialog guard cases).
 
   it("the_skills_button_sits_in_the_button_row", async () => {
     render(<SpacesList />);
@@ -689,7 +691,10 @@ describe("SpacesList (archive, ADR 0016)", () => {
     await waitFor(() =>
       expect(mockedStartSession).toHaveBeenCalledWith("/tmp/alpha"),
     );
-    expect(screen.queryByText("New space")).toBeNull();
+    // The negative pin, on the FLAG: "it did not fall back to the dialog" is the
+    // claim, and `queryByText("New space")` could no longer express it — this pane
+    // renders no dialog, so a text query there would pass for every input.
+    expect(getNewSpaceDialogOpen()).toBe(false);
   });
 
   it("an archived-only active session still resolves its space for the skill catalog", async () => {
@@ -1131,7 +1136,34 @@ describe("SpacesList (archive, ADR 0016)", () => {
     });
     render(<SpacesList />);
     fireEvent.click(screen.getByTitle("Open Space"));
-    expect(screen.getByText("New space")).toBeTruthy();
+    // The rail's icon and the labelled button are the SAME closure, so they raise
+    // the same flag — asserted on the flag, because the dialog renders at `App`
+    // root now (see the button case above for why a text query is the wrong probe
+    // in this file).
+    expect(getNewSpaceDialogOpen()).toBe(true);
+  });
+
+  it("the `…` menu's \"New Session in this Space\" gets the no-Space dialog fallback too", () => {
+    // The deliberate behaviour change of this task. The menu item used to call the
+    // (now deleted) hook DIRECTLY, which no-oped with no Space selected — unlike
+    // the button path, it had NO dialog fallback, so it was a menu item that looked
+    // alive and did nothing. Routing it through `startSessionInActiveSpace` gives it
+    // the store's fallback; this is the only test that would notice it going back to
+    // the direct call (the button path's fallback is pinned above).
+    useSessions.setState({ activeSpacePath: null });
+    render(<SpacesList />);
+    // Radix opens on `pointerDown` (`click` does not open the menu in jsdom) and
+    // selects on `Enter` — the same two steps the menu's other test here uses.
+    fireEvent.pointerDown(
+      screen.getByRole("button", { name: "Session actions" }),
+    );
+    fireEvent.keyDown(
+      screen.getByRole("menuitem", { name: "New Session in this Space" }),
+      { key: "Enter" },
+    );
+    expect(getNewSpaceDialogOpen()).toBe(true);
+    // …and it did NOT try to start a Session in a Space that does not exist.
+    expect(mockedStartSession).not.toHaveBeenCalled();
   });
 
   it("has EXACTLY ONE Settings door in either state (no gear is ever doubled)", () => {

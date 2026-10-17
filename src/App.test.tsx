@@ -3,9 +3,11 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import App from "./App";
 import {
   externalOpen,
+  listSpaces,
   listenInteractiveRequestClose,
   listenSessionTitled,
   listenSubagentClosed,
+  startSession,
 } from "./lib/tauri";
 import { useSessions } from "./store/sessions";
 import { useSubagents } from "./store/subagents";
@@ -14,6 +16,10 @@ import { usePermissions } from "./store/permissions";
 import { useSubagentSelection } from "./store/subagentSelection";
 import { getLeftPaneCollapsed, LEFT_PANE_RAIL, setLeftPaneCollapsed } from "./lib/leftPaneState";
 import { getSidePaneCollapsed, setSidePaneCollapsed } from "./lib/sidePaneState";
+import {
+  getNewSpaceDialogOpen,
+  setNewSpaceDialogOpen,
+} from "./lib/newSpaceDialogState";
 
 // Mock the Tauri IPC layer (the `importActual` pattern from
 // `NewSpaceDialog.test.tsx`): the boot `useEffect` loads `listSessions` /
@@ -30,6 +36,18 @@ vi.mock("./lib/tauri", async () => {
     listSessions: vi.fn().mockResolvedValue([]),
     listSpaces: vi.fn().mockResolvedValue([]),
     listSkills: vi.fn().mockResolvedValue([]),
+    // `startSession`: required for the same reason as the catalog fetches below
+    // — this factory spreads `importActual`, so the ⌘N chord's store command
+    // (`startSessionInActiveSpace`) would reach the REAL `invoke`, which rejects
+    // in jsdom. Un-mocked, a chord test here would still go green (the store
+    // catches the rejection into `newSessionError`) while printing a failure no
+    // one reads.
+    startSession: vi.fn().mockResolvedValue({
+      sessionId: "new1",
+      cwd: "/tmp/ws",
+      capabilities: {},
+      archived: false,
+    }),
     // The three `useMentionCatalogs` fetches (`ChatStream`'s composer
     // catalogs). They MUST be mocked here: the factory spreads
     // `importActual`, so an un-mocked export still calls the REAL `invoke`,
@@ -163,6 +181,17 @@ beforeAll(() => {
       dispatchEvent: vi.fn(),
     }),
   );
+});
+
+// The Open Space dialog's flag is MODULE-scoped, so it outlives every case in
+// this file — and this file can now raise it (the root ⌘O chord). The reset must
+// sit at FILE scope, not inside one `describe`: a leaked `true` makes EVERY later
+// `render(<App/>)` mount a real Radix modal, which sets
+// `document.body.style.pointerEvents = "none"` and `aria-hidden`s its siblings,
+// so unrelated `getByRole` queries all over the file go red for a reason that
+// has nothing to do with them.
+beforeEach(() => {
+  setNewSpaceDialogOpen(false);
 });
 
 describe("App (the gear icon + settings view swap)", () => {
@@ -1227,5 +1256,155 @@ describe("App (the SpaceCwdProvider that gives a transcript anchor its Space)", 
     expect(vi.mocked(externalOpen).mock.calls).toEqual([
       ["docs/notes.md", "/tmp/alpha"],
     ]);
+  });
+});
+
+describe("App (the ⌘O chord reaches the dialog from the SETTINGS view)", () => {
+  // The chord and the dialog are BOTH mounted at `App` root now, and the view
+  // that proves it is Settings: `SpacesList` — which used to own the listener and
+  // used to be the dialog's only render site — is unmounted there (it lives in
+  // the `view === "settings"` ternary's else-branch). So this is the one case
+  // that cannot be satisfied by leaving either half in the workspace: move the
+  // listener back into `SpacesList` and the keystroke reaches nothing; move the
+  // render back into `SpacesList` and the flag flips while no dialog exists.
+  //
+  // The boot effect is the harness trap here: `App` calls `listSpaces()` and
+  // feeds the result to `setSpaces`, which rewrites `activeSpacePath`
+  // UNCONDITIONALLY (`sessions.ts` — `owner ? owner.path : rows[0]?.path ?? null`).
+  // The mocked `listSpaces` resolves `[]`, so `activeSpacePath` lands on `null`
+  // one macrotask after mount, whatever a `setState` seed said before `render`.
+  // That is exactly the state wanted here — no Space selected is the honest
+  // Settings-page state, and it is what makes `⌘N` route to the dialog too — so
+  // the case leans on the landing instead of fighting it.
+  it("⌘O with the Settings view open opens the dialog", async () => {
+    render(<App />);
+    // Let the boot effect land (`listSessions` / `listSpaces` resolve, `setSpaces`
+    // rewrites `activeSpacePath`) before pressing anything.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Sessions")).toBeTruthy();
+    // Open Settings the way the gear test does.
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.getByText("General")).toBeTruthy();
+    // The workspace is gone — this is the view where `SpacesList` does not exist.
+    expect(screen.queryByText("Sessions")).toBeNull();
+    // ⌘O targeted at `document.body` (nothing in Settings holds focus).
+    expect(fireEvent.keyDown(document.body, { key: "o", ctrlKey: true })).toBe(
+      false,
+    );
+    // The shared flag flipped AND the dialog is actually on screen — the flag
+    // alone would pass with no render site, which is the bug.
+    expect(getNewSpaceDialogOpen()).toBe(true);
+    expect(screen.getByText("New space")).toBeTruthy();
+    // Closing it through the dialog's own Cancel goes back through the flag, so
+    // the root render site is not a one-way door.
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(getNewSpaceDialogOpen()).toBe(false);
+    expect(screen.queryByText("New space")).toBeNull();
+  });
+
+  it("⌘N with the Settings view open routes to the dialog too (no Space selected)", async () => {
+    // The chord calls the store command, and the store command owns the no-Space
+    // routing — so the chord needs no view of its own to fall back on. With the
+    // boot `listSpaces` resolving `[]` there is no Space, and `⌘N` must open the
+    // dialog rather than do nothing.
+    render(<App />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(fireEvent.keyDown(document.body, { key: "n", metaKey: true })).toBe(
+      false,
+    );
+    expect(getNewSpaceDialogOpen()).toBe(true);
+    expect(screen.getByText("New space")).toBeTruthy();
+  });
+});
+
+describe("App (a failed ⌘N says why on the SETTINGS page)", () => {
+  // The other half of "the chord is app-wide" (the describe above covers the
+  // success path). `startSessionInActiveSpace` records a rejection in
+  // `newSessionError`, and the only thing that used to read it was the sidebar's
+  // `Session actions` trigger `title` — the component the Settings view
+  // UNMOUNTS. So a chord that now works everywhere could fail everywhere
+  // silently, which is strictly worse than a chord that does not exist: nothing
+  // happens and nothing says so. `NewSessionErrorBanner` is mounted at `App`
+  // root for the same reason the chord is — so this asserts the REASON is on
+  // screen in the one view where the sidebar is not.
+  //
+  // A Space IS selected here (unlike the chord tests above, which lean on the
+  // empty boot state): with no Space the chord routes to the dialog and cannot
+  // fail, and the failure is what this pins.
+  //
+  // The reset covers every field these two cases leave behind, and it sits in
+  // this `describe` because the banner is what it tests: `useSessions` is a
+  // module singleton, so a `newSessionError` (or a one-row `spaces` list) left
+  // here would put a warning strip on screen inside the NEXT file's renders too.
+  // Same reason the pane flags and the dialog flag are reset at file scope above.
+  const clearStores = () =>
+    useSessions.setState({
+      newSessionError: null,
+      sessions: [],
+      historySessions: [],
+      archivedSessions: [],
+      activeSessionId: null,
+      activeSpacePath: null,
+      spaces: [],
+      messages: {},
+    });
+  beforeEach(clearStores);
+  afterEach(clearStores);
+
+  it("a rejected start from the Settings page names the command's message on screen", async () => {
+    // One Space row at boot, so `setSpaces` lands `activeSpacePath` on it and
+    // the chord takes the START path rather than the dialog path.
+    vi.mocked(listSpaces).mockResolvedValueOnce([
+      { path: "/tmp/alpha", createdAt: 0, lastOpenedAt: 1, trusted: false },
+    ]);
+    // `Once`, so the factory's resolved value stands for every other test in
+    // this file (there is no file-scope `clearAllMocks` here).
+    vi.mocked(startSession).mockRejectedValueOnce("no such folder");
+    render(<App />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    // The workspace really is gone — this is the view where the sidebar's
+    // `title` cannot exist.
+    expect(screen.queryByText("Sessions")).toBeNull();
+    fireEvent.keyDown(document.body, { key: "n", metaKey: true });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // The store recorded it (the mechanism), and — the assertion that used to
+    // fail — the user can READ it while the Settings page is up.
+    expect(useSessions.getState().newSessionError).toBe("no such folder");
+    // `getByTestId` rather than `getByRole("alert")`: the workspace's own
+    // surfaces can carry live regions too, and this asserts WHICH node speaks.
+    const banner = screen.getByTestId("new-session-error");
+    expect(banner.getAttribute("role")).toBe("alert");
+    expect(banner.textContent).toContain("no such folder");
+    // No dialog opened: a Space was selected, so this was a start, not a routing
+    // to the Open Space dialog.
+    expect(getNewSpaceDialogOpen()).toBe(false);
+  });
+
+  it("the same failure is visible back in the WORKSPACE too (one surface, both views)", async () => {
+    vi.mocked(listSpaces).mockResolvedValueOnce([
+      { path: "/tmp/alpha", createdAt: 0, lastOpenedAt: 1, trusted: false },
+    ]);
+    vi.mocked(startSession).mockRejectedValueOnce("the harness could not start");
+    render(<App />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.keyDown(document.body, { key: "n", metaKey: true });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("new-session-error").textContent).toContain(
+      "the harness could not start",
+    );
   });
 });

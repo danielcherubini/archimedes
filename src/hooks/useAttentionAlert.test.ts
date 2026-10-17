@@ -35,7 +35,7 @@ import {
 const { ipc } = vi.hoisted(() => ({ ipc: [] as ("arm" | "disarm")[] }));
 
 // Mock the two IPC wrappers (the `importActual` pattern, as in
-// `useStartNewConversation.test.ts`): the hook is the only consumer, and the
+// `../components/SpacesList.test.tsx`): the hook is the only consumer, and the
 // wire contract itself is pinned in `src/lib/tauri.test.ts`.
 vi.mock("../lib/tauri", async () => {
   const actual = await vi.importActual<Record<string, unknown>>("../lib/tauri");

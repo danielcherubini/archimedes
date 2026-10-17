@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-10-16
-superseded-by:
+superseded-by: 0057-the-webview-asserts-its-key-focus-ungated-because-both-linux-and-macos-deliver-focus-in.md
 ---
 
 # The webview's key focus is asserted at the webview level, because the window's focus does not imply it
