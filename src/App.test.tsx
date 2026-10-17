@@ -1336,9 +1336,25 @@ describe("App (a failed ⌘N says why on the SETTINGS page)", () => {
   // A Space IS selected here (unlike the chord tests above, which lean on the
   // empty boot state): with no Space the chord routes to the dialog and cannot
   // fail, and the failure is what this pins.
-  beforeEach(() => {
-    useSessions.setState({ newSessionError: null });
-  });
+  //
+  // The reset covers every field these two cases leave behind, and it sits in
+  // this `describe` because the banner is what it tests: `useSessions` is a
+  // module singleton, so a `newSessionError` (or a one-row `spaces` list) left
+  // here would put a warning strip on screen inside the NEXT file's renders too.
+  // Same reason the pane flags and the dialog flag are reset at file scope above.
+  const clearStores = () =>
+    useSessions.setState({
+      newSessionError: null,
+      sessions: [],
+      historySessions: [],
+      archivedSessions: [],
+      activeSessionId: null,
+      activeSpacePath: null,
+      spaces: [],
+      messages: {},
+    });
+  beforeEach(clearStores);
+  afterEach(clearStores);
 
   it("a rejected start from the Settings page names the command's message on screen", async () => {
     // One Space row at boot, so `setSpaces` lands `activeSpacePath` on it and
