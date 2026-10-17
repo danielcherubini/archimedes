@@ -121,9 +121,18 @@ order a release actually takes:
 
 **skill version bump (all three files) → tag `vX.Y.Z` → `release.yml` creates
 the DRAFT → the Windows and Linux builds upload their bundles and `.sig`s →
-the `publish` job composes and uploads `latest.json`, and only then flips the
-draft to published.** A draft is not a shipped release — it 404s from the
-updater endpoint.
+the `publish` job generates the release notes (`scripts/release-notes.sh`) and
+applies them to the still-draft release, then composes and uploads
+`latest.json`, and only then flips the draft to published.** A draft is not a
+shipped release — it 404s from the updater endpoint.
+
+Notes are generated from GitHub's own generator, which is why the release page
+and the in-app "update available" line both say something: the app reads the
+`notes` field of `latest.json` (the plugin exposes it as `update.body`), so a
+release body alone would never reach a device. The workflow's notes step is
+`continue-on-error` on purpose — a release whose notes failed still ships, on
+the placeholder — so AGENTS.md's final step is the human pass: generate, rewrite
+into human-facing prose, apply, and refresh `latest.json`'s `notes` to match.
 
 Before the first tag, the signing key has to exist. This is the ceremony; the
 password-touching steps are run by a human in their own terminal.

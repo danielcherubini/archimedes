@@ -68,6 +68,43 @@ files. The values stay bare `X.Y.Z` — no `v` prefix (the tag carries the `v`;
 the manifest composer rejects a `v`-prefixed version precisely because the two
 are not interchangeable).
 
+**Skill-executable final step — write the release notes.** This one runs AFTER
+the skill's tag push and after `release.yml` has published (it is the only step
+here that cannot run before the tag exists, so run it last and do not skip it
+because the workflow "already did it"). `release.yml` now puts GitHub's
+*generated* notes on the release automatically, so what remains — and what no
+workflow can do — is writing notes a person would read.
+
+1. Generate the draft:
+   `bash scripts/release-notes.sh --repo <owner>/<repo> --tag vX.Y.Z --out /tmp/notes.md`
+   — the markdown body goes to `--out`, the one-line summary to stdout. Do NOT
+   call `POST /releases/generate-notes` by hand: it does not validate
+   `tag_name`, so a tag with no release behind it answers 200 with confident,
+   correctly-formatted notes describing the PREVIOUS release. The script refuses
+   that case; two `gh` lines in a terminal do not.
+2. **Rewrite it.** The generated list is squash-merged PR subjects with
+   `by @user` suffixes — accurate, and not something to ship as the notes. Group
+   by what a user would notice (New / Fixed / Changed), drop internal-only
+   entries (`docs`, `chore`, CI, test-only), keep the PR links for what stays,
+   and open with the one change worth upgrading for. The script's output is the
+   floor, not the result.
+3. Apply: `gh release edit vX.Y.Z --notes-file /tmp/notes.md`.
+4. Refresh the in-app text too — Settings → Updates renders the `notes` field of
+   `latest.json`, NOT the release body, so step 3 alone leaves the app showing
+   one line. Download every `*.sig` plus `latest.json` off the release,
+   re-compose with `scripts/compose-updater-manifest.sh --notes "<new one-liner>"`,
+   and `gh release upload vX.Y.Z latest.json --clobber` — but only when the
+   downloaded `.sig` set is COMPLETE, because the composer emits one key per
+   signature it was given, so a missing sig publishes a manifest with a platform
+   missing over the good one (ADR 0052). Re-uploading is otherwise safe: the
+   signatures and the tag-pinned URLs come out identical, and
+   `tauri-plugin-updater` reads `pub_date` for display only. An incomplete set
+   means stop — stale-but-correct notes beat a broken manifest.
+5. Confirm, since `release.yml`'s notes step is `continue-on-error` on purpose (a
+   release whose notes failed must still ship): `gh release view vX.Y.Z --json
+   body -q .body` must show the curated text, not `Archimedes vX.Y.Z` — that
+   placeholder is what every release before this step read like.
+
 - The minisign private key and its password live as GitHub secrets —
   `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — and
   nowhere in the repo; the public half is committed in

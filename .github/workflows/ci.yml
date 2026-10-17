@@ -157,6 +157,13 @@ jobs:
       - name: Test the updater-manifest composer
         run: bash scripts/compose-updater-manifest.test.sh
 
+      # The release-notes generator is the third script with a silent failure
+      # mode (GitHub's endpoint answers 200 for a tag that has no release), so it
+      # is under scripts/ with tests here rather than inlined into release.yml —
+      # where no fixture could reach it.
+      - name: Test the release-notes generator
+        run: bash scripts/release-notes.test.sh
+
       # The same check on the real checkout, so the guard runs even when the
       # test script above is what changed.
       - name: Check the three version fields agree

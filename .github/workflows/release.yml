@@ -77,10 +77,10 @@ jobs:
       # going, not die on "release already exists". `--verify-tag` is the loud
       # failure for the race where the tag was deleted between the push and
       # this step; `--draft` keeps every asset invisible until the publish job
-      # has written the manifest; `--notes` is non-empty because this is the
-      # only place the body is ever set — the publish job edits the DRAFT flag
-      # and nothing else, so an empty note here is an empty release page
-      # forever.
+      # has written the manifest. `--notes` is a PLACEHOLDER, not the release's
+      # notes: the `publish` job replaces the body with generated notes before
+      # it flips the draft, so the one thing this line must guarantee is that a
+      # release which dies before that step is not a blank page.
       - name: Create the draft release
         id: create
         run: |
@@ -397,7 +397,51 @@ jobs:
             exit 1
           }
 
+      # The notes are generated BEFORE the manifest is composed, and that order
+      # is the design, not a preference: the composer already writes the `notes`
+      # field of `latest.json`, which is the ONLY release text an installed app
+      # ever shows (Settings → Updates renders it — `tauri-plugin-updater`
+      # exposes the manifest's `notes` as `update.body`). Generating first lets
+      # the one existing writer carry it, so the in-app panel and the release
+      # page come from one run and NOTHING is written to the release after it
+      # goes public.
+      #
+      # `continue-on-error` is deliberate and is the ONLY such step in this job:
+      # the assets and the manifest are the product, and a notes failure must not
+      # cost a built release. The reachable case is a re-tag with no merged PR
+      # between the two tags, which generates an empty body and exits 1 — a
+      # perfectly legitimate release with nothing to say. The backstop is
+      # `create-release`'s placeholder body, and the empty manifest field is
+      # replaced with that same placeholder below, so the failure is loud in the
+      # log and harmless on the device.
+      - name: Generate the release notes
+        id: generate-notes
+        continue-on-error: true
+        run: |
+          notes_summary="$(
+            bash scripts/release-notes.sh \
+              --repo "$GITHUB_REPOSITORY" \
+              --tag "$TAG" \
+              --out release-notes.md
+          )"
+          # stdout is exactly one line BY CONTRACT (the script's tests pin it), and
+          # it is what the manifest carries — the in-app panel renders it as one
+          # paragraph, so the markdown body must never be the value here.
+          echo "summary=$notes_summary" >> "$GITHUB_OUTPUT"
+
+      # Still a DRAFT at this point, which is the point: the release page is
+      # never public carrying the placeholder. This is the step that replaced
+      # "the body is set once at creation and never touched again".
+      - name: Apply the generated notes to the release
+        if: steps.generate-notes.outcome == 'success'
+        run: gh release edit "$TAG" --notes-file release-notes.md
+
       - name: Compose latest.json
+        env:
+          # Empty when the step above failed — and `${NOTES_SUMMARY:-…}` is where
+          # the placeholder comes back, so a notes failure cannot put an empty
+          # `notes` field into the manifest of a shipped release.
+          NOTES_SUMMARY: ${{ steps.generate-notes.outputs.summary }}
         run: |
           bash scripts/compose-updater-manifest.sh \
             --sigs-dir sigs \
@@ -405,7 +449,7 @@ jobs:
             --tag "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --out latest.json \
-            --notes "Archimedes $TAG"
+            --notes "${NOTES_SUMMARY:-Archimedes $TAG}"
 
       # The one and only `latest.json` upload (ADR 0052).
       - name: Upload the updater manifest
@@ -413,7 +457,8 @@ jobs:
 
       # LAST step, nothing after it: flipping the draft is the moment installed
       # clients start seeing this version, so it happens only once the assets
-      # and the manifest are both in place. The body/title are never edited
-      # here — they were set at creation.
+      # and the manifest are both in place. The title is never edited anywhere;
+      # the BODY is edited once, by "Apply the generated notes" above — still a
+      # draft, so no published release is ever seen carrying the placeholder.
       - name: Publish the release
         run: gh release edit "$TAG" --draft=false
