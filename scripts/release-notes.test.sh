@@ -95,6 +95,13 @@ trap 'rm -rf "$tmp_root"' EXIT
 #                            pagination section asserts both shapes.
 #   FAKE_RELEASE_LIST_STATUS non-empty — the listing request fails with that HTTP
 #                            status, for the "the lookup broke" cases.
+#   FAKE_RELEASE_LIST_RAW    text served by the listing at exit 0, bypassing every
+#                            jq in the shim. This is the only way to hand the
+#                            script a response that is not valid JSON: routed
+#                            through the normal fixture path, the shim's own jq
+#                            would reject it and fail the REQUEST, so the case
+#                            would duplicate the HTTP-status one and the script's
+#                            filter-error branch would never execute.
 #   FAKE_REQUIRE_REPO        true — `gh release view` REFUSES to run without an
 #                            explicit `--repo`. This is the fork simulation: real
 #                            gh resolves the repository from the checkout when no
@@ -231,6 +238,18 @@ case "${1:-}" in
       fi
       pages="${FAKE_RELEASE_PAGES:-}"
       if [[ -z "$pages" ]]; then
+        # `FAKE_RELEASE_LIST_RAW` bypasses every jq in this branch on purpose. The
+        # listing is a real HTTP response and GitHub can answer 200 with something
+        # that is not the documented JSON at all (a proxy page, a gateway's HTML).
+        # Building that fixture through the normal path is impossible — the shim's
+        # own jq would choke on it, exit non-zero, and the script's REQUEST-failure
+        # branch would fire instead of its FILTER-error branch, so the case would
+        # duplicate the HTTP-status one and leave the filter untested. Text out the
+        # door, exit status 0, and jq is the script's problem.
+        if [[ -n "${FAKE_RELEASE_LIST_RAW:-}" ]]; then
+          printf '%s\n' "$FAKE_RELEASE_LIST_RAW"
+          exit 0
+        fi
         pages="[$(printf '%s' "${FAKE_RELEASE_LIST:-[]}")]"
       fi
       if [[ -n "$jq_expr" ]]; then
@@ -867,11 +886,25 @@ assert_eq "stdout is still exactly the summary" "1" "$(printf '%s\n' "$stdout" |
 # the same class: it says nothing about what the repository actually contains.
 dir="$tmp_root/listing-filter-error"
 mkdir -p "$dir"
-export FAKE_RELEASE_LIST='this is not JSON'
+# The listing must ANSWER (exit 0) and hand back garbage. If the harness itself
+# rejects the malformed fixture it exits non-zero, the script's REQUEST-failure
+# branch fires, and this case silently duplicates the 502 above while the script's
+# own filter-error branch stays unexecuted. `FAKE_RELEASE_LIST_RAW` is what makes
+# that possible: text out the door, success status, and jq is the script's problem.
+export FAKE_RELEASE_LIST_RAW='this is not JSON'
 run_notes "$dir" --repo o/r --tag v0.2.0 --out out/notes.md
 assert_fails "unparseable listing output exits 1 rather than guessing"
-assert_contains "the unparseable listing is reported" "could not list" "$stderr"
+assert_contains "the filter error is named as a filter error" \
+  "could not read the release list" "$stderr"
+# The discriminating pair, and the reason this case exists separately: a request
+# that FAILED says `could not list`. Same symptom, same exit code, different cause
+# — and if this assertion ever starts passing on `could not list`, the case has
+# quietly become a duplicate of the one above and is testing nothing new.
+assert_not_contains "the failure is NOT reported as a request failure" \
+  "could not list" "$stderr"
 assert_eq "the endpoint is never called on a filter error" "0" "$(api_calls)"
+assert_eq "no notes file survives a filter error" "no" "$(path_exists "$dir/out/notes.md")"
+unset FAKE_RELEASE_LIST_RAW
 export FAKE_RELEASE_LIST='[{"tag_name":"v0.1.1","draft":false,"prerelease":false}]'
 
 # ---------------------------------------------------------------------------
