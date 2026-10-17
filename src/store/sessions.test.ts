@@ -21,7 +21,12 @@ import {
   setSpaceTrusted,
   deleteSpace,
   closeSession,
+  startSession,
 } from "../lib/tauri";
+import {
+  getNewSpaceDialogOpen,
+  setNewSpaceDialogOpen,
+} from "../lib/newSpaceDialogState";
 import type {
   CloseReasonStr,
   MessageRow,
@@ -50,6 +55,13 @@ vi.mock("../lib/tauri", async () => {
     setSpaceTrusted: vi.fn().mockResolvedValue(undefined),
     // The store's `closeSpace` stops the Space's live sessions with this.
     closeSession: vi.fn().mockResolvedValue(undefined),
+    // `startSessionInActiveSpace` starts the native session with this.
+    startSession: vi.fn().mockResolvedValue({
+      sessionId: "new1",
+      cwd: "/tmp/ws",
+      capabilities: {},
+      archived: false,
+    }),
   };
 });
 
@@ -3241,5 +3253,100 @@ describe("views (store integration for space views)", () => {
     );
     expect(view.liveSessionIds).toEqual(["s3", "s2", "s1"]);
     expect(view.liveSessionId).toBe("s3");
+  });
+});
+
+describe("useSessions.startSessionInActiveSpace", () => {
+  beforeEach(() => {
+    // Seed via `setState` directly — NOT `getState().setSpaces(…)`, which
+    // triggers boot auto-selection + `openSession` → a `loadHistory` IPC.
+    useSessions.setState({
+      sessions: [],
+      historySessions: [],
+      archivedSessions: [],
+      activeSessionId: null,
+      activeSpacePath: null,
+      spaces: [],
+      closeReasons: {},
+      messages: {},
+      configOptions: {},
+      newSessionError: null,
+    });
+    // The dialog flag is module-scoped, so a `true` this suite's "no Space"
+    // cases leave behind is `true` for the next case in this file.
+    setNewSpaceDialogOpen(false);
+    // The mock is module-scoped: an earlier case's `mockRejectedValueOnce`
+    // must not decide a later case's outcome.
+    vi.mocked(startSession).mockReset();
+    vi.mocked(startSession).mockResolvedValue({
+      sessionId: "new1",
+      cwd: "/tmp/ws",
+      capabilities: {},
+      archived: false,
+    });
+  });
+
+  it("starts a native session at activeSpacePath, records session + space, and SELECTS the new session", async () => {
+    useSessions.setState({
+      spaces: [row("/tmp/alpha", 1)],
+      activeSpacePath: "/tmp/alpha",
+    });
+    await useSessions.getState().startSessionInActiveSpace();
+    expect(vi.mocked(startSession)).toHaveBeenCalledWith("/tmp/alpha");
+    const st = useSessions.getState();
+    expect(st.sessions.map((s) => s.sessionId)).toContain("new1");
+    expect(st.spaces.map((s) => s.path)).toContain("/tmp/ws");
+    // The invariant the deleted `useStartNewConversation` test carried: a
+    // start flow ALWAYS switches the view to the session it started —
+    // `addSession` sets `activeSessionId`, so nothing else has to.
+    expect(st.activeSessionId).toBe("new1");
+  });
+
+  it("opens the Open Space dialog when activeSpacePath is null", async () => {
+    useSessions.setState({ spaces: [], activeSpacePath: null });
+    await useSessions.getState().startSessionInActiveSpace();
+    expect(vi.mocked(startSession)).not.toHaveBeenCalled();
+    expect(getNewSpaceDialogOpen()).toBe(true);
+  });
+
+  it("opens the Open Space dialog when the path matches no Space row (a legacy cwd)", async () => {
+    // A `⌘N` aimed at a cwd that is no longer a Space row: nothing to start
+    // in, so the dialog is the honest answer (the same route the sidebar
+    // took for `activeView === undefined`).
+    useSessions.setState({
+      spaces: [row("/tmp/alpha", 1)],
+      activeSpacePath: "/tmp/gone",
+    });
+    await useSessions.getState().startSessionInActiveSpace();
+    expect(vi.mocked(startSession)).not.toHaveBeenCalled();
+    expect(getNewSpaceDialogOpen()).toBe(true);
+  });
+
+  it("suppresses a concurrent double-invoke (⌘N pressed twice in one tick)", async () => {
+    useSessions.setState({
+      spaces: [row("/tmp/alpha", 1)],
+      activeSpacePath: "/tmp/alpha",
+    });
+    const p1 = useSessions.getState().startSessionInActiveSpace();
+    const p2 = useSessions.getState().startSessionInActiveSpace();
+    await Promise.all([p1, p2]);
+    expect(vi.mocked(startSession)).toHaveBeenCalledTimes(1);
+  });
+
+  it("records the rejection message in newSessionError, and clears it on the next run", async () => {
+    // The sidebar's actions-menu `title` is the only surface that shows this,
+    // and it re-reads the flag on every open — which is why the action clears
+    // it at the top of its own run instead of carrying a `clearError` the way
+    // the hook did (no consumer ever called one).
+    useSessions.setState({
+      spaces: [row("/tmp/alpha", 1)],
+      activeSpacePath: "/tmp/alpha",
+    });
+    vi.mocked(startSession).mockRejectedValueOnce("no such folder");
+    await useSessions.getState().startSessionInActiveSpace();
+    expect(useSessions.getState().newSessionError).toBe("no such folder");
+
+    await useSessions.getState().startSessionInActiveSpace();
+    expect(useSessions.getState().newSessionError).toBeNull();
   });
 });

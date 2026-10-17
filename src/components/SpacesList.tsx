@@ -28,6 +28,12 @@ import {
   subscribeLeftPane,
 } from "../lib/leftPaneState";
 import {
+  getNewSpaceDialogOpen,
+  openNewSpaceDialog,
+  setNewSpaceDialogOpen,
+  subscribeNewSpaceDialog,
+} from "../lib/newSpaceDialogState";
+import {
   useSessions,
   spaceViewFor,
   type Message,
@@ -94,7 +100,17 @@ export default function SpacesList({
   const activeSpacePath = useSessions((s) => s.activeSpacePath);
   const openSession = useSessions((s) => s.openSession);
   const deleteSession = useSessions((s) => s.deleteSession);
-  const [dialogOpen, setDialogOpen] = useState(false);
+  // The Open Space dialog's open flag is the SHARED module's, not local
+  // state: the tab strip's `+` and the sidebar's own buttons raise the same
+  // flag, and a private copy in each is two owners of one dialog (which is
+  // how two dialogs get mounted at once). This component still READS the flag
+  // for its render below — the render site moves to `App` root in the next
+  // step of this plan, which is what makes the dialog survive the Settings
+  // view that unmounts this component.
+  const dialogOpen = useSyncExternalStore(
+    subscribeNewSpaceDialog,
+    getNewSpaceDialogOpen,
+  );
   // The Skills modal (the left pane has NO skill list — ZCode parity: the
   // skills UI is a searchable modal, opened from the third button in the
   // row). The catalog fetch lives in `useSkillCatalog` below (the modal
@@ -222,12 +238,12 @@ export default function SpacesList({
     // Space): open the Open Space dialog instead (the hook itself no-ops
     // on an undefined view).
     if (activeView === undefined) {
-      setDialogOpen(true);
+      openNewSpaceDialog();
       return;
     }
     void newSession.startNewConversation();
   }, [activeView, newSession]);
-  const handleOpenSpace = useCallback(() => setDialogOpen(true), []);
+  const handleOpenSpace = useCallback(() => openNewSpaceDialog(), []);
 
   // The collapsed rail's command strips. These are the SAME handlers the open
   // pane's labelled buttons call — one closure each, referenced from both, so
@@ -454,7 +470,9 @@ export default function SpacesList({
           tailActions={railTailActions}
         />
       )}
-      {dialogOpen && <NewSpaceDialog onClose={() => setDialogOpen(false)} />}
+      {dialogOpen && (
+        <NewSpaceDialog onClose={() => setNewSpaceDialogOpen(false)} />
+      )}
       {skillsOpen && (
         <SkillsDialog skills={skills} onClose={() => setSkillsOpen(false)} />
       )}

@@ -7,7 +7,7 @@ import { useSessionStatuses } from "../hooks/useSessionStatus";
 import { SessionStatusMark } from "./SessionStatusMark";
 import type { SessionStatus } from "../hooks/useSessionStatus";
 import CloseSpaceDialog from "./CloseSpaceDialog";
-import NewSpaceDialog from "./NewSpaceDialog";
+import { openNewSpaceDialog } from "../lib/newSpaceDialogState";
 
 /**
  * A Space's own status, folded out of its live Sessions' statuses with the SAME
@@ -38,7 +38,10 @@ export function tabStatusOf(
  * active one selected; clicking a tab selects the Space (the store's
  * `selectSpace` — its most recent session opens: live first, then the
  * newest stored). The `+` opens the New-Space dialog (picking a folder
- * IS creating a space — the same flow as the sidebar's `Open Space`).
+ * IS creating a space — the same flow as the sidebar's `Open Space`), and it
+ * opens it through the SHARED flag (`newSpaceDialogState`), because the tab
+ * strip is not the dialog's owner — the flag has one, and this component is
+ * not where it renders.
  *
  * The `...` menu (`New Session in this Space`) moved to the sidebar's
  * `Sessions` header (right-aligned, next to the word `Sessions`), and the
@@ -79,7 +82,6 @@ export default function SpaceTabs() {
   const activeSpacePath = useSessions((s) => s.activeSpacePath);
   const selectSpace = useSessions((s) => s.selectSpace);
   const closeSpace = useSessions((s) => s.closeSpace);
-  const [newSpaceOpen, setNewSpaceOpen] = useState(false);
   const liveSessionIds = useMemo(
     () => sessions.map((s) => s.sessionId),
     [sessions],
@@ -308,7 +310,7 @@ export default function SpaceTabs() {
       <button
         type="button"
         aria-label="New space"
-        onClick={() => setNewSpaceOpen(true)}
+        onClick={openNewSpaceDialog}
         className="size-8 shrink-0 rounded-md text-foreground-subtle hover:bg-surface-hover"
       >
         <PlusIcon className="size-4" />
@@ -317,9 +319,6 @@ export default function SpaceTabs() {
           a plain spacer; the chrome bar container is the drag region).
           */}
       <div className="flex-1" />
-      {newSpaceOpen && (
-        <NewSpaceDialog onClose={() => setNewSpaceOpen(false)} />
-      )}
       {closeTarget && (
         <CloseSpaceDialog
           spaceName={closeTarget.name}

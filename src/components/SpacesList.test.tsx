@@ -9,6 +9,7 @@ import {
   LEFT_PANE_RAIL,
   setLeftPaneCollapsed,
 } from "../lib/leftPaneState";
+import { setNewSpaceDialogOpen } from "../lib/newSpaceDialogState";
 import { clearSkillCatalogCache } from "../hooks/useSkillCatalog";
 import SpacesList from "./SpacesList";
 
@@ -150,6 +151,16 @@ beforeEach(clearSkillCatalogCache);
 // writes localStorage itself).
 beforeEach(() => {
   setLeftPaneCollapsed(false);
+});
+// The Open-Space-dialog flag is module-scoped too, and THIS file can raise
+// it (the `Open Space` button, the rail icon, `⌘O`, the `…` menu). A leaked
+// `true` makes every later `render(<SpacesList/>)` auto-mount a real Radix
+// modal, which sets `document.body.style.pointerEvents = "none"` and
+// `aria-hidden`s its siblings — so unrelated `getByRole` queries further down
+// this file throw for a reason that has nothing to do with them. Reset at
+// FILE scope, not inside one `describe`.
+beforeEach(() => {
+  setNewSpaceDialogOpen(false);
 });
 
 describe("SpacesList", () => {

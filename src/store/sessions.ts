@@ -8,6 +8,7 @@ import {
   resumeSession as resumeSessionCommand,
   setSessionArchived as setSessionArchivedCommand,
   setSpaceTrusted as setSpaceTrustedCommand,
+  startSession as startSessionCommand,
   type AcpSessionUpdate,
   type AcpToolCallStatus,
   type CloseReasonStr,
@@ -19,6 +20,7 @@ import {
   type ToolCallContent,
 } from "../lib/tauri";
 import { basenameOfPath } from "../lib/paths";
+import { openNewSpaceDialog } from "../lib/newSpaceDialogState";
 import { unifiedPatch } from "../lib/diff";
 import type { SessionUpdateBatchItem } from "../lib/batchSessionUpdates";
 import { usePermissions } from "./permissions";
@@ -731,6 +733,31 @@ interface SessionsState {
    */
   closeSpace: (path: string, stopSessionIds?: string[]) => Promise<void>;
   /**
+   * Start a new Session in the SELECTED Space (`activeSpacePath`) — the one
+   * flow the sidebar's "New Session" button, the collapsed rail's icon, the
+   * `Sessions` header's `…` menu item and the `⌘N` chord all share.
+   *
+   * It lives in the store rather than in a hook closure because its callers
+   * do not share a component: a root-level chord listener has to reach it
+   * with nothing mounted, and the sidebar it used to live behind unmounts in
+   * the Settings view.
+   *
+   * With NO Space to start in — nothing selected, or a selected path that is
+   * no longer a Space row (a legacy cwd) — it opens the Open Space dialog
+   * instead of starting anything, which is what the sidebar's button did with
+   * an `undefined` view. On success it records the Session (`addSession`,
+   * which SELECTS it) and the Space (`addSpace`, which selects that too).
+   */
+  startSessionInActiveSpace: () => Promise<void>;
+  /**
+   * Why the last `startSessionInActiveSpace` failed, as the command's message
+   * (`null` when the last run succeeded or none has run) — what the sidebar's
+   * actions-menu item shows as its `title`, so a dead menu item says why.
+   * Cleared ONLY by the reset at the top of the next run: a stale message on
+   * an item that has since worked would blame the wrong thing.
+   */
+  newSessionError: string | null;
+  /**
    * Flip a space's `trusted` flag: optimistic local update first (the spaces
    * store has NO live refresh — the flag must flip immediately, not wait for
    * a round-trip), then the `set_space_trusted` command; on rejection the
@@ -794,6 +821,12 @@ const inFlightToggles = new Map<string, Promise<void>>();
 // baseline; the UI-value fallback below is a last resort only.
 const committedTrusted = new Map<string, boolean>();
 
+// One new-session command at a time. APP-GLOBAL, not per-Space: there is one
+// selected Space and one new-session flow, and the thing it suppresses is two
+// entry points (the button and the `⌘N` chord, or a double-click) firing in the
+// same tick — a key per Space would let both through.
+let newSessionInFlight = false;
+
 // The `messageId` for a Client-authored transcript line (see `addSystemLine`).
 // A MODULE-LOCAL counter, not a timestamp: two lines appended in the same
 // millisecond must still differ, or `agent_message_chunk`'s same-id append
@@ -820,6 +853,7 @@ export const useSessions = create<SessionsState>((set, get) => ({
   inTurn: {},
   stopReasons: {},
   stalled: {},
+  newSessionError: null,
 
   markStalled: (sessionId, at, crashLog) =>
     set((state) => ({
@@ -987,6 +1021,40 @@ export const useSessions = create<SessionsState>((set, get) => ({
     // a transcript with no tab is not a view.
     if (landing) get().selectSpace(landing);
     else set({ activeSessionId: null });
+  },
+
+  startSessionInActiveSpace: async () => {
+    const { activeSpacePath, spaces } = get();
+    // No Space selected, or the selected path is a legacy cwd that is no
+    // longer a Space row → route the request to the Open Space dialog.
+    // Equivalent to the old `activeView === undefined` (`spaceViewFor`
+    // returns `path` verbatim, so `views.find(…)` was undefined iff no row
+    // carried the path). The `=== null` clause is for tsc NARROWING only — a
+    // `SpaceView.path` can never be null — so do not "simplify" it away: the
+    // build breaks.
+    if (
+      activeSpacePath === null ||
+      !spaces.some((s) => s.path === activeSpacePath)
+    ) {
+      // BEFORE the in-flight guard: opening a dialog is not an in-flight
+      // command, and a second press must still open it.
+      openNewSpaceDialog();
+      return;
+    }
+    if (newSessionInFlight) return;
+    newSessionInFlight = true;
+    set({ newSessionError: null });
+    try {
+      const info = await startSessionCommand(activeSpacePath);
+      // `addSession` selects the new session (it sets `activeSessionId`);
+      // `addSpace` refreshes `lastOpenedAt` and sets `activeSpacePath`.
+      get().addSession(info);
+      get().addSpace(info.cwd);
+    } catch (err) {
+      set({ newSessionError: err instanceof Error ? err.message : String(err) });
+    } finally {
+      newSessionInFlight = false;
+    }
   },
 
   setSpaceTrusted: (path, trusted) => {
