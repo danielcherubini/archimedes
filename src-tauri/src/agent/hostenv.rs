@@ -976,3 +976,127 @@ mod tests {
         );
     }
 }
+
+/// The fabricated AppImage host the CALL-SITE tests inject into [`scrub`].
+///
+/// A call-site test cannot use [`for_child`]: under `cargo test` the production
+/// gate is CLOSED (`current_exe()` is `target/debug/deps/<hash>`, never under
+/// `$APPDIR`), so it hands back the EMPTY patch on every host and an assertion
+/// built on it proves nothing — see its doc. These fixtures fabricate the host
+/// instead, so a test can ask a spawn site "what does the patch do to this
+/// `Command`?" with a patch that is genuinely non-empty:
+///
+/// * [`MOUNT`] is `appdir`-shaped the way the AppImage runtime names a mount
+///   point (`build_mount_point` in `runtime.c`), which is the structural
+///   corroboration [`scrub`]'s gate accepts — so NO tree has to exist on disk
+///   and the fabrications stay deterministic on every Linux runner.
+/// * [`tainted_inherited`] is the taint `AppRun.c` and the GTK hook actually
+///   write, with one non-mount entry in it: without a survivor the patch would
+///   `remove` every variable and a call site that dropped the user's own paths
+///   could not be told from a correct one.
+///
+/// One place rather than a copy per call site, because these encode THIS
+/// module's gate shape: when the gate or the tainted list moves, the fixtures
+/// move with it and every consumer's expectations move with them.
+///
+/// Linux-only: off Linux [`scrub`] is DEFINED to return the empty patch, so
+/// nothing there consumes this module, and `clippy --all-targets -D warnings`
+/// would report it as `dead_code` on the Windows/macOS CI rows.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) mod fixtures {
+    use super::*;
+
+    /// The fabricated mount root.
+    pub(crate) const MOUNT: &str = "/tmp/.mount_archimTEST";
+    /// The `current_exe()` of a process running FROM [`MOUNT`] (in a real
+    /// AppImage it resolves through the mount via `/proc/self/exe`).
+    pub(crate) const EXE_INSIDE_MOUNT: &str = "/tmp/.mount_archimTEST/usr/bin/archimedes";
+    /// The entry that is NOT the bundle's and must survive every scrub, so
+    /// "stripped everything" is never mistaken for "stripped the mount".
+    pub(crate) const USER_BIN: &str = "/opt/test-unique/bin";
+    /// The value the scrub leaves for `LD_LIBRARY_PATH` (the surviving entry).
+    pub(crate) const SCRUBBED_LD_LIBRARY_PATH: &str = "/usr/lib";
+
+    /// The taint, in the shapes `AppRun.c` emits: the mount dir at position 0,
+    /// a TRAILING SLASH + colon on `LD_LIBRARY_PATH`, and `PYTHONHOME` as a
+    /// SINGLE path inside the mount (so the patch must REMOVE it — an empty
+    /// value is not an absent one).
+    pub(crate) fn tainted_inherited() -> Vec<(OsString, OsString)> {
+        vec![
+            (
+                OsString::from("LD_LIBRARY_PATH"),
+                OsString::from(format!("{MOUNT}/usr/lib/:/usr/lib")),
+            ),
+            (
+                OsString::from("PATH"),
+                OsString::from(format!("{MOUNT}/bin:{USER_BIN}")),
+            ),
+            (
+                OsString::from("PYTHONHOME"),
+                OsString::from(format!("{MOUNT}/usr")),
+            ),
+        ]
+    }
+
+    /// The patch [`tainted_inherited`] produces, asserted non-empty: a test
+    /// whose patch is empty cannot fail, so it must not be run at all.
+    pub(crate) fn tainted_patch() -> EnvPatch {
+        let patch = scrub(
+            tainted_inherited(),
+            Some(Path::new(MOUNT)),
+            Path::new(EXE_INSIDE_MOUNT),
+        );
+        assert!(
+            !patch.is_empty(),
+            "the fabricated host produced an EMPTY patch, so every test built on it \
+             asserts nothing: {patch:?}"
+        );
+        patch
+    }
+
+    /// The environment a `Command` was TOLD to carry, as a map — the only
+    /// honest introspection available, because `tokio::process::Command` has no
+    /// `get_envs` (hence `as_std()`), and because `get_envs` reports an
+    /// `env_remove` as a `None`-valued entry (it lists the configured changes,
+    /// not the inherited env).
+    pub(crate) fn configured_env(
+        cmd: &tokio::process::Command,
+    ) -> std::collections::BTreeMap<OsString, Option<OsString>> {
+        cmd.as_std()
+            .get_envs()
+            .map(|(key, value)| (key.to_os_string(), value.map(|v| v.to_os_string())))
+            .collect()
+    }
+
+    /// The env a command must carry when the ONLY thing done to it is
+    /// `patch.apply` — the expectation, built by `scrub` + the real
+    /// [`EnvPatch::apply`], never by reading the patch's internals (they are
+    /// private on purpose) and never by `for_child()`.
+    ///
+    /// Deliberately NO `env_clear()`: std reports `get_envs` as empty after one
+    /// and DROPS an `env_remove` issued afterwards (measured), so clearing here
+    /// would hide exactly the half of the patch the ordering test is about. A
+    /// bare `Command` reports every configured change — and `get_envs` never
+    /// lists the INHERITED env, so there is nothing else to clear away.
+    pub(crate) fn reference_env(
+        patch: &EnvPatch,
+    ) -> std::collections::BTreeMap<OsString, Option<OsString>> {
+        let mut cmd = tokio::process::Command::new("true");
+        patch.apply(&mut cmd);
+        configured_env(&cmd)
+    }
+
+    /// Whether a colon list names a mount path ANYWHERE in it (an independent
+    /// restatement of the shape rule, so a call site that scrubbed via a bug in
+    /// this module's own matcher is still caught).
+    pub(crate) fn lists_a_mount_path(value: &OsStr) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+        std::env::split_paths(value).any(|component| {
+            Path::new(&component).ancestors().any(|ancestor| {
+                ancestor
+                    .file_name()
+                    .is_some_and(|name| name.as_bytes().starts_with(b".mount_"))
+            })
+        })
+    }
+}
