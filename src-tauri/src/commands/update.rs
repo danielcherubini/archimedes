@@ -545,6 +545,11 @@ fn owned_relaunch(
 ///
 /// The spawn uses [`crate::agent::childproc`]`::command_std`, the owner of the
 /// Windows child-console window policy (`CREATE_NO_WINDOW`).
+///
+/// ⚠ Only because this function is Linux-gated: on Windows and macOS the
+/// relaunch is the `app.restart()` fallthrough below, whose spawn is Tauri's own
+/// unflagged `Command::new(path)…spawn()` (`tauri-2.12.2/src/process.rs:83`) —
+/// outside that seam, and outside the census that guards it.
 #[cfg(target_os = "linux")]
 fn relaunch_through_the_mount(
     app: &AppHandle,
