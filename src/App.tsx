@@ -42,6 +42,7 @@ import {
   subscribeNewSpaceDialog,
 } from "./lib/newSpaceDialogState";
 import NewSpaceDialog from "./components/NewSpaceDialog";
+import NewSessionErrorBanner from "./components/NewSessionErrorBanner";
 import { useActiveSpaceCwd } from "./hooks/useActiveSpaceCwd";
 import { useWindowMaximized } from "./hooks/useWindowMaximized";
 
@@ -403,6 +404,16 @@ function App() {
         )}
         <WindowControls />
       </div>
+      {/* Why the last new-session attempt failed, when it failed. MOUNTED OUTSIDE
+          the view ternary for the same reason the ⌘N chord is mounted at this root
+          (`useAppShortcuts`) and for the same reason `SubagentModals` and the root
+          `NewSpaceDialog` are: the surface that used to be the ONLY reader of
+          `newSessionError` — the sidebar's `Session actions` trigger `title` —
+          unmounts on the Settings page, so a chord that works there could fail
+          there in total silence. A strip in the column (not inside the content
+          row) so it spans the window instead of squeezing a pane, and it needs no
+          `SpaceCwdProvider`: it reads one store field and opens nothing. */}
+      <NewSessionErrorBanner />
       <div className="flex min-h-0 flex-1" data-testid="content-row">
         {/* The active **Space**'s folder for every **External open** of a
             relative path (ADR 0051), provided HERE rather than inside

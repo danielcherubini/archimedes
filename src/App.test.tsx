@@ -3,9 +3,11 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import App from "./App";
 import {
   externalOpen,
+  listSpaces,
   listenInteractiveRequestClose,
   listenSessionTitled,
   listenSubagentClosed,
+  startSession,
 } from "./lib/tauri";
 import { useSessions } from "./store/sessions";
 import { useSubagents } from "./store/subagents";
@@ -1317,5 +1319,76 @@ describe("App (the ⌘O chord reaches the dialog from the SETTINGS view)", () =>
     );
     expect(getNewSpaceDialogOpen()).toBe(true);
     expect(screen.getByText("New space")).toBeTruthy();
+  });
+});
+
+describe("App (a failed ⌘N says why on the SETTINGS page)", () => {
+  // The other half of "the chord is app-wide" (the describe above covers the
+  // success path). `startSessionInActiveSpace` records a rejection in
+  // `newSessionError`, and the only thing that used to read it was the sidebar's
+  // `Session actions` trigger `title` — the component the Settings view
+  // UNMOUNTS. So a chord that now works everywhere could fail everywhere
+  // silently, which is strictly worse than a chord that does not exist: nothing
+  // happens and nothing says so. `NewSessionErrorBanner` is mounted at `App`
+  // root for the same reason the chord is — so this asserts the REASON is on
+  // screen in the one view where the sidebar is not.
+  //
+  // A Space IS selected here (unlike the chord tests above, which lean on the
+  // empty boot state): with no Space the chord routes to the dialog and cannot
+  // fail, and the failure is what this pins.
+  beforeEach(() => {
+    useSessions.setState({ newSessionError: null });
+  });
+
+  it("a rejected start from the Settings page names the command's message on screen", async () => {
+    // One Space row at boot, so `setSpaces` lands `activeSpacePath` on it and
+    // the chord takes the START path rather than the dialog path.
+    vi.mocked(listSpaces).mockResolvedValueOnce([
+      { path: "/tmp/alpha", createdAt: 0, lastOpenedAt: 1, trusted: false },
+    ]);
+    // `Once`, so the factory's resolved value stands for every other test in
+    // this file (there is no file-scope `clearAllMocks` here).
+    vi.mocked(startSession).mockRejectedValueOnce("no such folder");
+    render(<App />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    // The workspace really is gone — this is the view where the sidebar's
+    // `title` cannot exist.
+    expect(screen.queryByText("Sessions")).toBeNull();
+    fireEvent.keyDown(document.body, { key: "n", metaKey: true });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // The store recorded it (the mechanism), and — the assertion that used to
+    // fail — the user can READ it while the Settings page is up.
+    expect(useSessions.getState().newSessionError).toBe("no such folder");
+    // `getByTestId` rather than `getByRole("alert")`: the workspace's own
+    // surfaces can carry live regions too, and this asserts WHICH node speaks.
+    const banner = screen.getByTestId("new-session-error");
+    expect(banner.getAttribute("role")).toBe("alert");
+    expect(banner.textContent).toContain("no such folder");
+    // No dialog opened: a Space was selected, so this was a start, not a routing
+    // to the Open Space dialog.
+    expect(getNewSpaceDialogOpen()).toBe(false);
+  });
+
+  it("the same failure is visible back in the WORKSPACE too (one surface, both views)", async () => {
+    vi.mocked(listSpaces).mockResolvedValueOnce([
+      { path: "/tmp/alpha", createdAt: 0, lastOpenedAt: 1, trusted: false },
+    ]);
+    vi.mocked(startSession).mockRejectedValueOnce("the harness could not start");
+    render(<App />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.keyDown(document.body, { key: "n", metaKey: true });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("new-session-error").textContent).toContain(
+      "the harness could not start",
+    );
   });
 });
