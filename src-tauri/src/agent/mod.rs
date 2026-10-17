@@ -3,6 +3,7 @@
 //! manager.
 
 pub mod boundary;
+pub mod childproc;
 pub mod crashlog;
 pub mod debuglog;
 mod errors;
