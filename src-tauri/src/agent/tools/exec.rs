@@ -1751,28 +1751,118 @@ mod tests {
         let _ = std::fs::remove_dir_all(&cwd);
     }
 
-    /// (#35) A `bash` run reaches stdin **EOF** instead of the deadline.
+    /// Set on the re-executed test binary to tell it that it IS the child half
+    /// of [`bash_without_stdin_reaches_eof_instead_of_the_deadline`] — the same
+    /// sentinel trick `a_bash_child_under_a_fabricated_appimage_mount_sees_a_scrubbed_env`
+    /// uses, for the same reason: the condition under test belongs to the
+    /// PROCESS, so it has to be built around a fresh one.
+    const LIVE_STDIN: &str = "ARCHIMIDES_LIVE_STDIN_CHILD";
+    /// Printed by that child before it asserts anything, so the parent can tell
+    /// "the child ran and passed" from "the filter matched nothing" — a filter
+    /// that matches nothing exits 0, the trap the fabricated-mount test documents.
+    const LIVE_STDIN_RAN: &str = "LIVE-STDIN-CHILD-RAN";
+
+    /// (#35) A `bash` run reaches stdin **EOF** instead of the deadline, when it
+    /// inherits a stdin that is a **live pipe nobody writes to** — the Worker's
+    /// actual shape.
     ///
     /// `cat` with no arguments reads stdin, so it is the smallest command whose
     /// ONLY behaviour here is "block until stdin says stop". `exec_bash` pipes
     /// stdout/stderr itself and never writes the child's stdin, and `tokio`'s
-    /// `output()`/`spawn()` do not pipe stdin either — so before
+    /// `output()`/`wait_with_output()` take only stdout/stderr
+    /// (`tokio-1.53.1/src/process/mod.rs:1457-1462`), never stdin — so before
     /// `childproc::closed_stdin` the child inherited OUR stdin handle, which on
     /// the desktop is the Worker's JSONL pipe (`worker/client.rs` owns that
     /// writer for the Worker's whole life): live, and never written again. The
     /// run then sat there until `timeout_ms` fired — and once the console window
     /// disappeared (the rest of #35) there was nothing on screen to notice.
     ///
-    /// The assertions are the ones `bash_happy_path_serializes_camel_case`
-    /// makes for `echo hi`. Observed RED without `closed_stdin` — after exactly
-    /// 2.00 s it reported `exitCode: null`, `isError: true` and the text "The
-    /// command timed out and was killed at its deadline." (`cancelled` stays
-    /// `false` on that path: it is the USER-cancel flag, the deadline sets
-    /// `timed_out` instead, so `exitCode`/`isError`/the text are the assertions
-    /// that catch it) — and GREEN with it. Neither half needed a window or a
-    /// creation-flag getter to observe.
+    /// **Why this test re-execs itself.** A review (PR #36) caught that the
+    /// first version passed for the wrong reason, and it was right,
+    /// measurably: `exec_bash` does not touch stdin until `closed_stdin`, so the
+    /// only stdin a Tool child can inherit is **this process's fd 0**, and under
+    /// `cargo test` that is whatever cargo was started with. A CI step gets
+    /// `/dev/null`, which is already an EOF source, so the plain version of this
+    /// test was measured PASSING with `closed_stdin` deleted — a green test
+    /// guarding nothing. Deleting the call now reddens the census (invariant C)
+    /// AND this test, because the parent hands the child an fd 0 that is a
+    /// `std::io::pipe` it holds OPEN and never writes: the one stdin that tells
+    /// "we nulled it" apart from "we inherited it".
+    ///
+    /// Observed RED with `closed_stdin` removed — the child reported
+    /// `exitCode: null`, `isError: true`, "The command timed out and was killed
+    /// at its deadline." after exactly 2.00 s — and GREEN with it. `cancelled`
+    /// stays `false` on that path (it is the USER-cancel flag; the deadline sets
+    /// `timed_out`), so `exitCode`/`isError`/the text are what catch it. Neither
+    /// half needs a window or a creation-flag getter to observe.
     #[tokio::test]
     async fn bash_without_stdin_reaches_eof_instead_of_the_deadline() {
+        if std::env::var_os(LIVE_STDIN).is_some() {
+            live_stdin_child_half().await;
+            return;
+        }
+
+        // fd 0 for the child is a pipe whose write end stays in OURS, open and
+        // silent, for the child's whole life. This is the entire failure
+        // condition: handing the write end to the child, or dropping it here,
+        // would give it EOF for free and put the vacuous test back.
+        let (read_half, write_half) =
+            std::io::pipe().expect("a pipe to stand in for the Worker's stdin");
+        let exe = std::env::current_exe().expect("a test binary has a path");
+        let mut cmd = crate::agent::childproc::command(&exe);
+        cmd.arg(format!(
+            "agent::tools::exec::tests::{}",
+            stringify!(bash_without_stdin_reaches_eof_instead_of_the_deadline)
+        ));
+        cmd.arg("--exact");
+        // Without this the child's libtest harness CAPTURES its stdout and the
+        // marker never reaches us — the child then looks like "ran nothing"
+        // while having actually passed, which is the false alarm this guard
+        // exists to avoid, not a real one.
+        cmd.arg("--nocapture");
+        cmd.env(LIVE_STDIN, "1");
+        cmd.stdin(std::process::Stdio::from(read_half));
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        // The deadline below must not be able to orphan a child holding a pipe.
+        cmd.kill_on_drop(true);
+
+        let child = cmd.spawn().expect("the live-stdin test child starts");
+        let out =
+            match tokio::time::timeout(Duration::from_secs(180), child.wait_with_output()).await {
+                Ok(out) => out.expect("the live-stdin test child is reaped"),
+                Err(_) => {
+                    drop(write_half);
+                    panic!("the live-stdin test child did not finish within 180 s");
+                }
+            };
+        // Released only after the child is reaped: while it is held the child's
+        // `cat` has a writer to wait for.
+        drop(write_half);
+
+        let log = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            out.status.success(),
+            "the child's own assertions failed — on a live stdin the bash tool did NOT reach \
+             EOF, which is #35's hang:\n{log}"
+        );
+        assert!(
+            log.contains(LIVE_STDIN_RAN),
+            "the child never ran the stdin assertions — a filter that matched nothing exits 0, \
+             so the marker is the only proof it ran:\n{log}"
+        );
+    }
+
+    /// The child half above: THIS process's fd 0 is the parent's live, silent
+    /// pipe, so the bash tool's child inherits exactly the stdin the shipped
+    /// Worker's child inherits. Prints the marker, then makes the assertions
+    /// `bash_happy_path_serializes_camel_case` makes for `echo hi`.
+    async fn live_stdin_child_half() {
+        println!("{LIVE_STDIN_RAN}");
         let cwd = temp_cwd("bash-eof");
         let r = execute_tool(
             &ctx(&cwd),
@@ -1780,8 +1870,16 @@ mod tests {
             &json!({ "command": "cat", "timeout_ms": 2000 }),
         )
         .await;
-        assert_eq!(r.details.as_ref().unwrap()["cancelled"], false);
-        assert_eq!(r.details.as_ref().unwrap()["exitCode"], 0);
+        let details = r.details.as_ref().unwrap();
+        assert_eq!(details["cancelled"], false);
+        assert_eq!(
+            details["exitCode"],
+            0,
+            "`cat` must reach EOF, not the 2 s deadline (is_error={}, text {:?}) — \
+             `closed_stdin` is not reaching the Tool child",
+            r.is_error,
+            text_of(&r)
+        );
         assert_eq!(text_of(&r).trim(), "");
         assert!(!r.is_error);
         let _ = std::fs::remove_dir_all(&cwd);

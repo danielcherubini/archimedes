@@ -137,8 +137,10 @@ mod tests {
     /// replaces is already an EOF source. It pins the SHAPE (the API exists, is
     /// cross-platform, and a child built through `childproc` still runs); it
     /// cannot pin the EFFECT. The behaviour proof is Task 3's `execute_tool`
-    /// test, which drives the bash tool through a stdin a test does write to,
-    /// and the policy proof is Task 3's census.
+    /// test, which re-execs this binary with fd 0 wired to a `std::io::pipe` the
+    /// parent holds OPEN and never writes — the Worker's real shape, and the one
+    /// stdin that separates "we nulled it" from "we inherited it". The policy
+    /// proof is Task 3's census.
     #[tokio::test]
     async fn tool_child_reads_eof_on_closed_stdin() {
         let mut cmd = command("sh");
