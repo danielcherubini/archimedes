@@ -60,6 +60,14 @@ _Avoid_: Child process, agent process, harness process
 The Tauri app process (the **Client**) in the Worker-process architecture (ADR 0025): React UI + WorkerManager (spawn / reap / crash-detect / abort-all) + sole SQLite writer (persists transcripts from the Worker event stream) + provider catalog + the response side of the permission/interactive gates (relays the user's answers back over the protocol).
 _Avoid_: Main process, parent, daemon
 
+**Tool child**:
+An OS process spawned on the **Agent**'s behalf by a tool executor — `sh`/`cmd` from the shell tool, `fd`, `rg`. It has no channel back to us, so it gets `childproc`'s full child policy including a CLOSED stdin (`Stdio::null()`): nothing can ever feed it, and an inherited stdin handle means a command like `cat` waits forever on a pipe no one will write (ADR 0060, `docs/research/windows-child-console-window.md`).
+_Avoid_: Agent child (reads as "a **Subagent session**", which is a **Worker** — the opposite category), subprocess, shell child
+
+**Runtime child**:
+An OS process the **Client** or **Worker** spawns to run *itself* rather than the Agent's command — the `--worker` self-exec, an MCP stdio server, the `sudo_exec` helper, the updater relaunch. Its stdin is a pipe WE write to (JSONL, JSON-RPC, a password), so `closed_stdin` must never touch it; only the window policy applies.
+_Avoid_: Client child, long-lived child (an MCP server that exits is not long-lived), background process
+
 **Stalled session**:
 A **Session** whose **Worker process** died (a crash, or a spawn failure) — the transcript is intact (persisted as events arrived), the last turn is incomplete (no `agent_settled` = incomplete), and the session offers a **Resume** action (a fresh Worker + the Supervisor-rehydrated transcript). A view/lifecycle state, distinct from **Archived** (a user action) and from a running session.
 _Avoid_: Dead session, crashed session, orphaned session
