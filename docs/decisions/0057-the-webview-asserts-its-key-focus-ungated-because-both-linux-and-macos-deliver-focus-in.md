@@ -1,8 +1,8 @@
 ---
 status: accepted
 date: 2026-10-17
-supersedes: 0056-the-webview-grabs-its-own-key-focus-on-every-focus-in.md
 superseded-by:
+
 ---
 
 # The webview asserts its own key focus ungated, because Linux and macOS both deliver the focus-in that triggers it
