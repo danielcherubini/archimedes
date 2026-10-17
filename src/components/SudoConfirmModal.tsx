@@ -49,7 +49,7 @@ export default function SudoConfirmModal({
 
   return (
     <Dialog open onOpenChange={() => {}}>
-      <DialogContent showCloseButton={false} className="max-w-md">
+      <DialogContent showCloseButton={false} className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Run this command with sudo?</DialogTitle>
         </DialogHeader>

@@ -288,7 +288,7 @@ function McpDialog({
       : draft.command.trim() !== "");
   return (
     <Dialog open onOpenChange={(nextOpen) => !nextOpen && onClose()}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>
             {initial.name === ""

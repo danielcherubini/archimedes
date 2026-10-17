@@ -76,7 +76,7 @@ export default function SudoPasswordModal({
 
   return (
     <Dialog open onOpenChange={() => {}}>
-      <DialogContent showCloseButton={false} className="max-w-md">
+      <DialogContent showCloseButton={false} className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Sudo password required</DialogTitle>
         </DialogHeader>

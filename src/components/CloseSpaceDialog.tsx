@@ -67,7 +67,7 @@ export default function CloseSpaceDialog({
         if (!open) onClose();
       }}
     >
-      <DialogContent showCloseButton={false} className="max-w-md">
+      <DialogContent showCloseButton={false} className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Close &ldquo;{spaceName}&rdquo;?</DialogTitle>
         </DialogHeader>

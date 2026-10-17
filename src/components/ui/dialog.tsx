@@ -60,7 +60,18 @@ function DialogContent({
         className={cn(
           // Electron 自绘标题栏下，弹窗可能会落进窗口顶部的 drag 区域。
           // 如果不把弹窗内容整体标成 no-drag，右上角关闭按钮这类交互会被窗口拖拽命中吞掉。
-          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-2xl border border-popover-border bg-popover p-4 text-ui-base/relaxed text-foreground shadow-md duration-100 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95 [app-region:no-drag]",
+          //
+          // 末尾的 sm:max-w-md 是默认宽度，缺失它才是真正的 bug：`w-full` 作用在
+          // `fixed` 元素上时相对视口求值，而 max-w-[calc(100%-2rem)] 只是视口比例上限，
+          // 所以调用方不写宽度就会铺满整个窗口（New Space 对话框铺满即为此）。姊妹原语
+          // AlertDialogContent 的基类早已以 sm:max-w-md 收尾，这个不对称就是缺陷本身。
+          // 视口相对的上限保留原位——它才是窄窗口里把弹窗框住的那道约束。
+          //
+          // 陷阱：调用方必须用 `sm:` 形式声明宽度。裸 `max-w-*` 属于另一个
+          // tailwind-merge 分组，两个类都会存活到 CSS，而 `sm:` 规则在生成的样式表里
+          // 排在后面，于是 640px 以上是它获胜——未迁移的 `max-w-3xl` 会被静默压成
+          // 28rem，且 jsdom 完全看不出来。
+          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-2xl border border-popover-border bg-popover p-4 text-ui-base/relaxed text-foreground shadow-md duration-100 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95 [app-region:no-drag] sm:max-w-md",
           className,
         )}
         {...props}

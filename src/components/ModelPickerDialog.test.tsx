@@ -195,11 +195,21 @@ describe("ModelPickerDialog", () => {
     expect(screen.getByText('No models match "zzz".')).toBeTruthy();
   });
 
-  it("is bounded like the skills dialog (max-w-3xl + the min-w-0 chain + pr-2)", async () => {
+  it("is bounded like the skills dialog (sm:max-w-3xl + the min-w-0 chain + pr-2)", async () => {
     renderDialog([item()]);
     const title = await screen.findByText("Models");
     const content = title.closest("[data-slot=dialog-content]");
-    expect(content?.className).toContain("max-w-3xl");
+    // Token-set membership, BOTH halves, never `toContain`: the string
+    // `"… sm:max-w-3xl"` CONTAINS the substring `max-w-3xl`, so a substring
+    // assertion passes whether or not the caller was migrated. And the bare
+    // form must be GONE, not merely superseded — `tailwind-merge` files
+    // `max-w-3xl` and the base class's `sm:max-w-md` in different groups, so
+    // both survive to CSS and the later-emitted `sm:` rule wins above 640px,
+    // silently shrinking this dialog to 28rem.
+    const classTokens = (content?.className ?? "").split(/\s+/);
+    expect(classTokens).toContain("sm:max-w-3xl");
+    expect(classTokens).not.toContain("max-w-3xl");
+    expect(classTokens).not.toContain("sm:max-w-md");
     const desc = screen.getByText("Qwen3.8");
     expect(desc.className).toContain("min-w-0");
     const row = desc.closest("[role=button]");

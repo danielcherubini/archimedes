@@ -33,7 +33,7 @@ export default function DeleteSessionDialog({
         if (!open) onClose();
       }}
     >
-      <DialogContent showCloseButton={false} className="max-w-md">
+      <DialogContent showCloseButton={false} className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Delete session?</DialogTitle>
         </DialogHeader>

@@ -248,11 +248,20 @@ describe("SkillsDialog", () => {
     expect(screen.getByText('No skills match "zzz".')).toBeTruthy();
   });
 
-  it("the dialog content is bounded (max-w-3xl — not the full-width default)", async () => {
+  it("the dialog content is bounded (sm:max-w-3xl — not the full-width default)", async () => {
     render(<SkillsDialog skills={[skill()]} onClose={() => {}} />);
     const title = await screen.findByText("Skills");
     const content = title.closest("[data-slot=dialog-content]");
-    expect(content?.className).toContain("max-w-3xl");
+    // Token-set membership, BOTH halves, never `toContain`: `"… sm:max-w-3xl"`
+    // contains the substring `max-w-3xl`, so a substring assertion cannot tell
+    // a migrated caller from an unmigrated one. The bare form must be GONE:
+    // `tailwind-merge` puts `max-w-3xl` and the base `sm:max-w-md` in
+    // different groups, so both reach CSS and the later `sm:` rule wins above
+    // 640px — this dialog would become 28rem with no test noticing.
+    const classTokens = (content?.className ?? "").split(/\s+/);
+    expect(classTokens).toContain("sm:max-w-3xl");
+    expect(classTokens).not.toContain("max-w-3xl");
+    expect(classTokens).not.toContain("sm:max-w-md");
   });
 
   it("the truncation chain is bounded (min-w-0 on the wrapper, the scroll container, and the row — the text cannot escape the right edge)", async () => {

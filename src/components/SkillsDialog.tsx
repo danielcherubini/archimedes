@@ -101,7 +101,7 @@ export default function SkillsDialog({
 
   return (
     <Dialog open onOpenChange={(nextOpen) => !nextOpen && onClose()}>
-      <DialogContent className="max-h-[70vh] max-w-3xl">
+      <DialogContent className="max-h-[70vh] sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>Skills</DialogTitle>
         </DialogHeader>
