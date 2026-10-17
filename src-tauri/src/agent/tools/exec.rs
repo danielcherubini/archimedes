@@ -386,6 +386,17 @@ pub async fn exec_bash(ctx: &ToolCtx, params: &Value) -> ToolResult {
         c.arg("/C");
         c
     };
+    // Tool child, so stdin is NULL, not inherited. Nothing can ever feed this
+    // child: the Worker owns the only pipe a stdin could be (`worker/client.rs`
+    // holds the `BufWriter<ChildStdin>` for its whole life) and `tokio`'s
+    // `output()`/`spawn()` pipe stdout/stderr but never stdin — so an inherited
+    // handle is a live, silent pipe, and `cat` / `python -` / a `git credential`
+    // helper / an `ssh` password prompt blocks on it until the
+    // [`DEFAULT_BASH_TIMEOUT`] 300 s deadline. EOF is always the better answer.
+    // One call here covers BOTH `cfg` arms above (they bind the same `cmd`).
+    // Deliberately NOT applied to Runtime children (the Worker's own stdin, an
+    // MCP server's, `sudo_exec`'s password stdin) — we write those pipes.
+    crate::agent::childproc::closed_stdin(&mut cmd);
     cmd.arg(&command);
     cmd.current_dir(&ctx.cwd);
     cmd.stdout(std::process::Stdio::piped());
@@ -1053,6 +1064,10 @@ pub async fn exec_find(ctx: &ToolCtx, params: &Value) -> ToolResult {
     // The constructor is `crate::agent::childproc`'s, which owns the child's
     // Windows console window policy (`CREATE_NO_WINDOW`).
     let mut cmd = crate::agent::childproc::command("fd");
+    // A Tool child starts at EOF on stdin — see the note in `exec_bash`: an
+    // inherited handle is a live pipe nothing can ever feed, so a `fd` that
+    // read stdin would hang to the caller's deadline instead of failing.
+    crate::agent::childproc::closed_stdin(&mut cmd);
     cmd.args([
         "--max-results",
         &max.to_string(),
@@ -1251,6 +1266,8 @@ pub async fn exec_grep(ctx: &ToolCtx, params: &Value) -> ToolResult {
     // Same `crate::agent::childproc` constructor as `fd` — it owns the child's
     // Windows console window policy (`CREATE_NO_WINDOW`).
     let mut cmd = crate::agent::childproc::command("rg");
+    // Tool child → null stdin, for the same reason as `fd` and `bash` above.
+    crate::agent::childproc::closed_stdin(&mut cmd);
     cmd.args(&args);
     crate::agent::hostenv::for_child().apply(&mut cmd);
     match cmd.output().await {
@@ -1731,6 +1748,42 @@ mod tests {
         assert_eq!(v["details"]["truncated"], false);
         assert_eq!(v["details"]["cancelled"], false);
         assert_eq!(v["isError"], false);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// (#35) A `bash` run reaches stdin **EOF** instead of the deadline.
+    ///
+    /// `cat` with no arguments reads stdin, so it is the smallest command whose
+    /// ONLY behaviour here is "block until stdin says stop". `exec_bash` pipes
+    /// stdout/stderr itself and never writes the child's stdin, and `tokio`'s
+    /// `output()`/`spawn()` do not pipe stdin either — so before
+    /// `childproc::closed_stdin` the child inherited OUR stdin handle, which on
+    /// the desktop is the Worker's JSONL pipe (`worker/client.rs` owns that
+    /// writer for the Worker's whole life): live, and never written again. The
+    /// run then sat there until `timeout_ms` fired — and once the console window
+    /// disappeared (the rest of #35) there was nothing on screen to notice.
+    ///
+    /// The assertions are the ones `bash_happy_path_serializes_camel_case`
+    /// makes for `echo hi`. Observed RED without `closed_stdin` — after exactly
+    /// 2.00 s it reported `exitCode: null`, `isError: true` and the text "The
+    /// command timed out and was killed at its deadline." (`cancelled` stays
+    /// `false` on that path: it is the USER-cancel flag, the deadline sets
+    /// `timed_out` instead, so `exitCode`/`isError`/the text are the assertions
+    /// that catch it) — and GREEN with it. Neither half needed a window or a
+    /// creation-flag getter to observe.
+    #[tokio::test]
+    async fn bash_without_stdin_reaches_eof_instead_of_the_deadline() {
+        let cwd = temp_cwd("bash-eof");
+        let r = execute_tool(
+            &ctx(&cwd),
+            "bash",
+            &json!({ "command": "cat", "timeout_ms": 2000 }),
+        )
+        .await;
+        assert_eq!(r.details.as_ref().unwrap()["cancelled"], false);
+        assert_eq!(r.details.as_ref().unwrap()["exitCode"], 0);
+        assert_eq!(text_of(&r).trim(), "");
+        assert!(!r.is_error);
         let _ = std::fs::remove_dir_all(&cwd);
     }
 
