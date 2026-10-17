@@ -9,6 +9,7 @@ mod errors;
 pub mod events;
 mod fs_backend;
 pub mod harness;
+pub mod hostenv;
 pub mod interactive;
 pub mod mcp;
 mod normalize;
