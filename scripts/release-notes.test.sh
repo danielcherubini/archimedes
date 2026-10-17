@@ -881,8 +881,11 @@ export FAKE_RELEASE_LIST='[{"tag_name":"v0.1.1","draft":false,"prerelease":false
 # whose predecessor is older than that — a maintenance line with a long stream of
 # newer releases above it — finds no candidate, silently degrades, and publishes
 # notes describing every change since the beginning. `--limit -1` and `--limit 0`
-# are both rejected by gh (`invalid limit`, exit 1; verified), so "all of them"
-# is not expressible there at all; the listing has to paginate.
+# are both rejected by gh (`invalid limit`, exit 1; verified), so there is no
+# "everything" keyword — though a large finite limit does page (`--limit 100000`
+# returns all 206 releases of cli/cli), so the honest reason to paginate is that a
+# magic ceiling is a number someone has to maintain and can get wrong, not that the
+# flag cannot be pushed.
 #
 # The fixture is built so BOTH wrong answers are visible, and it must be read
 # with the two shapes of `gh api --paginate` in mind, both measured:

@@ -208,10 +208,16 @@ fi
 # newest-first window, and "the nearest predecessor" is not guaranteed to be inside
 # any fixed window: a maintenance line can accumulate more than N newer releases
 # above the tag it is patching, at which point the predecessor is simply not in the
-# answer and the notes silently widen to the whole history. There is no way to ask
-# for all of them with that flag — `--limit -1` and `--limit 0` are both rejected
-# with `invalid limit` and exit 1 (verified against gh 2.97.0) — so the listing has
-# to walk the pages, and `gh api --paginate` is the only `gh` that can.
+# answer and the notes silently widen to the whole history. `--limit -1` and
+# `--limit 0` are both rejected with `invalid limit` and exit 1 (verified against gh
+# 2.97.0), so there is no "everything" keyword — but be honest about the rest: a
+# large finite limit DOES fetch past the first page (`--limit 100000` returns all
+# 206 releases of cli/cli), so the flag could be pushed to work. `--paginate` is
+# still the right call, for two reasons that are not about capability: a magic
+# number is a ceiling someone has to maintain and can get wrong, and `--paginate`
+# has no ceiling to be wrong about. It also keeps every call in this script the same
+# shape — a `gh api` path carrying the owner/name — which is what makes the
+# repository addressing above auditable in one grep.
 #
 # NO `--jq` on that call, deliberately. `gh api --paginate --jq FILTER` runs the
 # filter ONCE PER PAGE and prints each page's result, so a bracketed filter emits
