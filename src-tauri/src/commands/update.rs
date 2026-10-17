@@ -7,6 +7,9 @@
 //! ACL gates the webview→Rust boundary only, so a Rust-side `check()` needs no
 //! permission entry, and `AppHandle::restart()` is on Tauri itself, so
 //! `tauri-plugin-process` — and `allow-restart` with it — never enters the graph.
+//! The AppImage relaunch keeps that property too: where it owns the spawn it
+//! builds a plain `std::process::Command` in Rust, so no `shell:allow-*` and no
+//! ACL entry appears anywhere near it.
 //! `capabilities/default.json` is not touched by this module and must stay that way.
 //!
 //! Three decisions that the official `@tauri-apps/plugin-updater` would have made
@@ -33,6 +36,16 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::AppHandle;
 use tauri_plugin_updater::Error as UpdaterError;
+
+use crate::agent::hostenv;
+
+// `Manager` is the trait carrying `env()` and `try_state()`, and BOTH are read
+// only on the Linux (AppImage) path — `restart()` and `cleanup_before_exit()`
+// are inherent methods (`shared_app_impl!`, `app.rs:1251`). Ungated it is
+// `unused_imports` on the macOS/Windows CI rows, where `-D warnings` makes that
+// an error.
+#[cfg(target_os = "linux")]
+use tauri::Manager;
 
 /// What `check_update` tells the renderer: current, or here is what is newer.
 ///
@@ -431,6 +444,172 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
         .map_err(|e| map_check_error(&e))
 }
 
+/// What to exec to restart into the current build, and with which args.
+///
+/// `appimage`: `Manager::env().appimage` (Linux-only `Option<OsString>`).
+/// `exe`:      `std::env::current_exe()`.  `args`: `std::env::args_os()`.
+///
+/// TOTAL — it runs on the relaunch path, where a panic is unrecoverable: the
+/// blocking command handler dies, nothing is spawned, and the app quits with no
+/// successor. Hence `args.get(1..)` rather than `args[1..]` (which panics on an
+/// empty slice) and no `expect` anywhere. `std::env::args_os()` always yields an
+/// argv0 in production, but a pure resolver cannot assume it.
+///
+/// The path is `$APPIMAGE` when there is one: inside a bundle the exe is an
+/// unpacked AppDir on a FUSE mount that is unmounted when this process exits,
+/// and the runtime + `AppRun` are what set the bundle up. Same answer as
+/// `tauri::process::current_binary`, with ONE deliberate difference — Tauri
+/// takes any `Some`, so `APPIMAGE=""` makes it spawn `""`, whose failed spawn it
+/// merely logs (`process.rs:83-85`) before `exit(0)` (`process.rs:88`): the
+/// updater would kill the app and restart nothing. An empty value counts as
+/// absent here, so the user gets a running app either way.
+///
+/// The `allow` is for the macOS/Windows CI rows: its only caller is
+/// Linux-only, so the plain `--lib` build there sees an unused function (its
+/// tests run on every target, which is why it is not simply `cfg`'d out).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn restart_target(
+    appimage: Option<&std::ffi::OsStr>,
+    exe: &std::path::Path,
+    args: &[std::ffi::OsString],
+) -> (std::path::PathBuf, Vec<std::ffi::OsString>) {
+    let path = match appimage {
+        Some(appimage) if !appimage.is_empty() => std::path::PathBuf::from(appimage),
+        _ => exe.to_path_buf(),
+    };
+    (path, args.get(1..).map(<[_]>::to_vec).unwrap_or_default())
+}
+
+/// The env decision for the relaunch: the patch to hand the owned spawn, or
+/// EMPTY, which means "hand back to `app.restart()`".
+///
+/// Calls [`hostenv::scrub`] DIRECTLY rather than going through
+/// [`for_child`](crate::agent::hostenv::for_child), and the reason is
+/// testability, not taste: `for_child()` reads the PROCESS env and
+/// `current_exe()`, so under `cargo test` it returns an empty patch on every
+/// host (its gate needs this exe under `$APPDIR`, and under cargo it is
+/// `target/debug/deps/<hash>`) — the entire AppImage branch of this file would
+/// be untestable through it. Here every input is an argument, so a test can
+/// fabricate a bundle (`hostenv::fixtures`) and the gate is genuinely exercised.
+///
+/// The gate is `scrub`'s own — the one every other spawn site uses — so a
+/// `.deb`, an `.rpm` and a `cargo run` host get the empty patch and their
+/// restart stays byte-identical to the pre-task behaviour.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn relaunch_patch(
+    inherited: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    appdir: Option<&std::path::Path>,
+    exe: &std::path::Path,
+) -> hostenv::EnvPatch {
+    hostenv::scrub(inherited, appdir, exe)
+}
+
+/// The owned relaunch — `(exec target, args, patch)` — or `None` to hand back
+/// to Tauri.
+///
+/// Linux-only, and not only for `Env`'s `cfg`'d fields: off Linux there is no
+/// bundle to re-enter and [`hostenv::scrub`] is defined to find nothing, so the
+/// owned path does not exist there at all.
+#[cfg(target_os = "linux")]
+fn owned_relaunch(
+    app: &AppHandle,
+) -> Option<(
+    std::path::PathBuf,
+    Vec<std::ffi::OsString>,
+    hostenv::EnvPatch,
+)> {
+    // `Env` is managed during `build()` (`app.rs:2569-2570`), so this cannot
+    // fail from a command; it is a CLONE, and `args_os` in it is exactly the
+    // `std::env::args_os()` that `process::restart` would have used.
+    let env = app.env();
+    // A failing `current_exe()` means we cannot know whether we are inside a
+    // mount, and `/` is the root `scrub`'s gate rejects (no `Component::Normal`)
+    // — so the unknown fails toward `app.restart()`, never toward rewriting a
+    // user's `PATH`.
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+    let patch = relaunch_patch(
+        std::env::vars_os().collect(),
+        env.appdir.as_deref().map(std::path::Path::new),
+        &exe,
+    );
+    if patch.is_empty() {
+        return None;
+    }
+    let (path, args) = restart_target(env.appimage.as_deref(), &exe, &env.args_os);
+    Some((path, args, patch))
+}
+
+/// The owned spawn, with the teardown `App::run` would have performed. Never
+/// returns: `std::process::exit(0)` is the last statement whatever the spawn
+/// did, mirroring `tauri::process::restart` (`process.rs:74-89`).
+#[cfg(target_os = "linux")]
+fn relaunch_through_the_mount(
+    app: &AppHandle,
+    path: &std::path::Path,
+    args: &[std::ffi::OsString],
+    patch: &hostenv::EnvPatch,
+) -> ! {
+    // (1) This app's OWN `RunEvent::Exit` hook (`src/lib.rs:378-389`): reap the
+    //     Workers — the graceful `close` + grace + `kill`. Skip it and every
+    //     Worker is SIGKILLed on each update-restart instead of reaped. The
+    //     fresh current-thread runtime is the same one that hook builds, for the
+    //     same reason: this is not a tokio context.
+    if let Some(wm) =
+        app.try_state::<std::sync::Arc<crate::agent::worker::manager::WorkerManager>>()
+    {
+        let wm = wm.inner().clone();
+        // NOT the `.expect` that hook uses. There a failed runtime costs the
+        // teardown; here it would cost the RESTART (a panic in this blocking
+        // command kills the handler, nothing is spawned, no successor), so the
+        // failure is logged and the relaunch proceeds — the OS reaps the Workers
+        // when their pipes close anyway.
+        match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt.block_on(wm.reap_all()),
+            Err(e) => {
+                crate::agent::debuglog::log(&format!("relaunch: no runtime to reap workers: {e}"))
+            }
+        }
+    }
+
+    // (2) The `tauri-plugin-window-state` `RunEvent::Exit` handler
+    //     (`tauri-plugin-window-state-2.4.0/src/lib.rs:503`): the geometry save.
+    //     `StateFlags::all()` is what the plugin is registered with
+    //     (`Builder::default()`, `src/lib.rs:280`), so this is the same save and
+    //     not a wider one. Its `Result` is ignored on purpose: a state file that
+    //     cannot be written costs the user a geometry, and the process is
+    //     exiting whatever we do with it here.
+    use tauri_plugin_window_state::AppHandleExt as _;
+    let _ = app.save_window_state(tauri_plugin_window_state::StateFlags::all());
+
+    // (3) `App::run`'s own step, which it runs AFTER the callback: the tray
+    //     icons and the resource tables. Last of the three, and after it no
+    //     Tauri API may be used at all (its documented contract) — which is why
+    //     what follows is a std `Command` and not anything Tauri-adjacent.
+    app.cleanup_before_exit();
+
+    // (4) The spawn Tauri would have done — target, `args_os[1..]`, `spawn()`,
+    //     `exit(0)` — plus the env patch Tauri does not apply, which is the
+    //     whole point of doing it here.
+    let mut cmd = std::process::Command::new(path);
+    cmd.args(args);
+    patch.apply_std(&mut cmd);
+    if let Err(e) = cmd.spawn() {
+        // The repo's own logger, NOT `log::error!`: `log` is not a dependency of
+        // this crate and `tauri` 2.12.2 does not re-export it, so the upstream
+        // call is E0433 here — and adding the dep would move `Cargo.lock`, which
+        // this task's own acceptance criteria forbid. Same call the sibling
+        // spawn site makes (`worker/client.rs`, `debuglog::log("worker spawn…")`).
+        crate::agent::debuglog::log(&format!(
+            "relaunch: could not spawn {}: {e}",
+            path.display()
+        ));
+    }
+    std::process::exit(0)
+}
+
 /// Restart into the freshly installed build.
 ///
 /// Synchronous, and it does not return: `AppHandle::restart()` is `-> !`
@@ -438,14 +617,58 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
 /// its `allow-restart` entry are absent from this repo. The renderer is responsible
 /// for delaying the call by a beat so the "restarting" paint actually lands before
 /// the process goes — nothing here can help with that, and nothing here should.
+///
+/// Outside an AppImage that is all there is to do, and this command does exactly
+/// that, unchanged. Inside one it is not enough. `restart()` ends in
+/// `tauri::process::restart(&self.env())`, whose spawn target on Linux is
+/// `current_binary()` = **`$APPIMAGE`** (`process.rs:48-56`), spawned as
+/// `Command::new(path).args(args_os.iter().skip(1)).spawn()` with NO `env_clear`
+/// and NO `env_remove` (`process.rs:74-89`). So the child re-enters
+/// `runtime → AppRun → AppRun.wrapped`, and `AppRun` **prepends** its mount
+/// paths to the env it has just inherited: N restarts ⇒ N+1 stacked generations.
+/// (The host this was filed from sat at generation 2: `APPDIR` named
+/// `.mount_archimgAAJCI` while `OWD` named the older `.mount_archimPfJcAP`,
+/// `/proc/mounts` listed both, and 10 of 25 `PATH` entries were under the older
+/// one.) Tasks 1–3 make that stack harmless for CHILDREN; only not inheriting
+/// it stops the PARENT from growing.
+///
+/// So inside a bundle this command owns the spawn
+/// ([`relaunch_through_the_mount`]) with the same mount-stripping patch every
+/// other spawn site applies — and that leaves exactly ONE generation, not zero:
+/// the relaunched bundle's `AppRun` re-adds its own single set, and that one is
+/// all the new process and its children carry.
+///
+/// ⚠ What the owned spawn owes, and why it is three steps rather than one.
+/// `relaunch_app` is a BLOCKING command, so Tauri runs it inline in an IPC
+/// handler off the main thread, so `restart()` would not spawn anything itself:
+/// it sets `restart_on_exit` and requests exit, and the restart happens in
+/// `App::run`'s `RuntimeRunEvent::Exit` arm (`app.rs:1448-1454`) — which runs the
+/// `RunEvent::Exit` **callback first** and `cleanup_before_exit()` only after.
+/// `cleanup_before_exit()` alone (`app.rs:1128-1140`: tray icons + resource
+/// tables) is therefore NOT the teardown being bypassed. The owned path replays,
+/// in that order: this app's own `RunEvent::Exit` hook (the Worker `reap_all`,
+/// `src/lib.rs:378-389`), the window-state plugin's `RunEvent::Exit` save
+/// (`tauri-plugin-window-state-2.4.0/src/lib.rs:503`), and then
+/// `cleanup_before_exit()`.
 #[tauri::command]
 pub fn relaunch_app(app: AppHandle) {
+    // Non-Linux has no `Env::appimage`/`Env::appdir` to read and nothing for
+    // `scrub` to strip, so the owned path is not compiled there at all and this
+    // is the one-line command it was.
+    #[cfg(target_os = "linux")]
+    {
+        if let Some((path, args, patch)) = owned_relaunch(&app) {
+            relaunch_through_the_mount(&app, &path, &args, &patch);
+        }
+    }
     app.restart()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{map_check_error, InstallClaim, ProgressThrottle};
+    use super::{map_check_error, relaunch_patch, restart_target, InstallClaim, ProgressThrottle};
+    use std::ffi::OsString;
+    use std::path::Path;
     use std::time::{Duration, Instant};
     use tauri_plugin_updater::Error as UpdaterError;
 
@@ -460,8 +683,9 @@ mod tests {
     // dev smoke of Task 5 (`__TAURI_INTERNALS__.invoke("check_update")` answering
     // in devtools, and once a release exists, the Settings UI) — and `tests/ipc.rs`
     // gains NO updater case for that same mock_builder reason. What IS pinned below
-    // is the two pieces of logic that do not need an `AppHandle` to be wrong: which
-    // string each failure becomes, and how many frames a flood becomes.
+    // is the logic that does not need an `AppHandle` to be wrong: which string each
+    // failure becomes, how many frames a flood becomes, and — since the AppImage
+    // relaunch — what the relaunched process is exec'd with and which env it gets.
     //
     // No test sleeps. `std::time::Instant` cannot be constructed, only moved, so
     // every clock reading below is `base.checked_sub(ms)` — an `Instant` from
@@ -711,5 +935,306 @@ mod tests {
         }
         assert!((9..=12).contains(&emits), "emits: {emits}");
         assert_eq!(throttle.downloaded(), 1000 * 4096);
+    }
+
+    // ── the relaunch resolvers ───────────────────────────────────────────
+    //
+    // `relaunch_app` ITSELF is still not exercised, and the two walls above are
+    // why it cannot be: it needs a live `AppHandle` (a `mock_builder` app has no
+    // plugins, so `save_window_state` would fail on unregistered state), and it
+    // ends in `std::process::exit(0)` — which would take the test harness down
+    // with it. So the two DECISIONS the command is built from are pinned here,
+    // which is exactly why they are pure functions of their arguments rather
+    // than inline code in the command.
+    //
+    // ⚠ Nothing below touches `hostenv::for_child()`. Under `cargo test`
+    // `current_exe()` is `target/debug/deps/<hash>`, never under `$APPDIR`, so
+    // its cached patch is EMPTY on every host and any assertion made against it
+    // asserts nothing. `relaunch_patch` must therefore call `hostenv::scrub`
+    // DIRECTLY — that is the only way its AppImage branch is reachable from a
+    // test at all — and every input below is fabricated.
+
+    /// `$APPIMAGE` of a relaunched bundle — what `Manager::env().appimage`
+    /// carries inside an AppImage, and what `tauri::process::current_binary`
+    /// hands to `Command::new`.
+    const APPIMAGE: &str = "/home/user/downloads/archimedes_0.4.0_x86_64.AppImage";
+    /// The `current_exe()` / argv0 of a process running FROM a mount. The same
+    /// shape as `hostenv::fixtures::EXE_INSIDE_MOUNT`, restated because the
+    /// fixtures module is `cfg(all(test, target_os = "linux"))` and the
+    /// `restart_target` tests below run on every target.
+    const EXE_IN_MOUNT: &str = "/tmp/.mount_archimTEST/usr/bin/archimedes";
+    /// The `current_exe()` of a `.deb` / `.rpm` / `cargo run` host.
+    const EXE_INSTALLED: &str = "/usr/bin/archimedes";
+
+    fn os(value: &str) -> OsString {
+        OsString::from(value)
+    }
+
+    #[test]
+    fn restart_target_prefers_the_appimage_path() {
+        // Inside an AppImage the thing to re-exec is the BUNDLE, not the exe:
+        // the mount only holds an unsquashed AppDir, and the runtime + `AppRun`
+        // are what set the bundle up. Getting this backwards restarts into a
+        // binary whose libraries are resolved by a mount that is unmounted the
+        // moment this process exits.
+        let args = [os(EXE_IN_MOUNT), os("--worker"), os("/some path/空间")];
+        let (path, spawn_args) = restart_target(
+            Some(std::ffi::OsStr::new(APPIMAGE)),
+            Path::new(EXE_IN_MOUNT),
+            &args,
+        );
+        assert_eq!(
+            path,
+            std::path::PathBuf::from(APPIMAGE),
+            "the relaunch target must be $APPIMAGE, not the exe under the mount"
+        );
+        // argv0 DROPPED, the rest carried verbatim (including the non-UTF-8-ish
+        // and space-bearing argument — `args_os`, never `args`).
+        assert_eq!(
+            spawn_args,
+            args[1..].to_vec(),
+            "the args must be exactly argv[1..]: argv0 is the mount path, and the \
+             relaunched process' own argv0 comes from the target"
+        );
+        assert!(
+            !spawn_args.iter().any(|arg| arg == &os(EXE_IN_MOUNT)),
+            "argv0 must not survive as an argument: the AppImage runtime would read \
+             it as ARGV0/the bundle path — {spawn_args:?}"
+        );
+    }
+
+    #[test]
+    fn restart_target_falls_back_to_the_exe_without_an_appimage() {
+        // A `.deb`, an `.rpm`, `cargo run`: no `APPIMAGE`, so the target is the
+        // exe — the same answer Tauri's `current_binary` gives, which is what
+        // keeps the handed-back path (`app.restart()`) and this one in agreement.
+        let args = [os(EXE_INSTALLED)];
+        let (path, spawn_args) = restart_target(None, Path::new(EXE_INSTALLED), &args);
+        assert_eq!(path, std::path::PathBuf::from(EXE_INSTALLED));
+        assert!(
+            spawn_args.is_empty(),
+            "a lone argv0 leaves nothing to pass on: {spawn_args:?}"
+        );
+    }
+
+    /// `APPIMAGE=""` is a set-but-empty variable, and it is the one input on
+    /// which this resolver **deliberately differs from Tauri**. Tauri's
+    /// `current_binary` (`tauri-2.12.2/src/process.rs:48-56`) returns
+    /// `PathBuf::from($APPIMAGE)` for ANY `Some`, so with an empty value it
+    /// spawns `""` — `Command::new("")` fails, `process.rs:83-85` only logs it, and
+    /// `exit(0)` follows: the updater would kill the app and restart NOTHING.
+    /// Falling back to the exe keeps the user's app alive.
+    #[test]
+    fn an_empty_appimage_is_not_a_path() {
+        let (path, spawn_args) = restart_target(
+            Some(std::ffi::OsStr::new("")),
+            Path::new(EXE_IN_MOUNT),
+            &[os(EXE_IN_MOUNT), os("--flag")],
+        );
+        assert_eq!(
+            path,
+            std::path::PathBuf::from(EXE_IN_MOUNT),
+            "an empty $APPIMAGE is no executable to spawn — fall back to the exe"
+        );
+        assert_eq!(spawn_args, vec![os("--flag")], "the args are unaffected");
+    }
+
+    /// Totality, pinned. `args[1..]` panics on an empty slice (`range end index
+    /// 1 out of range for slice of length 0`), and this resolver runs on the
+    /// relaunch path, where a panic is unrecoverable: the command handler dies,
+    /// nothing is spawned, and the app quits with no successor. `std::env::args_os()`
+    /// always yields an argv0 in production, but the resolver is pure, so a caller
+    /// CAN hand it nothing — and it must answer with nothing, not with a panic.
+    #[test]
+    fn restart_target_tolerates_an_empty_arg_list() {
+        let (path, spawn_args) = restart_target(
+            Some(std::ffi::OsStr::new(APPIMAGE)),
+            Path::new(EXE_IN_MOUNT),
+            &[],
+        );
+        assert!(
+            spawn_args.is_empty(),
+            "no argv at all means no args, not a panic: {spawn_args:?}"
+        );
+        assert_eq!(path, std::path::PathBuf::from(APPIMAGE));
+    }
+
+    /// The `.deb` guarantee: outside an AppImage the patch is EMPTY, so
+    /// `relaunch_app` calls `app.restart()` exactly as it did before this task
+    /// and a non-bundle restart stays byte-identical.
+    ///
+    /// The `inherited` env carries mount paths ON PURPOSE: it is the GATE that
+    /// has to close here, not the shape of the values. Give a leaky gate this
+    /// env and a `.deb` user's `PATH` gets rewritten by a restart. Each shape is
+    /// the one `hostenv::appimage_mount_root` exists to reject — and none of
+    /// them is reachable through `for_child()`, which is empty under cargo
+    /// whatever the process env says.
+    ///
+    /// Runs on every target: off Linux `scrub` is defined to return the empty
+    /// patch, so the four shapes are not re-testing the gate there, they are
+    /// pinning the cross-platform promise that the owned spawn never happens.
+    #[test]
+    fn relaunch_hands_back_to_tauri_outside_an_appimage() {
+        let inherited = vec![
+            (
+                os("PATH"),
+                os("/tmp/.mount_archimTEST/usr/bin:/usr/bin:/bin"),
+            ),
+            (
+                os("LD_LIBRARY_PATH"),
+                os("/tmp/.mount_archimTEST/usr/lib/:/usr/lib"),
+            ),
+        ];
+        // (a) `APPDIR` unset: the ordinary `.deb` / `.rpm` / `cargo run` host.
+        assert!(
+            relaunch_patch(inherited.clone(), None, Path::new(EXE_INSTALLED)).is_empty(),
+            "no APPDIR means no patch — the restart must go through app.restart()"
+        );
+        // (b) `APPDIR` exported by the user's own shell while the exe lives
+        //     nowhere near it: their real `PATH` is theirs.
+        assert!(
+            relaunch_patch(
+                inherited.clone(),
+                Some(Path::new("/tmp/.mount_archimTEST")),
+                Path::new(EXE_INSTALLED),
+            )
+            .is_empty(),
+            "an APPDIR the exe is not under is not a bundle we are running from"
+        );
+        // (c) `APPDIR` set-but-empty (`export APPDIR=`). `Path::new("")` makes
+        //     `starts_with` true for EVERY path and an empty byte-prefix matches
+        //     every absolute entry, so this is the shape that would strip a
+        //     `.deb` user's `PATH` down to nothing — exit code 0, no error.
+        assert!(
+            relaunch_patch(
+                inherited.clone(),
+                Some(Path::new("")),
+                Path::new(EXE_IN_MOUNT)
+            )
+            .is_empty(),
+            "an empty APPDIR must gate the scrub OFF, not match every path"
+        );
+        // (d) `APPDIR="/"`: the same over-match in the other direction — only
+        //     `RootDir`, no `Component::Normal`, and a prefix of everything.
+        assert!(
+            relaunch_patch(inherited, Some(Path::new("/")), Path::new(EXE_IN_MOUNT)).is_empty(),
+            "a root APPDIR must gate the scrub OFF too"
+        );
+    }
+
+    /// The OLDER mount generation — the one `$APPDIR` does NOT name. `AppRun`
+    /// prepends and never clears, so after one updater relaunch the parent carries
+    /// TWO: measured on the host this task was filed from, `APPDIR` named
+    /// `.mount_archimgAAJCI`, `OWD` named `.mount_archimPfJcAP`, `/proc/mounts`
+    /// listed both, and 10 of 25 `PATH` entries sat under the older one.
+    #[cfg(target_os = "linux")]
+    const STALE_MOUNT: &str = "/tmp/.mount_archimPfJcAP";
+
+    /// The env a second-generation relauncher inherits, built on
+    /// [`fixtures`](crate::agent::hostenv::fixtures) rather than re-fabricated:
+    /// both mounts in the colon lists, one of the user's own entries in each
+    /// multi-valued variable (so "the mount is gone" cannot be faked by
+    /// "everything is gone"), and a `PYTHONHOME` pointing ONLY at the stale
+    /// generation, so the patch has to `env_remove` it rather than re-set it.
+    #[cfg(target_os = "linux")]
+    fn two_generations_inherited() -> Vec<(OsString, OsString)> {
+        use crate::agent::hostenv::fixtures;
+        let current = fixtures::MOUNT;
+        let stale = STALE_MOUNT;
+        vec![
+            (
+                os("PATH"),
+                os(&format!(
+                    "{current}/usr/bin:{stale}/bin:{current}/bin:{}",
+                    fixtures::USER_BIN
+                )),
+            ),
+            (
+                os("LD_LIBRARY_PATH"),
+                os(&format!("{current}/usr/lib/:{stale}/usr/lib:/usr/lib")),
+            ),
+            (os("PYTHONHOME"), os(&format!("{stale}/usr"))),
+        ]
+    }
+
+    /// What a `std::process::Command` was TOLD to carry. The local copy of
+    /// `fixtures::configured_env` exists because that helper is typed for
+    /// `tokio::process::Command` and the relaunch spawn is a std one; the
+    /// semantics are identical, including the one that matters: `get_envs`
+    /// reports an `env_remove` as a `None`-valued entry.
+    #[cfg(target_os = "linux")]
+    fn configured(
+        cmd: &std::process::Command,
+    ) -> std::collections::BTreeMap<OsString, Option<OsString>> {
+        cmd.get_envs()
+            .map(|(key, value)| (key.to_os_string(), value.map(|v| v.to_os_string())))
+            .collect()
+    }
+
+    /// The stacking test, i.e. the reason this task exists: inside a bundle the
+    /// patch must be NON-empty (empty means `relaunch_app` hands back to
+    /// `app.restart()`, which spawns `$APPIMAGE` with the env untouched and lets
+    /// `AppRun` prepend a third generation), and it must strip BOTH generations
+    /// — the new `AppRun` re-adds its own single one, so stripping both is what
+    /// leaves the relaunched app at exactly one rather than at none.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn relaunch_strips_the_stale_generation() {
+        use crate::agent::hostenv::fixtures;
+
+        let inherited = two_generations_inherited();
+        let patch = relaunch_patch(
+            inherited.clone(),
+            Some(Path::new(fixtures::MOUNT)),
+            Path::new(fixtures::EXE_INSIDE_MOUNT),
+        );
+        assert!(
+            !patch.is_empty(),
+            "inside a fabricated AppImage the patch must NOT be empty — an empty one \
+             means the relaunch goes back through app.restart() and stacks another \
+             generation: {patch:?}"
+        );
+
+        // The env the relaunched process would ACTUALLY get: the inherited env
+        // seeded as std would inherit it, then the same
+        // [`EnvPatch::apply_std`](crate::agent::hostenv::EnvPatch::apply_std) the
+        // owned spawn runs. Seeding rather than `env_clear` is load-bearing: std
+        // drops an `env_remove` issued after a clear, which would hide exactly
+        // the half of the patch that removes `PYTHONHOME`.
+        let mut cmd = std::process::Command::new(EXE_IN_MOUNT);
+        cmd.envs(inherited.clone());
+        patch.apply_std(&mut cmd);
+        let got = configured(&cmd);
+
+        assert_eq!(
+            got.get(&os("PATH")).and_then(|value| value.as_deref()),
+            Some(std::ffi::OsStr::new(fixtures::USER_BIN)),
+            "both generations' bins are gone and the user's own is all that is left \
+             — an absent or empty PATH is a silent regression, not a scrub"
+        );
+        assert_eq!(
+            got.get(&os("LD_LIBRARY_PATH"))
+                .and_then(|value| value.as_deref()),
+            Some(std::ffi::OsStr::new("/usr/lib")),
+            "the stale AND the current mount dir are stripped; the new AppRun adds \
+             its own single generation back"
+        );
+        assert_eq!(
+            got.get(&os("PYTHONHOME")),
+            Some(&None),
+            "PYTHONHOME pointed only at the stale generation, so it is REMOVED — \
+             an empty value is not an absent one to CPython"
+        );
+        // The general rule, restated independently of `scrub`'s own matcher, so
+        // a bug in that matcher cannot make this test green: no value the patch
+        // hands on names ANY mount, of EITHER generation.
+        for (key, value) in &got {
+            if let Some(value) = value {
+                assert!(
+                    !fixtures::lists_a_mount_path(value),
+                    "{key:?} still names a mount path after the relaunch patch: {value:?}"
+                );
+            }
+        }
     }
 }
