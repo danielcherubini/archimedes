@@ -272,8 +272,8 @@ This task lands the rename **together with** a matcher that accepts both the old
 **Steps:**
 - [ ] Write the failing tests. (a) `the_crash_log_name_carries_the_writing_pid` — `write_crash(&dir, "worker", "marker", "f:1:1")`, take the returned path, assert the file name `ends_with(&format!("-{}.log", std::process::id()))`, `starts_with("crash-")` and contains `-worker-`. Exact suffix, not a regex. (b) `is_worker_crash_log_name_accepts_both_shapes` — accepts `crash-1-worker.log`, `crash-1-worker-4242.log`; rejects `crash-1-supervisor.log`, `crash-1-worker-.log`, `crash-1-worker-abc.log`, `crash-1-worker-4242.txt`, `notes-worker-1.log`. Pure string test, no filesystem.
 - [ ] Run `cargo test --lib agent::crashlog` and `cargo test --lib agent::session` — (a) fails (no pid yet); (b) fails to compile (`is_worker_crash_log_name` absent). Both red for the right reason?
-- [ ] Implement the name, the extracted predicate, the `:147` relaxation and the doc updates.
-- [ ] Run both — green? **If the pre-existing hook test goes red at `:147`, that is the trap above — relax the filter by name and rely on the content marker.**
+- [ ] Implement the name, the extracted predicate, the `:286` relaxation and the doc updates.
+- [ ] Run both — green? **If the pre-existing hook test goes red at `:286`, that is the trap above — relax the filter by name and rely on the content marker at `:289`.**
 - [ ] Run `cargo test` — green, **including** `tests/ipc.rs` (its crash case asserts `at` only, and points `app_data_dir` at a temp dir, so it stays green here)?
 - [ ] Run `cargo clippy --all-targets -- -D warnings` and `cargo fmt --all -- --check`.
 - [ ] Commit: `feat(crashlog): stamp the crash log with the writing process's pid`
