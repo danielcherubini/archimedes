@@ -67,14 +67,23 @@ Artifacts land in `src-tauri/target/release/bundle/`:
 | -------- | ------- |
 | macOS    | `.app` + `.dmg` — **not shipped yet**: pipeline ready, gated on the `APPLE_*` signing secrets (the matrix rows and their gate are in `release.yml`, commented out; see Releasing) |
 | Windows  | `.exe` (NSIS; unsigned in v1 — expect SmartScreen warnings) |
-| Linux    | `.AppImage` + `.deb` |
+| Linux    | `.AppImage` + `.deb` + `.rpm` |
 
-With `createUpdaterArtifacts` enabled (it is, in `tauri.conf.json`), each
-build also writes the updater payload next to the installer —
-`…_x64-setup.nsis.zip` on Windows, `…_amd64.AppImage.tar.gz` on Linux — plus a
-`.sig` minisign signature for **every** artifact. A local build without the
-signing key refuses to bundle for that reason; use `pnpm tauri build
---no-sign` (see Releasing).
+With `createUpdaterArtifacts` enabled (it is, in `tauri.conf.json`), each build
+also writes a `.sig` minisign signature beside every artifact — and on Windows
+and Linux **the installer itself is the updater payload**. There is no second
+file: `tauri-plugin-updater` decides the format by sniffing the downloaded bytes
+(`infer`), never by the URL's extension, so a raw `…_x64-setup.exe`, `.AppImage`,
+`.deb` or `.rpm` installs perfectly well from an update, and that is the shape
+`createUpdaterArtifacts: true` produces on purpose. Only **macOS** needs a
+distinct payload — `Archimedes.app.tar.gz`, which the bundler always writes
+alongside the `.app`; a `.dmg` gets no `.sig` at all and is never an updater
+payload. You may see `…_x64-setup.nsis.zip` and `…_amd64.AppImage.tar.gz` named
+in older notes here: those are the deprecated
+`createUpdaterArtifacts: "v1Compatible"` artifacts, which this project has never
+shipped — **their absence from a release is normal, not a broken build.** A
+local build without the signing key refuses to bundle for that reason; use
+`pnpm tauri build --no-sign` (see Releasing).
 
 ## Auto-update
 

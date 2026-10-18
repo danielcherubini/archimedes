@@ -304,11 +304,15 @@ elif [[ -n "$win_exe_sig" ]]; then
   add_key "windows-x86_64" "$win_exe_payload" "$win_exe_sig"
 fi
 
-# Linux: the plugin's Linux installer unzips the updater bundle, so the
-# `…AppImage.tar.gz` pair is the canonical payload; the bare `.AppImage` pair is
-# the fallback for a build that produced no tar.gz signature. Both Linux
+# Linux: the bare `.AppImage` pair IS the payload that `createUpdaterArtifacts:
+# true` produces — the plugin's `install_appimage` (2.14.0) accepts raw ELF bytes
+# and writes them straight over `$APPIMAGE`, and it also accepts a gzipped
+# AppImage when the bytes sniff as gzip. So a `…AppImage.tar.gz` pair, which only
+# the deprecated `createUpdaterArtifacts: "v1Compatible"` ever emits, is accepted
+# ahead of the bare one when both happen to exist (it is the more specific
+# artifact); the bare `.AppImage` is the normal case, not a fallback. Both Linux
 # AppImage keys name whichever pair was chosen — never one key per form, which
-# would have a key whose payload the corresponding installer cannot extract.
+# would give a key the corresponding installer cannot install.
 #
 # The AppImage is required only when a Linux signature is on disk at all: a
 # release carrying just Windows (or, later, macOS) assets is a legitimate
