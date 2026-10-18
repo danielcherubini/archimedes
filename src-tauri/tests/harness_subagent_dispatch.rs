@@ -86,7 +86,7 @@ async fn make_manager(
     let factory: Arc<dyn WorkerFactory> = Arc::new(FakeWorkerFactory);
     let wm = WorkerManager::new(
         factory,
-        Arc::new(|_id: String, _code: Option<i32>| {}),
+        Arc::new(|_id: String, _code: Option<i32>, _pid: Option<u32>| {}),
         Arc::new(
             |_id: String,
              _is_subagent: bool,

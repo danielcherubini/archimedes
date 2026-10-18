@@ -122,7 +122,7 @@ fn build_manager(
         let m2 = manager.clone();
         Arc::new(WorkerManager::new(
             Arc::new(FixtureFactory),
-            Arc::new(move |s, c| m.handle_crash(&s, c)),
+            Arc::new(move |s, c, p| m.handle_crash(&s, c, p)),
             Arc::new(move |s, b, e| m2.route_event(&s, b, e)),
             Arc::new(|_s| None),
         ))

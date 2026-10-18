@@ -2092,7 +2092,7 @@ mod tests {
                 },
             );
 
-        h.manager.handle_crash(id, Some(1));
+        h.manager.handle_crash(id, Some(1), None);
 
         assert!(!h.has_naming_entry(id));
     }
@@ -2117,7 +2117,7 @@ mod tests {
                     in_flight: true,
                 },
             );
-        h.manager.handle_crash(id, Some(1));
+        h.manager.handle_crash(id, Some(1), None);
         assert!(!h.has_naming_entry(id), "the crash cleared it");
 
         let state = h.manager.naming.clone();

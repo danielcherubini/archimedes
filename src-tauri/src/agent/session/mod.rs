@@ -238,10 +238,15 @@ pub(crate) struct NativeConfigState {
 pub struct StalledInfo {
     /// Unix milliseconds (the crash time).
     pub at: i64,
-    /// The newest `crash-<ts>-worker*.log` in the data dir, globbed and
-    /// FROZEN at crash time (best-effort attribution across concurrent
-    /// sessions — crash logs are diagnostic, not load-bearing); `None`
-    /// when none is found.
+    /// The crashed Worker's OWN `crash-<ts>-worker-<pid>.log`, selected by
+    /// the pid of the child the Supervisor just reaped and FROZEN at crash
+    /// time (one lookup per crash — the `session-stalled` push and this
+    /// struct's PULL name the same path). Crash logs are diagnostic, not
+    /// load-bearing, so the lookup is best-effort: `None` when the crash-log
+    /// dir is unwired or holds no log for that pid. A pid with no matching
+    /// log is `None` — never another Worker's crash. When no pid was
+    /// captured, the pre-amendment pid-less `crash-<ts>-worker.log` is still
+    /// matched, because logs already on disk keep their names.
     pub crash_log: Option<PathBuf>,
 }
 
@@ -460,6 +465,14 @@ pub struct SessionManager {
     /// The store-frame applier (the Supervisor's sole-writer persistence).
     /// Late-wired in `attach_db` (it needs the `Db`).
     persister: Arc<OnceLock<Arc<TranscriptPersister>>>,
+    /// The directory the crash logs land in — the app data dir
+    /// (`…/archimedes`), which is exactly what the crash hook was handed at
+    /// install time. Late-wired (`set_crash_log_dir`), because a router that
+    /// resolved `dirs::data_dir()` itself could neither be tested over a temp
+    /// dir nor kept out of the data-dir-resolving business the `crashlog`
+    /// census forbids in the panic path. Production wires the value `setup()`
+    /// already computes, so the lookup's effect is unchanged.
+    crash_log_dir: Arc<OnceLock<PathBuf>>,
     /// The per-session config state (the `set_config_option` re-synthesizer
     /// source — the mirror's home moved from the `NativeHandle` here,
     /// field-for-field: `start` / `resume` initialize it, `set_config_option`
@@ -479,7 +492,6 @@ pub struct SessionManager {
     /// marks the session stalled; the frontend reads it via `stalled_info`).
     stalled: Arc<StdMutex<HashMap<String, StalledInfo>>>,
 }
-
 impl SessionManager {
     /// The configured config directory (useful for tests and diagnostics).
     pub fn config_dir(&self) -> &PathBuf {
@@ -511,6 +523,7 @@ impl SessionManager {
             subagent_manager: Arc::new(OnceLock::new()),
             sink: Arc::new(OnceLock::new()),
             persister: Arc::new(OnceLock::new()),
+            crash_log_dir: Arc::new(OnceLock::new()),
             config_state: Arc::new(StdMutex::new(HashMap::new())),
             naming: Arc::new(StdMutex::new(HashMap::new())),
             live: Arc::new(StdMutex::new(HashMap::new())),
@@ -522,6 +535,17 @@ impl SessionManager {
     /// Attach the Tauri `AppHandle` (used for Supervisor-side web rendering).
     pub fn attach_app_handle(&self, app: tauri::AppHandle) {
         let _ = self.app_handle.set(app);
+    }
+
+    /// Inject the crash-log directory (the app data dir — `…/archimedes`;
+    /// the late-wire `setup_dirs` wiring). `&self` (the `OnceLock` `set`
+    /// needs no exclusive access) so it stays callable on an
+    /// `Arc<SessionManager>` — the shape of `attach_app_handle`, NOT of
+    /// `set_sink`, which is `&mut self` and cannot run once the manager is
+    /// `Arc`-wrapped. Unset = no crash-log lookup (`StalledInfo.crash_log`
+    /// is `None`), never a guessed path.
+    pub fn set_crash_log_dir(&self, dir: PathBuf) {
+        let _ = self.crash_log_dir.set(dir);
     }
 
     /// Inject the `WorkerManager` (the late-wire — the `setup_dirs` wiring
@@ -2086,13 +2110,116 @@ mod session_tests {
             let m2 = manager.clone();
             Arc::new(WorkerManager::new(
                 Arc::new(FixtureFactory),
-                Arc::new(move |s, c| m.handle_crash(&s, c)),
+                Arc::new(move |s, c, p| m.handle_crash(&s, c, p)),
                 Arc::new(move |s, b, e| m2.route_event(&s, b, e)),
                 Arc::new(|_s| None),
             ))
         };
         manager.attach_worker_manager(wm.clone());
         (manager, wm, db)
+    }
+
+    /// Stamp a seeded crash log's mtime `secs_ago` seconds in the past, so
+    /// a test can say which of two logs is the NEWER one without racing the
+    /// filesystem's mtime granularity.
+    fn stamp_crash_log(path: &Path, secs_ago: u64) {
+        let mtime = std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("the seeded crash log is re-openable")
+            .set_modified(mtime)
+            .expect("the seeded crash log's mtime is settable");
+    }
+
+    /// The two halves of crash-log attribution, on a REAL child pid:
+    ///
+    /// **(a) identity** — the `stalled` registry's `crash_log` is the log
+    /// named for the pid that just died, NOT the newest log in the dir.
+    /// A second, NEWER, pid-less `crash-7-worker.log` is seeded beside it: a
+    /// recency rule names that foreign file, so this half is the identity
+    /// guarantee itself.
+    ///
+    /// **(b) frozen equality** — the `session-stalled` payload's
+    /// `crashLog` is THE SAME path the registry froze. On its own this half
+    /// says nothing about WHICH file wins (a lookup re-run with the same pid
+    /// over an unchanged dir returns the same path), so do not expect a
+    /// today-red from it — it is the pin against re-globbing at the emit: a
+    /// second lookup there is exactly what re-opens the window in which
+    /// another Worker's crash moves the banner's link out from under the
+    /// registry. Seed-newer-besides-pid-named turns the cheapest regression
+    /// (a re-glob that forgets the pid) into a failure here.
+    #[tokio::test]
+    async fn the_stalled_registry_and_the_stalled_event_agree_on_the_pid_named_log() {
+        let dir = temp_config_dir();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        let (manager, _wm, _db) = build_worker_manager(&dir, native_test_catalog(), &sink);
+
+        // A REAL child, so the pid is one the Supervisor really would hold.
+        let handle = WorkerHandle::spawn(&fixture_path())
+            .expect("the fixture binary exists (cargo test built it)");
+        let pid = handle
+            .pid()
+            .expect("a live child reports its spawn-time pid");
+        // Let it go GRACEFULLY: `kill_on_drop` is false for this child, so a
+        // dropped handle leaves the process alive until its stdin EOF, and
+        // the `worker_smoke` EOF/exit pins are sensitive to a stray child.
+        handle.send_close().expect("the close frame encodes");
+        handle.exited().await;
+
+        // The crash-log dir — the late-wire seam (`setup_dirs_with_factory`
+        // wires the app data dir here in production).
+        let crash_dir = temp_config_dir();
+        manager.set_crash_log_dir(crash_dir.clone());
+
+        // The crashed Worker's own log, and a NEWER one belonging to nobody
+        // we care about.
+        let mine = crash_dir.join(format!("crash-1000-worker-{pid}.log"));
+        std::fs::write(&mine, "mine").expect("the pid-named log is seedable");
+        stamp_crash_log(&mine, 120);
+        let foreign = crash_dir.join("crash-7-worker.log");
+        std::fs::write(&foreign, "foreign").expect("the foreign log is seedable");
+        stamp_crash_log(&foreign, 0);
+
+        // `handle_crash` has no early return — it always marks the session
+        // stalled and emits — and its `live`-map helpers no-op for an id
+        // that was never started, so no Worker needs to be running here.
+        let id = "arch_pid_attributed";
+        manager.handle_crash(id, Some(1), Some(pid));
+
+        // (a) Identity: the registry holds the pid-named log.
+        let frozen = manager
+            .stalled_info(id)
+            .expect("the crash marks the session stalled")
+            .crash_log;
+        assert_eq!(
+            frozen.as_deref(),
+            Some(mine.as_path()),
+            "the banner names the log belonging to pid {pid}, not the newer foreign one \
+             (`{}`)",
+            foreign.display()
+        );
+
+        // (b) Frozen equality: the PUSH names exactly what the registry
+        // froze — one lookup per crash, never a re-glob.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let payload = loop {
+            let got = tokio::time::timeout_at(deadline, rx.recv())
+                .await
+                .expect("the `session-stalled` event is emitted")
+                .expect("the sink is live");
+            if got["event"] == "session-stalled" {
+                break got["payload"].clone();
+            }
+        };
+        assert_eq!(
+            payload["crashLog"],
+            serde_json::Value::String(mine.display().to_string()),
+            "the `session-stalled` payload's `crashLog` is the path the registry froze \
+             (a second glob would name the newer `{}`)",
+            foreign.display()
+        );
     }
 
     /// Start a native session with the given catalog (the Worker-mediated

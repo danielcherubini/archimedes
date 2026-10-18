@@ -126,9 +126,102 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --all-targets -- -D warnings
 
+      # The crash-log leak guard (crash-log-hardening Task 7), in two halves: the
+      # `cargo test` step below runs the suite with its data dir REDIRECTED into
+      # the runner temp dir, and the `Check the test suite wrote no crash log`
+      # step after it requires zero `crash-*.log` to have landed there.
+      #
+      # The redirect is the PREMISE of the question, not a detail: a runner's
+      # real data dir was never written to, so asking "is it empty?" there
+      # answers "yes" having checked nothing. This repo records that exact shape
+      # at `src-tauri/src/agent/tools/exec.rs:1780-1791` — the first version of
+      # the stdin test passed with `closed_stdin` DELETED, because CI's fd 0 was
+      # already `/dev/null`. So `test_support::the_ci_data_dir_redirect_took_effect`
+      # (running inside the step below) fails the run when the redirect did NOT
+      # take effect, and the script asserts the conclusion.
+      #
+      # ⚠ LINUX + macOS ONLY — there is deliberately no Windows redirect here,
+      # and no `APPDATA:` line should ever be added to "fix" that. `dirs` 6.0.0
+      # resolves the Windows data dir with
+      # `SHGetKnownFolderPath(FOLDERID_RoamingAppData)`
+      # (`dirs-sys-0.5.0/src/lib.rs:150-178`; `dirs-6.0.0/src/win.rs:10`), which
+      # IGNORES `%APPDATA%` — a Windows redirect would change nothing and the
+      # check would pass for exactly the wrong reason. Windows keeps the
+      # `childproc` census invariant as its ONLY guard: a recorded gap (ADR 0025
+      # amendment), not an oversight.
+      #
+      # Why the variable differs per OS: Linux honours `XDG_DATA_HOME`
+      # (`dirs-6.0.0/src/lin.rs:11`, which makes `data_dir()` EQUAL to it); macOS
+      # reads only `HOME` and resolves `$HOME/Library/Application Support`
+      # (`dirs-6.0.0/src/mac.rs:7,12`), so there the app dir sits THREE levels
+      # below the redirect — which is why the script searches recursively. Both
+      # arms name the SAME path (`$RUNNER_TEMP/archimedes-test-data`), so the one
+      # check step below needs no OS branch of its own.
+      #
+      # `cargo fmt` / `cargo clippy` above get no redirect: they compile, they do
+      # not run the app. `pnpm test` / `pnpm build` below are untouched for the
+      # same reason — and because a job-wide `HOME` override would move pnpm's
+      # cache, which is why the redirect sits on STEP env, not job env.
+      #
+      # Gates are `runner.os`, lowercase, matching `Install Linux build
+      # dependencies` above (GitHub's string `==` is case-insensitive; the file
+      # already chose lowercase, so a second spelling would be a false
+      # distinction). The three `cargo test` steps are mutually exclusive and
+      # exhaustive — every OS in the matrix still runs the full Rust suite.
       - name: cargo test
+        if: runner.os == 'linux'
+        working-directory: src-tauri
+        env:
+          XDG_DATA_HOME: ${{ runner.temp }}/archimedes-test-data
+          ARCHIMEDES_TEST_DATA_DIR: ${{ runner.temp }}/archimedes-test-data
+        run: cargo test
+
+      # The same step, macOS-shaped: `HOME` is the only variable `dirs` consults
+      # there. ⚠ A redirected `HOME` can make rustup auto-install the pinned
+      # toolchain into the fake home (measured locally: 1.5 GB, 12.8 s, with
+      # `RUSTUP_HOME` unset). On GitHub-hosted runners `RUSTUP_HOME` and
+      # `CARGO_HOME` are runner env vars OUTSIDE `HOME`, so this is instant; if
+      # this step ever turns slow, that is the first thing to look at.
+      - name: cargo test (data dir redirected via HOME)
+        if: runner.os == 'macos'
+        working-directory: src-tauri
+        env:
+          HOME: ${{ runner.temp }}/archimedes-test-data
+          ARCHIMEDES_TEST_DATA_DIR: ${{ runner.temp }}/archimedes-test-data
+        run: cargo test
+
+      # Windows runs the suite UNGATED-and-unredirected: nothing to point it at
+      # (see the ⚠ above). Its leak guard is the census test in
+      # `src-tauri/src/agent/childproc.rs`, and nothing here.
+      - name: cargo test (no data-dir redirect exists on Windows)
+        if: runner.os == 'windows'
         working-directory: src-tauri
         run: cargo test
+
+      # The guard's second half. Re-exports the same path on THIS step, because
+      # step-level `env` does not leak between steps — a step that just said
+      # `"$ARCHIMEDES_TEST_DATA_DIR"` would expand to the empty string, and the
+      # script rejects an empty argument precisely so a lost `env:` here reddens
+      # the step instead of scanning nothing and passing.
+      #
+      # Gated `!= 'windows'` to match the two redirecting steps above: Windows ran
+      # no redirect, so there is nothing for it to check.
+      #
+      # What this pair does NOT catch, stated plainly so nobody over-trusts it:
+      # the path literal is repeated on each step (step env cannot be shared), so
+      # renaming it on ONE step would leave the check scanning a different
+      # directory from the one the suite wrote to — a non-existent directory exits
+      # 0 ("nothing ran"), which is green. `the_ci_data_dir_redirect_took_effect`
+      # catches the other direction (the variable IS set but `dirs` ignores it,
+      # e.g. `XDG_DATA_HOME` handed to a macOS runner, or a `dirs` upgrade that
+      # changes resolution); it cannot catch the variable being dropped from the
+      # test step, because an unset variable is the local-run arm. Keep the three
+      # literals identical.
+      - name: Check the test suite wrote no crash log
+        if: runner.os != 'windows'
+        env:
+          ARCHIMEDES_TEST_DATA_DIR: ${{ runner.temp }}/archimedes-test-data
+        run: bash scripts/check-test-data-dir.sh "$ARCHIMEDES_TEST_DATA_DIR"
 
       - name: pnpm test
         run: pnpm test
@@ -153,6 +246,14 @@ jobs:
       # the job testing its own runner image.
       - name: Test the version check
         run: bash scripts/check-versions.test.sh
+
+      # The crash-log leak guard's own harness. It lives HERE rather than only in
+      # the `lint-test-build` matrix because the guard is a shell script: its
+      # fixtures (`supervisor.log` in the same dir, the nested macOS `archimedes/`
+      # level) are exactly the cases a matrix step cannot reach, and the macOS
+      # nesting case is the one that decides whether that guard is vacuous.
+      - name: Test the test-data-dir crash-log check
+        run: bash scripts/check-test-data-dir.test.sh
 
       - name: Test the updater-manifest composer
         run: bash scripts/compose-updater-manifest.test.sh

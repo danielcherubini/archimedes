@@ -43,7 +43,13 @@ use tokio::sync::mpsc;
 /// The Worker main (the `run_worker` entry's async half — the stdio
 /// JSONL loop over the `WorkerCore`).
 pub async fn run_worker_inner() {
-    crate::agent::crashlog::install_panic_hook("worker");
+    // The directory is resolved HERE, at install time, and handed to the
+    // hook — the hook resolves nothing during the panic. A `None` data
+    // dir is not a supported state (the Supervisor's `setup()` hard-fails
+    // on it), so skipping the hook here is belt-and-braces, not a mode.
+    if let Some(base) = dirs::data_dir() {
+        crate::agent::crashlog::install_panic_hook("worker", base.join("archimedes"));
+    }
     let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
     let (mut core, _inbound_tx) = WorkerCore::new(outbound_tx);
     // The stdout writer (the two producers — the pump task and the main

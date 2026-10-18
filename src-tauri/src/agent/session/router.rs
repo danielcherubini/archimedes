@@ -164,15 +164,34 @@ impl SessionManager {
     /// banner), resolve the in-flight `send_prompt` (the crash outcome — the
     /// composer unlocks; it never stays locked forever), and drop the session's
     /// NAMING entry (a resumed session re-uses the same id — see the site).
-    pub fn handle_crash(&self, session_id: &str, code: Option<i32>) {
+    ///
+    /// `pid` is the DEAD child's pid (the handle's, captured at spawn); `None`
+    /// when the Supervisor never saw one. It selects the crash log — see
+    /// `find_crash_log_for_pid` (private; the banner's link is `None` when the
+    /// pid names no log).
+    pub fn handle_crash(&self, session_id: &str, code: Option<i32>, pid: Option<u32>) {
         let at = now_ms();
-        let crash_log = find_newest_crash_log();
+        // The crash log for THIS Worker, resolved ONCE and then frozen. A
+        // second lookup for the emit below is what let the pushed
+        // `session-stalled` event and the pulled `stalled_info` name
+        // different files for ONE crash — a second Worker crashing in between
+        // moved the banner's link out from under the registry.
+        let crash_log = self
+            .crash_log_dir
+            .get()
+            .and_then(|d| find_crash_log_for_pid(d, pid));
         // Mark the session STALLED (the `stalled` registry — the frontend reads it via
         // `stalled_info` + the `session-stalled` event).
         self.stalled
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .insert(session_id.to_string(), StalledInfo { at, crash_log });
+            .insert(
+                session_id.to_string(),
+                StalledInfo {
+                    at,
+                    crash_log: crash_log.clone(),
+                },
+            );
         // The pending-modal cleanup (the `interactive-request-close` frames — the
         // unanswered-request-id diff: a crashed session's open permission / interactive
         // modals are dismissed, no stuck modal alongside the banner).
@@ -192,14 +211,15 @@ impl SessionManager {
             .unwrap_or_else(|p| p.into_inner())
             .remove(session_id);
         // Emit the `session-stalled` event (the frontend's banner — the `StalledInfo`
-        // shape: `at` + `crash_log`).
+        // shape: `at` + `crash_log`). The path is the one the registry just froze —
+        // NEVER a second glob (that is what let the push and the pull disagree).
         if let Some(sink) = self.sink.get() {
             sink.emit(
                 "session-stalled",
                 json!({
                     "sessionId": session_id,
                     "at": at,
-                    "crashLog": find_newest_crash_log(),
+                    "crashLog": crash_log,
                 }),
             );
         }
@@ -381,17 +401,112 @@ impl SessionManager {
     }
 }
 
-/// The newest `crash-<ts>-worker*.log` in the data dir (the `StalledInfo`'s
-/// `crash_log` — globbed and FROZEN at crash time; best-effort attribution across
-/// concurrent sessions — crash logs are diagnostic, not load-bearing). `None` when
-/// the data dir is unresolvable or no crash log is found.
-fn find_newest_crash_log() -> Option<PathBuf> {
-    let dir = dirs::data_dir()?.join("archimedes");
-    let entries = std::fs::read_dir(&dir).ok()?;
+/// Is `name` (a bare file name) a **Worker** crash log — in either of the
+/// two shapes that exist on disk?
+///
+/// - `crash-<ts>-worker.log` — the pre-amendment shape, still sitting in
+///   users' data dirs from before the writer stamped its pid in.
+/// - `crash-<ts>-worker-<pid>.log` — the current shape (`crashlog.rs`'s
+///   `write_crash`).
+///
+/// Both are accepted on purpose: the rename and this matcher landed in ONE
+/// commit, so there was never an interval where the **Stalled** banner's
+/// crash-log link matches nothing — and no integration test would notice
+/// (`tests/ipc.rs`'s crash case asserts only `at`, never `crashLog`).
+///
+/// The pid arm is a pure SUFFIX check and that is safe: `worker-` pins
+/// where the digit run starts and the `.` ends it, so no name can end in
+/// `-worker-<digits>.log` while meaning something else (brute-forced over
+/// every pid/other pair in `1..3000`: zero false positives). Do NOT
+/// "harden" this into a split-on-`-` parser — that only adds a way to
+/// drift from the writer's format.
+///
+/// [`find_crash_log_for_pid`] is the only reader of this rule: it gates
+/// BOTH of its arms (the crashed Worker's own pid-stamped log, and the
+/// pid-less pre-amendment fallback when no pid was captured).
+fn is_worker_crash_log_name(name: &str) -> bool {
+    if !name.starts_with("crash-") {
+        return false;
+    }
+    if name.ends_with("-worker.log") {
+        return true;
+    }
+    // `-worker-<digits>.log`: peel the two fixed ends and require that
+    // what is left is a NON-EMPTY run of ASCII digits — the pid.
+    let Some(stem) = name.strip_suffix(".log") else {
+        return false;
+    };
+    let Some((head, pid_part)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    head.ends_with("-worker")
+        && !pid_part.is_empty()
+        && pid_part.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Does `name` carry a `-<digits>.log` pid suffix (i.e. is it a
+/// pid-STAMPED crash log, `crash-<ts>-<tag>-<pid>.log`)?
+///
+/// The SAME suffix peel [`is_worker_crash_log_name`] uses — peel `.log`,
+/// then the last `-`, then require a non-empty ASCII-digit run. No field
+/// splitting: only the end of the name is ever inspected.
+fn has_pid_suffix(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".log") else {
+        return false;
+    };
+    let Some((_, tail)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The crash log belonging to `pid` — the `StalledInfo`'s `crash_log`,
+/// globbed ONCE and then FROZEN (crash logs are diagnostic, not load-bearing).
+///
+/// Attribution is by IDENTITY, not by recency. With N concurrent **Subagent**
+/// Workers, the newest log on disk routinely belongs to a *different* Worker,
+/// and the recency rule this replaced sent the **Stalled** banner to the wrong
+/// post-mortem. The Supervisor knows which child it just reaped — the handle's
+/// pid, captured at spawn because `Child::id()` is `None` after the reap — and
+/// the writer stamps that pid into the name (`crashlog`'s `write_crash`).
+///
+/// - `Some(pid)` → the entry named `crash-<…>-worker-<pid>.log`. No match is
+///   `None`, deliberately: the old rule returned *some* log whenever the dir
+///   held one, so a crash whose own log had been pruned linked the user at an
+///   unrelated Worker's crash. A banner with NO link beats a WRONG one, and
+///   `StalledInfo.crash_log` is an `Option` the banner already renders.
+/// - `None` (the pid was never captured) → the newest PRE-amendment log, i.e.
+///   [`is_worker_crash_log_name`] minus anything carrying a pid suffix. Those
+///   pid-less names are what sits in users' data dirs from before the writer
+///   stamped its pid, and a query that does not know the pid must not blame a
+///   log that names a specific process.
+///
+/// The directory comes from the CALLER (the `SessionManager`'s `crash_log_dir`
+/// late-wire), never from a resolver here: a router that resolved the
+/// platform data dir itself could not be tested over a temp dir — and a
+/// crash-log dir resolved deep in a call chain is the exact shape the
+/// [`crate::agent::crashlog`] census forbids in the panic path.
+fn find_crash_log_for_pid(dir: &std::path::Path, pid: Option<u32>) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    // The pid-stamped tail this Worker owns, e.g. `worker-4242.log`. Built
+    // once, outside the loop.
+    let owned = pid.map(|p| format!("worker-{p}.log"));
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with("crash-") && name.ends_with("-worker.log") {
+        let is_mine = match &owned {
+            // The crashed Worker's own log: the shared `crash-`-anchored
+            // predicate PLUS the exact pid tail. Both halves carry weight —
+            // the tail alone would accept any file that merely ENDS
+            // `worker-<pid>.log` (a `notes-worker-1.log` answers a query for
+            // pid 1), and the predicate alone is the recency rule this fn
+            // replaced. Keeping the predicate shared with the fallback arm
+            // also stops the two name readers drifting apart.
+            Some(tail) => is_worker_crash_log_name(&name) && name.ends_with(tail.as_str()),
+            // No pid: only the pid-less pre-amendment shape is attributable.
+            None => is_worker_crash_log_name(&name) && !has_pid_suffix(&name),
+        };
+        if is_mine {
             if let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) {
                 if newest.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {
                     newest = Some((mtime, entry.path()));
@@ -512,6 +627,155 @@ mod tests {
         assert!(
             !modals.contains("render-1"),
             "fetch render request must NOT be tracked as a user modal"
+        );
+    }
+
+    /// The crash-log NAME matcher accepts BOTH shapes — the pre-amendment
+    /// `crash-<ts>-worker.log` and the pid-stamped `crash-<ts>-worker-<pid>.log`
+    /// — because the rename and the matcher land in one commit: a banner
+    /// whose link silently stops matching is invisible to the integration
+    /// suite (`tests/ipc.rs`'s crash case asserts only `at`, never
+    /// `crashLog`).
+    ///
+    /// Tested as a PURE function (no filesystem) on purpose: the two shapes
+    /// it accepts are a string rule, and the selector that consumes it
+    /// ([`find_crash_log_for_pid`]) is tested separately over temp dirs.
+    #[test]
+    fn is_worker_crash_log_name_accepts_both_shapes() {
+        // The pre-amendment shape (still on disk from before the rename)
+        // and the pid-stamped shape.
+        assert!(
+            is_worker_crash_log_name("crash-1-worker.log"),
+            "the pid-less pre-amendment name still matches"
+        );
+        assert!(
+            is_worker_crash_log_name("crash-1-worker-4242.log"),
+            "the pid-stamped name matches"
+        );
+
+        // Every negative: a different tag, an empty pid, a non-numeric
+        // pid, the wrong extension, and a name that merely ENDS like ours
+        // without the `crash-` prefix.
+        for rejected in [
+            "crash-1-supervisor.log",
+            "crash-1-worker-.log",
+            "crash-1-worker-abc.log",
+            "crash-1-worker-4242.txt",
+            "notes-worker-1.log",
+        ] {
+            assert!(
+                !is_worker_crash_log_name(rejected),
+                "`{rejected}` is not a Worker crash log"
+            );
+        }
+    }
+
+    // ── The pid-based crash-log selector ──────────────────────────────────
+
+    /// Seed `<dir>/<name>` with a given age (seconds ago), so a test can
+    /// state which of two crash logs is the NEWER one without racing the
+    /// filesystem's mtime granularity. `now - secs_ago` — the larger
+    /// `secs_ago`, the OLDER the file.
+    fn seed_crash_log(dir: &std::path::Path, name: &str, secs_ago: u64) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, "x").expect("the seeded crash log is writable");
+        let mtime = std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("the seeded crash log is re-openable")
+            .set_modified(mtime)
+            .expect("the seeded crash log's mtime is settable");
+        path
+    }
+
+    /// A throwaway directory to seed crash logs into (the selector takes
+    /// the directory — that is the whole point of Task 6's seam).
+    fn crash_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("crashsel-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("the crash dir is creatable");
+        dir
+    }
+
+    /// Attribution is by IDENTITY, not by recency: with N concurrent
+    /// **Subagent** Workers, the newest log on disk is routinely a
+    /// *different* Worker's crash, and a banner that names it sends the
+    /// user to the wrong post-mortem. The pid the Supervisor holds (the
+    /// handle's, captured at spawn) picks the owner's log even when some
+    /// other Worker died LATER.
+    #[test]
+    fn the_pid_named_log_wins_over_a_newer_foreign_one() {
+        let dir = crash_dir();
+        let mine = seed_crash_log(&dir, "crash-1000-worker-4242.log", 120);
+        // A FOREIGN Worker's crash, stamped NEWER — recency would pick it.
+        seed_crash_log(&dir, "crash-2000-worker-9999.log", 0);
+
+        assert_eq!(
+            find_crash_log_for_pid(&dir, Some(4242)).as_deref(),
+            Some(mine.as_path()),
+            "the log belonging to pid 4242 wins over a newer foreign crash log"
+        );
+    }
+
+    /// A crash log written before the pid stamping landed sits in the
+    /// user's data dir with NO pid in its name, and a crash whose pid the
+    /// Supervisor could not capture queries with `None` — that pair must
+    /// still resolve, or the amendment silently drops the banner's link
+    /// for exactly the users whose old logs are already on disk.
+    #[test]
+    fn a_pid_less_log_is_still_found_when_the_pid_is_unknown() {
+        let dir = crash_dir();
+        let old = seed_crash_log(&dir, "crash-1000-worker.log", 0);
+
+        assert_eq!(
+            find_crash_log_for_pid(&dir, None).as_deref(),
+            Some(old.as_path()),
+            "the pre-amendment pid-less log is still attributed when no pid is known"
+        );
+    }
+
+    /// A pid-less query never blames a log that names a SPECIFIC process.
+    ///
+    /// ⚠ This is NOT a vacuous clause, which is easy to assume:
+    /// [`is_worker_crash_log_name`] accepts BOTH name shapes (so a rename can
+    /// never strand the banner), which means a pid-stamped name DOES satisfy
+    /// the predicate — only this suffix check keeps it out of a pid-less
+    /// answer. Delete it and a query that explicitly does not know a pid
+    /// picks a named process's log.
+    #[test]
+    fn a_pid_less_query_never_names_a_pid_stamped_log() {
+        let dir = crash_dir();
+        // Only pid-stamped logs — nobody's pid is known, so nothing is
+        // attributable to an anonymous query.
+        seed_crash_log(&dir, "crash-1000-worker-4242.log", 0);
+
+        assert_eq!(
+            find_crash_log_for_pid(&dir, None),
+            None,
+            "a query with no pid must not answer with a log that names pid 4242"
+        );
+    }
+
+    /// A pid that matches NOTHING yields `None`, NOT "the newest log I
+    /// could find". The old recency rule always returned *a* path, so a
+    /// crashed Worker whose log was already pruned pointed the user at an
+    /// unrelated crash — a wrong link is worse than no link, and
+    /// `StalledInfo.crash_log` is an `Option` the banner already renders.
+    #[test]
+    fn an_unmatched_pid_returns_no_log_rather_than_guessing() {
+        let dir = crash_dir();
+        // A perfectly good Worker crash log — belonging to somebody else.
+        seed_crash_log(&dir, "crash-2000-worker-9999.log", 0);
+        // And a file whose TAIL matches the queried pid but that is no crash
+        // log at all: the pid tail alone must not be the whole rule (the
+        // shared `crash-`-anchored predicate still has to agree).
+        seed_crash_log(&dir, "notes-worker-1.log", 0);
+
+        assert_eq!(
+            find_crash_log_for_pid(&dir, Some(1)),
+            None,
+            "a pid with no matching log must not borrow another Worker's crash, \
+             and must not pick a non-crash file that merely ends `worker-1.log`"
         );
     }
 }
