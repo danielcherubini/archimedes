@@ -231,6 +231,61 @@ fn focus_probe_trace(window: Option<Result<bool, String>>) -> (bool, String) {
     }
 }
 
+/// What asked for the webview's key focus, reduced to the two things the
+/// decision needs. Pure so the platform matrix is testable off-Windows: the
+/// `cfg` is evaluated at the CALL site (`cfg!(windows)`) and handed in as data,
+/// so the branch that governs a platform this machine cannot compile for is
+/// still a branch a test on Linux can execute.
+#[derive(Debug, PartialEq, Eq)]
+enum KeyFocusTrigger<'a> {
+    /// `RunEvent::Ready` — fresh launch, the window revealed by
+    /// `tauri-plugin-window-state` and never clicked.
+    Ready,
+    /// A `WindowEvent::Focused` carrying its `focused` flag and window label.
+    WindowFocused(bool, &'a str),
+}
+
+/// Does this trigger ask for the webview's key focus, on this platform?
+///
+/// **Only the `Focused(true)` arm is gated, and only off Windows** — which is
+/// the correction of a claim ADR 0057 records as verified. Its delivery matrix
+/// says `Focused(true)` is not delivered on Windows, and from that it argued the
+/// arm "cannot steal a sibling widget's focus". The conclusion was right about
+/// the mechanism and wrong about the platform: Windows DOES route a focus event
+/// here — `add_GotFocus` on the WebView2 controller sends
+/// `SynthesizedWindowEvent::Focused(true)`
+/// (`tauri-runtime-wry-2.11.4/src/lib.rs:5293-5310`) and the dispatcher turns it
+/// into the same `RunEvent::WindowEvent` (`:4237-4252`). Two consequences, and
+/// ADR 0057 was blind to both:
+///
+/// 1. On Windows the event means **WEBVIEW WIDGET** focus, not window
+///    activation — precisely the case the safety argument ruled out. **Clicking
+///    the webview fires it.**
+/// 2. `Webview::set_focus()` on Windows is `MoveFocus(PROGRAMMATIC)`
+///    (`wry-0.57.0/src/webview2/mod.rs:1583-1590`), and Microsoft defines that as
+///    re-assigning focus inside the page — "focus is set to previously focused
+///    element **or the default element** if no previously focused element
+///    exists" (`ICoreWebView2Controller::MoveFocus`). So each click was answered
+///    by a programmatic DOM focus move racing the click's own focus assignment:
+///    the caret flickers out of the composer and the click never lands. That is
+///    the reported Windows failure (ADR 0061).
+///
+/// `Ready` is deliberately kept on every platform, Windows included. It fires
+/// once at launch, before any interaction, so it cannot participate in the loop
+/// above; dropping it would change a Windows path that has shipped since v0.3.0
+/// without a complaint about it, on the one platform this repo cannot test.
+fn key_focus_grab_needed(is_windows: bool, trigger: &KeyFocusTrigger<'_>) -> bool {
+    match trigger {
+        // Fresh launch, every platform: the window the state plugin reveals holds
+        // no widget key focus. Cannot fight a click — no click has happened yet.
+        KeyFocusTrigger::Ready => true,
+        // Activation re-assert. On Windows this is the WEBVIEW widget's focus
+        // event, and re-asserting there breaks clicking, so Windows is excluded.
+        KeyFocusTrigger::WindowFocused(true, "main") => !is_windows,
+        _ => false,
+    }
+}
+
 /// The webview key-focus attempt, reduced to its log line.
 ///
 /// PURE (no window, no `AppHandle`) so the wording is testable — the same
@@ -265,7 +320,8 @@ fn webview_focus_trace(lookup: Option<Result<(), String>>) -> Option<String> {
     }
 }
 
-/// Grab KEY focus for the webview WIDGET (not the window) — see ADR 0056.
+/// Grab KEY focus for the webview WIDGET (not the window) — see ADR 0056, and
+/// ADR 0061 for WHEN this may be called (never from a focus-in on Windows).
 ///
 /// ⚠ The MECHANISM IS UNVERIFIED. The symptom is user-confirmed (no key reaches
 /// JS at fresh launch until the window is clicked) but the reason is not: the
@@ -438,12 +494,21 @@ pub fn run() {
     // the process is exiting anyway).
     app.run(|handle, event| {
         // The webview, not the window, must hold key focus or no key event reaches
-        // JS (ADR 0056 — mechanism UNVERIFIED, see the manual test). `&event`:
-        // RunEvent is owned here and `label` is a String, so a by-value `if let`
-        // partially moves `event` and the `Exit` arm below stops compiling (E0382).
-        // `..` is required — the variant is `#[non_exhaustive]`.
+        // JS. `Ready` does that on every platform; the `Focused(true)` re-assert is
+        // withheld on Windows, and that withholding is the fix for "nothing is
+        // clickable on Windows" (ADR 0061, superseding ADR 0057's platform matrix).
+        // `&event`: RunEvent is owned here and `label` is a String, so a by-value
+        // `if let` partially moves `event` and the `Exit` arm below stops compiling
+        // (E0382). `..` is required — the variant is `#[non_exhaustive]`.
         //
-        // THREE facts about these arms, each of which reads wrong without them:
+        // The decision is `key_focus_grab_needed`, NOT a hand-written match here:
+        // the platform is passed in as `cfg!(windows)` DATA so the Windows branch
+        // is executed by a test on Linux (`tests::windows_never_grabs_key_focus_*`).
+        // A `cfg`-gated match here would compile that branch out of the Linux test
+        // binary, which is exactly how ADR 0057's Windows claim went unexamined
+        // while this repo's CI was green.
+        //
+        // THREE facts, each of which reads wrong without them:
         //
         // 1. `Ready` is here because tauri's OWN `setup()` — the one that creates
         //    the config window — runs inside the `Ready` arm before this callback,
@@ -453,17 +518,19 @@ pub fn run() {
         //    executes inline, so that ordering is a coincidence of the inline
         //    queue and not a guarantee.
         //
-        // 2. `Focused(true)` is delivered on LINUX AND macOS and is suppressed
-        //    ONLY ON Windows for a window of our shape (one webview, no children):
-        //    the early return in `WindowEventWrapper::map_from_tao` is
-        //    `#[cfg(not(windows))]` and the `Self(None)` fall-through is
-        //    `#[cfg(windows)]`. ⚠ It is NOT "Linux-only". And on the platforms
-        //    where it does run it comes from WINDOW activation (tao's
-        //    `connect_focus_in_event` / `windowDidBecomeKey`), never from an
-        //    intra-window widget focus change — `add_focus_change_listeners` is
-        //    `#[cfg(windows)]`. So this re-assert cannot steal focus from a
-        //    sibling widget where it runs, and this window has exactly one
-        //    focusable widget anyway.
+        // 2. ⚠ `Focused(true)` DOES arrive on Windows. ADR 0057 recorded the
+        //    opposite after reading only `WindowEventWrapper::map_from_tao`, where
+        //    the `#[cfg(windows)]` path really does return `Self(None)` for our
+        //    shape. It missed the SECOND, Windows-only source: the WebView2
+        //    controller's `add_GotFocus` handler synthesises
+        //    `SynthesizedWindowEvent::Focused(true)`
+        //    (`tauri-runtime-wry-2.11.4/src/lib.rs:5293-5310`), and that dispatches
+        //    straight into the `RunEvent::WindowEvent` matched below (`:4237-4252`).
+        //    So on Windows this event means WEBVIEW WIDGET focus — the very case
+        //    0057 argued was impossible — and re-asserting it moves the DOM caret
+        //    off the element the user just clicked. On Linux/macOS the only source
+        //    is window activation (`connect_focus_in_event` / `windowDidBecomeKey`),
+        //    so the re-assert is safe there and is what fixes minimise/restore.
         //
         // 3. The macOS `Webview::focus()` implementation runs
         //    `self.webview.window().unwrap()` before `makeFirstResponder`
@@ -471,18 +538,19 @@ pub fn run() {
         //    was ever detached from its window turns this arm into a PANIC inside
         //    the event-loop callback. Accepted (tauri's own macOS build attaches
         //    the webview to the window), but it is why this arm is not free.
-        //
-        // `label == "main"` is a CHEAP FILTER, not a necessity: the window lookup
-        // happens inside `grab_webview_key_focus` regardless, because no ungated
-        // API maps a label to a webview.
-        match &event {
-            tauri::RunEvent::Ready => grab_webview_key_focus(handle),
+        let trigger = match &event {
+            tauri::RunEvent::Ready => Some(KeyFocusTrigger::Ready),
             tauri::RunEvent::WindowEvent {
                 label,
-                event: tauri::WindowEvent::Focused(true),
+                event: tauri::WindowEvent::Focused(focused),
                 ..
-            } if label == "main" => grab_webview_key_focus(handle),
-            _ => {}
+            } => Some(KeyFocusTrigger::WindowFocused(*focused, label)),
+            _ => None,
+        };
+        if let Some(trigger) = trigger {
+            if key_focus_grab_needed(cfg!(windows), &trigger) {
+                grab_webview_key_focus(handle);
+            }
         }
         if let tauri::RunEvent::Exit = event {
             if let Some(wm) = handle.try_state::<Arc<WorkerManager>>() {
@@ -499,7 +567,89 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{focus_probe_trace, webview_focus_trace};
+    use super::{focus_probe_trace, key_focus_grab_needed, webview_focus_trace, KeyFocusTrigger};
+
+    // ── The platform gate (`key_focus_grab_needed`) ─────────────────────────
+    //
+    // The Windows input failure (a user with a real machine: nothing clickable,
+    // no typing, the composer visibly gaining and losing focus) is caused by the
+    // focus-in arm running ON WINDOWS. ADR 0057's delivery matrix asserts that
+    // cannot happen — "Windows routes webview focus through
+    // `add_GotFocus`/`add_LostFocus` INSTEAD", i.e. never reaches this arm. It
+    // does reach it: that handler sends
+    // `SynthesizedWindowEvent::Focused(true)` (`tauri-runtime-wry-2.11.4/src/lib.rs:5293-5310`)
+    // and the dispatcher turns it into exactly the `RunEvent::WindowEvent` this
+    // arm matches (`:4237-4252`). So on Windows the arm fires on WEBVIEW widget
+    // focus, and `Webview::set_focus()` there is `MoveFocus(PROGRAMMATIC)`
+    // (`wry-0.57.0/src/webview2/mod.rs:1583-1590`) — it yanks DOM focus away from
+    // the element the user just clicked. Hence the flicker and the dead clicks.
+    //
+    // These pin the matrix so the false premise cannot be re-introduced by a
+    // reader who trusts the comment over the crate.
+
+    /// Windows must never grab **from the focus-in arm**. That event means
+    /// WEBVIEW WIDGET focus there, and `set_focus()` on Windows is
+    /// `MoveFocus(PROGRAMMATIC)`, which re-assigns DOM focus — so answering a
+    /// click with it is what made clicks vanish and the caret flicker.
+    #[test]
+    fn windows_never_grabs_from_the_focus_in_arm() {
+        assert!(
+            !key_focus_grab_needed(true, &KeyFocusTrigger::WindowFocused(true, "main")),
+            "on Windows Focused(true) is a WIDGET focus change — grabbing there \
+             steals the caret from whatever was just clicked"
+        );
+    }
+
+    /// `Ready` stays on Windows. It fires once at launch before any interaction,
+    /// so it cannot be part of the click/focus loop, and removing it would alter
+    /// a Windows path that has shipped since v0.3.0 uncomplained — on the one
+    /// platform this repo has no way to test. Pinned so a later "simplify by
+    /// disabling Windows entirely" change has to answer this test.
+    #[test]
+    fn windows_still_grabs_once_at_ready() {
+        assert!(
+            key_focus_grab_needed(true, &KeyFocusTrigger::Ready),
+            "fresh launch needs the grab on Windows too — it precedes any click"
+        );
+    }
+
+    /// Linux and macOS keep BOTH triggers: `Ready` for fresh launch, and
+    /// `Focused(true)` for minimise/restore and ⌘-tab, which re-map the window
+    /// with nothing re-asserting the widget. ADR 0057 got this half right.
+    #[test]
+    fn linux_and_macos_keep_both_triggers() {
+        assert!(
+            key_focus_grab_needed(false, &KeyFocusTrigger::Ready),
+            "fresh launch: the revealed window holds no key focus"
+        );
+        assert!(
+            key_focus_grab_needed(false, &KeyFocusTrigger::WindowFocused(true, "main")),
+            "activation: minimise/restore needs the re-assert too"
+        );
+    }
+
+    /// A blur is not a focus-in: grabbing on `Focused(false)` would move focus
+    /// at the exact moment the user is leaving the window.
+    #[test]
+    fn a_focus_loss_never_grabs_on_any_platform() {
+        for windows in [true, false] {
+            assert!(
+                !key_focus_grab_needed(windows, &KeyFocusTrigger::WindowFocused(false, "main")),
+                "Focused(false) must not grab (windows={windows})"
+            );
+        }
+    }
+
+    /// The `label == "main"` filter is behavioural, not cosmetic: a second window
+    /// (a future Settings window, a WebviewWindow per Space) activating must not
+    /// yank key focus into the main webview.
+    #[test]
+    fn only_the_main_window_focus_in_grabs() {
+        assert!(
+            !key_focus_grab_needed(false, &KeyFocusTrigger::WindowFocused(true, "settings")),
+            "another window's focus-in must not grab the MAIN webview's focus"
+        );
+    }
 
     /// A window that cannot be FOUND is not a window the user is reading, so
     /// the probe fires (fail open) — and says it never got a window, BY LABEL,
