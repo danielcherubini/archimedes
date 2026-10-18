@@ -165,6 +165,56 @@ fn write_crash(
 /// the clock-skew rule above: on a full disk this crash is worth more than
 /// the history, and the newest crash outranks it. The one file the cap pass
 /// may never touch is `keep`.
+///
+/// # The protection is per-process; the directory is not
+///
+/// `keep` names ONE file — the calling process's own log — and it is
+/// per-process BY CONSTRUCTION: there is nothing else it could name. The
+/// directory is not per-process. Both install sites hand the hook
+/// `base.join("archimedes")` over the same `dirs` base (`lib.rs`, tag
+/// `"supervisor"`; `agent/worker/mod.rs`, tag `"worker"`) — the same directory
+/// `setup` resolves for the app data dir — so the **Supervisor and every
+/// Worker prune one shared directory**, and `keep` cannot see another
+/// process's just-written log sitting in it. So this process's cap pass can
+/// still delete a log some other process wrote moments ago. That is a
+/// DIFFERENT defect from the one the parameter exists to close: `keep` stops a
+/// writer eating its OWN log; nothing here stops a writer eating someone
+/// else's.
+///
+/// Three things must hold at once for that to cost anything:
+///
+/// - the directory is genuinely OVER the cap, so the cap pass fires at all.
+///   [`MAX_CRASH_LOG_FILES`] is 50 and `keep` occupies a slot, so the pass only
+///   runs once 50 files survive the age pass beside it — which means at least
+///   51 crash-named files in the directory, counting the one just written (a
+///   file the age pass deleted, or whose mtime could not be read, is never a
+///   survivor and never counts toward the trigger). At or below the limit the
+///   cap pass deletes nothing and this hazard does not exist — that is what
+///   bounds it: this needs a crash storm, not a crash;
+/// - two processes crash close enough together that one is pruning while the
+///   other's file is still in the survivor list. Write-then-prune is a few
+///   syscalls, so the window is narrow, but nothing closes it;
+/// - that fresh file sorts FIRST — which needs a clock skew or an mtime tie,
+///   because `sort_by_key` is stable and with equal mtimes has nothing to rank
+///   them with, so `read_dir`'s arbitrary order picks the victim. Under an
+///   ordinary forward clock a fresh log sorts LAST and outlives the trim.
+///
+/// If all three land, the other process returns `Some(path)` for a file that no
+/// longer exists, and the **Stalled** banner links a log that is not there.
+///
+/// Accepted, not fixed — deliberately. No code reads these files: the banner
+/// hands the path to External Open and nothing parses the contents, so the loss
+/// is one unread log inside a storm that has already produced 50 others, which
+/// is the least likely place in the app for a single missing file to be
+/// noticed. Closing it properly means coordinating across processes, and both
+/// routes cost more than the file they would protect: a grace window in which
+/// nothing is prunable makes the cap SOFT — a crash loop then transiently
+/// exceeds 50, which is a policy decision with its own tests — and a lock or
+/// rename-before-prune adds a failure mode (a lock held by a process that died
+/// mid-panic) to the one code path that must not gain one.
+///
+/// Tracked in issue #42, which carries this reasoning and both candidate
+/// remedies; the grace window is the one to reach for if it ever bites.
 fn prune_crash_logs(dir: &std::path::Path, keep: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
