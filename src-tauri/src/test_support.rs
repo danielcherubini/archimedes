@@ -111,6 +111,79 @@ pub fn is_incarnation_stamp(s: &str) -> bool {
 mod tests {
     use super::is_incarnation_stamp;
 
+    /// Does the CI data-dir redirect actually reach `dirs::data_dir()`?
+    ///
+    /// This is the PREMISE of `scripts/check-test-data-dir.sh`, and the reason
+    /// the guard cannot rest on the script alone. That script asks "is the
+    /// redirected data dir free of `crash-*.log`?" — and a CI runner's REAL data
+    /// dir was never written to, so unredirected it answers "yes" while checking
+    /// nothing. That shape has bitten this repo before and is recorded at
+    /// `agent/tools/exec.rs:1780-1791`: the first version of the stdin test
+    /// passed with `closed_stdin` deleted, because CI's fd 0 was already
+    /// `/dev/null`. So the script asserts the conclusion and THIS test asserts
+    /// the premise: if the CI step's `env:` block ever stops taking effect (a
+    /// renamed variable, a gate that no longer matches, a `dirs` upgrade that
+    /// resolves the dir differently), this test reddens the `cargo test` step
+    /// instead of the leak guard quietly becoming decoration.
+    ///
+    /// **Unset means "a local run" and the test returns immediately** — that arm
+    /// is inert, not dead. `ARCHIMEDES_TEST_DATA_DIR` is set only by the CI
+    /// steps that redirect; a developer running plain `cargo test` has no
+    /// redirect to verify, and demanding one here would turn every local run red
+    /// for nothing. Nothing here sets or mutates an environment variable: the
+    /// lib binary reads env globally WITHOUT holding `ENV_LOCK` (see the note on
+    /// that static), so a `set_var` from any test is forbidden — the isolation
+    /// lives in CI plus the shell script, and this test only READS.
+    ///
+    /// The assertion is a PATH PREFIX, not equality, and it is
+    /// `Path::starts_with` rather than a string prefix:
+    ///   - Linux: `data_dir()` IS `XDG_DATA_HOME` (`dirs-6.0.0/src/lin.rs:11`),
+    ///     so the two paths are EQUAL — which satisfies a prefix trivially.
+    ///   - macOS: `data_dir()` is `$HOME/Library/Application Support`
+    ///     (`dirs-6.0.0/src/mac.rs:7,12`), so it sits UNDER the redirected
+    ///     `HOME`, and equality would fail a correct redirect.
+    ///
+    /// `starts_with` covers both platforms with one assertion. Its
+    /// path-component form is what makes that assertion sound: it compares
+    /// COMPONENTS, so a redirect of `/tmp/adh` does NOT match a data dir of
+    /// `/tmp/adhome/Library/Application Support` — the macOS shape a plain string
+    /// `starts_with` would accept, accepting a run that wrote somewhere else
+    /// entirely. (The two spellings only differ once a subdirectory is involved;
+    /// on Linux the paths are equal, so neither prefix form discriminates.)
+    ///
+    /// SCOPE, honestly: this catches Linux/macOS redirect drift and a future
+    /// `dirs` change. It covers WINDOWS NOT AT ALL — `dirs` resolves the Windows
+    /// data dir with `SHGetKnownFolderPath(FOLDERID_RoamingAppData)`
+    /// (`dirs-sys-0.5.0/src/lib.rs:150-178`; `dirs-6.0.0/src/win.rs:10`), which
+    /// ignores `%APPDATA%`, so no environment variable redirects it and the CI
+    /// steps set nothing on Windows for that reason. Windows is guarded by
+    /// Task 2's census alone; that gap is recorded, not closed.
+    #[test]
+    fn the_ci_data_dir_redirect_took_effect() {
+        let Some(var) = std::env::var_os("ARCHIMEDES_TEST_DATA_DIR") else {
+            // A local run: no redirect was asked for, so there is nothing to
+            // verify (see the doc comment — this arm is inert by design).
+            return;
+        };
+
+        let expected = std::path::Path::new(&var);
+        let actual = dirs::data_dir().expect(
+            "the redirect names a data dir, so `dirs::data_dir()` cannot be `None` here — \
+             a `None` means the redirect was never read",
+        );
+
+        assert!(
+            actual.starts_with(expected),
+            "the CI data-dir redirect did not take effect: `dirs::data_dir()` is \
+             {actual:?}, which is not under `ARCHIMEDES_TEST_DATA_DIR` = {expected:?}. \
+             On Linux the redirect is `XDG_DATA_HOME` (so the two are EQUAL); on macOS it \
+             is `HOME` (so `data_dir()` is `$HOME/Library/Application Support`, i.e. UNDER \
+             it). Without the redirect the crash-log leak guard in \
+             `scripts/check-test-data-dir.sh` passes for the wrong reason — see \
+             `agent/tools/exec.rs:1780-1791`."
+        );
+    }
+
     /// The negative cases are the point, though only `A3F9C1` is a case the
     /// `len() == 6` + `u32::from_str_radix(_, 16)` check this replaces was
     /// actually BLIND to — the length clause already caught the 7-char, 5-char
