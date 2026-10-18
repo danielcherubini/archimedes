@@ -353,12 +353,251 @@ Two documentation gaps are part of this bug. First, no file tells a user or a su
 
 ---
 
+## Findings
+
+Task 4 executed on Linux (`x86_64-unknown-linux-gnu`), no Windows machine and no
+access to the reporter. Everything below is therefore either (a) something read
+out of this tree and re-checked here, (b) something re-checked against a local
+`sqlite3`, (c) upstream Microsoft documentation, or (d) explicitly marked as NOT
+OBTAINED. No Windows runtime behaviour was observed. Nothing here claims the
+`\\?\` prefix is, or is not, the cause of the reporter's failure — see the
+sub-heading at the end.
+
+### 1. The coupling is now pinned by a test
+
+`src-tauri/tests/storage.rs::the_session_cwd_string_and_the_space_path_key_are_the_same_string`
+asserts, for one folder, that the string `record_session` writes to
+`sessions.cwd` and the string `upsert_space` writes to `spaces.path` are
+byte-identical, reading BOTH back out of the database (`db.session(…)?.cwd` and
+`db.list_spaces()[0].path`). It passes on all three platforms today; its job is
+to go red the moment either stringifier is changed without the other.
+
+It is not vacuous — verified by a mutation probe on each side in turn:
+
+| Probe (temporary, reverted before commit) | Result |
+| --- | --- |
+| `db.rs:325` → `format!("{}|MUTATION-PROBE", info.cwd.display())` (the session side) | **FAILED** — `left: "…/space\|MUTATION-PROBE"`, `right: "…/space"` |
+| `db.rs:744` → `.map(\|c\| format!("{}|MUTATION-PROBE", c.display()))` in `space_key` (the space side) | **FAILED** — `left: "…/space"`, `right: "…/space\|MUTATION-PROBE"` |
+| Neither (committed state) | **ok** — `12 passed` in `tests/storage.rs`, `1249 passed / 0 failed / 4 ignored` overall (baseline 1248 + this test) |
+
+Both probes were reverted and the revert confirmed with `git diff` (the working
+tree at commit time contained only `tests/storage.rs`, `src/types.rs` and this
+document) plus `grep -rn "MUTATION-PROBE" src-tauri/src src-tauri/tests` → 0
+hits in code (the only remaining occurrences are the two table cells above,
+which are this report).
+
+The test canonicalizes its fixture dir BEFORE building the `SessionInfo`, and
+that is load-bearing rather than hygienic: the two writers differ in shape —
+`record_session` stores the raw `info.cwd.display()` (`db.rs:325`, no
+canonicalization at all) while `upsert_space` stores `space_key()`'s
+re-canonicalized value (`db.rs:645` → `:742-746`). A raw temp path therefore
+diverges on macOS (`/var` → `/private/var`) and on Windows (the prefix is added
+on one side only) for reasons unrelated to the coupling under test. Production
+avoids that by canonicalizing at `agent/session/mod.rs:1133` (start) and
+`:1156` (resume); the invariant is about the stringifiers.
+
+`src/types.rs` now carries the same warning on `pub cwd: PathBuf` — a `PathBuf`
+type with a `display()`-stringified wire form, and the ten frontend equality
+sites (seven in `store/sessions.ts`, three in components) plus
+`worker/manager.rs:768` that compare that string.
+
+⚠ One correction to the task text, found while writing the references: every
+`store/sessions.ts` line number quoted in constraint 2 is **one line above** the
+comparison it names (the filter predicate sits on the line after `.filter((s)`),
+and `SpaceTabs.tsx:150` is a `path === activeSpacePath` compare, not a cwd
+compare. The three doc comments added here cite the verified lines
+(`sessions.ts:466`/`:502`/`:560`/`:565`/`:921`/`:966`/`:1249`,
+`SpaceTabs.tsx:106`/`:162`, `SpacesList.tsx:74`) and also name the greppable
+predicate `cwd ===`, because these numbers drift and the invariant does not.
+Constraint 2's substance — seven joins in the store plus three in components,
+all raw string equality — is confirmed as written.
+
+### 2. Long-path awareness: the manifest analysis, done by reading
+
+Verified in this tree, not assumed:
+
+- `src-tauri/windows-app-manifest.xml` is **14 lines** and contains **no
+  `<longPathAware>` element** (`grep -c longPathAware` → `0`). Its entire
+  content is the Common-Controls-v6 `dependentAssembly`.
+- `build.rs:93-98` embeds it with
+  `cargo:rustc-link-arg=/MANIFEST:EMBED` + `/MANIFESTINPUT:<path>` + `/WX`, on
+  the `windows` + `msvc` branch only (`:37-49`), where
+  `tauri_build::WindowsAttributes::new_without_app_manifest()` (`:46`) first
+  takes the manifest away from `tauri-winres` so the unscoped link arg can
+  reach tests/benches/examples/cdylibs too (upstream tauri#13419 / #13948).
+- The "byte-for-byte copy of tauri-build's default" claim at `build.rs:21-23`
+  (restated as "byte-equal" at `:84-86`) was re-checked here rather than
+  trusted: `md5sum` of the vendored file and of the manifest in **each**
+  locally-vendored `tauri-build` (2.6.3, 2.7.1, and the locked 2.7.2) are all
+  `52be4de7dbb84d8eef5a957d679195cc`. `tauri-winres` 0.3.6 ships no manifest
+  template and no `longPathAware` string anywhere (`grep -rl` → 0 hits), so
+  there is no second place a long-path element could already be coming from.
+
+Adding the element would need (per Microsoft's *Maximum Path Length
+Limitation*, the authoritative text, last updated 2024-07-16):
+
+```xml
+<application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings xmlns:ws2="http://schemas.microsoft.com/SMI/2016/WindowsSettings">
+        <ws2:longPathAware>true</ws2:longPathAware>
+    </windowsSettings>
+</application>
+```
+
+— i.e. the `asm.v3` namespace on `<application>` and the 2016
+`WindowsSettings` namespace on the element, neither of which the current file
+declares. **A manifest entry alone does not make long paths work on a user's
+machine**: Microsoft states two conditions must BOTH hold — the manifest
+element, *and* `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled`
+(a `REG_DWORD`) existing and set to `1`, which the system caches per process
+after the first affected call, so a change is not seen by a running process and
+may need a reboot. The default value of that key on a given install was **not
+verified here** (no Windows machine; the widely-repeated claim that 11 ships it
+on and 10 ships it off was not confirmable from Microsoft's own page, and one
+third-party report describes a Windows 11 25H2 install where it was reported as
+`0`) — so do not repeat either default as fact. It also applies only to a named
+list of the `…W` Win32 file/directory functions, so it is not a global
+"`MAX_PATH` is gone" switch.
+
+Consequence for this branch, stated as precisely as the evidence allows: the
+absence of `<longPathAware>` is a verified fact about our manifest, and the
+mechanism by which that absence would make a non-verbatim path over 260
+characters fail is documented by Microsoft. **Neither was executed on Windows
+here**, so constraint 1's "the verbatim prefix is currently the only thing that
+lets a deep Space open" remains an inference from those two, not an observation.
+The `StartEnv.cwd` leg of that chain is verifiable locally and is real: it is a
+`String` (`agent/worker/protocol.rs:201`), built from `cwd.display().to_string()`
+(`agent/session/mod.rs:959`), turned back into a path in the Worker
+(`agent/worker/core.rs:253`) and handed to the OS as
+`cmd.current_dir(&ctx.cwd)` (`agent/tools/exec.rs:401`). So "the `PathBuf`
+stays a `PathBuf`, therefore only strings change" is false on that path — after
+`worker/core.rs:253` there is no type left to protect it.
+
+Because adding the element (i) changes what the shipped binary can open, (ii)
+is gated by a per-machine registry value we do not control, and (iii) makes
+`build.rs:21-23`'s and `:84-86`'s byte-equality claim **false** — that claim is
+the whole of the "nothing disappears from the shipped app" argument the
+unscoped-embedding workaround rests on, so the comment must be rewritten in the
+same change that adds the element — this stays out of scope and needs its own
+ADR. Recorded as the first follow-up below.
+
+### 3. The `LIKE` probe claim, re-run locally
+
+Constraint 5 was re-checked against a local `sqlite3` 3.51.2 with a seeded
+`\\?\C:\proj` row (written from a `.sql` file, since shell quoting mangles
+backslashes — the first attempt through `sqlite3 "…"` reported `substr: 0`
+purely because the shell ate them; the stored value's `hex()` confirms
+`5C5C3F5C433A…`, i.e. the intended 10 characters):
+
+```
+like-escape-zero: 0     -- WHERE path LIKE '\\?\%' ESCAPE '\'
+substr-one      : 1     -- WHERE substr(path, 1, 4) = '\\?\'
+like-case-insens: 1     -- WHERE path LIKE '/tmp/alpha'   (row is '/tmp/Alpha')
+pk-binary-lookup: 0     -- WHERE path = '/tmp/alpha'
+```
+
+Confirms constraint 5 exactly: under `ESCAPE '\'` the pattern is a 5-character
+exact match with no wildcard (a re-key written as a `LIKE` probe would find
+nothing and report success), and `LIKE` is ASCII-case-insensitive where a
+`PRIMARY KEY` lookup — which is what `find_space` (`db.rs:693`) and
+`delete_space` (`db.rs:725`) issue with the frontend's raw string — is binary.
+The asymmetry means a probe and the real operation can disagree about whether a
+row exists.
+
+Also confirmed while reading, for the record: `spaces.path` is a `PRIMARY KEY`
+(`db.rs:777-778`), and the existing probe+transaction migrations sit at
+`db.rs:118-131` / `:136-160` i.e. **before** `conn.execute_batch(SCHEMA)` at
+`:162`, so constraint 4's "a re-key must go after `:162` or it errors
+`no such table`" is right about the ordering as the file stands today.
+
+### 4. What is genuinely unaffected (and the wording trap in it)
+
+Re-read rather than trusted: `FsBackend::check_under_roots` canonicalizes the
+root on every check (`agent/fs_backend.rs:161-171`), the session-boundary
+`canon` helper canonicalizes before comparing (`agent/boundary.rs:96-98`),
+`sandbox.rs:579` canonicalizes the write root against already-canonicalized
+`protected_dirs`, and `exec.rs:320-323` canonicalizes both sides of the
+protected-dir test. Both sides of each comparison therefore carry the same
+`\\?\` shape on Windows, so they agree — the trusted-space lookup
+(`space_trusted`, `db.rs:705-717`, canonicalizing its `Path` argument) is in the
+same category. Windows CI has already been bitten by the *opposite* mistake,
+which is recorded in-tree: `agent/boundary.rs:28-35` documents a real CI failure
+(`read: path escapes the session sandbox: \\?\C:\Users\runneradmin\…`) caused by
+comparing a verbatim path against a bare `/`.
+
+The trap in the sentence above: `canonicalize` does not **remove** the verbatim
+prefix on Windows, it **adds** it. Anyone tempted to reason "the OS normalizes
+it away" should apply that thought to a *string* site first — `sessions.cwd`,
+`spaces.path`, the `SpaceTabs.tsx:237-239` tooltip, `StartEnv.cwd` — because
+that is exactly how this bug comes back.
+
+Two more canonicalized-path display sites are **deliberately out of scope**
+here, listed so a grep for `canonicalize` does not read them as oversights:
+`src/agents.rs:139` (`path: canon.to_string_lossy().into_owned()`, canonicalize
+at `:105` — note: the crate-root `src/agents.rs`, not `commands/agents.rs`) and
+`src/skills.rs:259` put the verbatim prefix into `AgentDefinition.path` and the
+skill paths, which reach the wire and the system prompt's `<location>` /
+`<project_instructions path>` attributes (`agent/harness/prompt.rs:96`), and
+`agent/harness/prompt.rs:138` slash-normalizes the cwd into the `<cwd>` section,
+so a Windows prompt shows the `//?/C:/…` shape. All cosmetic on both platforms,
+and fixing any of them independently is the same one-sided-normalization hazard
+this task exists to prevent — hence untouched.
+
+### 5. Reporter log evidence — STILL OUTSTANDING
+
+**Not obtained. Nothing in this section substitutes for it, and nothing here
+should be read as having settled the cause.** This task was executed on Linux
+with no Windows machine, no Windows VM or CI run against a real Space, and no
+channel to the reporter, so the requested log lines could not be produced. No
+Windows output has been invented, paraphrased from expectation, or reasoned into
+existence anywhere in this document.
+
+What would settle it, in one session on the reporter's machine:
+
+1. Set `ARCHIMEDES_DEBUG=1` in the environment **before launching** the app (it
+   is read once at startup, `agent/debuglog.rs:43-56` — setting it afterwards
+   does nothing, and with it unset no log file is created at all).
+2. Build/install a build **containing Task 3 of this branch** — the
+   `ipc start_session FAILED: …` line does not exist in any released build, so
+   a log from today's release cannot contain it. This is a genuine ordering
+   problem for closing issue #44: the diagnostic that identifies the cause
+   ships in the same branch as the fix for the symptom that hid it.
+3. Open a Space three times: (i) at a **drive root** (`C:\` — the
+   verbatim-path case, `canonicalize` yielding `\\?\C:\`), (ii) at an ordinary
+   shallow folder, (iii) at a folder whose full path exceeds **260 characters**
+   (the long-path case, whose behaviour depends on the registry value in §2).
+4. Read `%APPDATA%\archimedes\supervisor.log` (Windows resolves that directory
+   via `SHGetKnownFolderPath(FOLDERID_RoamingAppData)`, which **ignores** the
+   `%APPDATA%` variable — so point at the Roaming path itself, per ADR 0025) and
+   dump the `spaces` and `sessions` tables alongside it.
+
+The two candidate causes that must be told apart, and which today's evidence
+cannot:
+
+- **The drive-root verbatim path** — a `\\?\C:\` Space path reaching something
+  that mishandles it. Signature: a failure specific to case (i), and a
+  `sessions.cwd` / `spaces.path` pair whose stored spelling differs, or a
+  `FolderMissing` for a folder that exists.
+- **`no models available for the native session`** (`agent/session/mod.rs:1796`,
+  `SessionError::Command`) — the leading hypothesis, because a fresh install has
+  no provider configured and it fits every observed fact: first Space, new
+  Windows install, a structured rejection, no log. Signature: the same line in
+  **all three** cases including (ii), which would exonerate the path entirely.
+
+Only case (i) failing while (ii) succeeds implicates the path; all three failing
+with the same sentence closes the path question and makes the follow-up
+"dedicated message for the likely root cause" the actual fix. Until that line
+exists, §1's test is the only durable output of Task 4's Windows half, and it is
+deliberately the part that did not need a Windows machine.
+
+---
+
 ## Follow-ups recorded, deliberately not in this plan
 
-- **Long-path awareness on Windows.** `src-tauri/windows-app-manifest.xml` declares no `<longPathAware>`, so the `\\?\` prefix from `canonicalize` is currently the only thing letting a >260-char path open. A Space deep enough to cross 260 characters may therefore be behaving oddly today for that reason alone, independently of everything in this plan. (The registry value gates only the *manifest-based*, non-verbatim route — do not confuse the two.) Adding the manifest element is a real change (it alters what the shipped binary can open, and it invalidates `build.rs:21-23`'s "byte-identical to tauri-build's default" claim) and needs its own ADR.
-- **Stripping `\\?\` for display.** If Task 4's findings say the prefix matters, design it against Task 4's five constraints — the strip has to move `SessionInfo.cwd`, `sessions.cwd`, `spaces.path` and the frontend's seven string joins in one change, and the migration must run after `db.rs:162` with an explicit delete/update order.
+- **Long-path awareness on Windows.** `src-tauri/windows-app-manifest.xml` declares no `<longPathAware>` (verified — Task 4's `## Findings` §2), which by Microsoft's documented mechanism is what currently leaves the `\\?\` prefix from `canonicalize` as the only thing letting a >260-char path open — an inference from a verified manifest fact plus Microsoft's spec, NOT something observed on a Windows machine here. A Space deep enough to cross 260 characters may therefore be behaving oddly today for that reason alone, independently of everything in this plan. Note the two conditions are conjunctive: manifest element **and** the `LongPathsEnabled` registry value (the verbatim `\\?\` route needs neither, which is the distinction to keep — the registry value gates only the *manifest-based*, non-verbatim route). Adding the manifest element is a real change (it alters what the shipped binary can open, and it invalidates `build.rs:21-23`'s "byte-identical to tauri-build's default" claim, which is the load-bearing half of the unscoped-embedding argument) and needs its own ADR.
+- **Stripping `\\?\` for display.** Task 4's findings deliberately do **not** say the prefix matters — the reporter's log, which is what would settle it, is recorded as outstanding in `## Findings` §5. If that evidence ever arrives and says it does, design the strip against Task 4's five constraints — it has to move `SessionInfo.cwd`, `sessions.cwd`, `spaces.path` and the frontend's seven string joins in one change (the test from `## Findings` §1 is the tripwire), and the migration must run after `db.rs:162` with an explicit delete/update order.
 - **`close_session` failures are invisible.** They are `console.error`-only (`SpaceTabs.tsx:334`/`:340`) and rendered nowhere, so a Space whose sessions failed to stop looks exactly like one that closed cleanly. Task 3 logs them server-side; nothing surfaces them. Whether a banner is warranted is a product call.
 
-- **A dedicated message for the likely root cause.** If Task 4's investigation confirms the fresh-install failure is `no models available for the native session`, the right fix is product-level — detect "no provider configured" and send the user to Settings — not a better sentence. Out of scope here; the message becomes legible in Tasks 1-2 regardless.
+- **A dedicated message for the likely root cause.** Task 4 could NOT confirm it — the reporter's log is recorded as outstanding in `## Findings` §5, and `no models available for the native session` (`agent/session/mod.rs:1796`) remains a hypothesis, not a finding. If that log does arrive and confirms it, the right fix is product-level — detect "no provider configured" and send the user to Settings — not a better sentence. Out of scope here; the message becomes legible in Tasks 1-2 regardless.
 - **`prune_crash_logs`' cross-process hazard** is already tracked upstream in issue #42 (`agent/crashlog.rs`'s "Accepted, not fixed" section). Unrelated to this plan.
 - **Always-on logging**, if the opt-in switch proves too costly in practice — the decision and its cost are recorded in ADR 0063 so reopening it does not require re-deriving the argument.
