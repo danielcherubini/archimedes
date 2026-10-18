@@ -96,18 +96,43 @@ fn write_crash(
     // history. `a_failing_write_prunes_nothing_even_though_it_could`
     // watches this position — it goes red (60 files become 50) if the
     // call moves above the `fs::write`.
-    prune_crash_logs(dir);
+    //
+    // `path` goes in as the PROTECTED file: it is already sitting in the
+    // directory, so without it the prune would be free to delete the log it
+    // is supposed to be keeping (`a_full_directory_of_future_dated_logs_never_eats_the_new_crash`,
+    // `equal_mtimes_never_decide_which_crash_survives`).
+    prune_crash_logs(dir, &path);
     Some(path)
 }
 
 /// Best-effort retention: deletes crash logs older than
-/// [`MAX_CRASH_LOG_AGE_DAYS`] and then trims what is left to the newest
-/// [`MAX_CRASH_LOG_FILES`].
+/// [`MAX_CRASH_LOG_AGE_DAYS`] and then trims what is left so that `dir`
+/// holds at most [`MAX_CRASH_LOG_FILES`].
 ///
 /// Runs AFTER the write, never before it: on a full disk (or a directory
 /// that refuses anything) the crash log that just happened is worth more
 /// than the history, so a failing write must not have spent a file to get
 /// there.
+///
+/// # `keep` is never a candidate
+///
+/// The log that was just written is passed in as `keep` and is excluded from
+/// BOTH passes — it is not deletable and it still COUNTS toward the cap, so
+/// at most `MAX_CRASH_LOG_FILES - 1` older logs survive alongside it. That
+/// exclusion is the whole reason the parameter exists. `prune_crash_logs`
+/// runs after `fs::write` succeeded, so the new file is already in the
+/// directory and would otherwise be a candidate like any other, and the
+/// cap pass deletes from the FRONT of an mtime-sorted list: the new file is
+/// exactly the file most likely to sit at the front, because after a clock
+/// rollback its stamp is the only one in the PAST (every retained log looks
+/// newer), and when the retained logs share one mtime — a crash loop writing
+/// 50 logs inside a single mtime tick, or any coarse filesystem —
+/// `sort_by_key` is stable and cannot rank them, so `read_dir`'s arbitrary
+/// order picks the victim instead. Either way `write_crash` would return
+/// `Some(path)` for a path that no longer exists, and the **Stalled** banner
+/// hands that path to External Open: **a returned path that does not exist is
+/// the one outcome worse than an unbounded directory**, because the user
+/// clicks it and gets nothing while the crash leaves no trace.
 ///
 /// Best-effort BY CONSTRUCTION — every fallible call is swallowed
 /// (`read_dir`, `metadata`, `modified`, `remove_file`). This runs inside a
@@ -124,12 +149,23 @@ fn write_crash(
 /// deleting. It must still NOT match `debuglog`'s `supervisor.log` /
 /// `supervisor.log.old`, which live in the same directory.
 ///
+/// # The two passes, and what each one is allowed to delete
+///
 /// mtime is the only clock here — the same clock attribution trusts, and
-/// the only one that survives a process that died mid-write. An age that
-/// cannot be computed (no metadata, no mtime, or an mtime in the FUTURE —
-/// clock skew, a restored backup) means KEEP: an unmeasurable age must
-/// never delete history.
-fn prune_crash_logs(dir: &std::path::Path) {
+/// the only one that survives a process that died mid-write.
+///
+/// The AGE pass deletes only what it can PROVE is old. An age that cannot be
+/// computed (no metadata, no mtime, or an mtime in the FUTURE — clock skew,
+/// a restored backup) means KEEP: an unmeasurable age must never delete
+/// history, so a future-dated file is untouchable HERE.
+///
+/// The CAP pass is deliberately NOT bound by that rule. When the directory is
+/// genuinely over the limit it trims by mtime regardless of direction, so it
+/// CAN delete a future-dated file — and that is intended, not a violation of
+/// the clock-skew rule above: on a full disk this crash is worth more than
+/// the history, and the newest crash outranks it. The one file the cap pass
+/// may never touch is `keep`.
+fn prune_crash_logs(dir: &std::path::Path, keep: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -142,6 +178,10 @@ fn prune_crash_logs(dir: &std::path::Path) {
             continue;
         }
         let path = entry.path();
+        // The log this write just produced: not a candidate for either pass.
+        if path == keep {
+            continue;
+        }
         let Ok(mtime) = path.metadata().and_then(|m| m.modified()) else {
             continue;
         };
@@ -152,9 +192,11 @@ fn prune_crash_logs(dir: &std::path::Path) {
         }
         survivors.push((mtime, path));
     }
-    if survivors.len() > MAX_CRASH_LOG_FILES {
+    // `keep` occupies one slot of the cap, so the history gets the rest.
+    let budget = MAX_CRASH_LOG_FILES.saturating_sub(1);
+    if survivors.len() > budget {
         survivors.sort_by_key(|(mtime, _)| *mtime);
-        let excess = survivors.len() - MAX_CRASH_LOG_FILES;
+        let excess = survivors.len() - budget;
         for (_, path) in survivors.into_iter().take(excess) {
             let _ = std::fs::remove_file(&path);
         }
@@ -812,6 +854,178 @@ mod tests {
             "a future-dated mtime is clock skew, not freshness — it is never deleted"
         );
         assert!(!ancient.exists(), "the genuinely old file is still deleted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A future-dated crash-log-shaped file, one that is
+    /// `mins_behind_the_hour` minutes UNDER an hour from now: every file
+    /// made by this helper is future-dated (so the AGE pass must spare it),
+    /// while the seeds stay MUTUALLY ORDERED — "oldest of the lot" keeps a
+    /// defined answer, which the CAP pass needs. A fixture whose futures were
+    /// all identical would make the deletion order `read_dir`'s choice rather
+    /// than the code's, and this helper is deliberately not that.
+    fn future_aged(dir: &Path, name: &str, mins_behind_the_hour: u64) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, "x").unwrap();
+        let ahead = SystemTime::now() + Duration::from_secs(DAYS)
+            - Duration::from_secs(mins_behind_the_hour * MINUTES);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(ahead)
+            .unwrap();
+        p
+    }
+
+    /// THE PROTECTED-FILE RULE, case 1 (the reviewer's case): a directory
+    /// already AT the cap whose every file is future-dated. The AGE pass
+    /// spares all of them (a future mtime is clock skew, never age), so the
+    /// CAP pass is the only thing with work to do — and the newest crash
+    /// outranks history, so it trims ONE of the seeds and keeps the log it
+    /// just wrote.
+    ///
+    /// Before the fix the just-written file was itself a candidate: its mtime
+    /// is the only PAST-dated one in the directory, so `sort_by_key(mtime)`
+    /// put it at the FRONT and `take(excess)` deleted it. `write_crash` then
+    /// returned `Some(path)` for a path that no longer exists — the Stalled
+    /// banner links that path to External Open, so the user gets a dead link
+    /// and the crash is gone. Clock rollback is how you meet this in the wild;
+    /// a restored backup or a guest VM with a drifting clock does it too.
+    #[test]
+    fn a_full_directory_of_future_dated_logs_never_eats_the_new_crash() {
+        let dir = temp_dir();
+        for n in 0..MAX_CRASH_LOG_FILES {
+            future_aged(&dir, &format!("crash-future-{n}.log"), n as u64);
+        }
+        assert_eq!(crash_log_names(&dir).len(), MAX_CRASH_LOG_FILES);
+
+        let written =
+            write_crash(&dir, "worker", "marker", "file:1:1").expect("the write succeeds");
+        assert!(
+            written.exists(),
+            "write_crash returned {} but the prune deleted it — a returned path \
+             that does not exist is the one outcome worse than an unbounded \
+             directory, because the Stalled banner links it (found {:#?})",
+            written.display(),
+            crash_log_names(&dir)
+        );
+        let names = crash_log_names(&dir);
+        assert_eq!(
+            names.len(),
+            MAX_CRASH_LOG_FILES,
+            "the just-written log COUNTS toward the cap — the directory holds \
+             {MAX_CRASH_LOG_FILES} logs, one of them the new one"
+        );
+        let written_name = written
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        assert!(
+            names.contains(&written_name),
+            "the new log is one of the {MAX_CRASH_LOG_FILES}: {names:?}"
+        );
+        // The cap trimmed exactly one of the FUTURES, and it picked the oldest
+        // of them (the largest offset below the hour), never the newest.
+        assert!(
+            !names.contains(&format!("crash-future-{}.log", MAX_CRASH_LOG_FILES - 1)),
+            "the OLDEST of the future-dated files is the one the cap trimmed: {names:?}"
+        );
+        assert!(
+            names.contains(&"crash-future-0.log".to_string()),
+            "the newest of the future-dated files is spared: {names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// THE PROTECTED-FILE RULE, case 2 (the likelier one): the whole full
+    /// directory shares ONE mtime, which is what a crash loop actually
+    /// looks like — 50 logs written inside one mtime tick, or any coarse
+    /// filesystem (FAT/exFAT/NFS stamp in milliseconds or seconds, not
+    /// nanoseconds). With every seed tied, `sort_by_key(mtime)` has NOTHING
+    /// to rank them with: `sort_by_key` is stable, so the order the cap pass
+    /// deletes in is `read_dir`'s order — the directory's accident, not a
+    /// decision. The one file the pass can still rank is the just-written
+    /// log, and it ranks LOWEST (its stamp is the only one in the past), so
+    /// the accident lands on it. No clock jump is needed for this shape.
+    ///
+    /// ⚠ What this test CAN and CANNOT reproduce on this machine, stated
+    /// plainly: the pure 51-way tie (the new file's own stamp tied with the
+    /// seeds') needs a filesystem whose stamp quantum is wider than the ~5 ms
+    /// `write_crash` spends capturing a backtrace. Measured here: tmpfs stamps
+    /// in ~200 µs–1 ms quanta, so the new file always lands a few ticks LATE
+    /// and the tie among the 51 never forms locally. The tie among the 50
+    /// seeds is exact and deterministic, and it is the tie that removes the
+    /// prune's ability to choose — which is the hazard. The bug it drives is
+    /// the same one, and it fires 20 times in 20 runs against the unfixed
+    /// code, so this test cannot pass by accident.
+    #[test]
+    fn equal_mtimes_never_decide_which_crash_survives() {
+        let dir = temp_dir();
+        // ONE read of the clock for ALL the seeds — a per-file
+        // `SystemTime::now()` would give 50 different stamps and the tie
+        // (the whole point) would silently not exist. Future-dated so the AGE
+        // pass is provably innocent and only the CAP pass can delete anything.
+        let shared = SystemTime::now() + Duration::from_secs(MINUTES);
+        for round in 0..3 {
+            for n in 0..MAX_CRASH_LOG_FILES {
+                let p = dir.join(format!("crash-tie-{round}-{n}.log"));
+                std::fs::write(&p, "x").unwrap();
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&p)
+                    .unwrap()
+                    .set_modified(shared)
+                    .unwrap();
+            }
+            assert_eq!(crash_log_names(&dir).len(), MAX_CRASH_LOG_FILES);
+
+            let written =
+                write_crash(&dir, "worker", "marker", "file:1:1").expect("the write succeeds");
+            assert!(
+                written.exists(),
+                "round {round}: write_crash returned {} but the prune deleted it. \
+                 Every other file in the directory shares ONE mtime, so \
+                 `sort_by_key(mtime)` cannot rank them and `read_dir` order picks \
+                 the victim — the log that just happened must never be in that \
+                 draw. Directory now holds {:#?}",
+                written.display(),
+                crash_log_names(&dir)
+            );
+            let names = crash_log_names(&dir);
+            assert_eq!(
+                names.len(),
+                MAX_CRASH_LOG_FILES,
+                "round {round}: the tied seeds are trimmed to make room — the new \
+                 log counts toward the cap instead of overflowing it: {names:?}"
+            );
+            // The trim came out of the tied group (49 seeds + the new log),
+            // so the cap held WITHOUT spending the log that just happened.
+            let written_name = written
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            assert!(
+                names.contains(&written_name),
+                "round {round}: the new log is one of the {MAX_CRASH_LOG_FILES} \
+                 survivors, not the file that paid for itself: {names:?}"
+            );
+            let seeds_left = names
+                .iter()
+                .filter(|n| n.starts_with(&format!("crash-tie-{round}-")))
+                .count();
+            assert_eq!(
+                seeds_left,
+                MAX_CRASH_LOG_FILES - 1,
+                "round {round}: exactly ONE tied seed paid for the new log: {names:?}"
+            );
+            let _ = std::fs::remove_file(&written);
+            for name in crash_log_names(&dir) {
+                let _ = std::fs::remove_file(dir.join(name));
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
