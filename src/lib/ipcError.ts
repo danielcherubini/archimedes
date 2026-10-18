@@ -9,6 +9,14 @@
  * `[object Object]`. Every `catch` that shows a rejection to the user calls
  * this instead.
  *
+ * The envelope and the resolution order below are a cross-language contract,
+ * not an implementation detail: ADR 0063
+ * (`docs/decisions/0063-ipc-errors-carry-a-kind-and-a-message.md`) fixes them,
+ * and says why the sentence is written in Rust — this function only CHOOSES
+ * which available string to show, so never build prose from `kind`, translate
+ * it, or pattern-match its values here. The producer is
+ * `src-tauri/src/agent/errors.rs`.
+ *
  * Zero imports on purpose: it is used by Settings components that never touch
  * `lib/tauri`, and a formatting helper must not drag `@tauri-apps/api` in.
  *

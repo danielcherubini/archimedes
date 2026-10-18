@@ -1,6 +1,11 @@
 //! Errors for the session layer: `SessionError` is the only error type
 //! (the read-only pre-approval `FsBackend` has its own local `FsError`
 //! in `fs_backend.rs`).
+//!
+//! The wire contract this file implements — the `{kind, message, …}` envelope,
+//! the rule that RUST owns the sentence the user reads, and why there is no
+//! `Serialize` derive — is ADR 0063
+//! (`docs/decisions/0063-ipc-errors-carry-a-kind-and-a-message.md`).
 
 /// Errors surfaced by the session layer.
 ///
@@ -52,7 +57,7 @@ pub enum SessionError {
 }
 
 impl SessionError {
-    /// The serialized `kind` discriminator (the wire contract — see the ADR).
+    /// The serialized `kind` discriminator (the wire contract — ADR 0063).
     ///
     /// Byte-identical to what the deleted `#[serde(rename_all = "snake_case")]`
     /// produced, so anything already reading `kind` keeps working. Exhaustive:
@@ -71,7 +76,8 @@ impl SessionError {
     }
 }
 
-/// The IPC envelope: `{"kind", "message", …the variant's own field}`.
+/// The IPC envelope: `{"kind", "message", …the variant's own field}` — the
+/// contract, and the reason it is hand-built rather than derived, is ADR 0063.
 ///
 /// `message` is the `#[error(...)]` Display sentence and is ALWAYS present and
 /// non-empty — it is the key the frontend renders, and the reason the payload
