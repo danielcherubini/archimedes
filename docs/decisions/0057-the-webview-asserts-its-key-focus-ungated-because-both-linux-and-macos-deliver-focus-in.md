@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-10-17
-superseded-by:
+superseded-by: 0061-the-focus-in-key-focus-grab-is-withheld-on-windows-because-there-it-is-the-webviews-widget-focus-event.md
 
 ---
 

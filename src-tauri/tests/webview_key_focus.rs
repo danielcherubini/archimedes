@@ -17,8 +17,10 @@
 //! refuted outright (`WebviewAttributes::from(&WindowConfig)` never sets
 //! `visible`, wry defaults it true, so `show_all()` and `grab_focus()` both run
 //! on a realized widget; ADR 0056 records that refutation, and 0057 — which
-//! supersedes 0056 — inherits it. **The decision you are testing is 0057's**, so
-//! every instruction below names 0057.
+//! supersedes 0056 — inherits it. **The decision you are testing is 0057's on
+//! Linux/macOS**, superseded by ADR 0061 on Windows. Windows keeps the `Ready`
+//! grab but skips the focus-in grab. Steps 1–3 apply on every platform; step 4
+//! checks Linux/macOS focus-in, and step 5 checks Windows interaction.
 //!
 //! Nothing in the headless suite can settle it. The mock runtime has **no
 //! widget**: `MockRuntime` fakes window and webview handles, so `set_focus()` on
@@ -93,9 +95,23 @@ WHAT YOU ARE MEASURING
    focus-out/in cycle that the second arm exists for — minimise/restore re-maps
    the window without anything re-asserting the widget's focus, which is how the
    symptom returns even if step 2 passes.
-   ⚠ Linux/macOS ONLY. Windows never delivers `WindowEvent::Focused(true)` for a
-   window of our shape (one webview, no children), so on Windows that arm cannot
-   fire and step 4 proves nothing — record it as "not applicable", not "failed".
+   ⚠ LINUX/macOS ONLY — and NOT because Windows cannot deliver the event. It
+   does deliver it (ADR 0061: WebView2's `add_GotFocus` synthesises it), but
+   `key_focus_grab_needed` refuses the focus-in arm on Windows, so the correct
+   Windows observation is that NO new `focus:` line appears at this step (the one
+   from launch stays). Record "no new line, by design", not "not applicable".
+
+5. ON WINDOWS: PROVE THE FOCUS-IN ARM STAYS OUT OF THE WAY (the ADR 0061 check)
+   Expect exactly ONE `focus: webview key focus grabbed` line, at launch (the
+   `Ready` arm still runs on Windows by design). With the log open, click into
+   the composer and type, then click a Settings input, then tab between fields.
+   The window must stay usable throughout AND the log must gain NO FURTHER
+   `focus:` line from any of that interaction.
+   - One launch line, then silence, and typing works → the Windows fix is CONFIRMED.
+   - A NEW `focus:` line appears as you click → THE GATE HAS REGRESSED. The grab
+     is firing on webview WIDGET focus again, which is what made every click land
+     on nothing (ADR 0061). Do not investigate the DOM: check
+     `key_focus_grab_needed` and its `cfg!(windows)` call site first.
 
 THE FOUR VERDICTS (say which one, and quote the log lines)
   (a) Dialog OPENS at step 2, and the log shows `focus: webview key focus grabbed`
