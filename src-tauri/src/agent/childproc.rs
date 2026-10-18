@@ -486,16 +486,22 @@ mod tests {
     ///
     /// **Why the region and not the file.** [`is_comment`] is what makes this
     /// rule usable: `crashlog.rs` contains the literal string
-    /// `dirs::data_dir()` THREE times right now and not one of them is code —
-    /// twice in the module `//!` doc (`:13` and `:21`, which sit INSIDE the
-    /// scanned region, so only the comment filter saves them) and once in a
-    /// `///` doc comment inside `mod tests` (`:251`, which the region boundary
-    /// excludes before the filter is even consulted). A naive "the file
-    /// contains the string" rule would therefore be a PERMANENT false
-    /// positive — the kind that gets the test deleted rather than the code
-    /// fixed. The region stops at the first non-comment `#[cfg(test)]`
-    /// (`crashlog.rs:133`), which is also why the test-side mentions can never
-    /// leak in.
+    /// `dirs::data_dir()` THREE times and not one of them is code — twice in
+    /// the module `//!` doc, which sits INSIDE the scanned region (so only the
+    /// comment filter saves them), and once in a `///` doc comment inside
+    /// `mod tests`, which the region boundary excludes before the filter is
+    /// even consulted. A naive "the file contains the string" rule would
+    /// therefore be a PERMANENT false positive — the kind that gets the test
+    /// deleted rather than the code fixed — and a naive "everything above
+    /// `mod tests`" rule would scan the module-doc prose and trip on it too.
+    /// The region stops at the first non-comment line starting with
+    /// `#[cfg(test)]`, which is also why the test-side mentions can never leak
+    /// in.
+    ///
+    /// **No line numbers are quoted here, on purpose.** `crashlog.rs` shifts
+    /// with every edit, and a drifted number is a worse guide than none —
+    /// locate the occurrences with
+    /// `grep -n 'dirs::data_dir()' src/agent/crashlog.rs` when you need them.
     ///
     /// **Inherited blind spot:** this is [`is_comment`] with all its limits, so
     /// the `*`-prefix rule silently drops any line whose trimmed text starts
