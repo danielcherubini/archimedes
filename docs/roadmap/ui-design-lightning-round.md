@@ -25,10 +25,10 @@ done-when: A user sees the assistant's reply on the same band as their own messa
 
 This is a `git worktree`, not a clone. Do **not** `cd` to the main checkout to run commands, and do not create another worktree.
 
-**Disk is 95% full (13 GB free) and `src-tauri/target` is 137 GB.** The two sharing arrangements already in place:
+**Run no Rust here, because the sharing setup makes a local build pointless, not because the disk is full.** Two arrangements are already in place:
 
-- `node_modules` is a btrfs reflink copy — costs zero real space. Leave it.
-- `src-tauri/target` is a **symlink to `/tmp/archimedes-wt-ui-target`** (an empty dir). Cargo's dep-info files embed absolute source paths, so a second checkout at a second path cannot reuse the main cache anyway.
+- `node_modules` is a btrfs reflink copy of the main checkout's — costs zero real space. Leave it.
+- `src-tauri/target` is a **symlink to `/tmp/archimedes-wt-ui-target`**, an empty dir. Cargo's dep-info files embed absolute source paths (measured: 5 refs to the main checkout's path in one `.d` file), so a build in this worktree cannot reuse the main checkout's cache — it would compile the whole dependency tree from scratch here while the main checkout keeps building its own.
 
 **Therefore: run NO cargo command in this worktree.** `cargo test`, `cargo clippy`, `cargo fmt`, `pnpm tauri build`, `make check` — none of them. This branch touches **zero Rust**, so the cargo lanes are not part of its bar (AGENTS.md: the Rust lanes run from `src-tauri/`, and there is nothing here to validate). Building Rust would allocate a fresh 137 GB tree into `/tmp` and fail. Do not delete the symlink.
 
@@ -72,6 +72,8 @@ Decisions already made: the band reuses the **token** `bg-composer` (never a cop
 - Modify: `src/components/MessageBubble.tsx` (the `case "agent-text":` arm, currently ~line 658)
 - Test: `src/components/MessageBubble.test.tsx`
 - Test: `src/components/chat/MessageList.gap.test.tsx` (update the two rhythm tests named below)
+- Test: `src/components/MessageBubble.codeblock.test.tsx` (**required** — see step 5a)
+- Modify: `src/components/SubagentTranscript.tsx` (one container class — see step 5b)
 
 **What to implement:**
 
@@ -96,6 +98,12 @@ Decisions already made: the band reuses the **token** `bg-composer` (never a cop
 
 5. **Do not** put `my-*` on the band the way the user case puts it on its *unit* — the user case deliberately puts `my-5` on the unit and not the band because its mention cards and image grid are siblings; `agent-text` has no siblings, so the margins belong on the band itself.
 
+5a. **Scoping the codeblock test is part of this task, not a follow-up.** Adding an always-present `role=button` to every `agent-text` bubble breaks three tests in `MessageBubble.codeblock.test.tsx`, which renders `agent-text` and queries the fence's copy button **unscoped**: `:443` `screen.getByRole("button").getAttribute("aria-label")` and `:489` `await clickCopy(screen.getByRole("button"))`. Two buttons per render makes `getByRole` throw `Found multiple elements with the role "button"` (verified against this tree's `@testing-library/dom@10.4.2`), killing the whole "copy button: the 1.5s reset and the unmount cleanup" group (`:445`, `:471`, `:504`). Fix by giving the two buttons **distinct accessible names** and scoping the queries: keep the fence's `"Copy code"` / `"Copied"` and give the response button `"Copy response"`; then scope `copyLabel()` and `:489` with `within(...)` or `getByRole("button", { name: "Copy code" })`. Pin with a new test that both buttons exist in one render and that clicking one never mutates the other's label.
+
+5b. **`SubagentTranscript` has a different rhythm and the negative margin would overlap it.** Its messages sit in `<div className="flex flex-col gap-2"><div className="space-y-1">` (`SubagentTranscript.tsx:96-98`) — 4px, not `MessageList`'s 12px. Against 4px, `-mt-2` (−8px) produces **−4px: the reply visibly overlaps the row above it.** Change that inner container from `space-y-1` to `flex flex-col gap-3` so the sheet uses the same 12px base as the main transcript and the band's 4px/32px arithmetic holds in both places. One class, and it removes a second undocumented rhythm rather than adding one.
+
+5c. **Return a fragment, not a wrapper `<div>`.** `MessageBubble.markdown.test.tsx:50-52` reads `container.firstElementChild.firstElementChild` to find the markdown root, so a single wrapping element shifts the path and reddens that file. The arm must return `<>{band}{button}</>`.
+
 6. Update `MessageList.gap.test.tsx`. Its `extra()` helper reads the **row wrapper**'s classes (the wrapper `MessageList` renders), so the band's own margins are invisible to it and every existing assertion stays green — but two test *names/intents* now describe the old world, and one needs a real new assertion:
    - `"thinking → chat keeps the tight base gap (unchanged)"` — keep the wrapper assertions (they still hold) and add an assertion that the rendered `agent-text` row contains `[data-testid="agent-band"]` whose class list contains `-mt-2` and `mb-5`, with a comment that the wrapper carries no margin *on purpose* and the 4px lives inside.
    - `"tool → prose: the breathing gap is symmetric"` — unchanged; do not touch it.
@@ -118,7 +126,7 @@ Decisions already made: the band reuses the **token** `bg-composer` (never a cop
 Decision already made: hold the sent attachments in a session-keyed ref instead of releasing them at clear-time, and release them when the turn settles.
 
 **Files:**
-- Modify: `src/components/ChatStream.tsx` (the `send()` function, ~lines 1077–1125, plus a new ref beside the other refs ~line 357)
+- Modify: `src/components/ChatStream.tsx` (`send()` is `:939-1124` — the edits land at `:1077-1102`, but read the whole function first: the `hasImages` re-derivation at `:1003-1005` and the reconcile at `:1023` are upstream of them, plus a new ref beside the other refs ~line 357)
 - Test: `src/components/ChatStream.test.tsx` (the attachment group, ~lines 2060–2200)
 
 **What to implement:**
@@ -165,7 +173,21 @@ Decision already made: hold the sent attachments in a session-keyed ref instead 
 
    Do **not** revoke the restored attachments' object URLs — that is what makes the restored thumbnail render again. Leave the existing comment about a failed send keeping attachments, and update it to say the thumbnails now go at send and come back here.
 
-5. Unmount cleanup already releases `attachmentsRef.current` (~line 396). Add the held ones too, or a send interrupted by unmount leaks object URLs. Same for the session-switch cleanup (~line 435), which must clear the held entry for the session being left.
+   **Keep the restore in the same synchronous `catch` block** as `setError`. `"a failed send keeps attachments staged"` waits on `screen.getByText("boom")`, and it passes only because `setError` and the restore land in one React 19 batch inside the same block — if the restore is moved after an `await`, the test can observe the pre-restore DOM and go flaky.
+
+5. Both cleanups must release the held attachments too, or an interrupted send leaks object URLs:
+
+   - The **unmount** cleanup (~`:396`) already releases `attachmentsRef.current` — iterate every value of `heldForSendRef.current` as well.
+   - The **session-switch** cleanup (`:431-438`) needs care: it overwrites `prevSessionIdRef.current = activeSessionId` at `:434` **before** the release at `:435`, so at the release point the only id available is the session being ENTERED. Capture the left one first:
+
+     ```ts
+     const left = prevSessionIdRef.current;
+     prevSessionIdRef.current = activeSessionId;
+     const held = heldForSendRef.current.get(left);
+     if (held) { held.forEach(releaseAttachment); heldForSendRef.current.delete(left); }
+     ```
+
+     Without capturing `left` this is exactly the leak step 5 exists to prevent, and it is permanent, because step 4's `delete` drops the entry without releasing.
 
 6. **Do not** change `hasImages`, the `MAX_CHAT_ATTACHMENTS` caps, or the `imageCapable` fail-closed gates.
 
@@ -192,7 +214,8 @@ Two decisions already made, both load-bearing:
 - Modify: `src/components/ChatStream.tsx` (`stageFiles` ~`:1183`, `removeAttachment` ~`:1318`)
 - Modify: `src/components/chat/AttachmentStrip.tsx` (a `#N` badge on each thumbnail)
 - Test: `src/lib/chatAttachments.test.ts`
-- Test: `src/components/ChatStream.test.tsx` (the paste/attachment group)
+- Modify: `src/components/ChatStream.tsx` — `send()`'s single `expandMentions` call at `:1057` (the mask wrapper, step 5)
+- Test: `src/components/ChatStream.test.tsx` (the paste/attachment group) — **two existing tests change**, inventoried below
 
 **What to implement:**
 
@@ -209,11 +232,22 @@ Two decisions already made, both load-bearing:
    export function renumberImageMarkers(text: string, removedAt: number): string;
    ```
 
-   `insertAtCaret` prepends a single space when the character at `caret - 1` is not already whitespace, and returns the caret immediately after the inserted text. `handlePaste` already calls `e.preventDefault()` (`:1221`) **before** `stageFiles`, so for an image paste the marker is the only thing that lands — there is no auto-inserted text to collide with, and any clipboard text alongside an image is discarded (existing behaviour, unchanged). The no-space branch is still real and reachable: a draft whose caret already follows a newline or space. Pin both branches on the helper as **unit** tests. `renumberImageMarkers` must be a single pass over the exact literal pattern `/\[image #(\d+)\]/g` — nothing looser, so ordinary prose mentioning "#3" is untouched.
+   `insertAtCaret` prepends a single space when the character at `caret - 1` is not already whitespace, and returns the caret immediately after the inserted text.
+
+   `renumberImageMarkers` has a **whitespace contract** — without it the deletion leaves orphan blanks. Two passes: delete the named marker (removing the marker itself, then collapsing any run of 2+ spaces the deletion created and any leading space), then decrement every marker whose number is above `removedAt`. Do NOT consume a space as part of the match pattern — that swallows the separator that follows the *last* marker in mid-sentence prose. Measured, these are the required outputs:
+
+   | input | `removedAt` | output |
+   |---|---|---|
+   | `"[image #1]"` | 1 | `""` |
+   | `"[image #1] [image #2]"` | 1 | `"[image #1]"` |
+   | `"a [image #1] [image #2] [image #3] b"` | 2 | `"a [image #1] [image #2] b"` |
+   | `"a [image #1] [image #2] [image #3] b"` | 3 | `"a [image #1] [image #2] b"` |
+   | `"look at [image #1] and stuff"` | 1 | `"look at and stuff"` |
+   | `"prose with #3 unbracketed [image #1]"` | 1 | `"prose with #3 unbracketed"` | `handlePaste` already calls `e.preventDefault()` (`:1221`) **before** `stageFiles`, so for an image paste the marker is the only thing that lands — there is no auto-inserted text to collide with, and any clipboard text alongside an image is discarded (existing behaviour, unchanged). The no-space branch is still real and reachable: a draft whose caret already follows a newline or space. Pin both branches on the helper as **unit** tests. `renumberImageMarkers` must be a single pass over the exact literal pattern `/\[image #(\d+)\]/g` — nothing looser, so ordinary prose mentioning "#3" is untouched.
 
 2. In `stageFiles`, after `addImageAttachments` returns `next` and only when `next !== attachmentsRef.current` (i.e. something was actually staged — rejected files must insert nothing), insert the markers.
 
-   **Build ONE string for the whole batch and insert it once.** A batch of N files staged in one call must produce `#k #k+1 …` **ascending**, numbered from `attachmentsRef.current.length + 1` upward. Inserting one at a time at the same caret yields `#3 #2 #1` — the numbers then run opposite to the attachment order, inverting the marker→image mapping on every multi-file paste. After the single insert, restore focus/caret inside a `requestAnimationFrame` — copy the refocus block from `selectMention` (`ChatStream.tsx:1388-1394`), because a controlled textarea drops focus on a programmatic `setDraft`.
+   **Build ONE string for the whole batch and insert it once.** A batch of N files staged in one call must produce `#k #k+1 …` **ascending**, numbered from `attachmentsRef.current.length + 1` upward. **Derive N from the returned list — `next.length - attachmentsRef.current.length` — never from `files.length`**: `addImageAttachments` can reject mid-batch (`src/lib/chatAttachments.ts:107`/`:112` `continue`, `:118` `break` on the cap), so looping the input emits a marker for a rejected file and the numbers then name the wrong picture. Inserting one at a time at the same caret yields `#3 #2 #1` — the numbers then run opposite to the attachment order, inverting the marker→image mapping on every multi-file paste. After the single insert, restore focus/caret inside a `requestAnimationFrame` — copy the refocus block from `selectMention` (`ChatStream.tsx:1388-1394`), because a controlled textarea drops focus on a programmatic `setDraft`.
 
    **Use the caret only when the textarea actually has focus.** `selectionStart` is `0` for a textarea that has never been focused, and two of the four staging paths (drag-and-drop, and the `+` file picker — the native dialog holds focus) routinely run that way, so the naive read would drop every marker at the *start* of the user's sentence. Use:
 
@@ -229,7 +263,30 @@ Two decisions already made, both load-bearing:
 
 4. In `AttachmentStrip.tsx`, render `#{index + 1}` as a small badge on each thumbnail (`absolute`-positioned, `bg-input`-ish, non-interactive `aria-hidden`), so the number in the text is checkable against the picture it names.
 
-5. **Pin the `#`-mention collision with a test, and treat this as required, not optional.** `MCP_MENTION_RE` is `/(^|\s)#([a-z0-9]+(?:-[a-z0-9]+)*)/g` (`src/lib/skills.ts:287`). In `[image #3]` the character before `#` is a space, so the left boundary is satisfied and `3` matches the token class — the marker is a **live mention candidate** that survives today only because unmatched tokens are left verbatim (invariant 5). Add a test that stages an image with an MCP catalog containing a server named `3` and asserts the draft is sent **unchanged** (`sendPrompt` receives the text byte-for-byte), so a future server literally named `3` cannot silently turn a marker into an expanded `<mcp>` block.
+5. **Make markers immune to `#`-mention expansion by construction, not by luck.** This is the task's one real risk, so read the whole step.
+
+   `MCP_MENTION_RE` is `/(^|\s)#([a-z0-9]+(?:-[a-z0-9]+)*)/g` (`src/lib/skills.ts:287`). In `[image #3]` the `#` is preceded by a space and `3` is in the token class, so the marker **is** a mention token. Today it survives only because no catalog entry is named `3` (invariant 5, verbatim). That is not a guarantee: `is_mentionable_name` (`src-tauri/src/skills.rs`) accepts digits — its own tests use `"0"` as a positive case — so an MCP server literally named `3` makes `expandMentions` append a `<mcp name=\"3\">` block to a prompt the user never asked for. Measured on this tree: with catalog `[]` the text is verbatim; with catalog `[\"3\"]` it gains the block. A test that merely asserts verbatim-ness is therefore vacuous in the safe case and false in the interesting one.
+
+   **Fix in `send()`**, at the single `expandMentions` call (`ChatStream.tsx:1057`), as a wrapper — mask, expand, unmask:
+
+   ```ts
+   const marks: string[] = [];
+   const masked = rawText.replace(/\[image #(\d+)\]/g, (m) => { marks.push(m); return "\uE000"; });
+   const expanded = expandMentions(masked, catalogs);
+   let k = 0;
+   const text = expanded.replace(/\uE000/g, () => marks[k++]);
+   ```
+
+   Proved on this tree: masking makes `expandMentions` see no `#` token at all (so no block is emitted for a marker), and because the marker text is stashed and restored verbatim the round-trip is byte-exact for every marker the user typed. Keep the existing `\uE000`-style sentinel out of any user-reachable range (a Private Use Area codepoint is not typeable by any ordinary path).
+
+   Then **pin all three directions**, or the gate is vacuous:
+   - `[image #3]` + a catalog containing `3` → `sendPrompt` receives the text with **no** `<mcp` block (the collision case — this is the test that fails without the wrapper).
+   - A genuine `#postgres` mention + a marker in the same draft → the `<mcp name=\"postgres\">` block IS appended, and the marker is still intact in the text (proves the mask did not disable real mentions).
+   - Markers only, empty catalog → text unchanged (the existing verbatim path still works).
+
+   The trailing `]` is separately load-bearing for the **picker**: `activeMentionToken` (`skills.ts:325`) returns `null` for `look [image #3]` with the caret after the `]`, but returns `{prefix:"#",remainder:"3"}` for `look [image #3` with the caret there. So the closing bracket is what stops a marker from opening the MCP picker while the user keeps typing. Say that in `imageMarker`'s docstring — a future change that drops the bracket turns every marker into a picker trigger.
+
+6. Do not touch `send()`'s other text handling: the marker is ordinary draft text and reaches the model through the existing path. Do not add a Rust change. Do not strip markers anywhere except via the mask in step 5.
 
 6. Do not touch `send()`'s text handling: the marker is ordinary draft text and reaches the model through the existing path. Do not add a Rust change. Do not strip markers anywhere.
 
@@ -238,7 +295,10 @@ Two decisions already made, both load-bearing:
 - [ ] Component test: paste one image → textarea value contains `[image #1]`; paste a second → contains `[image #1]` and `[image #2]`.
 - [ ] Component test through the `+` picker path and the drop path: both insert a marker (the "all four paths" claim is what is under test).
 - [ ] Component test: paste two, remove the first via the ✕ → draft reads `[image #1]` (the survivor renumbered), and `sendPrompt` is called with exactly that draft text.
-- [ ] The `#`-mention immunity test from step 5.
+- [ ] All three `#`-mention tests from step 5, including the collision case (`[image #3]` + a server named `3` → no `<mcp` block), which must fail before the mask wrapper exists.
+- [ ] **`"image-only send is allowed"` (`ChatStream.test.tsx:2201`) — rewrite, do not delete.** It asserts `sendPrompt` was called with `("s1", "", […])`. With markers the text is now `"[image #1]"`, and that is the **intended** semantics: a bare screenshot paste now tells the model which image it is, instead of sending an empty prompt with an anonymous image. Update the expectation to `("s1", "[image #1]", […])` and say why in a comment.
+- [ ] **`"an image-only send with the image removed during the read sends nothing"` (`:2350`) — verify, likely unchanged.** Removing the attachment also removes its marker (step 3), so the draft empties and the stale-draft guard at `:1042` aborts the send. It still asserts `sendPrompt` was not called and should still pass — but it now passes for that reason rather than the images-empty reason. Add a comment naming the guard, so nobody later reads the empty-images path as the only thing protecting it.
+- [ ] Mixed batch: 1 accepted + 1 rejected file ⇒ exactly ONE marker (`#1`), never two.
 - [ ] `npx vitest run src/lib/chatAttachments.test.ts src/components/ChatStream.test.tsx` green; `npx tsc --noEmit` clean.
 
 ---
