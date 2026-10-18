@@ -381,17 +381,66 @@ impl SessionManager {
     }
 }
 
+/// Is `name` (a bare file name) a **Worker** crash log — in either of the
+/// two shapes that exist on disk?
+///
+/// - `crash-<ts>-worker.log` — the pre-amendment shape, still sitting in
+///   users' data dirs from before the writer stamped its pid in.
+/// - `crash-<ts>-worker-<pid>.log` — the current shape (`crashlog.rs`'s
+///   `write_crash`).
+///
+/// Both are accepted on purpose: the rename and this matcher land in ONE
+/// commit, so there is never an interval where the **Stalled** banner's
+/// crash-log link matches nothing — and no integration test would notice
+/// (`tests/ipc.rs`'s crash case asserts only `at`, never `crashLog`).
+///
+/// The pid arm is a pure SUFFIX check and that is safe: `worker-` pins
+/// where the digit run starts and the `.` ends it, so no name can end in
+/// `-worker-<digits>.log` while meaning something else (brute-forced over
+/// every pid/other pair in `1..3000`: zero false positives). Do NOT
+/// "harden" this into a split-on-`-` parser — that only adds a way to
+/// drift from the writer's format.
+///
+/// Task 6 of crash-log-hardening reuses this as the pid-less fallback arm
+/// of the pid-based selector.
+fn is_worker_crash_log_name(name: &str) -> bool {
+    if !name.starts_with("crash-") {
+        return false;
+    }
+    if name.ends_with("-worker.log") {
+        return true;
+    }
+    // `-worker-<digits>.log`: peel the two fixed ends and require that
+    // what is left is a NON-EMPTY run of ASCII digits — the pid.
+    let Some(stem) = name.strip_suffix(".log") else {
+        return false;
+    };
+    let Some((head, pid_part)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    head.ends_with("-worker")
+        && !pid_part.is_empty()
+        && pid_part.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// The newest `crash-<ts>-worker*.log` in the data dir (the `StalledInfo`'s
 /// `crash_log` — globbed and FROZEN at crash time; best-effort attribution across
 /// concurrent sessions — crash logs are diagnostic, not load-bearing). `None` when
 /// the data dir is unresolvable or no crash log is found.
+///
+/// The SELECTION rule is still newest-by-mtime and unchanged here; only the
+/// name predicate was factored out into [`is_worker_crash_log_name`], which
+/// is the only way that rule gets tested — this fn takes no arguments and
+/// resolves `dirs::data_dir()` itself, so no temp-dir test can reach it
+/// until the injectable directory exists (crash-log-hardening Task 6, which
+/// also replaces this selection rule with pid attribution).
 fn find_newest_crash_log() -> Option<PathBuf> {
     let dir = dirs::data_dir()?.join("archimedes");
     let entries = std::fs::read_dir(&dir).ok()?;
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with("crash-") && name.ends_with("-worker.log") {
+        if is_worker_crash_log_name(&name) {
             if let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) {
                 if newest.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {
                     newest = Some((mtime, entry.path()));
@@ -513,5 +562,46 @@ mod tests {
             !modals.contains("render-1"),
             "fetch render request must NOT be tracked as a user modal"
         );
+    }
+
+    /// The crash-log NAME matcher accepts BOTH shapes — the pre-amendment
+    /// `crash-<ts>-worker.log` and the pid-stamped `crash-<ts>-worker-<pid>.log`
+    /// — because the rename and the matcher land in one commit: a banner
+    /// whose link silently stops matching is invisible to the integration
+    /// suite (`tests/ipc.rs`'s crash case asserts only `at`, never
+    /// `crashLog`).
+    ///
+    /// Tested as a PURE function (no filesystem) on purpose:
+    /// `find_newest_crash_log` takes no arguments and resolves
+    /// `dirs::data_dir()` itself, so a temp-dir test of it is impossible
+    /// until the injectable directory exists (crash-log-hardening Task 6).
+    #[test]
+    fn is_worker_crash_log_name_accepts_both_shapes() {
+        // The pre-amendment shape (still on disk from before the rename)
+        // and the pid-stamped shape.
+        assert!(
+            is_worker_crash_log_name("crash-1-worker.log"),
+            "the pid-less pre-amendment name still matches"
+        );
+        assert!(
+            is_worker_crash_log_name("crash-1-worker-4242.log"),
+            "the pid-stamped name matches"
+        );
+
+        // Every negative: a different tag, an empty pid, a non-numeric
+        // pid, the wrong extension, and a name that merely ENDS like ours
+        // without the `crash-` prefix.
+        for rejected in [
+            "crash-1-supervisor.log",
+            "crash-1-worker-.log",
+            "crash-1-worker-abc.log",
+            "crash-1-worker-4242.txt",
+            "notes-worker-1.log",
+        ] {
+            assert!(
+                !is_worker_crash_log_name(rejected),
+                "`{rejected}` is not a Worker crash log"
+            );
+        }
     }
 }

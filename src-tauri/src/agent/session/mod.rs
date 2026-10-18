@@ -238,10 +238,13 @@ pub(crate) struct NativeConfigState {
 pub struct StalledInfo {
     /// Unix milliseconds (the crash time).
     pub at: i64,
-    /// The newest `crash-<ts>-worker*.log` in the data dir, globbed and
-    /// FROZEN at crash time (best-effort attribution across concurrent
+    /// The newest `crash-<ts>-worker-<pid>.log` in the data dir, globbed
+    /// and FROZEN at crash time (best-effort attribution across concurrent
     /// sessions — crash logs are diagnostic, not load-bearing); `None`
-    /// when none is found.
+    /// when none is found. The matcher accepts the pre-amendment
+    /// pid-less `crash-<ts>-worker.log` too, because logs already on disk
+    /// keep their names — that both-shapes rule goes away when pid
+    /// attribution replaces the selection rule (crash-log-hardening Task 6).
     pub crash_log: Option<PathBuf>,
 }
 

@@ -2,7 +2,16 @@
 //! reused by the Supervisor in Task 6): a Worker panic stays in the
 //! Worker (the release profile is `panic = "unwind"` — a Worker
 //! process dies, the app lives), and the crash is LOGGED to
-//! `<dir>/crash-<ts>-<tag>.log`.
+//! `<dir>/crash-<ts>-<tag>-<pid>.log`.
+//!
+//! The `-<pid>` is this process's own (`std::process::id()`, stamped at
+//! write time): two **Worker** processes crashing in the same millisecond
+//! otherwise collide on one filename, and a name with no owner is why the
+//! Stalled banner's crash attribution could only guess by recency. A
+//! pre-amendment **pid-less** `crash-<ts>-<tag>.log` is still matched by
+//! the attribution matcher (`router.rs`'s `is_worker_crash_log_name`),
+//! because logs already on disk keep their names — that both-shapes rule
+//! is replaced when pid attribution lands (crash-log-hardening Task 6).
 //!
 //! The `dir` comes from the CALLER — never from this module. That is
 //! load-bearing, not convenience: a hook that resolves its own
@@ -21,9 +30,10 @@
 //! reasonable-looking `let dir = dirs::data_dir()` cannot grow back here.
 //!
 //! The tags: the Worker's `"worker"` (the session id is unknown before
-//! `Start`; the file name carries the timestamp — the Supervisor's
-//! crash attribution uses the exit + the `session-stalled`
-//! bookkeeping, NOT the file name); the Supervisor's (Task 6):
+//! `Start`; the file name carries the timestamp and the pid — today the
+//! Supervisor's crash attribution uses the exit + the `session-stalled`
+//! bookkeeping, NOT the file name, and the `-<pid>` is what lets it move
+//! to identity instead of guesswork); the Supervisor's (Task 6):
 //! `"supervisor"`.
 //!
 //! NOTE (toolchain): the panic info is only reachable from INSIDE a
@@ -43,7 +53,8 @@ pub const MAX_CRASH_LOG_AGE_DAYS: u64 = 30;
 /// See [`MAX_CRASH_LOG_AGE_DAYS`].
 pub const MAX_CRASH_LOG_FILES: usize = 50;
 
-/// The writer's testable core: writes `<dir>/crash-<ts>-<tag>.log`.
+/// The writer's testable core: writes `<dir>/crash-<ts>-<tag>-<pid>.log`
+/// (`<pid>` = `std::process::id()` — the writing process stamps itself).
 /// Content: the panic message + location + a captured backtrace.
 ///
 /// It takes the payload and the location as PLAIN STRINGS on purpose:
@@ -69,7 +80,7 @@ fn write_crash(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let path = dir.join(format!("crash-{ts}-{tag}.log"));
+    let path = dir.join(format!("crash-{ts}-{tag}-{}.log", std::process::id()));
     // `force_capture`: plain `Backtrace::capture()` is empty unless
     // `RUST_BACKTRACE` is set — `force_capture` gets the frames
     // regardless (raw frames survive `strip`).
@@ -276,14 +287,19 @@ mod tests {
         rx.recv().expect("the thread signalled before panicking");
         // The hook runs (synchronously) at the panic's start — the file
         // appears once the hook's write lands (a bounded retry). A
-        // foreign `crash-*-worker.log` (another test's panic) is read
-        // and REJECTED here by its content, not skipped by its name.
+        // foreign crash log (another test's panic) is read and REJECTED
+        // here by its CONTENT marker, never by its name — so the name
+        // filter below is deliberately the loose `crash-` prefix only:
+        // matching a NAME shape here would silently stop matching the
+        // moment the name changes (this test used to require
+        // `ends_with("worker.log")`, which the pid-stamped
+        // `crash-<ts>-worker-<pid>.log` does not satisfy).
         let mut path = None;
         for _ in 0..100 {
             if let Ok(entries) = std::fs::read_dir(&dir) {
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    if name.starts_with("crash-") && name.ends_with("worker.log") {
+                    if name.starts_with("crash-") {
                         let candidate = entry.path();
                         let owned =
                             std::fs::read_to_string(&candidate).is_ok_and(|c| c.contains(&marker));
@@ -401,14 +417,15 @@ mod tests {
             "the panic message is in the log:\n{content}"
         );
         // The tag reaches the FILE NAME (not the content) — it is what
-        // says which binary wrote the log.
+        // says which binary wrote the log. It sits between the timestamp
+        // and the writer's pid: `crash-<ts>-<tag>-<pid>.log`.
         let name = path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
         assert!(
-            name.ends_with("-worker-capture.log"),
+            name.ends_with(&format!("-worker-capture-{}.log", std::process::id())),
             "the tag given to `hook_closure` is in the file name: {name}"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -431,8 +448,10 @@ mod tests {
             .to_string_lossy()
             .to_string();
         assert!(
-            name.starts_with("crash-") && name.ends_with("-worker.log"),
-            "the file name is crash-<ts>-<tag>.log: {name}"
+            name.starts_with("crash-") && name.contains("-worker-"),
+            "the file name is crash-<ts>-<tag>-<pid>.log \
+             (`the_crash_log_name_carries_the_writing_pid` pins the pid \
+             suffix exactly): {name}"
         );
         let content = std::fs::read_to_string(&path).expect("the crash log is readable");
         assert!(content.contains(&marker), "payload: {content}");
@@ -447,6 +466,40 @@ mod tests {
         assert!(
             !backtrace.trim().is_empty(),
             "force_capture produces frames even without RUST_BACKTRACE"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The name carries the WRITING process's pid:
+    /// `crash-<ts>-<tag>-<pid>.log`. Two **Worker** processes crashing in
+    /// the same millisecond otherwise collide on one filename (the
+    /// timestamp is milliseconds and they share a millisecond boundary
+    /// often enough to matter), and a name with no owner is why the
+    /// Stalled banner's attribution can only guess by recency.
+    ///
+    /// Exact suffix, not a regex: `-{pid}.log` is the whole contract, and
+    /// the pid is this process's — the writer stamps itself.
+    #[test]
+    fn the_crash_log_name_carries_the_writing_pid() {
+        let dir = temp_dir();
+        let path = write_crash(&dir, "worker", "marker", "f:1:1").expect("the write succeeds");
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        assert!(
+            name.ends_with(&format!("-{}.log", std::process::id())),
+            "the file name ends with the writing process's pid: {name}"
+        );
+        assert!(
+            name.starts_with("crash-"),
+            "the file name still starts with `crash-` (the prune and the \
+             attribution matcher both key on it): {name}"
+        );
+        assert!(
+            name.contains("-worker-"),
+            "the tag survives the rename, pinned between the two `-`s: {name}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
