@@ -95,11 +95,22 @@ workflow can do — is writing notes a person would read.
    re-compose with `scripts/compose-updater-manifest.sh --notes "<new one-liner>"`,
    and `gh release upload vX.Y.Z latest.json --clobber` — but only when the
    downloaded `.sig` set is COMPLETE, because the composer emits one key per
-   signature it was given, so a missing sig publishes a manifest with a platform
-   missing over the good one (ADR 0052). Re-uploading is otherwise safe: the
-   signatures and the tag-pinned URLs come out identical, and
-   `tauri-plugin-updater` reads `pub_date` for display only. An incomplete set
-   means stop — stale-but-correct notes beat a broken manifest.
+   signature it was given and **exits 0 on the shrunken result**, so a missing
+   sig publishes a manifest with a platform missing over the good one (ADR 0052).
+   **COMPLETE means one `.sig` per platform this release targets — not one per
+   filename on the release.** On Windows and Linux the payload IS the installer
+   (`createUpdaterArtifacts: true` signs the raw `.exe`/`.AppImage`/`.deb`/`.rpm`;
+   `tauri-plugin-updater` sniffs the bytes, not the URL), so a correct Linux+
+   Windows release has **4 sigs serving 6 keys**: `windows-x86_64` and
+   `-nsis` share the `.exe`, `linux-x86_64` and `-appimage` share the
+   `.AppImage`. Verify it that way — count distinct `.platforms[].url`
+   basenames in the shipped manifest and require a `.sig` for each — because
+   counting files against key names reports a false "2 sigs missing" on every
+   healthy release. What a genuinely incomplete set looks like is a *target with
+   no signature at all* (a deb built but its `.deb.sig` never uploaded). Re-
+   uploading is otherwise safe: the signatures and the tag-pinned URLs come out
+   identical, and `tauri-plugin-updater` reads `pub_date` for display only. An
+   incomplete set means stop — stale-but-correct notes beat a broken manifest.
 5. Confirm, since `release.yml`'s notes step is `continue-on-error` on purpose (a
    release whose notes failed must still ship): `gh release view vX.Y.Z --json
    body -q .body` must show the curated text, not `Archimedes vX.Y.Z` — that
