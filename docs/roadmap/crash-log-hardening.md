@@ -141,7 +141,7 @@ This task also introduces the **writer seam** every later test needs. `PanicHook
 **Context:** nothing ever deleted a crash log; the directory reached 862 files / 11 MB. `debuglog` rotates at 5 MB (`MAX_LOG_BYTES`, `MAX_LINE_BYTES` at `debuglog.rs:21,24`), so a size discipline exists — but crash logs are one file per crash, not append-only, so the unit is *files*, paired with an age bound. Pruning runs inside a panic hook, so it must never panic and never lose the log it just wrote.
 
 **Files:**
-- Modify: `src-tauri/src/agent/crashlog.rs` — two `pub const`s, `fn prune_crash_logs(dir: &std::path::Path)`, one call site in `write_crash` between the successful `fs::write` (`:52`) and `Some(path)` (`:54`)
+- Modify: `src-tauri/src/agent/crashlog.rs` — two `pub const`s, `fn prune_crash_logs(dir: &std::path::Path)`, one call site in `write_crash` between the successful `fs::write` (`:67`) and `Some(path)` (`:68`)
 
 **What to implement:**
 - `pub const MAX_CRASH_LOG_AGE_DAYS: u64 = 30;` and `pub const MAX_CRASH_LOG_FILES: usize = 50;` beside the writer, next to `debuglog`'s pair conceptually.
