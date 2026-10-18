@@ -369,7 +369,18 @@ pub fn run() {
     // `worker_smoke` test's EOF case). The `ARCHIMEDES_DEBUG` init
     // reads the var ONCE (the cached check — `log` is a free no-op when
     // unset).
-    crashlog::install_panic_hook("supervisor");
+    //
+    // The directory is resolved HERE, at install time, and handed to the
+    // hook: the hook must never resolve anything during the panic, or the
+    // closure occupying the single process-global hook slot decides where
+    // every thread's crash log goes.
+    //
+    // A `None` data dir is not a supported state — `setup()` hard-fails
+    // on it (`lib.rs`, "could not resolve the platform data dir"), so
+    // skipping the hook here is belt-and-braces, not a mode.
+    if let Some(base) = dirs::data_dir() {
+        crashlog::install_panic_hook("supervisor", base.join("archimedes"));
+    }
     debuglog::init_from_env();
     // The navigation guard (ADR 0051 Task 3): a navigation to anything that is
     // not the app's OWN page is refused, so an anchor nobody wrote a handler
