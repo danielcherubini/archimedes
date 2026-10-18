@@ -132,7 +132,7 @@ struct E2e {
     db: Arc<Db>,
     persister: Arc<TranscriptPersister>,
     events: mpsc::UnboundedReceiver<(String, bool, WorkerInboundEvent)>,
-    crashes: mpsc::UnboundedReceiver<(String, Option<i32>)>,
+    crashes: mpsc::UnboundedReceiver<(String, Option<i32>, Option<u32>)>,
     sink: mpsc::UnboundedReceiver<(String, Value)>,
     /// The CUMULATIVE collectors (every `wait` / `wait_sink` appends to
     /// these — a frame consumed by an earlier step's `wait` is still
@@ -154,8 +154,8 @@ impl E2e {
         let (sink_tx, sink) = mpsc::unbounded_channel();
         let manager = WorkerManager::new(
             Arc::new(RealWorkerFactory),
-            Arc::new(move |sid: String, code: Option<i32>| {
-                let _ = crash_tx.send((sid, code));
+            Arc::new(move |sid: String, code: Option<i32>, pid: Option<u32>| {
+                let _ = crash_tx.send((sid, code, pid));
             }),
             Arc::new(
                 move |sid: String, is_subagent: bool, evt: WorkerInboundEvent| {
@@ -935,12 +935,18 @@ async fn crash_path_on_crash_fires_and_rows_stay_intact() {
         .manager
         .handle_for("e2e-crash")
         .expect("the session is attached");
+    // The pid the Supervisor holds for THIS child (captured at spawn — after
+    // the kill it is reaped and `Child::id()` answers `None`).
+    let spawned_pid = handle
+        .pid()
+        .expect("a live Worker reports its spawn-time pid");
     handle.kill().await.expect("the kill succeeds");
 
     // (a) `on_crash` fires (the `WorkerManager`'s raw callback) with
     // the session id + a non-zero exit code (the kill — a signal
-    // exit's `code` is `None`; a normal exit's code is non-zero).
-    let (sid, code) = tokio::time::timeout(Duration::from_secs(15), h.crashes.recv())
+    // exit's `code` is `None`; a normal exit's code is non-zero) + the
+    // pid of the process that died.
+    let (sid, code, pid) = tokio::time::timeout(Duration::from_secs(15), h.crashes.recv())
         .await
         .expect("on_crash fires within the bound")
         .expect("the collector is live");
@@ -948,6 +954,13 @@ async fn crash_path_on_crash_fires_and_rows_stay_intact() {
     assert!(
         code != Some(0),
         "the exit is non-zero (a kill), got {code:?}"
+    );
+    assert_eq!(
+        pid,
+        Some(spawned_pid),
+        "the crash is attributed to the PROCESS that died — the real spawn → real death → \
+         `on_crash` plumbing the Stalled banner's pid selection depends on \
+         (the handle's pid was {spawned_pid}, the callback carried {pid:?})"
     );
 
     // (b) The `TranscriptPersister`'s rows are intact (everything

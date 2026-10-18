@@ -216,7 +216,7 @@ export interface SessionClosedPayload {
 export interface StalledInfo {
   /** Unix milliseconds (the crash time). */
   at: number;
-  /** The newest `crash-<ts>-worker*.log` path (FROZEN at crash time — best-effort attribution); `null` when none is found. */
+  /** The crashed Worker's own `crash-<ts>-worker-<pid>.log` — selected by the pid of the child the Supervisor reaped, and FROZEN at crash time (the `session-stalled` push and `getStalledInfo` name the same path). `null` when the pid matched no log — never another Worker's crash. */
   crashLog: string | null;
 }
 

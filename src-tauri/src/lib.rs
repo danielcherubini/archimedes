@@ -108,6 +108,14 @@ pub fn setup_dirs_with_factory<R: tauri::Runtime>(
     // access), then `attach_worker_manager` hands the `WorkerManager`
     // to the `SessionManager` after both are built.
     let manager = Arc::new(manager);
+    // The crash-log directory (the `StalledInfo`'s `crash_log` lookup). The
+    // value production already computes for the panic hook — `app_data_dir`
+    // is `dirs::data_dir().join("archimedes")` (`setup`, the same join the
+    // router used to make itself) — so wiring it here changes nothing in
+    // production and keeps `dirs` out of the router, where no temp-dir test
+    // could reach a self-resolved path. `&self`, so it is legal on the `Arc`
+    // (the `attach_app_handle` shape, not `set_sink`'s `&mut self`).
+    manager.set_crash_log_dir(app_data_dir.clone());
     let wm = {
         let m = manager.clone();
         let m2 = manager.clone();
@@ -115,7 +123,7 @@ pub fn setup_dirs_with_factory<R: tauri::Runtime>(
         Arc::new(
             WorkerManager::new(
                 worker_factory.unwrap_or_else(|| Arc::new(ProductionWorkerFactory)),
-                Arc::new(move |session_id, code| m.handle_crash(&session_id, code)),
+                Arc::new(move |session_id, code, pid| m.handle_crash(&session_id, code, pid)),
                 Arc::new(move |session_id, is_subagent, evt| {
                     m2.route_event(&session_id, is_subagent, evt)
                 }),
@@ -364,7 +372,7 @@ pub fn run() {
     // The Supervisor's crash hook (ADR 0025 Task 6 — the Task-2 shared
     // hook, tag `"supervisor"`): a Supervisor panic STILL kills the app
     // (it IS the app — the `release` profile's `panic = "unwind"` only
-    // protects the WORKERS), but a `crash-<ts>-supervisor.log` now
+    // protects the WORKERS), but a `crash-<ts>-supervisor-<pid>.log` now
     // exists; the live Workers exit cleanly on the stdin EOF (the
     // `worker_smoke` test's EOF case). The `ARCHIMEDES_DEBUG` init
     // reads the var ONCE (the cached check — `log` is a free no-op when

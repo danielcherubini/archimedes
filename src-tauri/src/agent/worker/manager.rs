@@ -17,8 +17,10 @@
 //! Worker: main `false`, subagent `true`), (b) on `SubagentDispatch`
 //! runs `dispatch_subagent`, and (c) on `Exited` (unexpected — no
 //! `detach` / `reap_all` in flight) calls `on_crash(session_id,
-//! code); an EXPECTED `Exited` (a `detach` / `reap_all` was in
-//! flight) fires NO `on_crash` (the Task-4 router's
+//! code, pid)` — the pid being the DEAD child's, captured off the handle
+//! at pump start, which is how the router attributes the crash log to the
+//! Worker that actually died; an EXPECTED `Exited` (a `detach` / `reap_all`
+//! was in flight) fires NO `on_crash` (the Task-4 router's
 //! `session-closed` handling, Task 4 step 1).
 //!
 //! The state is `Arc`-backed (`ManagerState`): the pump / drive tasks
@@ -440,9 +442,10 @@ struct ManagerState {
     /// The test seam (production: `current_exe()`; tests: the
     /// `fake_worker` binary).
     factory: Arc<dyn WorkerFactory>,
-    /// (session_id, exit code) — the Task-4 stalled-session callback
-    /// (an UNEXPECTED exit — no `detach` / `reap_all` in flight).
-    on_crash: Arc<dyn Fn(String, Option<i32>) + Send + Sync>,
+    /// The `WorkerManager`'s `on_crash` callback (session_id, exit code,
+    /// the DEAD child's pid — see [`OnCrash`]) — the Task-4 stalled-session
+    /// callback (an UNEXPECTED exit — no `detach` / `reap_all` in flight).
+    on_crash: OnCrash,
     /// (session_id, is_subagent, evt) — the Task-4 router (UI +
     /// persistence; the `is_subagent` flag is known per attached
     /// Worker: main `false`, subagent `true`).
@@ -480,6 +483,14 @@ type CwdRegistrar = Arc<dyn Fn(&str, &str) + Send + Sync>;
 /// PARENT session's sink; `None` = no UI delivery).
 type SinkLookup = Arc<dyn Fn(&str) -> Option<Arc<dyn EventSink>> + Send + Sync>;
 
+/// The Worker-crash callback (session_id, exit code, the DEAD child's pid) —
+/// a type alias to keep the `Arc<dyn Fn>` out of the field's and the ctor
+/// parameter's types (the clippy `type_complexity` lint; the same remedy
+/// [`SinkLookup`] exists for). The pid is the attribution key: the crash log's
+/// name carries the writing process's pid, so the router selects the log that
+/// belongs to the Worker that actually died instead of the newest one on disk.
+type OnCrash = Arc<dyn Fn(String, Option<i32>, Option<u32>) + Send + Sync>;
+
 /// A registry of live Workers (session-keyed) + the Supervisor-side
 /// subagent-dispatch flow. The `dead_bound` is OUTSIDE the `Arc`
 /// (the `with_dead_bound` test variant swaps it without rebuilding
@@ -495,7 +506,7 @@ pub struct WorkerManager {
 impl WorkerManager {
     pub fn new(
         factory: Arc<dyn WorkerFactory>,
-        on_crash: Arc<dyn Fn(String, Option<i32>) + Send + Sync>,
+        on_crash: OnCrash,
         on_event: Arc<dyn Fn(String, bool, WorkerInboundEvent) + Send + Sync>,
         sink_for: SinkLookup,
     ) -> Self {
@@ -826,6 +837,13 @@ fn start_pump(
     // stored receiver is idle, so every frame routes to the polled
     // clone).
     let mut rx = handle.events();
+    // The DEAD child's pid, read HERE rather than at the fire site below:
+    // `Child::id()` answers `None` once the child is reaped — exactly the
+    // state a crash leaves — so the only value that can still attribute the
+    // crash is the one the handle captured at spawn. Read BEFORE the
+    // `spawn`: the pump does not move the `handle` into its future, and this
+    // keeps that true (only an `Option<u32>` is captured).
+    let pid = handle.pid();
     tokio::spawn(async move {
         loop {
             let result = rx.recv().await;
@@ -965,7 +983,11 @@ fn start_pump(
                         if crashed { "crash" } else { "exit" }
                     ));
                     if crashed {
-                        (state.on_crash)(session_id.clone(), code);
+                        // The pid of the process that just died — the router's
+                        // attribution key (the crash log's name carries the
+                        // writing pid, so the banner names THIS Worker's log
+                        // rather than the newest one in the dir).
+                        (state.on_crash)(session_id.clone(), code, pid);
                     }
                     break;
                 }
@@ -1873,7 +1895,7 @@ mod tests {
     /// The test logging type aliases (the `clippy::type_complexity`
     /// bound — the `Arc<StdMutex<...>>` shapes are repeated across
     /// the test helpers).
-    type CrashLog = Arc<StdMutex<Vec<(String, Option<i32>)>>>;
+    type CrashLog = Arc<StdMutex<Vec<(String, Option<i32>, Option<u32>)>>>;
     type EventLog = Arc<StdMutex<Vec<(String, bool, WorkerInboundEvent)>>>;
     type SinkMap = Arc<StdMutex<HashMap<String, Arc<CollectorSink>>>>;
     type SinkEvents = Arc<StdMutex<Vec<(String, Value)>>>;
@@ -1975,11 +1997,11 @@ mod tests {
         let sinks_c = sinks.clone();
         let manager = WorkerManager::new(
             factory,
-            Arc::new(move |id: String, code: Option<i32>| {
+            Arc::new(move |id: String, code: Option<i32>, pid: Option<u32>| {
                 crashes_c
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
-                    .push((id, code));
+                    .push((id, code, pid));
             }),
             Arc::new(
                 move |id: String, is_subagent: bool, evt: WorkerInboundEvent| {
@@ -2090,7 +2112,7 @@ mod tests {
         let sinks_c = sinks.clone();
         let manager = WorkerManager::new(
             factory,
-            Arc::new(|_id: String, _code: Option<i32>| {}),
+            Arc::new(|_id: String, _code: Option<i32>, _pid: Option<u32>| {}),
             Arc::new(
                 move |id: String, is_subagent: bool, evt: WorkerInboundEvent| {
                     // ONLY a child frame parks the pump, so the parent's own
@@ -2378,6 +2400,51 @@ mod tests {
         );
     }
 
+    /// The crash's PID reaches the Supervisor (the router's attribution
+    /// source): `on_crash` carries the pid of the child that just died —
+    /// captured off the handle BEFORE the pump's future is spawned,
+    /// because `Child::id()` is already `None` once the child is reaped.
+    /// Without it the router can only guess which of N crashed Workers the
+    /// banner should name.
+    #[tokio::test]
+    async fn the_crash_callback_carries_the_spawned_handles_pid() {
+        let (manager, crashes, _events, _sinks) = make_manager(None);
+        manager
+            .attach("c1", &test_env("c1", None))
+            .await
+            .expect("the attach completes");
+        let spawned = manager
+            .handle_for("c1")
+            .expect("the handle is reachable")
+            .pid()
+            .expect("a live child reports its spawn-time pid");
+        manager
+            .handle_for("c1")
+            .expect("the handle is reachable")
+            .send_prompt("__crash__", &[])
+            .expect("the prompt encodes");
+
+        // The `on_crash` fires with the SAME pid the handle carries (the
+        // child exits 137 — `fake_worker`'s `__crash__`).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let fired = loop {
+            let c = crashes.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            if let Some(hit) = c.iter().find(|(id, _, _)| id == "c1") {
+                break Some(hit.clone());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break None;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        .expect("`on_crash` fires for the crashed Worker");
+        assert_eq!(
+            fired.2,
+            Some(spawned),
+            "the `on_crash` pid is the pid of the Worker that died (the handle's was {spawned})"
+        );
+    }
+
     /// A crashed Worker fires `on_crash` exactly ONCE with the right
     /// code (an unexpected `Exited` — no `detach` was called; the
     /// `Exited` frame is terminal, so the pump fires it exactly once).
@@ -2409,7 +2476,8 @@ mod tests {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             let c = crashes.lock().unwrap_or_else(|p| p.into_inner()).clone();
-            if c.iter().any(|(id, code)| id == "c1" && *code == Some(137))
+            if c.iter()
+                .any(|(id, code, _)| id == "c1" && *code == Some(137))
                 || tokio::time::Instant::now() >= deadline
             {
                 break;
@@ -2422,7 +2490,7 @@ mod tests {
         let c = crashes.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let hits: Vec<_> = c
             .iter()
-            .filter(|(id, code)| id == "c1" && *code == Some(137))
+            .filter(|(id, code, _)| id == "c1" && *code == Some(137))
             .collect();
         assert_eq!(
             hits.len(),
@@ -2435,7 +2503,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
         let c = crashes.lock().unwrap_or_else(|p| p.into_inner()).clone();
         assert_eq!(
-            c.iter().filter(|(id, _)| id == "c1").count(),
+            c.iter().filter(|(id, _, _)| id == "c1").count(),
             1,
             "the `on_crash` is not re-fired by the cleanup detach: {c:?}"
         );

@@ -10,8 +10,11 @@
 //! Stalled banner's crash attribution could only guess by recency. A
 //! pre-amendment **pid-less** `crash-<ts>-<tag>.log` is still matched by
 //! the attribution matcher (`router.rs`'s `is_worker_crash_log_name`),
-//! because logs already on disk keep their names — that both-shapes rule
-//! is replaced when pid attribution lands (crash-log-hardening Task 6).
+//! because logs already on disk keep their names. Attribution reads the
+//! pid back out of the name: the **Stalled** banner picks the log named for
+//! the child the Supervisor just reaped (`router.rs`'s
+//! `find_crash_log_for_pid`), and falls back to the pid-less shape only when
+//! no pid was captured.
 //!
 //! The `dir` comes from the CALLER — never from this module. That is
 //! load-bearing, not convenience: a hook that resolves its own
@@ -30,10 +33,10 @@
 //! reasonable-looking `let dir = dirs::data_dir()` cannot grow back here.
 //!
 //! The tags: the Worker's `"worker"` (the session id is unknown before
-//! `Start`; the file name carries the timestamp and the pid — today the
-//! Supervisor's crash attribution uses the exit + the `session-stalled`
-//! bookkeeping, NOT the file name, and the `-<pid>` is what lets it move
-//! to identity instead of guesswork); the Supervisor's (Task 6):
+//! `Start`; the file name carries the timestamp and the pid — the
+//! Supervisor's crash attribution reads the pid back out of it: the
+//! **Stalled** banner selects the log named for the child it just reaped,
+//! see `session::router`'s `find_crash_log_for_pid`); the Supervisor's:
 //! `"supervisor"`.
 //!
 //! NOTE (toolchain): the panic info is only reachable from INSIDE a
