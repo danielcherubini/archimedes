@@ -18,8 +18,9 @@
 //! `visible`, wry defaults it true, so `show_all()` and `grab_focus()` both run
 //! on a realized widget; ADR 0056 records that refutation, and 0057 — which
 //! supersedes 0056 — inherits it. **The decision you are testing is 0057's on
-//! Linux/macOS**, amended by ADR 0061 on Windows (0061 removes the grab there
-//! entirely, so steps 1–4 are a Linux/macOS measurement and step 5 is Windows).
+//! Linux/macOS**, superseded by ADR 0061 on Windows. Windows keeps the `Ready`
+//! grab but skips the focus-in grab. Steps 1–3 apply on every platform; step 4
+//! checks Linux/macOS focus-in, and step 5 checks Windows interaction.
 //!
 //! Nothing in the headless suite can settle it. The mock runtime has **no
 //! widget**: `MockRuntime` fakes window and webview handles, so `set_focus()` on
