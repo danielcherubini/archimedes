@@ -1,5 +1,6 @@
 import { useState, type ChangeEvent } from "react";
 import { respondInteractiveRequest } from "../lib/tauri";
+import { describeIpcError } from "../lib/ipcError";
 import { useInteractive } from "../store/interactive";
 import {
   Dialog,
@@ -55,7 +56,7 @@ export default function SudoPasswordModal({
       // settles the card; it never persisted in store state.
       removeRequest(sessionId, requestId);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(describeIpcError(err));
     } finally {
       setBusy(false);
     }

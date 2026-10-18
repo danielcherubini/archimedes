@@ -20,6 +20,7 @@ import {
   type ToolCallContent,
 } from "../lib/tauri";
 import { basenameOfPath } from "../lib/paths";
+import { describeIpcError } from "../lib/ipcError";
 import { openNewSpaceDialog } from "../lib/newSpaceDialogState";
 import { unifiedPatch } from "../lib/diff";
 import type { SessionUpdateBatchItem } from "../lib/batchSessionUpdates";
@@ -1051,7 +1052,7 @@ export const useSessions = create<SessionsState>((set, get) => ({
       get().addSession(info);
       get().addSpace(info.cwd);
     } catch (err) {
-      set({ newSessionError: err instanceof Error ? err.message : String(err) });
+      set({ newSessionError: describeIpcError(err) });
     } finally {
       newSessionInFlight = false;
     }

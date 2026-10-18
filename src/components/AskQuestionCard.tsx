@@ -5,6 +5,7 @@ import {
   type AskResponsePayload,
 } from "../lib/tauri";
 import { useInteractive } from "../store/interactive";
+import { describeIpcError } from "../lib/ipcError";
 import { useSessions } from "../store/sessions";
 import { Button } from "./ui/button";
 
@@ -238,7 +239,7 @@ export default function AskQuestionCard({
       await respondInteractiveRequest(sessionId, requestId, payload);
       removeRequest(sessionId, requestId);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(describeIpcError(err));
     } finally {
       setBusy(false);
     }

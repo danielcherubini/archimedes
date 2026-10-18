@@ -15,6 +15,7 @@ import {
   compactSession,
 } from "../lib/tauri";
 import { basenameOfPath } from "../lib/paths";
+import { describeIpcError } from "../lib/ipcError";
 import { fuzzyMatch } from "../lib/fuzzy";
 import { composerCommands, parseComposerCommand } from "../lib/composerCommands";
 import {
@@ -1103,15 +1104,9 @@ export default function ChatStream() {
       turnCompleted(targetSessionId, stopReason);
     } catch (err) {
       turnCompleted(targetSessionId, "end_turn");
-      // Tauri IPC errors are plain objects (`{ kind, message }`), not `Error`
-      // instances — `String(err)` would show `[object Object]` (a pre-existing
-      // gap the new `InvalidPrompt` validation error would hit; fix it here).
-      const msg =
-        err instanceof Error
-          ? err.message
-          : err && typeof err === "object" && "message" in err
-            ? String((err as { message: unknown }).message)
-            : String(err);
+      // Tauri IPC rejections are strings OR plain objects (`{kind, message}`) —
+      // `src/lib/ipcError.ts` is the one renderer for both shapes.
+      const msg = describeIpcError(err);
       if (activeSessionIdRef.current === targetSessionId) {
         setError(msg);
       }
@@ -1130,7 +1125,7 @@ export default function ChatStream() {
     try {
       await resumeSession(activeSessionId);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(describeIpcError(err));
       return false;
     } finally {
       setResuming(false);
@@ -1305,7 +1300,7 @@ export default function ChatStream() {
         // A read failure (e.g. the file over the 10 MiB cap — the command
         // rejects): keep the readable selections staged, surface the error
         // only when NOTHING was staged.
-        readError = e instanceof Error ? e.message : String(e);
+        readError = describeIpcError(e);
       }
     }
     if (files.length > 0) {

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { respondPermission, type PermissionOutcome } from "../lib/tauri";
+import { describeIpcError } from "../lib/ipcError";
 import { usePermissions } from "../store/permissions";
 import { Button } from "./ui/button";
 
@@ -39,7 +40,7 @@ export default function PermissionPrompt({
       await respondPermission(sessionId, requestId, outcome);
       removePrompt(sessionId, requestId);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(describeIpcError(err));
     } finally {
       setBusy(false);
     }

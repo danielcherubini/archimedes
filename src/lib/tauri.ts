@@ -14,6 +14,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { ImageRef } from "./chatAttachments";
+import { describeIpcError } from "./ipcError";
 
 // ---------------------------------------------------------------------------
 // Types mirroring the Rust side
@@ -974,7 +975,7 @@ export async function externalOpen(
   try {
     await invoke("external_open", { href, cwd: cwd ?? null });
   } catch (err) {
-    console.warn(`external open refused: ${String(err)}`, href);
+    console.warn(`external open refused: ${describeIpcError(err)}`, href);
   }
 }
 

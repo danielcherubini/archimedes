@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { respondInteractiveRequest } from "../lib/tauri";
+import { describeIpcError } from "../lib/ipcError";
 import { useInteractive } from "../store/interactive";
 import {
   Dialog,
@@ -41,7 +42,7 @@ export default function SudoConfirmModal({
       await respondInteractiveRequest(sessionId, requestId, { confirmed });
       removeRequest(sessionId, requestId);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(describeIpcError(err));
     } finally {
       setBusy(false);
     }
