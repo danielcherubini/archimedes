@@ -22,6 +22,15 @@ import type { BrailleLoaderVariant } from "../../lib/braille-loader";
  *   - the spinner is `shrink-0`, because a braille loader that squashes to
  *     three dots is not a spinner any more.
  *
+ * THE TEXT IS `foreground`, NOT the `foreground-subtle` it used to be, and the
+ * reason is the move itself: the row's background changed from the chat plane
+ * (`--color-chat`, `#232323` under zai dark) to the composer fill
+ * (`--color-input`, `#2b2b2b`), and on the lighter fill subtle text measures
+ * **4.46:1** where it measured 4.76:1 on the chat plane — i.e. it crosses
+ * WCAG's 4.5:1 small-text floor, on the one line the user reads while the
+ * agent works. `foreground` is 9.55:1 there. The spinner already landed on
+ * `foreground`, by inheriting the composer island's ink.
+ *
  * Props-only: `quip` comes from `useSpinQuip`, which stays in `ChatStream`
  * (it is called unconditionally, alongside the other cue hooks, and this
  * component renders `null` most of the time — a hook in a conditionally-rendered
@@ -61,7 +70,7 @@ export function WorkingIndicator({
       data-testid="working-indicator"
     >
       {agentState === "blocked" ? (
-        <p className="truncate text-ui-sm text-foreground-subtle">
+        <p className="truncate text-ui-sm text-foreground">
           Waiting for your input…
         </p>
       ) : compacting !== undefined ? (
@@ -79,7 +88,7 @@ export function WorkingIndicator({
             label="Compacting"
             className="shrink-0"
           />
-          <p className="truncate text-ui-sm text-foreground-subtle">
+          <p className="truncate text-ui-sm text-foreground">
             Compacting
           </p>
         </>
@@ -92,7 +101,7 @@ export function WorkingIndicator({
             label="Agent working"
             className="shrink-0"
           />
-          <p className="truncate text-ui-sm text-foreground-subtle">{quip}</p>
+          <p className="truncate text-ui-sm text-foreground">{quip}</p>
         </>
       )}
     </div>

@@ -630,6 +630,24 @@ describe("ChatStream", () => {
     expect(attach.parentElement!.className).toContain("ml-auto");
   });
 
+  it("keeps the quip at full foreground ink (the composer fill is lighter than the chat plane)", () => {
+    // The indicator's BACKGROUND moved with it: `--color-chat` (#232323) became
+    // `--color-input` (#2b2b2b), and `foreground-subtle` on the new fill
+    // measures 4.46:1 against the 4.76:1 it had on the old one — under WCAG's
+    // 4.5:1 floor, on the line the user reads while the agent works. The token
+    // is therefore load-bearing, not taste: a drift back to `-subtle` would be
+    // invisible to every other test here.
+    seedLiveSession();
+    useSessions.getState().addUserMessage("s1", "hi");
+    useSessions.getState().beginTurn("s1");
+    const { container } = render(<ChatStream />);
+    const text = container.querySelector(
+      '[data-testid="working-indicator"] p',
+    ) as HTMLElement;
+    expect(text.className).toContain("text-foreground");
+    expect(text.className).not.toMatch(/text-foreground-subtle/);
+  });
+
   it("runs the configured spinner style (the settings store's spinnerStyle)", () => {
     seedLiveSession();
     useSessions.getState().addUserMessage("s1", "hi");
