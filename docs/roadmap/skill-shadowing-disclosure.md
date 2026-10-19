@@ -109,6 +109,7 @@ ADR 0065 fixes the shape: the losers ride on the **winner** as `shadowed` (addit
 - Modify: `src-tauri/src/skills.rs` (`Shadowed<T>`, `normalize_line_endings`, `SkillInfo.shadowed`, `discover_in_roots`, `parse_skill_file` calling the shared normalizer, `mod tests`)
 - Modify: `src-tauri/src/agent/harness/prompt.rs` — **one** literal: `fn skill` (`:329-338`) gains `shadowed: Vec::new()`. `fn hidden_skill` (`:343-348`) is `SkillInfo { disable_model_invocation: true, ..skill(..) }` and inherits the field; **verify, do not add** (adding it invites a later agent to drop the spread).
 - Test: `src-tauri/src/skills.rs` (`mod tests`) + `src-tauri/src/agent/tools/exec/tests/skills.rs` (extend the existing drift pin)
+- Test: `src-tauri/tests/skills.rs` — add ONE assertion to the existing `first_wins_dedupe_and_order` (`:436`), which already builds the same-name/different-content fixture at the integration surface and is the only place that contract is tested through the public `discover_in_roots` API: `assert_eq!(find_row(&rows, "shared").shadowed.len(), 1, …)`. (Added during execution: the plan's original list pinned this only at unit + prompt-catalog level and missed the integration surface that already existed for exactly this contract.)
 
 **What to implement:**
 
@@ -149,6 +150,7 @@ ADR 0065 fixes the shape: the losers ride on the **winner** as `shadowed` (addit
   6. `a_loser_with_an_unsafe_directory_name_is_not_reported` — the loser's `SKILL.md` sits in a directory whose name contains a `"`. Gate it `#[cfg(unix)]` and, on Windows, delegate to the established pattern in `src-tauri/tests/skills.rs:200-208` (`#[cfg(windows)] fn assert_quote_component_is_unconstructible`, which asserts NTFS refuses the name — the skip is unreachable-by-construction there, and the RULE stays pinned on Windows via the frontmatter route). Expect `len() == 1`, `shadowed.is_empty()`. **This is the only test that exercises the reorder.**
   7. `a_loser_over_the_description_limit_is_not_reported` — 1025-char description → `len() == 1`, `shadowed.is_empty()`; comment it as a parse-time rejection that passes either side of the reorder (kept so a future move of the cap into the loop is caught).
   8. `several_losers_from_several_roots_all_land_on_the_winner` — three roots, same name, different bytes → `len() == 1`, `shadowed.len() == 2`, in root order.
+- [ ] Add the integration assertion to `src-tauri/tests/skills.rs`'s existing `first_wins_dedupe_and_order` (`:436` — it already writes `shared` into two roots with DIFFERENT content): `assert_eq!(find_row(&rows, "shared").shadowed.len(), 1, "the shadowed loser must be reported at the integration surface: {rows:?}");`. Run `cargo test --test skills first_wins_dedupe_and_order` and confirm RED before the implementation, green after.
 - [ ] Run `cargo test --lib skills::tests::` from `src-tauri/`.
   - Expected RED: compile error (`unknown Shadowed` / `no field shadowed`). If any new test PASSES pre-implementation, stop — it pins nothing.
 - [ ] Implement steps 1–5.
