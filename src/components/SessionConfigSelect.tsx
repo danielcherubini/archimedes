@@ -1,5 +1,5 @@
 import { memo, useState, useEffect } from "react";
-import { Bot, ChevronDownIcon } from "lucide-react";
+import { Bot } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -15,7 +15,6 @@ import { useSettings } from "../store/settings";
 import { SessionConfigOption } from "../lib/tauri";
 import { THINKING_GLYPHS } from "../lib/toolOutput";
 import { describeIpcError } from "../lib/ipcError";
-import { Button } from "./ui/button";
 
 type OnSet = (optionId: string, value: string) => Promise<void>;
 
@@ -57,8 +56,12 @@ const COMPOSER_THINKING_EDGE = "pl-1";
  * The props: a REAL option (the `kind` is optional — it falls back to the
  * option's `category` / `id`) OR a `null` option (a closed session's config
  * is dropped — the `kind` is REQUIRED then, since there is no option to
- * derive it from). The `null` case renders a disabled stub (the control's
- * identity, no data — the config re-emits on resume).
+ * derive it from). The `null` case is MODEL-ONLY: it renders a disabled model
+ * stub (the control's identity, no data — the config re-emits on resume), and
+ * a model selector is meaningful for any session. Thinking has no null case —
+ * a model with no thinking levels has nothing to select, so the caller
+ * (`SessionConfigBlock`) gates the whole reasoning line on the option existing
+ * rather than passing `null` here.
  */
 type SessionConfigSelectProps =
   | {
@@ -70,7 +73,7 @@ type SessionConfigSelectProps =
     }
   | {
       option: null;
-      kind: "model" | "thinking";
+      kind: "model";
       onSet: OnSet;
       disabled?: boolean;
       fullWidth?: boolean;
@@ -160,63 +163,38 @@ function SessionConfigSelect({
   // `FULL_WIDTH_TRIGGER`): the composer hugs its text and caps at 18rem, the
   // side pane's line stretches. The seam edges ride only the composer branch —
   // they exist to tighten the pair's shared seam, and a full-width line has no
-  // neighbouring trigger to share one with. FOUR sites consume these two
-  // strings (the null-model stub, the null-thinking stub, the live model, the
-  // live thinking trigger); missing one leaves that one trigger content-sized
-  // inside a line that is supposed to be full-width.
+  // neighbouring trigger to share one with. THREE sites consume these two
+  // strings (the null-model stub, the live model, the live thinking trigger);
+  // missing one leaves that one trigger content-sized inside a line that is
+  // supposed to be full-width.
   const width = fullWidth ? FULL_WIDTH_TRIGGER : COMPOSER_TRIGGER_WIDTH;
   const modelEdge = fullWidth ? "" : ` ${COMPOSER_MODEL_EDGE}`;
   const thinkingEdge = fullWidth ? "" : ` ${COMPOSER_THINKING_EDGE}`;
-  // A `null` option (a closed session's config is dropped — re-emitted on
-  // resume): render a DISABLED stub (the control's identity, no data).
+  // A `null` option is MODEL-ONLY (the props union below says so): render the
+  // DISABLED model stub — the control's identity, no data, the config re-emits
+  // on resume. Thinking has no stub at all: `SessionConfigBlock` gates the
+  // whole reasoning line on the option existing, so a null thinking option can
+  // never reach this component.
   if (option === null) {
-    if (isModel) {
-      return (
-        <div className="relative min-w-0">
-          <ModelPicker
-            label="Model"
-            value=""
-            placeholder="Model"
-            items={[]}
-            onSelect={() => {}}
-            variant="ghost"
-            triggerClassName={`${width}${modelEdge}`}
-            disabled
-            icon={
-              <Bot
-                className="size-3.5 text-foreground-subtle"
-                aria-hidden
-                data-testid="model-icon"
-              />
-            }
-          />
-        </div>
-      );
-    }
     return (
       <div className="relative min-w-0">
-        <Button
+        <ModelPicker
+          label="Model"
+          value=""
+          placeholder="Model"
+          items={[]}
+          onSelect={() => {}}
           variant="ghost"
-          size="sm"
-          className={`${width}${thinkingEdge} justify-start`}
-          aria-label="Thinking"
+          triggerClassName={`${width}${modelEdge}`}
           disabled
-        >
-          <span
-            className="text-ui-sm text-foreground-subtle"
-            aria-hidden
-            data-testid="thinking-level-icon"
-          >
-            ○
-          </span>
-          <span className="min-w-0 flex-1 truncate text-left text-foreground-subtlest">
-            Thinking
-          </span>
-          <ChevronDownIcon
-            className="size-3.5 shrink-0 text-foreground-subtle"
-            aria-hidden
-          />
-        </Button>
+          icon={
+            <Bot
+              className="size-3.5 text-foreground-subtle"
+              aria-hidden
+              data-testid="model-icon"
+            />
+          }
+        />
       </div>
     );
   }
