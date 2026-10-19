@@ -2335,6 +2335,30 @@ describe("ChatStream", () => {
     await waitFor(() => expect(screen.getByText("proto")).toBeTruthy());
   });
 
+  it("an image-only send is blocked when the capability regresses mid-session (a marker is not prose)",
+    async () => {
+      // `hasImages` exists for exactly one case a session switch cannot produce:
+      // a same-session capability regression. With the draft now reading
+      // `[image #1]` instead of `""`, the "image-only send is blocked" rule
+      // needs to see a marker-only draft as no prose — otherwise the sentence
+      // "here is [image #1]" ships to an agent that receives NO image.
+      seedLiveSessionWithImages();
+      render(<ChatStream />);
+      pasteToComposer([
+        new File([new Uint8Array([1, 2, 3])], "s.png", { type: "image/png" }),
+      ]);
+      await act(async () => {
+        useSessions.setState({
+          sessions: [
+            { sessionId: "s1", cwd: "/home/u/proj", capabilities: {}, archived: false },
+          ],
+        });
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await flush();
+      expect(vi.mocked(sendPrompt)).not.toHaveBeenCalled();
+    });
+
   it("image-only send is allowed", async () => {
     seedLiveSessionWithImages();
     render(<ChatStream />);
@@ -2345,8 +2369,13 @@ describe("ChatStream", () => {
     const sendButton = screen.getByRole("button", { name: "Send" });
     expect(sendButton.hasAttribute("disabled")).toBe(false);
     fireEvent.click(sendButton);
+    // The text is now `"[image #1]"`, NOT `""` — and that is the intended
+    // semantics of this task: a bare screenshot paste now TELLS the model which
+    // image it is (the marker names the Nth image of this prompt, which is the
+    // only reading the wire supports), instead of sending an empty prompt with an
+    // anonymous image attached.
     await waitFor(() =>
-      expect(sendPrompt).toHaveBeenCalledWith("s1", "", [
+      expect(sendPrompt).toHaveBeenCalledWith("s1", "[image #1]", [
         { name: "s.png", mimeType: "image/png", sizeBytes: 3, data: "AQID" },
       ]),
     );
@@ -2505,6 +2534,13 @@ describe("ChatStream", () => {
     // `send()` aborted (nothing meaningful left to send): `sendPrompt` was
     // NEVER called. (A bare `waitFor` on the negative would be false green —
     // the fake-timer advance guarantees the read has settled first.)
+    // WHICH guard catches this: removing the thumbnail also removes its
+    // `[image #1]` marker (`removeAttachment` → `renumberImageMarkers`), so the
+    // draft is empty by the time the read lands and the STALE-DRAFT GUARD
+    // (`draftRef.current.trim() !== rawText`) aborts the send — it fires before
+    // the images-empty block below, which no longer sees an empty text to
+    // reject. Don't read the images-empty path as the only thing protecting an
+    // image-only send: with markers in play the draft guard is the first line.
     expect(vi.mocked(sendPrompt)).not.toHaveBeenCalled();
   });
 
@@ -2742,7 +2778,11 @@ describe("ChatStream", () => {
       expect(resumeSession).toHaveBeenCalledWith("s1", "/home/u/proj"),
     );
     // Blocked: no prompt is sent (an empty prompt + unsent images is
-    // meaningless — the same fail-closed posture as `!imageCapable`).
+    // meaningless — the same fail-closed posture as `!imageCapable`). With the
+    // `[image #1]` marker now IN the draft this also pins that the guard sees a
+    // marker-only draft as "no prose" (`draftIsMarkerOnly`) — otherwise the
+    // marker alone would carry the prompt through to an agent that receives no
+    // image at all.
     expect(vi.mocked(sendPrompt)).not.toHaveBeenCalled();
   });
 
@@ -6590,5 +6630,282 @@ describe("ChatStream — the /compact Composer command (ADR 0044)", () => {
     const messages = useSessions.getState().messages["s1"] ?? [];
     const user = messages.find((m) => m.kind === "user");
     expect(user?.kind === "user" ? user.text : null).toBe(text);
+  });
+});
+
+// ── The `[image #N]` staging marker ───────────────────────────────────────
+//
+// Every path that stages an image leaves a marker in the draft, and the marker
+// travels to the model as part of the prompt (so a prompt can name a specific
+// attachment). `N` counts the attachments of THAT message, never the session —
+// the harness pushes the text block first and then the images in send order, so
+// "the Nth image of this prompt" is the only reading a model can resolve.
+//
+// `stageFiles` is the single funnel for all four staging paths, so the "all four
+// paths" claim below is what is really under test: paste-with-file-items, the
+// WebKitGTK empty-paste clipboard fallback, drag-and-drop, and the `+` picker.
+describe("ChatStream — the [image #N] staging marker", () => {
+  /** The composer's current draft text. */
+  function composerValue(): string {
+    return (screen.getByRole("textbox") as HTMLTextAreaElement).value;
+  }
+
+  it("a pasted screenshot leaves [image #1] in the draft", () => {
+    seedLiveSessionWithImages();
+    render(<ChatStream />);
+    pasteToComposer([
+      new File([new Uint8Array([1, 2, 3])], "s.png", { type: "image/png" }),
+    ]);
+    expect(composerValue()).toBe("[image #1]");
+  });
+
+  it("a second paste is #2 — the number counts THIS message's attachments in staging order",
+    () => {
+      seedLiveSessionWithImages();
+      render(<ChatStream />);
+      const one = new File([new Uint8Array([1])], "a.png", { type: "image/png" });
+      pasteToComposer([one]);
+      pasteToComposer([
+        new File([new Uint8Array([2])], "b.png", { type: "image/png" }),
+      ]);
+      expect(composerValue()).toBe("[image #1] [image #2]");
+    });
+
+  it("a batch of three staged in ONE event numbers ascending #1 #2 #3", () => {
+    // Inserting one marker at a time at the same caret would emit `#3 #2 #1`
+    // and invert the marker→image mapping on every multi-file paste.
+    seedLiveSessionWithImages();
+    render(<ChatStream />);
+    pasteToComposer(
+      ["a", "b", "c"].map(
+        (n) => new File([new Uint8Array([1])], `${n}.png`, { type: "image/png" }),
+      ),
+    );
+    expect(composerValue()).toBe("[image #1] [image #2] [image #3]");
+    expect(screen.getAllByRole("img")).toHaveLength(3);
+  });
+
+  it("a rejected file in a mixed batch inserts NO marker (the count comes from the staged list)",
+    () => {
+      // `addImageAttachments` can reject mid-batch, so the marker count must be
+      // derived from the returned list — looping the INPUT would number the
+      // survivor `#2` and the number would name the wrong picture.
+      seedLiveSessionWithImages();
+      render(<ChatStream />);
+      pasteToComposer([
+        new File([new Uint8Array([1])], "ok.png", { type: "image/png" }),
+        new File([new Uint8Array([1])], "bad.txt", { type: "text/plain" }),
+      ]);
+      expect(composerValue()).toBe("[image #1]");
+      expect(screen.getAllByAltText("ok.png")).toHaveLength(1);
+    });
+
+  it("a fully rejected batch inserts nothing at all", () => {
+    seedLiveSessionWithImages();
+    render(<ChatStream />);
+    pasteToComposer([
+      new File([new Uint8Array([1])], "a.svg", { type: "image/svg+xml" }),
+    ]);
+    expect(composerValue()).toBe("");
+  });
+
+  it("the drop path inserts a marker too", () => {
+    seedLiveSessionWithImages();
+    render(<ChatStream />);
+    dropOnComposer([
+      new File([new Uint8Array([1])], "d.png", { type: "image/png" }),
+    ]);
+    expect(composerValue()).toBe("[image #1]");
+  });
+
+  it("the `+` file-picker path inserts a marker too", async () => {
+    seedLiveSessionWithImages();
+    vi.mocked(openFilePicker).mockResolvedValueOnce(["/home/u/pics/shot.png"]);
+    vi.mocked(readFileBytes).mockResolvedValueOnce([
+      0x89, 0x50, 0x4e, 0x47, 1, 2, 3,
+    ]);
+    render(<ChatStream />);
+    fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+    await waitFor(() => expect(vi.mocked(readFileBytes)).toHaveBeenCalled());
+    expect(composerValue()).toBe("[image #1]");
+  });
+
+  it("the WebKitGTK empty-paste clipboard fallback inserts a marker too", async () => {
+    seedLiveSessionWithImages();
+    vi.mocked(readClipboardImage).mockResolvedValueOnce([
+      0x89, 0x50, 0x4e, 0x47,
+    ]);
+    render(<ChatStream />);
+    pasteToComposer([]); // no items, no text — the WebKitGTK shape
+    await flush();
+    expect(composerValue()).toBe("[image #1]");
+  });
+
+  it("a drop onto an UNFOCUSED composer with a non-empty draft appends the marker at the END",
+    () => {
+      // `selectionStart` is 0 for a textarea that has never been focused, and
+      // two of the four staging paths (drag-and-drop, and the `+` picker — the
+      // native dialog holds focus) routinely run that way. Reading the caret
+      // unconditionally would drop every marker at the START of the user's
+      // sentence.
+      seedLiveSessionWithImages();
+      render(<ChatStream />);
+      fireEvent.change(screen.getByRole("textbox"), {
+        target: { value: "explain this" },
+      });
+      expect(document.activeElement).not.toBe(screen.getByRole("textbox"));
+      dropOnComposer([
+        new File([new Uint8Array([1])], "d.png", { type: "image/png" }),
+      ]);
+      expect(composerValue()).toBe("explain this [image #1]");
+    });
+
+  it("a paste while the composer is focused lands at the CARET, not at the end",
+    () => {
+      seedLiveSessionWithImages();
+      render(<ChatStream />);
+      const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+      fireEvent.change(textarea, { target: { value: "explain this" } });
+      textarea.focus();
+      textarea.setSelectionRange(7, 7); // after "explain", before " this"
+      pasteToComposer([
+        new File([new Uint8Array([1])], "s.png", { type: "image/png" }),
+      ]);
+      expect(composerValue()).toBe("explain [image #1] this");
+    });
+
+  it("removing an attachment drops its marker and renumbers the survivors", () => {
+    seedLiveSessionWithImages();
+    render(<ChatStream />);
+    pasteToComposer([
+      new File([new Uint8Array([1, 2, 3])], "a.png", { type: "image/png" }),
+    ]);
+    pasteToComposer([
+      new File([new Uint8Array([4, 5, 6])], "b.png", { type: "image/png" }),
+    ]);
+    expect(composerValue()).toBe("[image #1] [image #2]");
+    // ✕ on the FIRST thumbnail: `[image #1]` goes and `#2` shifts down, so the
+    // remaining number still names the remaining picture.
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Remove image attachment" })[0]!,
+    );
+    expect(composerValue()).toBe("[image #1]");
+  });
+
+  it("the renumbered draft is what gets sent", async () => {
+    seedLiveSessionWithImages();
+    render(<ChatStream />);
+    pasteToComposer([
+      new File([new Uint8Array([1, 2, 3])], "a.png", { type: "image/png" }),
+    ]);
+    pasteToComposer([
+      new File([new Uint8Array([4, 5, 6])], "b.png", { type: "image/png" }),
+    ]);
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Remove image attachment" })[0]!,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(sendPrompt).toHaveBeenCalledWith("s1", "[image #1]", [
+        { name: "b.png", mimeType: "image/png", sizeBytes: 3, data: "BAUG" },
+      ]),
+    );
+  });
+
+  it("the strip badges each thumbnail with the number its marker uses", () => {
+    seedLiveSessionWithImages();
+    render(<ChatStream />);
+    pasteToComposer([
+      new File([new Uint8Array([1])], "a.png", { type: "image/png" }),
+      new File([new Uint8Array([2])], "b.png", { type: "image/png" }),
+    ]);
+    // The number in the text has to be checkable against the picture it names.
+    expect(screen.getByText("#1").textContent).toBe("#1");
+    expect(screen.getByText("#2").textContent).toBe("#2");
+    // Non-interactive chrome: it is decoration beside the thumbnail, so it must
+    // not leak into the strip's accessible names.
+    expect(screen.getByText("#1").getAttribute("aria-hidden")).toBe("true");
+  });
+
+  // ── The `#` collision (the task's one real risk) ─────────────────────────
+  //
+  // `MCP_MENTION_RE` is `/(^|\s)#([a-z0-9]+(?:-[a-z0-9]+)*)/g`, so `[image #3]`
+  // IS a mention token (`3` is in the class, the `#` has its space). It survives
+  // today only because no catalog entry is named `3` — and the Rust picker
+  // predicate `is_mentionable_name` ACCEPTS digits (its own tests use `"0"` as
+  // a positive case). So a server literally named `3` would make `expandMentions`
+  // append an `<mcp name="3">` block to a prompt the user never asked for. The
+  // mask in `send()` makes that structurally impossible.
+
+  it("a marker never expands into an <mcp> block even when the catalog has a server of that number",
+    async () => {
+      seedLiveSessionWithImages();
+      seedMcpMentionsOn();
+      // THE collision case: a server literally named `3`.
+      vi.mocked(listMcpServersEffective).mockResolvedValueOnce([
+        { name: "3", kind: "stdio", summary: "a server named with a digit" },
+      ]);
+      render(<ChatStream />);
+      await waitForCatalog();
+      pasteToComposer(
+        ["a", "b", "c"].map(
+          (n) =>
+            new File([new Uint8Array([1])], `${n}.png`, { type: "image/png" }),
+        ),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(sendPrompt).toHaveBeenCalled());
+      const sent = vi.mocked(sendPrompt).mock.calls[0]![1] as string;
+      // Byte-exact: the markers round-trip through the mask verbatim and NO
+      // block is appended.
+      expect(sent).toBe("[image #1] [image #2] [image #3]");
+      expect(sent).not.toContain("<mcp");
+    });
+
+  it("the mask does NOT disable a real # mention sharing the draft with a marker",
+    async () => {
+      seedLiveSessionWithImages();
+      seedMcpMentionsOn();
+      // The MCP catalog is seeded LOCALLY, on purpose: the shared default mock
+      // is overwritten by a `mockResolvedValue` further down this file (a
+      // persistent implementation, which `clearAllMocks` does not undo), so a
+      // test that relied on the default `postgres` row would pass when run
+      // alone and fail in file order. The summary matches the `postgres` block
+      // text asserted below.
+      vi.mocked(listMcpServersEffective).mockResolvedValueOnce([
+        { name: "postgres", kind: "stdio", summary: "npx -y x-mcp" },
+      ]);
+      render(<ChatStream />);
+      await waitForCatalog();
+      pasteToComposer([
+        new File([new Uint8Array([1])], "s.png", { type: "image/png" }),
+      ]);
+      // The user types around the marker (a `fireEvent.change` is exactly the
+      // keystroke that does — the draft is plain text).
+      fireEvent.change(screen.getByRole("textbox"), {
+        target: { value: "query #postgres [image #1]" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(sendPrompt).toHaveBeenCalled());
+      const sent = vi.mocked(sendPrompt).mock.calls[0]![1] as string;
+      expect(sent).toContain('<mcp name="postgres">');
+      // And the marker survived the round trip, in place, unharmed.
+      expect(sent.startsWith("query #postgres [image #1]")).toBe(true);
+    });
+
+  it("markers-only with no colliding catalog is sent BYTE-IDENTICAL", async () => {
+    seedLiveSessionWithImages();
+    seedMcpMentionsOn(); // the default catalog is `postgres` — no digit name
+    render(<ChatStream />);
+    await waitForCatalog();
+    pasteToComposer([
+      new File([new Uint8Array([1, 2, 3])], "s.png", { type: "image/png" }),
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(sendPrompt).toHaveBeenCalledWith("s1", "[image #1]", [
+        { name: "s.png", mimeType: "image/png", sizeBytes: 3, data: "AQID" },
+      ]),
+    );
   });
 });

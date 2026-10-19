@@ -28,8 +28,12 @@ import { groupConsecutiveFileWrites } from "../lib/toolGroups";
 import {
   addImageAttachments,
   agentSupportsImages,
+  draftIsMarkerOnly,
+  imageMarker,
+  insertAtCaret,
   readAttachmentAsBase64,
   releaseAttachment,
+  renumberImageMarkers,
   type ChatComposerAttachment,
 } from "../lib/chatAttachments";
 import { inferAttachmentMimeType, shouldPreferSpreadsheetClipboardText } from "../lib/chatAttachmentMetadata";
@@ -965,7 +969,17 @@ export default function ChatStream() {
     const targetSessionId = activeSessionId;
     if (!targetSessionId) return;
     const rawText = draft.trim();
-    if ((!rawText && !hasImages) || composerLocked) return;
+    // A marker is draft TEXT, so "the user pasted a screenshot and typed
+    // nothing" is no longer `rawText === ""` — it reads `[image #1]`. Without
+    // `draftIsMarkerOnly`, an image-only send on a session whose capability has
+    // regressed would ship the SENTENCE "here is [image #1]" to an agent that
+    // receives no image at all, which is worse than the empty prompt this guard
+    // exists to block. Real prose is unaffected (still sent text-only).
+    if (
+      (!hasImages && (rawText === "" || draftIsMarkerOnly(rawText))) ||
+      composerLocked
+    )
+      return;
     if (sendingSessionsRef.current.has(targetSessionId)) return; // guard: see the ref's comment above
     sendingSessionsRef.current.add(targetSessionId);
     try {
@@ -1027,7 +1041,14 @@ export default function ChatStream() {
           .sessions.find((x) => x.sessionId === targetSessionId);
         hasImages =
           attachments.length > 0 && agentSupportsImages(fresh?.capabilities);
-        if (!hasImages && rawText === "") return;
+        // A marker is draft TEXT, so `rawText === ""` alone no longer describes
+        // "the user attached a screenshot and typed nothing" — the draft now
+        // reads `[image #1]`. Without this, a staged image plus a fresh agent
+        // that cannot take images would send the sentence "look at [image #1]"
+        // to a model that receives NO image, which is worse than the empty
+        // prompt this guard exists to block. So "nothing but markers" counts as
+        // no prose: the same fail-closed posture, unchanged for real text.
+        if (!hasImages && (rawText === "" || draftIsMarkerOnly(rawText))) return;
       }
       let images:
         | { id: string; name: string; mimeType: string; sizeBytes: number; data: string }[]
@@ -1079,11 +1100,31 @@ export default function ChatStream() {
       // The `#` gate (see the `mcpMentionsEnabled` note above): an EMPTY MCP
       // catalog means a `#` token matches nothing, so the text stays
       // BYTE-IDENTICAL — the existing verbatim path, not a special case.
-      const text = expandMentions(rawText, {
+      //
+      // THE MASK, and why it is not cosmetic: `[image #3]` IS a `#` mention
+      // token — `MCP_MENTION_RE` is `/(^|\s)#([a-z0-9]+(?:-[a-z0-9]+)*)/g`, the
+      // `#` has its leading space and a digit is in the class. It survives today
+      // only because no catalog entry happens to be named `3`, and that is not a
+      // guarantee: the Rust picker predicate `is_mentionable_name` accepts
+      // digits (its own tests use `"0"` as a positive case), so an MCP server
+      // literally named `3` would get an `<mcp name="3">` block appended to a
+      // prompt the user never asked for. So the markers are lifted out BEFORE
+      // the expansion and put back byte-exact AFTER it: `expandMentions` sees no
+      // `#` token from a marker at all, and the marker text is stashed rather
+      // than re-derived, so the round trip is exact. The sentinel is a Private
+      // Use Area codepoint, which no ordinary input path can type.
+      const marks: string[] = [];
+      const masked = rawText.replace(/\[image #(\d+)\]/g, (marker) => {
+        marks.push(marker);
+        return "\uE000";
+      });
+      const expanded = expandMentions(masked, {
         skills,
         agents,
         mcpServers: mcpMentionsEnabled ? mcpServers : [],
       });
+      let markIndex = 0;
+      const text = expanded.replace(/\uE000/g, () => marks[markIndex++]);
       // Every staged image was removed during the read (the composer isn't
       // locked until `beginTurn`, so a thumbnail can be removed during the
       // read): with no text there's nothing meaningful left to send; with
@@ -1244,13 +1285,62 @@ export default function ChatStream() {
     // Read the CURRENT list from the ref — a render closure would be stale
     // for fast successive events (e.g. pasting 8 files then a 9th in
     // separate dispatches without a re-render in between).
+    const stagedBefore = attachmentsRef.current;
     const { attachments: next, rejected } = addImageAttachments(
-      attachmentsRef.current,
+      stagedBefore,
       files,
     );
-    if (next !== attachmentsRef.current) {
+    if (next !== stagedBefore) {
       attachmentsRef.current = next;
       setAttachments(next);
+      // ── The `[image #N]` markers, for EVERY staging path ────────────────
+      // `stageFiles` is the single funnel for all four of them (paste with
+      // file items, the WebKitGTK empty-paste clipboard fallback, drag-and-drop
+      // and the `+` picker), so one insert here covers all four. Doing it in
+      // the callers instead would number a mixed batch `#1, #3` and the number
+      // would stop matching the strip.
+      // `N` counts the attachments of THIS message (1-based, in staging
+      // order) — see `imageMarker` for why a session-wide number would be
+      // unresolvable by the model.
+      // The count comes from the RETURNED list, never from `files.length`:
+      // `addImageAttachments` can reject mid-batch (`continue` on a bad MIME
+      // / an oversize file, `break` on the cap), so looping the input would
+      // emit a marker for a rejected file and the numbers would then name the
+      // wrong picture.
+      // ONE string for the WHOLE batch, inserted ONCE (ascending `#k #k+1 …`):
+      // inserting one at a time at the same caret would emit `#3 #2 #1` and
+      // invert the marker→image mapping on every multi-file paste.
+      const markers = next
+        .slice(stagedBefore.length)
+        .map((_, i) => imageMarker(stagedBefore.length + 1 + i))
+        .join(" ");
+      // CARET ONLY WHEN THE TEXTAREA ACTUALLY HAS FOCUS. `selectionStart` is
+      // `0` for a textarea that has never been focused, and two of these four
+      // paths (a drop, and the `+` picker — the native dialog holds focus)
+      // routinely run that way, so the naive read would drop every marker at
+      // the START of the user's sentence. This is a deliberate divergence from
+      // the `selectionStart ?? draft.length` idiom in `handleDrop`'s backstop
+      // and `selectMention`, which is safe there only because both are
+      // reachable solely after typing (so the field is focused).
+      // `draftRef` — not the render closure — for the same reason
+      // `attachmentsRef` exists: a 9th paste in a fast sequence would
+      // otherwise revert the draft to a stale value and drop the earlier
+      // markers.
+      const el = composerRef.current;
+      const len = draftRef.current.length;
+      const caret =
+        el && document.activeElement === el ? (el.selectionStart ?? len) : len;
+      const inserted = insertAtCaret(draftRef.current, caret, markers);
+      setDraft(inserted.text);
+      // Restore focus + caret after the controlled `setDraft` (which would
+      // otherwise drop both) — the same block `selectMention` uses.
+      const pos = inserted.caret;
+      requestAnimationFrame(() => {
+        const area = composerRef.current;
+        if (!area) return;
+        area.focus();
+        area.setSelectionRange(pos, pos);
+      });
     }
     // A successful stage also CLEARS a stale rejection line (null when
     // nothing was rejected) — otherwise a rejection stays visible after the
@@ -1380,6 +1470,15 @@ export default function ChatStream() {
     // runs them twice; a double revoke is harmless but the wrong pattern).
     const target = attachmentsRef.current.find((a) => a.id === id);
     if (target) releaseAttachment(target);
+    // The 1-based position IN THE LIST BEING SHOWN, computed BEFORE the
+    // filter (after it, the index would be the survivor's). This is the `N`
+    // the draft's marker uses, so removing a thumbnail takes its marker with
+    // it and shifts every marker above it down — the numbers keep naming the
+    // right picture. `draftRef` (not the closure) for the same reason
+    // `attachmentsRef` is read here: the composer is not locked, so a
+    // same-tick draft edit must not be reverted by this rewrite.
+    const position = attachmentsRef.current.findIndex((a) => a.id === id) + 1;
+    setDraft(renumberImageMarkers(draftRef.current, position));
     const next = attachmentsRef.current.filter((a) => a.id !== id);
     attachmentsRef.current = next;
     setAttachments(next);
