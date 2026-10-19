@@ -698,8 +698,10 @@ impl SessionManager {
         self.driver.trust_db = Some(db.clone());
         // The store-frame applier (the Supervisor's sole-writer persistence —
         // it needs the `Db`). Late-wired here (the `Db` is attached after
-        // `new`).
-        let _ = self.persister.set(Arc::new(TranscriptPersister::new(db)));
+        // `new`), unless already installed (e.g. via `SessionManagerBuilder`).
+        if self.persister.get().is_none() {
+            let _ = self.persister.set(Arc::new(TranscriptPersister::new(db)));
+        }
     }
 
     /// Inject the subagent manager (main only — sets the driver's
@@ -872,6 +874,7 @@ impl SessionManagerBuilder {
             );
 
             let mut sm = SessionManager::new(self.config_dir);
+            let _ = sm.persister.set(self.persister);
             sm.attach_db(self.db);
             sm.set_catalog(self.catalog);
             sm.set_sink(self.sink);
@@ -886,7 +889,6 @@ impl SessionManagerBuilder {
                 sm.set_crash_log_dir(dir);
             }
 
-            let _ = sm.persister.set(self.persister);
             let _ = sm.worker_manager.set(wm.clone());
             if let Some(m) = sm.subagent_manager.get() {
                 m.set_worker_manager(wm.clone());
@@ -3528,5 +3530,26 @@ mod session_tests {
 
         // Weak upgrade must fail cleanly
         assert!(wm.hooks().sink_for("any").is_none());
+    }
+
+    #[test]
+    fn session_manager_builder_preserves_supplied_persister() {
+        let dir = temp_config_dir();
+        let db = open_db(&dir);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        let persister = Arc::new(TranscriptPersister::new(db.clone()));
+
+        let (manager, _wm) = SessionManagerBuilder::new(dir.clone(), db, sink, persister.clone())
+            .with_worker_factory(Arc::new(FixtureFactory))
+            .build();
+
+        assert!(
+            Arc::ptr_eq(
+                &persister,
+                &manager.persister().expect("persister should be set")
+            ),
+            "SessionManager must use the exact persister instance provided to the builder"
+        );
     }
 }

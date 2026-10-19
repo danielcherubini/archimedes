@@ -2087,21 +2087,22 @@ async fn the_enabled_tools_wire_convention_is_applied_verbatim() {
     );
 }
 
-#[test]
-fn worker_manager_with_hooks_invokes_custom_hooks() {
+#[tokio::test]
+async fn worker_manager_with_hooks_invokes_custom_hooks() {
     use super::WorkerHooks;
 
     struct CustomHooks {
-        events: Arc<StdMutex<Vec<(String, bool)>>>,
+        events: Arc<StdMutex<Vec<(String, bool, WorkerInboundEvent)>>>,
         crashes: CrashLog,
         registered_cwds: Arc<StdMutex<Vec<(String, String)>>>,
     }
     impl WorkerHooks for CustomHooks {
-        fn on_event(&self, session_id: &str, is_subagent: bool, _evt: WorkerInboundEvent) {
-            self.events
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .push((session_id.to_string(), is_subagent));
+        fn on_event(&self, session_id: &str, is_subagent: bool, evt: WorkerInboundEvent) {
+            self.events.lock().unwrap_or_else(|p| p.into_inner()).push((
+                session_id.to_string(),
+                is_subagent,
+                evt,
+            ));
         }
         fn on_crash(&self, session_id: &str, code: Option<i32>, pid: Option<u32>) {
             self.crashes
@@ -2127,10 +2128,68 @@ fn worker_manager_with_hooks_invokes_custom_hooks() {
     });
     let factory: Arc<dyn WorkerFactory> = Arc::new(FakeWorkerFactory);
     let manager = WorkerManager::with_hooks(factory, hooks.clone());
+
     manager.hooks().register_child_cwd("s1", "/tmp/cwd");
     assert_eq!(hooks.registered_cwds.lock().unwrap().len(), 1);
     assert_eq!(
         hooks.registered_cwds.lock().unwrap()[0],
         ("s1".to_string(), "/tmp/cwd".to_string())
+    );
+
+    // Spawn a worker that emits events and crashes
+    manager
+        .attach("s1", &test_env("s1", None))
+        .await
+        .expect("attach completes");
+
+    manager
+        .handle_for("s1")
+        .expect("handle is reachable")
+        .send_prompt("__crash__", &[])
+        .expect("prompt encodes");
+
+    // Bounded-wait until on_crash is called
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let c = hooks
+            .crashes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if c.iter()
+            .any(|(id, code, _)| id == "s1" && *code == Some(137))
+            || tokio::time::Instant::now() >= deadline
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let crashes = hooks
+        .crashes
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    assert_eq!(crashes.len(), 1, "on_crash should be called exactly once");
+    assert_eq!(crashes[0].0, "s1");
+    assert_eq!(crashes[0].1, Some(137));
+    assert!(crashes[0].2.is_some(), "crashed pid should be recorded");
+
+    let events = hooks
+        .events
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    assert!(
+        events.iter().any(|(id, is_sub, evt)| {
+            id == "s1" && !is_sub && matches!(evt, WorkerInboundEvent::SinkFrame { .. })
+        }),
+        "custom hook on_event must receive worker SinkFrame"
+    );
+    assert!(
+        events.iter().any(|(id, is_sub, evt)| {
+            id == "s1" && !is_sub && matches!(evt, WorkerInboundEvent::Exited(Some(137)))
+        }),
+        "custom hook on_event must receive worker Exited event"
     );
 }
