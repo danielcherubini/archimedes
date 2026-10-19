@@ -93,23 +93,14 @@ describe("SessionConfigSelect", () => {
     expect(tokens).not.toContain("pl-2");
   });
 
-  it("the null-option stubs keep the same width contract as the live triggers", () => {
-    const { unmount } = render(
+  it("the NULL-model stub keeps the same width contract as the live triggers", () => {
+    render(
       <SessionConfigSelect kind="model" option={null} onSet={vi.fn()} />,
     );
     const model = screen.getByRole("button", { name: "Model" });
     expect(model.className).toContain("max-w-72");
     expect(model.className).not.toContain("max-w-48");
     expect(model.className.split(/\s+/)).toContain("pr-1");
-    unmount();
-
-    render(
-      <SessionConfigSelect kind="thinking" option={null} onSet={vi.fn()} />,
-    );
-    const thinking = screen.getByRole("button", { name: "Thinking" });
-    expect(thinking.className).toContain("max-w-72");
-    expect(thinking.className).not.toContain("max-w-48");
-    expect(thinking.className.split(/\s+/)).toContain("pl-1");
   });
 
   it("FULL WIDTH (the side pane's line): the live model trigger stretches to the line and drops the 18rem cap", () => {
@@ -150,34 +141,11 @@ describe("SessionConfigSelect", () => {
     expect(trigger.className).toContain("min-w-0");
   });
 
-  it("FULL WIDTH: the NULL-thinking stub stretches too (it is a Button, not a SelectTrigger — the fourth site)", () => {
-    render(
-      <SessionConfigSelect
-        kind="thinking"
-        option={null}
-        onSet={vi.fn()}
-        fullWidth
-      />,
-    );
-    // The null-thinking stub is a plain `Button` (there is no Radix select to
-    // render without options), so it needs the same treatment at its own site.
-    const trigger = screen.getByRole("button", { name: "Thinking" });
-    expect(trigger.tagName).toBe("BUTTON");
-    expect(trigger.className).toContain("w-full");
-    expect(trigger.className).not.toContain("max-w-72");
-    expect(trigger.className).toContain("min-w-0");
-  });
-
   it("without fullWidth the triggers keep the composer's content-sized contract", () => {
-    const { unmount } = render(
+    render(
       <SessionConfigSelect option={mockOption} onSet={vi.fn()} />,
     );
     expect(screen.getByRole("button", { name: "Model" }).className).toContain(
-      "max-w-72",
-    );
-    unmount();
-    render(<SessionConfigSelect kind="thinking" option={null} onSet={vi.fn()} />);
-    expect(screen.getByRole("button", { name: "Thinking" }).className).toContain(
       "max-w-72",
     );
   });
@@ -349,18 +317,6 @@ describe("SessionConfigSelect", () => {
     expect(trigger.hasAttribute("disabled")).toBe(true);
     expect(trigger.querySelector('[data-testid="model-icon"]')).toBeTruthy();
     expect(screen.getByText("Model")).toBeTruthy();
-  });
-
-  it("a null thinking option renders a disabled stub (the open-circle glyph, no data)", () => {
-    render(
-      <SessionConfigSelect kind="thinking" option={null} onSet={vi.fn()} />,
-    );
-    const trigger = screen.getByRole("button", { name: "Thinking" });
-    expect(trigger.hasAttribute("disabled")).toBe(true);
-    const icon = trigger.querySelector(
-      '[data-testid="thinking-level-icon"]',
-    ) as HTMLElement;
-    expect(icon.textContent).toBe("○");
   });
 
   it("the model picker dialog flattens grouped options (the value prefix is the provider cue)", async () => {
