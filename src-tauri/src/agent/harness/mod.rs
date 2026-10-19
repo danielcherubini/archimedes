@@ -36,7 +36,7 @@ pub use provider::{
     ModelOptions, ModelRequest, OpenAiCompatibleProvider, OpenAiResponsesProvider, Provider,
     ProviderError, ProviderEvent, ToolCall, ToolCallDelta, ToolSpec, Usage,
 };
-pub use r#loop::{AgentLoop, ControlCmd, Prompt, SudoDeps};
+pub use r#loop::{AgentLoop, ControlCmd, Prompt, PromptTurn, SudoDeps};
 pub use retry::RetryPolicy;
 pub use store::{DisplayRow, NoopStore, SessionStore, Store};
 pub(crate) use tool_specs::tool_specs;
