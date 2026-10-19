@@ -219,6 +219,186 @@ describe("MessageBubble", () => {
     expect(container.querySelector(".bg-input")!.closest('[data-testid="user-band"]')).toBeNull();
   });
 
+  // --- The agent's reply rides a BAND (the mirror of the user band) + the
+  // copy button that lives OUTSIDE it. ---
+
+  it("paints the agent's reply on the COMPOSER's fill (the user band's token, not a copy of its hex)", () => {
+    // Same reasoning as the user band: `--color-composer` is the TOKEN the
+    // palette owns, so a theme that moves it moves BOTH bands together. A
+    // hardcoded hex here would drift the moment a palette moves the token.
+    const message: Message = {
+      kind: "agent-text",
+      messageId: "m1",
+      text: "the reply",
+      at: 1,
+    };
+    render(<MessageBubble message={message} />);
+    const band = screen.getByTestId("agent-band");
+    expect(band.className).toContain("bg-composer");
+    expect(band.className).toContain("rounded-xl");
+    expect(band.className).toContain("px-3");
+    expect(band.className).toContain("py-2");
+    expect(band.className).toContain("text-ui-base");
+    expect(band.className).toContain("text-foreground");
+    // `[overflow-wrap:anywhere]` stays OFF: the user band needs it because it
+    // renders the raw sentence (a long URL must break), while `AgentMarkdown`
+    // renders block elements that prose already wraps.
+    expect(band.className).not.toContain("[overflow-wrap:anywhere]");
+    // And the reply's text rides the band: `AgentMarkdown`'s root is the band's
+    // own child (`react-markdown` is mocked in this file, so the root is the
+    // deepest node available here — the markdown scale itself is pinned by
+    // `MessageBubble.markdown.test.tsx`).
+    const root = screen.getByTestId("agent-band").firstElementChild;
+    expect(root).toBeTruthy();
+    expect(root!.className).toContain("leading-[1.75]");
+  });
+
+  it("carries -mt-2 / mb-5 on the band (the Thought pair closes to 4px, the gap below matches a user message)", () => {
+    // `MessageList`'s scroll container is `flex flex-col gap-3` (12px) and a
+    // flex MARGIN ADDS to a gap — it can never subtract, so `mt-0` cannot pull
+    // the reply closer than 12px. `-mt-2` (−8px) is what reaches the agreed 4px
+    // (12 − 8); `mb-5` (20px) is what a user message's `my-5` measures below the
+    // user band (12 + 20 = 32px).
+    const message: Message = {
+      kind: "agent-text",
+      messageId: "m1",
+      text: "the reply",
+      at: 1,
+    };
+    render(<MessageBubble message={message} />);
+    const tokens = screen.getByTestId("agent-band").className.split(/\s+/);
+    expect(tokens).toContain("-mt-2");
+    expect(tokens).toContain("mb-5");
+    // One place, the whole band shape, so a class cannot quietly leave the
+    // class list without reddening this test too.
+    expect(tokens).toContain("bg-composer");
+    expect(tokens).toContain("rounded-xl");
+    // The margin lives on the BAND because `agent-text` has no siblings — the
+    // user case puts `my-5` on its UNIT only because its mention cards and
+    // image grid are siblings of that band.
+    expect(tokens).not.toContain("my-5");
+  });
+
+  it("returns a fragment (band + button), so the markdown root keeps its DOM path", () => {
+    // `MessageBubble.markdown.test.tsx` walks
+    // `container.firstElementChild.firstElementChild` to reach the markdown
+    // root; wrapping the two nodes in a `<div>` would shift that path by one.
+    const message: Message = {
+      kind: "agent-text",
+      messageId: "m1",
+      text: "the reply",
+      at: 1,
+    };
+    const { container } = render(<MessageBubble message={message} />);
+    expect(container.firstElementChild).toBe(screen.getByTestId("agent-band"));
+    // The copy button is the band's SIBLING — not a wrapper child, not inside
+    // the band.
+    const button = screen.getByTestId("copy-response");
+    expect(screen.getByTestId("agent-band").contains(button)).toBe(false);
+    expect(button.parentElement).toBe(container);
+  });
+
+  it("renders the copy response button WITHOUT any hover or focus (it is always visible)", () => {
+    const message: Message = {
+      kind: "agent-text",
+      messageId: "m1",
+      text: "the reply",
+      at: 1,
+    };
+    render(<MessageBubble message={message} />);
+    // No `fireEvent.mouseOver`, no `focus()` — the node is simply there.
+    expect(screen.getByTestId("copy-response")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Copy response" }),
+    ).toBeTruthy();
+  });
+
+  it("copies the reply's RAW markdown (not the rendered output) and confirms visibly", async () => {
+    const raw = "Use `npm test`:\n\n| a | b |\n| - | - |\n| 1 | 2 |\n";
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    const message: Message = {
+      kind: "agent-text",
+      messageId: "m1",
+      text: raw,
+      at: 1,
+    };
+    render(<MessageBubble message={message} />);
+    fireEvent.click(screen.getByTestId("copy-response"));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // Byte-for-byte the PROP: backticks and table pipes intact (a rendered-DOM
+    // read-back would lose both).
+    expect(writeText).toHaveBeenCalledWith(raw);
+    expect(
+      screen.getByRole("button", { name: "Copied" }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Copy response" }),
+    ).toBeNull();
+  });
+
+  it("resets the response copy button from Copied back to Copy response after 1.5s", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    const message: Message = {
+      kind: "agent-text",
+      messageId: "m1",
+      text: "the reply",
+      at: 1,
+    };
+    const { unmount } = render(<MessageBubble message={message} />);
+    fireEvent.click(screen.getByTestId("copy-response"));
+    vi.useFakeTimers();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole("button", { name: "Copied" })).toBeTruthy();
+    expect(vi.getTimerCount()).toBe(1);
+    await act(async () => {
+      vi.advanceTimersByTime(1500);
+      await Promise.resolve();
+    });
+    expect(
+      screen.queryByRole("button", { name: "Copy response" }),
+    ).toBeTruthy();
+    expect(vi.getTimerCount()).toBe(0);
+    // The unmount cleanup clears the pending timer (no `setState` on a dead tree).
+    fireEvent.click(screen.getByTestId("copy-response"));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(vi.getTimerCount()).toBe(1);
+    act(() => {
+      unmount();
+    });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("excludes thinking from the copy button (thoughts are a different render unit)", () => {
+    const message: Message = {
+      kind: "agent-text",
+      messageId: "m1",
+      text: "the reply",
+      at: 1,
+    };
+    render(<MessageBubble message={message} />);
+    // No thought text anywhere in the bubble, and the ONE button it owns is the
+    // response copy — the `Thought` row is a separate `agent-thought` unit.
+    expect(screen.getByTestId("copy-response")).toBeTruthy();
+    expect(screen.queryByText("Thought")).toBeNull();
+  });
+
   it("skips re-rendering when the message reference is unchanged (streaming perf)", () => {
     // A live thought chunk replaces ONLY the trailing message object in the
     // reducer; every other bubble gets the SAME reference. Re-rendering all

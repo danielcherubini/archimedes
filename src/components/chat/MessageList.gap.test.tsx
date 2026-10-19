@@ -144,6 +144,18 @@ describe("the transcript's vertical rhythm", () => {
     ]);
     expect(extra(thoughtRow!)).toEqual([]);
     expect(extra(prose!)).toEqual([]);
+    // The wrapper carries NO margin on purpose — the breathing `mt-4` is a
+    // property of a pair that touches a TOOL row, and a `Thought` is not one.
+    // The tight 4px between the `Thought` and its reply therefore lives INSIDE
+    // the row, on the reply's band: `-mt-2` (−8px) against the container's
+    // `gap-3` (12px) is the only way below 12px, because a flex margin adds to a
+    // gap and can never subtract from it. `mb-5` then opens the gap UNDER the
+    // reply to 12 + 20 = 32px, the same air a user message leaves below it.
+    const band = prose!.querySelector('[data-testid="agent-band"]');
+    expect(band).not.toBeNull();
+    const bandTokens = band!.className.split(/\s+/);
+    expect(bandTokens).toContain("-mt-2");
+    expect(bandTokens).toContain("mb-5");
   });
 
   it("chat → thinking also stays tight", () => {
