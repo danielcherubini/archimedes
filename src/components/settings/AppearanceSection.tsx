@@ -219,7 +219,7 @@ export default function AppearanceSection({
       />
       <SettingsRow
         label="Thinking spinner"
-        description="The animation the chat's top working indicator runs while the agent is busy"
+        description="The animation the composer's working indicator runs while the agent is busy"
         controlLayout="wide"
         control={
           <SpinnerStylePicker

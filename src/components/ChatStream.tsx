@@ -51,7 +51,7 @@ import { normalizeVariant } from "../lib/braille-loader";
 import SessionStalledBanner from "./SessionStalledBanner";
 import MessageList from "./chat/MessageList";
 import ComposerRow from "./chat/ComposerRow";
-import ComposerModals, { WorkingIndicator } from "./chat/ComposerModals";
+import ComposerModals from "./chat/ComposerModals";
 import type { MentionRow } from "./chat/ComposerMentions";
 
 /**
@@ -1605,13 +1605,6 @@ export default function ChatStream() {
           {error}
         </p>
       )}
-      <WorkingIndicator
-        agentState={agentState}
-        workingOrInTurn={workingOrInTurn}
-        compacting={compacting}
-        spinnerStyle={spinnerStyle}
-        quip={quip}
-      />
       </main>
       {/* The composer island (see the column comment): a SIBLING of the
           transcript, not its child. It stays LAST in DOM order, so tab order
@@ -1637,6 +1630,11 @@ export default function ChatStream() {
         composerLocked={composerLocked}
         imageCapable={imageCapable}
         hasImages={hasImages}
+        agentState={agentState}
+        workingOrInTurn={workingOrInTurn}
+        compacting={compacting}
+        spinnerStyle={spinnerStyle}
+        quip={quip}
       />
       {/* Interactive modals (rendered at the `ChatStream` root — `fixed`
           overlays, NOT inside the scroll region). */}
