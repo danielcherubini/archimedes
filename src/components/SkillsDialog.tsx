@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { SkillInfo } from "../lib/tauri";
+import type { ShadowedSkill, SkillInfo } from "../lib/tauri";
 import { isMentionableSkillName } from "../lib/skills";
 import {
   Dialog,
@@ -50,6 +50,24 @@ function manualOnlyTooltip(name: string): string {
 }
 
 /**
+ * The shadowing report's heading — and the ONE place its wording is decided.
+ *
+ * The clause names the WINNER's scope (the CAUSE), never the excluded entry's.
+ * Keying it on the loser is FALSE in shipped configurations: `space_roots()`
+ * contributes two roots per level (`.agents/skills`, then `.pi/skills`) and
+ * `user_roots()` returns two User roots (`~/.agents/skills`, then
+ * `~/.pi/agent/skills`), so a `user` entry can be excluded by a `user` winner
+ * (`~/.pi` losing to `~/.agents`) and a `space` entry by a same-level `space`
+ * winner in the other vendor directory — the symlink farm this feature exists to
+ * serve is exactly that shape (ADR 0065).
+ */
+function shadowHeading(winnerScope: "space" | "user", count: number): string {
+  return `${count} ${count === 1 ? "skill is" : "skills are"} hidden by a ${
+    winnerScope === "space" ? "project" : "global"
+  } skill with the same name`;
+}
+
+/**
  * The Skills modal (ZCode parity: the left pane has NO skill list — the
  * skills UI is a searchable list). One row per (filtered) skill: name
  * (primary) + description (secondary, one-line truncated, full text in a
@@ -83,6 +101,51 @@ export default function SkillsDialog({
     needle === ""
       ? skills
       : skills.filter((s) => s.name.toLowerCase().includes(needle));
+
+  /**
+   * The shadowing report (ADR 0065: a Skill's NAME is its identity, so when two
+   * roots contribute the same name the later one is EXCLUDED — it gets no `$`
+   * mention route and no `read_skill` route in this Space). The fact belongs
+   * HERE because this dialog is the one surface that sees the merged catalog
+   * (`SpacesList` passes `useSkillCatalog(activeSpacePath)`), so it is the only
+   * place a user can learn an entry they wrote is dead.
+   *
+   * `?? []` is the same IPC tolerance `legacyRow` pins in the tests (a row that
+   * genuinely lacks a field), NOT defensive noise: a bare `flatMap` over such a
+   * row yields `undefined` entries that throw on the first property access and
+   * take the whole dialog down.
+   *
+   * Filtered by the SAME needle the rows use, so the block can never
+   * contradict the list above it.
+   */
+  const shadows = skills
+    .flatMap((s) => s.shadowed ?? [])
+    .filter((s) => needle === "" || s.name.toLowerCase().includes(needle));
+
+  /**
+   * Grouped by the WINNER's scope, because the clause names the CAUSE. The
+   * loser's scope says nothing usable: `space_roots()` contributes TWO roots per
+   * level (`.agents/skills`, then `.pi/skills`) and `user_roots()` returns TWO
+   * User roots (`~/.agents/skills`, then `~/.pi/agent/skills`), so a `user`
+   * loser can lose to a `user` winner and a `space` loser to a same-level
+   * `space` winner in the other vendor directory — "hidden by a project skill"
+   * keyed on the LOSER would be false in shipped configurations, including the
+   * symlink farm this feature exists to serve.
+   *
+   * The winner lookup resolves for every shape discovery emits: a loser's name
+   * is EQUAL to its winner's by construction (the name is the dedupe key), and
+   * the winner is a row in this same catalog.
+   */
+  const shadowGroups: { scope: "space" | "user"; losers: ShadowedSkill[] }[] = [];
+  for (const loser of shadows) {
+    const winner = skills.find(
+      (s) => s.name.toLowerCase() === loser.name.toLowerCase(),
+    );
+    const scope = winner?.scope ?? loser.scope;
+    const group = shadowGroups.find((g) => g.scope === scope);
+    if (group) group.losers.push(loser);
+    else shadowGroups.push({ scope, losers: [loser] });
+  }
 
   /**
    * Insert `$<name> ` into the composer (a decoupled `window`
@@ -162,6 +225,39 @@ export default function SkillsDialog({
                       {skill.description}
                     </span>
                   )}
+                </div>
+              ))}
+            </div>
+          )}
+          {/* The shadowing report — a SIBLING of the three-branch ternary above,
+              never inside the rows branch, and gated on its OWN non-empty
+              condition so it can never ride along under either empty state.
+
+              Deliberately NOT a row: a row's onClick inserts `$<name> `, and
+              that token resolves to the WINNER — a row for an excluded entry is
+              a button that loads a different file than the one you are reading.
+              So this is plain text (no `role="button"`, no `tabIndex`, no
+              `onClick`, no hover affordance) and the winner stays the only row
+              for the name. Existing tokens only. */}
+          {shadowGroups.length > 0 && (
+            <div className="flex min-w-0 flex-col gap-0.5 overflow-y-auto">
+              {shadowGroups.map((group) => (
+                <div key={group.scope} className="flex min-w-0 flex-col gap-0.5">
+                  {/* The CAUSE names the WINNER's scope (see `shadowGroups`). */}
+                  <p className="text-ui-sm text-foreground-subtlest">
+                    {shadowHeading(group.scope, group.losers.length)}
+                  </p>
+                  {group.losers.map((loser) => (
+                    <div
+                      key={loser.path}
+                      className="flex min-w-0 items-center gap-2 text-ui-xs text-foreground-subtlest"
+                    >
+                      <span className="min-w-0 truncate">{loser.name}</span>
+                      <span className="min-w-0 truncate" title={loser.path}>
+                        {loser.path}
+                      </span>
+                    </div>
+                  ))}
                 </div>
               ))}
             </div>

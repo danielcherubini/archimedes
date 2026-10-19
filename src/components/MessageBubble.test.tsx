@@ -21,6 +21,7 @@ function makeSkill(overrides: Partial<SkillInfo> = {}): SkillInfo {
     scope: "space",
     body: "Step 1. Step 2.",
     disableModelInvocation: false,
+    shadowed: [],
     ...overrides,
   };
 }

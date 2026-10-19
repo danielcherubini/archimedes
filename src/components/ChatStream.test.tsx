@@ -193,6 +193,7 @@ vi.mock("../lib/tauri", async () => {
         dir: "/s/.agents/skills/debug",
         scope: "space",
         body: "Step 1. Step 2.",
+        shadowed: [],
       },
       {
         name: "beta",
@@ -201,6 +202,7 @@ vi.mock("../lib/tauri", async () => {
         dir: "/s/.agents/skills/beta",
         scope: "space",
         body: "B body",
+        shadowed: [],
       },
     ]),
     listAgentDefinitionsForSpace: vi.fn().mockResolvedValue([
@@ -3781,6 +3783,7 @@ describe("ChatStream", () => {
             scope: "space",
             body: "B",
             disableModelInvocation: false,
+            shadowed: [],
           })),
         );
       } else if (kind === "agents") {
@@ -3834,6 +3837,7 @@ describe("ChatStream", () => {
           scope: "space",
           body: "B",
           disableModelInvocation: false,
+          shadowed: [],
         },
       ]);
       // A DEFERRED listing: the in-flight state ADR 0033 calls out (an empty
@@ -4068,6 +4072,7 @@ describe("ChatStream", () => {
           scope: "space",
           body: "B",
           disableModelInvocation: false,
+          shadowed: [],
         })),
       );
       render(<ChatStream />);
@@ -4164,6 +4169,7 @@ describe("ChatStream", () => {
           scope: "space",
           body: "B",
           disableModelInvocation: false,
+          shadowed: [],
         },
         {
           name: "ab-beta",
@@ -4173,6 +4179,7 @@ describe("ChatStream", () => {
           scope: "space",
           body: "B",
           disableModelInvocation: false,
+          shadowed: [],
         },
         {
           name: "ac-gamma",
@@ -4182,6 +4189,7 @@ describe("ChatStream", () => {
           scope: "space",
           body: "B",
           disableModelInvocation: false,
+          shadowed: [],
         },
       ]);
       render(<ChatStream />);
@@ -5687,6 +5695,7 @@ describe("ChatStream — out-of-Space Directory completion (ADR 0035)", () => {
         scope: "space" as const,
         body: "B",
         disableModelInvocation: false,
+        shadowed: [],
       });
       vi.mocked(listSkills).mockResolvedValue([
         skill(DISCRIMINATING_NAME),
