@@ -6,6 +6,7 @@ import { useSubagentSelection } from "../store/subagentSelection";
 import { useInteractive } from "../store/interactive";
 import { usePermissions } from "../store/permissions";
 import { useSessions } from "../store/sessions";
+import * as statusIconModule from "./SubagentStatusIcon";
 
 // NO `vi.mock("../lib/tauri")` here on purpose. This file used to mock
 // `respondInteractiveRequest` / `respondPermission`, which implied the sheet
@@ -198,6 +199,33 @@ describe("SubagentDetailHost (the subagent transcript sheet)", () => {
     // A NON-selected entry renders NOTHING at all: nothing mounts a
     // transcript for an entry the sheet is not showing.
     expect(screen.queryByText("hello from the explorer")).toBeNull();
+  });
+
+  it("updating an entry other than selectedId does not re-render SubagentDetailHost", () => {
+    useSubagents.getState().addSession(entry);
+    useSubagents.getState().addSession(otherEntry);
+    select("sub1");
+
+    const statusIconSpy = vi.spyOn(statusIconModule, "StatusIcon");
+    render(<SubagentDetailHost />);
+
+    expect(statusIconSpy).toHaveBeenCalledTimes(1);
+
+    // Update otherEntry (sub2), which is not the selected session
+    act(() => {
+      useSubagents.getState().markClosed("sub2", "completed");
+    });
+
+    // SubagentDetailHost should NOT have re-rendered
+    expect(statusIconSpy).toHaveBeenCalledTimes(1);
+
+    // Updating the selected entry (sub1) should re-render
+    act(() => {
+      useSubagents.getState().markClosed("sub1", "completed");
+    });
+    expect(statusIconSpy).toHaveBeenCalledTimes(2);
+
+    statusIconSpy.mockRestore();
   });
 
   // NOTE: the former test `an Escape consumed by a nested
