@@ -14,6 +14,7 @@ import { modelItemsFromCatalog } from "./ModelPickerDialog";
 import { useSettings } from "../store/settings";
 import { SessionConfigOption } from "../lib/tauri";
 import { THINKING_GLYPHS } from "../lib/toolOutput";
+import { describeIpcError } from "../lib/ipcError";
 import { Button } from "./ui/button";
 
 type OnSet = (optionId: string, value: string) => Promise<void>;
@@ -198,7 +199,7 @@ function SessionConfigSelect({ option, kind, onSet, disabled }: SessionConfigSel
     try {
       await onSet(option.id, val);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(describeIpcError(e));
     } finally {
       setPending(false);
     }

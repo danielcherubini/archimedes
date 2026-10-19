@@ -351,3 +351,102 @@ This only affects the local AppImage; CI (Ubuntu) is unaffected.
 - CI (`.github/workflows/ci.yml`) runs fmt, clippy (`--all-targets`), and
   both test suites on every push/PR, on the toolchain pinned in
   `src-tauri/rust-toolchain.toml`.
+
+## Diagnostics
+
+Everything the app writes for diagnosis — plus its database — lives in ONE
+directory: the platform data directory, plus `archimedes`.
+
+| Platform | Directory |
+|---|---|
+| Windows | `%APPDATA%\archimedes` (i.e. `C:\Users\<you>\AppData\Roaming\archimedes`) |
+| Linux | `~/.local/share/archimedes` (or `$XDG_DATA_HOME/archimedes`) |
+| macOS | `~/Library/Application Support/archimedes` |
+
+On Windows the directory comes from the shell's Roaming app-data folder
+(`SHGetKnownFolderPath(FOLDERID_RoamingAppData)`), which **ignores the
+`%APPDATA%` variable** — so if you have redirected `APPDATA`, the path above is
+still where the files are, and the Roaming path is the only instruction worth
+giving a supporter (ADR 0025 records the same fact as the reason a test-side
+redirect cannot exist on Windows). On Windows and macOS this is also where
+`settings.json` lives, because `dirs` resolves the config dir to the same base as
+the data dir there; on Linux settings are separate (`~/.config/archimedes`).
+
+What is in there:
+
+- **`supervisor.log`** (+ **`supervisor.log.old`**) — the protocol log: Worker
+  lifecycle (spawn / ready / exit / crash), the raw Worker IPC lines, and every
+  rejected session command as `ipc <name> FAILED: <sentence>`. It rotates by
+  size: past **5 MB** the current file is renamed to `.old` (overwriting the old
+  one) and a fresh file starts. **This file only exists if you asked for it** —
+  see the switch below. (The `ipc … FAILED:` lines exist only from the build that
+  added them — a log from an older release has the lifecycle and protocol lines
+  and no record of a rejected command.) **It holds your conversation:** the raw
+  lines are the Worker's frames written verbatim, so an outbound (`→`) line
+  carries the prompt you sent and, on a resumed session, the whole transcript the
+  Supervisor handed the Worker. See the warning before sharing it below.
+- **`crash-<timestamp>-<tag>-<pid>.log`** — one file per **panic**, from the panic
+  hook, holding the panic message, its `file:line:column` and a backtrace, kept
+  for **30 days** and at most **50 files**. `<tag>` is `supervisor` (the app
+  process) or `worker` (one session's process); `<pid>` is the process that wrote
+  it. A panic on ANY thread of either process writes one, so the file proves a
+  panic happened — not that the app died or that a session's Worker died. In short:
+  `crash-*.log` is the crash trail, `supervisor.log` is the running story, and a
+  healthy session writes the second and none of the first.
+- **`archimedes.db`** — the SQLite database (sessions, messages, Spaces). Not a
+  log; do not send it as one, it contains your conversation text.
+
+### Turning the log on
+
+`ARCHIMEDES_DEBUG=1`. It is read **once, at startup** — set it **before starting
+the app**, then restart. Setting it while the app runs does nothing, and with the
+variable unset **no log file is created at all**: nothing is written during a
+normal run. Only the exact value `1` enables it.
+
+```sh
+# Linux / macOS — launch it from a shell, so the variable is in its environment
+ARCHIMEDES_DEBUG=1 <the app binary or AppImage>
+```
+
+```powershell
+# Windows PowerShell — set it, then launch the app from this same session
+$env:ARCHIMEDES_DEBUG = "1"
+Start-Process Archimedes
+```
+
+What matters is only that the variable is already in the environment the app
+process inherits; the launch route does not. An icon launched from a desktop
+shell may not inherit a variable you exported in a terminal, so if the log stays
+missing, run the installed binary directly from a terminal where you have set it
+— that form always works.
+
+Then reproduce the problem and read (or attach) `supervisor.log`. If you are
+reporting a failure you saw on screen, the log contains that same sentence,
+character for character — the app logs exactly what it prints.
+
+> **Read it before you send it — it holds your conversation.** The log records
+> the raw Worker frames, and they are written verbatim: an outbound (`→`) frame
+> is the prompt you sent, and a resumed session's `Start` frame carries the
+> whole transcript rehydrated from the database. The 2 KB-per-line cutoff only
+> cuts long frames, so a short prompt — the usual case in a bug report — lands
+> in the file whole. Paths, session ids and the model name are in it too. Before
+> posting it publicly, open it and delete the lines you would not want read (or
+> send only the window around the failure). The privacy warning above covers
+> `archimedes.db`; this one covers the log.
+
+Two things worth knowing when you are the person being handed these files:
+
+- **On Windows the release build has no console** (it is a GUI-subsystem binary —
+  `windows_subsystem = "windows"`), so a panic prints nowhere and
+  `crash-*-supervisor-<pid>.log` is the only trace one leaves. A dev build has a
+  console on every platform, so there the panic text also appears in the terminal.
+- **Older crash logs have no pid in the name.** v0.3.0 and v0.3.1 wrote
+  `crash-<timestamp>-<tag>.log`; the pid suffix arrived in v0.3.2. Both shapes are
+  real crash logs, the retention rule matches both, and crash attribution still
+  recognises the pid-less one — so search the directory for `crash-*.log`, not for
+  the pid-stamped shape alone, or you will tell someone their own file does not
+  exist.
+
+The envelope a rejected command carries over IPC — and why the sentence in it is
+written in Rust, not in the UI — is ADR 0063.
+

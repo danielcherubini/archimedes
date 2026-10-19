@@ -646,3 +646,99 @@ fn space_methods_agree_on_the_canonical_key() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// INVARIANT (issue #44, `docs/roadmap/readable-ipc-errors.md` Task 4): for
+/// one folder, the `sessions.cwd` string and the `spaces.path` string are
+/// THE SAME STRING — byte-identical.
+///
+/// Why it matters: **every Space↔session join in the frontend is a raw string
+/// equality between exactly these two values** — the `cwd === …path` predicate
+/// at `src/store/sessions.ts:466`/`:502`/`:560`/`:565`/`:921`/`:966`/`:1249`,
+/// plus `src/components/SpaceTabs.tsx:106` (the tab-close "how many are open"
+/// gate) and `:162` (the per-tab count) and `src/components/SpacesList.tsx:74`
+/// (reached with `session.cwd` from `:204`/`:758`); `sessions.ts:1038` gates
+/// `startSessionInActiveSpace` on the same equality and `addSpace(info.cwd)`
+/// (`sessions.ts:1053`, `NewSpaceDialog.tsx:93`) mints the Space tab from it,
+/// while `delete_space`/`find_space` take the frontend's string raw. And
+/// `agent/worker/manager.rs:768` compares `StartEnv.cwd` to a Space path the
+/// frontend supplied. So **any change to how either side is stringified must
+/// be applied to BOTH in the same change** — normalizing one side alone (the
+/// tempting one being a `\\?\` strip, the prefix `std::fs::canonicalize` ADDS
+/// to every Windows path) turns those equalities into silent misses: a session
+/// rendering in no Space group, a second tab for one folder, and a mid-session
+/// trust flip delivering to zero Workers. (Line numbers drift; grep
+/// `cwd ===` to re-find them.)
+///
+/// The two writers are deliberately different in shape, which is what makes
+/// the equality worth pinning: `record_session` stores the RAW
+/// `info.cwd.display()` (`src/storage/db.rs:317-325` — no canonicalization at
+/// all) while `upsert_space` stores `space_key()`'s RE-CANONICALIZED value
+/// (`:645` calling `:742-746`). They agree today only because production hands
+/// both an already-canonicalized cwd (`agent/session/mod.rs:1133` start,
+/// `:1156` resume).
+///
+/// ⚠ The `canonicalize` below is NOT hygiene, it is the invariant's
+/// precondition: on macOS the temp dir sits under the `/var` →
+/// `/private/var` symlink and on Windows `canonicalize` adds the verbatim
+/// prefix, so a RAW fixture path would diverge (session side raw, space side
+/// canonical) on two of three platforms for reasons that have nothing to do
+/// with the coupling under test. `open_backfills_space_rows_from_existing_sessions`
+/// canonicalizes for the same reason.
+#[test]
+fn the_session_cwd_string_and_the_space_path_key_are_the_same_string() {
+    let base =
+        std::env::temp_dir().join(format!("archimedes-cwd-coupling-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(base.join("space")).expect("space dir");
+    let db_path = base.join("archimedes.db");
+
+    // Production's precondition: the cwd is canonicalized before it reaches
+    // either writer. Build the `SessionInfo` from the canonical form.
+    let dir = std::fs::canonicalize(base.join("space")).expect("canonical");
+
+    let info = SessionInfo {
+        session_id: "sess-cwd-coupling".to_string(),
+        cwd: dir.clone(),
+        capabilities: serde_json::json!({
+            "piSessionId": "sess-cwd-coupling",
+            "loadSession": true,
+            "promptCapabilities": { "image": true, "audio": false, "embeddedContext": false },
+        }),
+        config_options: None,
+        archived: false,
+        title: None,
+        context_usage: None,
+        is_subagent: false,
+    };
+
+    let db = Db::open(&db_path).expect("db should open");
+    // The ONLY writer of `sessions.cwd` (a start/resume always records).
+    db.record_session(&info)
+        .expect("record_session should succeed");
+    // EXACTLY what `agent/session/mod.rs:760` passes for the same session —
+    // the only caller shape that exercises `upsert_space`'s re-canonicalization.
+    db.upsert_space(&info.cwd.display().to_string(), false)
+        .expect("upsert_space should succeed");
+
+    // Both sides are read back OUT OF THE DATABASE. Deliberately not via
+    // `space_key` on both sides (it is private, and calling it twice would
+    // make this assertion tautological) and not against a hand-written string.
+    let session_cwd = db
+        .session("sess-cwd-coupling")
+        .expect("session lookup")
+        .expect("the session row exists")
+        .cwd;
+    let spaces = db.list_spaces().expect("list_spaces");
+    assert_eq!(spaces.len(), 1, "one folder, one space row; got {spaces:?}");
+    let space_path = spaces[0].path.clone();
+
+    assert_eq!(
+        session_cwd, space_path,
+        "the frontend joins Spaces to sessions by `session.cwd === space.path` \
+         (and `worker/manager.rs:768` compares `StartEnv.cwd` to the Space path), \
+         so the two stringifiers must keep producing one identical string: a \
+         change to either side (e.g. stripping the Windows verbatim prefix) has \
+         to be applied to BOTH in the same change"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}

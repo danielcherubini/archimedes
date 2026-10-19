@@ -28,6 +28,44 @@ use serde_json::Value;
 #[serde(rename_all = "camelCase")]
 pub struct SessionInfo {
     pub session_id: String,
+    /// The session's working directory — the SAME folder as its Space, and
+    /// the value the whole Space↔session relationship is built from.
+    ///
+    /// A `PathBuf` (not a `String`) so the type says "path", but note what
+    /// actually crosses the wire: serde stringifies it with
+    /// `PathBuf::display()`, and THAT string is load-bearing in three places.
+    /// 1. **The frontend joins Spaces to sessions by raw string equality on
+    ///    it.** `session.cwd === space.path` at
+    ///    `src/store/sessions.ts:466`/`:502`/`:560`/`:565`/`:921`/`:966`/`:1249`
+    ///    (grep `cwd ===` — line numbers drift), plus
+    ///    `src/components/SpaceTabs.tsx:106` (the tab-close "how many are
+    ///    open" gate) and `:162` (the per-tab count) and
+    ///    `src/components/SpacesList.tsx:74` (reached with `session.cwd` from
+    ///    `:204`/`:758`). `sessions.ts:1038` gates `startSessionInActiveSpace`
+    ///    on the same equality, and `addSpace(info.cwd)`
+    ///    (`sessions.ts:1053`, `NewSpaceDialog.tsx:93`) derives the Space tab
+    ///    from it. `delete_space` / `find_space` take the frontend's string
+    ///    raw, so a mismatch there fails in silence.
+    /// 2. **`agent/worker/manager.rs:768`** matches Workers with a raw string
+    ///    compare between `StartEnv.cwd` and a Space path the frontend gave.
+    /// 3. `record_session` persists `info.cwd.display()` verbatim into
+    ///    `sessions.cwd`, while `upsert_space` persists its
+    ///    RE-canonicalized `space_key()` — two different code paths that must
+    ///    keep producing one identical string
+    ///    (`tests/storage.rs::the_session_cwd_string_and_the_space_path_key_are_the_same_string`).
+    ///
+    /// ⚠ So: **do not normalize this field's serialized form on one side
+    /// only.** `std::fs::canonicalize` on Windows ADDS a `\\?\` verbatim
+    /// prefix (it never removes one) and that string is what users see and
+    /// what these comparisons compare — but `src-tauri/windows-app-manifest.xml`
+    /// declares no `<longPathAware>` element, which Task 4's constraint 1
+    /// records as making the prefix the only thing currently letting a Space
+    /// deeper than `MAX_PATH` open (that absence is verified in this repo;
+    /// the runtime behaviour behind it is Windows-only and is NOT observed
+    /// here).
+    /// Stripping the prefix on one side would fix the display and break the
+    /// join. The full five-constraint analysis and the evidence status live in
+    /// `docs/roadmap/readable-ipc-errors.md` → Task 4 / `## Findings`.
     pub cwd: PathBuf,
     pub capabilities: Value,
     /// The session's configuration options (model / thinking level

@@ -8,6 +8,7 @@ import {
   relaunchApp,
   type UpdateProgress,
 } from "@/lib/update";
+import { describeIpcError } from "@/lib/ipcError";
 import { Button } from "@/components/ui/button";
 import {
   SettingsBadge,
@@ -173,7 +174,7 @@ export default function UpdateSection(): ReactElement {
     } catch (error) {
       // The typed code (`release-not-found`, `network:…`) is the diagnostic;
       // the sentence above it is the human half. Not a "you are current".
-      setPhase({ kind: "checkFailed", error: String(error) });
+      setPhase({ kind: "checkFailed", error: describeIpcError(error) });
     } finally {
       checkInFlight = false;
     }
@@ -206,7 +207,12 @@ export default function UpdateSection(): ReactElement {
       // A Linux deb/pkexec failure can land here AFTER a complete download.
       // Back to `available` with the reason — retryable, and deliberately not
       // the check-failed sentence (the server was reachable).
-      setPhase({ kind: "available", version: available, notes, error: String(error) });
+      setPhase({
+        kind: "available",
+        version: available,
+        notes,
+        error: describeIpcError(error),
+      });
     } finally {
       installInFlight = false;
       unlisten?.();

@@ -7,6 +7,7 @@ import {
   type AppSettings,
   type McpServerEntry,
 } from "@/lib/tauri";
+import { describeIpcError } from "@/lib/ipcError";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -88,7 +89,7 @@ function McpRow({
       const count = await testMcpServer(entry, name);
       setResult({ count });
     } catch (e) {
-      setResult({ error: e instanceof Error ? e.message : String(e) });
+      setResult({ error: describeIpcError(e) });
     } finally {
       setTesting(false);
     }
@@ -103,7 +104,7 @@ function McpRow({
       const count = await testMcpServer(entry, name);
       setResult({ count });
     } catch (e) {
-      setResult({ error: e instanceof Error ? e.message : String(e) });
+      setResult({ error: describeIpcError(e) });
     } finally {
       setAuthenticating(false);
     }

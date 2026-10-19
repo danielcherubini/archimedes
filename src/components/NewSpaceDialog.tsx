@@ -6,6 +6,7 @@ import {
   type SpaceCheck,
 } from "../lib/tauri";
 import { basenameOfPath } from "../lib/paths";
+import { describeIpcError } from "../lib/ipcError";
 import { useSessions } from "../store/sessions";
 import {
   Dialog,
@@ -38,9 +39,9 @@ export default function NewSpaceDialog({ onClose }: { onClose: () => void }) {
   /**
    * Edit OR Browse pick: a non-empty cwd is validated with `space_for_path`
    * (canonicalize + "is a space row already there"). Tauri rejects
-   * `Err(String)` commands with a PLAIN string, so `e.message` alone would
-   * be `undefined` — the `String(e)` fallback keeps the message visible
-   * (same idiom as the Start error below). An empty cwd clears both.
+   * `Err(String)` commands with a PLAIN string and typed commands with an
+   * OBJECT, so both paths go through `describeIpcError` (same renderer as the
+   * Start error below). An empty cwd clears both.
    */
   const changeCwd = (next: string) => {
     setCwd(next);
@@ -55,7 +56,7 @@ export default function NewSpaceDialog({ onClose }: { onClose: () => void }) {
         setFolderError(null);
       } catch (e) {
         setCheck(null);
-        setFolderError(e instanceof Error ? e.message : String(e));
+        setFolderError(describeIpcError(e));
       }
     })();
   };
@@ -93,8 +94,9 @@ export default function NewSpaceDialog({ onClose }: { onClose: () => void }) {
       onClose();
     } catch (err) {
       // Keep the dialog open; `space_for_path` / `start_session` errors
-      // (e.g. `no such folder`) reject as String.
-      setError(err instanceof Error ? err.message : String(err));
+      // (e.g. `no such folder`) reject as a String or as a typed envelope —
+      // `describeIpcError` reads either.
+      setError(describeIpcError(err));
     } finally {
       setBusy(false);
     }

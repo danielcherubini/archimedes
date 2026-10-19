@@ -6,6 +6,7 @@ import {
   type AppSettings,
   type WebSettings,
 } from "@/lib/tauri";
+import { describeIpcError } from "@/lib/ipcError";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -63,7 +64,7 @@ function KeyedProviderRow({
       const hits = await testSearchProvider(provider, settings);
       setResult({ hits });
     } catch (e) {
-      setResult({ error: e instanceof Error ? e.message : String(e) });
+      setResult({ error: describeIpcError(e) });
     } finally {
       setTesting(false);
     }
@@ -143,7 +144,7 @@ function SearxngRow({
       const hits = await testSearchProvider("searxng", settings);
       setResult({ hits });
     } catch (e) {
-      setResult({ error: e instanceof Error ? e.message : String(e) });
+      setResult({ error: describeIpcError(e) });
     } finally {
       setTesting(false);
     }
@@ -201,7 +202,7 @@ function DuckDuckGoRow({ settings }: { settings: AppSettings }): ReactElement {
       const hits = await testSearchProvider("duckduckgo", settings);
       setResult({ hits });
     } catch (e) {
-      setResult({ error: e instanceof Error ? e.message : String(e) });
+      setResult({ error: describeIpcError(e) });
     } finally {
       setTesting(false);
     }
