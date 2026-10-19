@@ -209,15 +209,15 @@ Decision already made: hold the sent attachments in a session-keyed ref instead 
 
 Two decisions already made, both load-bearing:
 
-- **Insert in `stageFiles`, not in the callers.** `stageFiles` (`ChatStream.tsx:1183`) is the single funnel for all four staging paths — paste-with-file-items (`:1224`), the WebKitGTK empty-paste clipboard fallback (`:1250`), drag-and-drop (`:1262`) and the `+` file picker (`:1312`). One edit covers all four. If only paste inserted markers, a mixed batch would number `#1, #3` and the number would stop matching the strip.
+- **Insert in `stageFiles`, not in the callers.** `stageFiles` (`ChatStream.tsx:1243`) is the single funnel for all four staging paths — paste-with-file-items (`:1284`), the WebKitGTK empty-paste clipboard fallback (`:1310`), drag-and-drop (`:1322`) and the `+` file picker (`:1372`). One edit covers all four. If only paste inserted markers, a mixed batch would number `#1, #3` and the number would stop matching the strip.
 - **Numbering is by staging order, and removal compacts by that order — not by text order.** Because a marker is inserted at the caret, markers can appear in the draft in a different order than the attachments were staged. So the rewrite must key on the number itself: dropping the attachment at position `k` deletes `[image #k]` and decrements every marker whose number is `> k`. Do not "simplify" this to a positional rescan of the text; it would be wrong for exactly the caret case.
 
 **Files:**
 - Modify: `src/lib/chatAttachments.ts` (three new pure exports)
-- Modify: `src/components/ChatStream.tsx` (`stageFiles` ~`:1183`, `removeAttachment` ~`:1318`)
+- Modify: `src/components/ChatStream.tsx` (`stageFiles` `:1243`, `removeAttachment` `:1378`)
 - Modify: `src/components/chat/AttachmentStrip.tsx` (a `#N` badge on each thumbnail)
 - Test: `src/lib/chatAttachments.test.ts`
-- Modify: `src/components/ChatStream.tsx` — `send()`'s single `expandMentions` call at `:1057` (the mask wrapper, step 5)
+- Modify: `src/components/ChatStream.tsx` — `send()`'s single `expandMentions` call at `:1082` (the mask wrapper, step 5)
 - Test: `src/components/ChatStream.test.tsx` (the paste/attachment group) — **two existing tests change**, inventoried below
 
 **What to implement:**
@@ -246,21 +246,21 @@ Two decisions already made, both load-bearing:
    | `"a [image #1] [image #2] [image #3] b"` | 2 | `"a [image #1] [image #2] b"` |
    | `"a [image #1] [image #2] [image #3] b"` | 3 | `"a [image #1] [image #2] b"` |
    | `"look at [image #1] and stuff"` | 1 | `"look at and stuff"` |
-   | `"prose with #3 unbracketed [image #1]"` | 1 | `"prose with #3 unbracketed"` | `handlePaste` already calls `e.preventDefault()` (`:1221`) **before** `stageFiles`, so for an image paste the marker is the only thing that lands — there is no auto-inserted text to collide with, and any clipboard text alongside an image is discarded (existing behaviour, unchanged). The no-space branch is still real and reachable: a draft whose caret already follows a newline or space. Pin both branches on the helper as **unit** tests. `renumberImageMarkers` must be a single pass over the exact literal pattern `/\[image #(\d+)\]/g` — nothing looser, so ordinary prose mentioning "#3" is untouched.
+   | `"prose with #3 unbracketed [image #1]"` | 1 | `"prose with #3 unbracketed"` | `handlePaste` already calls `e.preventDefault()` (`:1282`) **before** `stageFiles`, so for an image paste the marker is the only thing that lands — there is no auto-inserted text to collide with, and any clipboard text alongside an image is discarded (existing behaviour, unchanged). The no-space branch is still real and reachable: a draft whose caret already follows a newline or space. Pin both branches on the helper as **unit** tests. `renumberImageMarkers` must be a single pass over the exact literal pattern `/\[image #(\d+)\]/g` — nothing looser, so ordinary prose mentioning "#3" is untouched.
 
 2. In `stageFiles`, after `addImageAttachments` returns `next` and only when `next !== attachmentsRef.current` (i.e. something was actually staged — rejected files must insert nothing), insert the markers.
 
-   **Build ONE string for the whole batch and insert it once.** A batch of N files staged in one call must produce `#k #k+1 …` **ascending**, numbered from `attachmentsRef.current.length + 1` upward. **Derive N from the returned list — `next.length - attachmentsRef.current.length` — never from `files.length`**: `addImageAttachments` can reject mid-batch (`src/lib/chatAttachments.ts:107`/`:112` `continue`, `:118` `break` on the cap), so looping the input emits a marker for a rejected file and the numbers then name the wrong picture. Inserting one at a time at the same caret yields `#3 #2 #1` — the numbers then run opposite to the attachment order, inverting the marker→image mapping on every multi-file paste. After the single insert, restore focus/caret inside a `requestAnimationFrame` — copy the refocus block from `selectMention` (`ChatStream.tsx:1388-1394`), because a controlled textarea drops focus on a programmatic `setDraft`.
+   **Build ONE string for the whole batch and insert it once.** A batch of N files staged in one call must produce `#k #k+1 …` **ascending**, numbered from `attachmentsRef.current.length + 1` upward. **Derive N from the returned list — `next.length - attachmentsRef.current.length` — never from `files.length`**: `addImageAttachments` can reject mid-batch (`src/lib/chatAttachments.ts:107`/`:112` `continue`, `:118` `break` on the cap), so looping the input emits a marker for a rejected file and the numbers then name the wrong picture. Inserting one at a time at the same caret yields `#3 #2 #1` — the numbers then run opposite to the attachment order, inverting the marker→image mapping on every multi-file paste. After the single insert, restore focus/caret inside a `requestAnimationFrame` — copy the refocus block from `selectMention` (`ChatStream.tsx:1448-1453`), because a controlled textarea drops focus on a programmatic `setDraft`.
 
    **Use the caret only when the textarea actually has focus.** `selectionStart` is `0` for a textarea that has never been focused, and two of the four staging paths (drag-and-drop, and the `+` file picker — the native dialog holds focus) routinely run that way, so the naive read would drop every marker at the *start* of the user's sentence. Use:
 
    ```ts
    const el = composerRef.current;
-   const len = draftRef.current.length; // the LIVE mirror (:384), not the render closure
+   const len = draftRef.current.length; // the LIVE mirror (:388), not the render closure
    const caret = el && document.activeElement === el ? (el.selectionStart ?? len) : len;
    ```
 
-   `stageFiles` already reads `attachmentsRef.current` rather than the `attachments` state for exactly this reason ("a render closure would be stale for fast successive events", `:1184`) — the marker insert must apply the same discipline to the draft, or a 9th paste in a fast sequence reverts the draft to a stale value and drops the earlier markers. This is a deliberate divergence from the `:871` / `:1339` idiom, which is safe there only because both paths are reachable solely after typing (so the field is focused). Pin it: with a non-empty draft and the textarea never focused, a drop appends the marker to the END.
+   `stageFiles` already reads `attachmentsRef.current` rather than the `attachments` state for exactly this reason ("a render closure would be stale for fast successive events", `:1244`) — the marker insert must apply the same discipline to the draft, or a 9th paste in a fast sequence reverts the draft to a stale value and drops the earlier markers. This is a deliberate divergence from the `:896` / `:1399` idiom, which is safe there only because both paths are reachable solely after typing (so the field is focused). Pin it: with a non-empty draft and the textarea never focused, a drop appends the marker to the END.
 
 3. In `removeAttachment`, compute the removed item's **1-based position in the list being shown** (`attachmentsRef.current.findIndex(a => a.id === id) + 1`) *before* filtering, then `setDraft(renumberImageMarkers(draftRef.current, position))` — again `draftRef.current`, not the closure.
 
@@ -268,9 +268,9 @@ Two decisions already made, both load-bearing:
 
 5. **Make markers immune to `#`-mention expansion by construction, not by luck.** This is the task's one real risk, so read the whole step.
 
-   `MCP_MENTION_RE` is `/(^|\s)#([a-z0-9]+(?:-[a-z0-9]+)*)/g` (`src/lib/skills.ts:287`). In `[image #3]` the `#` is preceded by a space and `3` is in the token class, so the marker **is** a mention token. Today it survives only because no catalog entry is named `3` (invariant 5, verbatim). That is not a guarantee: `is_mentionable_name` (`src-tauri/src/skills.rs`) accepts digits — its own tests use `"0"` as a positive case — so an MCP server literally named `3` makes `expandMentions` append a `<mcp name=\"3\">` block to a prompt the user never asked for. Measured on this tree: with catalog `[]` the text is verbatim; with catalog `[\"3\"]` it gains the block. A test that merely asserts verbatim-ness is therefore vacuous in the safe case and false in the interesting one.
+   `MCP_MENTION_RE` is `/(^|\s)#([a-z0-9]+(?:-[a-z0-9]+)*)/g` (`src/lib/skills.ts:287`). In `[image #3]` the `#` is preceded by a space and `3` is in the token class, so the marker **is** a mention token. Today it survives only because no catalog entry is named `3` (invariant 5, verbatim). That is not a guarantee: `is_mentionable_name` (`src-tauri/src/skills.rs`) accepts digits — its own tests use `"0"` as a positive case — so an MCP server literally named `3` makes `expandMentions` append a `<mcp name="3">` block to a prompt the user never asked for. Measured on this tree: with catalog `[]` the text is verbatim; with catalog `["3"]` it gains the block. A test that merely asserts verbatim-ness is therefore vacuous in the safe case and false in the interesting one.
 
-   **Fix in `send()`**, at the single `expandMentions` call (`ChatStream.tsx:1057`), as a wrapper — mask, expand, unmask:
+   **Fix in `send()`**, at the single `expandMentions` call (`ChatStream.tsx:1082`), as a wrapper — mask, expand, unmask:
 
    ```ts
    const marks: string[] = [];
@@ -284,14 +284,13 @@ Two decisions already made, both load-bearing:
 
    Then **pin all three directions**, or the gate is vacuous:
    - `[image #3]` + a catalog containing `3` → `sendPrompt` receives the text with **no** `<mcp` block (the collision case — this is the test that fails without the wrapper).
-   - A genuine `#postgres` mention + a marker in the same draft → the `<mcp name=\"postgres\">` block IS appended, and the marker is still intact in the text (proves the mask did not disable real mentions).
+   - A genuine `#postgres` mention + a marker in the same draft → the `<mcp name="postgres">` block IS appended, and the marker is still intact in the text (proves the mask did not disable real mentions).
    - Markers only, empty catalog → text unchanged (the existing verbatim path still works).
 
    The trailing `]` is separately load-bearing for the **picker**: `activeMentionToken` (`skills.ts:325`) returns `null` for `look [image #3]` with the caret after the `]`, but returns `{prefix:"#",remainder:"3"}` for `look [image #3` with the caret there. So the closing bracket is what stops a marker from opening the MCP picker while the user keeps typing. Say that in `imageMarker`'s docstring — a future change that drops the bracket turns every marker into a picker trigger.
 
 6. Do not touch `send()`'s other text handling: the marker is ordinary draft text and reaches the model through the existing path. Do not add a Rust change. Do not strip markers anywhere except via the mask in step 5.
 
-6. Do not touch `send()`'s text handling: the marker is ordinary draft text and reaches the model through the existing path. Do not add a Rust change. Do not strip markers anywhere.
 
 **Acceptance criteria:**
 - [ ] Unit tests for all three helpers, including: two pastes give `#1` then `#2`; a rejected file inserts no marker; `renumberImageMarkers` on `[image #1] [image #3]` with `removedAt=2` yields `[image #1] [image #2]`; prose containing `#3` without the brackets is untouched; a marker whose number equals the removed one is gone entirely.
@@ -300,7 +299,7 @@ Two decisions already made, both load-bearing:
 - [ ] Component test: paste two, remove the first via the ✕ → draft reads `[image #1]` (the survivor renumbered), and `sendPrompt` is called with exactly that draft text.
 - [ ] All three `#`-mention tests from step 5, including the collision case (`[image #3]` + a server named `3` → no `<mcp` block), which must fail before the mask wrapper exists.
 - [ ] **`"image-only send is allowed"` (`ChatStream.test.tsx:2201`) — rewrite, do not delete.** It asserts `sendPrompt` was called with `("s1", "", […])`. With markers the text is now `"[image #1]"`, and that is the **intended** semantics: a bare screenshot paste now tells the model which image it is, instead of sending an empty prompt with an anonymous image. Update the expectation to `("s1", "[image #1]", […])` and say why in a comment.
-- [ ] **`"an image-only send with the image removed during the read sends nothing"` (`:2350`) — verify, likely unchanged.** Removing the attachment also removes its marker (step 3), so the draft empties and the stale-draft guard at `:1042` aborts the send. It still asserts `sendPrompt` was not called and should still pass — but it now passes for that reason rather than the images-empty reason. Add a comment naming the guard, so nobody later reads the empty-images path as the only thing protecting it.
+- [ ] **`"an image-only send with the image removed during the read sends nothing"` (`:2350`) — verify, likely unchanged.** Removing the attachment also removes its marker (step 3), so the draft empties and the stale-draft guard at `:1067` aborts the send. It still asserts `sendPrompt` was not called and should still pass — but it now passes for that reason rather than the images-empty reason. Add a comment naming the guard, so nobody later reads the empty-images path as the only thing protecting it.
 - [ ] Mixed batch: 1 accepted + 1 rejected file ⇒ exactly ONE marker (`#1`), never two.
 - [ ] `npx vitest run src/lib/chatAttachments.test.ts src/components/ChatStream.test.tsx` green; `npx tsc --noEmit` clean.
 
