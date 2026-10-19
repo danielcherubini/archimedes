@@ -35,6 +35,7 @@ import type {
 } from "../lib/tauri";
 import { setSidePaneCollapsed } from "../lib/sidePaneState";
 import { activeMentionToken, isOutsideSpaceQuery } from "../lib/skills";
+import { MAX_CHAT_ATTACHMENTS } from "../lib/chatAttachments";
 
 /** A full settings fixture (the spinner-style tests seed the store with it). */
 const SETTINGS_FIXTURE: AppSettings = {
@@ -362,17 +363,23 @@ async function flush(): Promise<void> {
 }
 
 /**
- * A promise that has NOT settled yet, plus its resolver — the shape an
+ * A promise that has NOT settled yet, plus its resolvers — the shape an
  * in-flight IPC has. `deferred` (rather than a plain pending promise) so a
  * test can settle it on purpose and assert what the NEXT keystroke does, and
  * so a test that means to leave one hanging can still unwind it.
  */
-function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (v: T) => void;
+  reject: (e: unknown) => void;
+} {
   let resolve!: (v: T) => void;
-  const promise = new Promise<T>((r) => {
-    resolve = r;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 /**
@@ -6557,4 +6564,177 @@ describe("ChatStream — the [image #N] staging marker", () => {
       ]),
     );
   });
+
+  // ── The mask sentinel is PASTABLE ────────────────────────────────────────
+  //
+  // `\uE000` is a Private Use Area codepoint: no keyboard produces it, but a
+  // PASTE can carry any codepoint, and a log / data dump / mojibake'd file is
+  // full of them. So the sentinel is not un-obtainable, and the un-mask is not
+  // automatically a bijection. The two tests below are the two ways that
+  // bites: an unpaired sentinel must not become the literal word "undefined",
+  // and a draft holding both a marker and a stray sentinel must degrade to
+  // sending the user's text UNEXPANDED rather than to corrupting it.
+
+  it("a pasted mask sentinel in a marker-free prompt is sent BYTE-UNCHANGED",
+    async () => {
+      seedLiveSession(); // no attachments, so NO markers can exist to mask
+      render(<ChatStream />);
+      // A log line that happens to carry a PUA codepoint (the realistic shape:
+      // data pasted in from elsewhere, not something the user typed).
+      const pasted = "decode this: \uE000 and report";
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: pasted } });
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(sendPrompt).toHaveBeenCalled());
+      const sent = vi.mocked(sendPrompt).mock.calls[0]![1] as string;
+      // Byte-for-byte the user's text. An unbounded un-mask replacer returns
+      // `undefined` for an unpaired sentinel and JS stringifies the result, so
+      // the model would read "decode this: undefined and report".
+      expect(sent).toBe(pasted);
+      expect(sent).not.toContain("undefined");
+    });
+
+  it("a marker AND a pasted mask sentinel send UNEXPANDED (no block, no rewrite)",
+    async () => {
+      seedLiveSessionWithImages();
+      seedMcpMentionsOn();
+      // The catalog entry that makes skipping the expansion worthwhile: a
+      // server literally named `3`, so a `#3` token in prose WOULD expand.
+      vi.mocked(listMcpServersEffective).mockResolvedValueOnce([
+        { name: "3", kind: "stdio", summary: "a server named with a digit" },
+      ]);
+      render(<ChatStream />);
+      await waitForCatalog();
+      pasteToComposer([
+        new File([new Uint8Array([1])], "s.png", { type: "image/png" }),
+      ]);
+      const draft = `look [image #1] at #3 and \uE000 tail`;
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: draft } });
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(sendPrompt).toHaveBeenCalled());
+      const sent = vi.mocked(sendPrompt).mock.calls[0]![1] as string;
+      // The pathological draft (a marker to mask AND a stray sentinel to
+      // restore) sends the user's own text UNEXPANDED: no `<mcp>` block for the
+      // `#3` token that pass loses, because corrupting the prompt is worse than
+      // one send without mention expansion.
+      expect(sent).not.toContain("<mcp");
+      expect(sent).toContain("[image #1]");
+      // And the pasted sentinel survives as the byte it was, not as "undefined".
+      expect(sent).toBe(draft);
+    });
+});
+
+describe("ChatStream — the failed-send attachment restore", () => {
+  /** The composer's current draft text. */
+  function composerValue(): string {
+    return (screen.getByRole("textbox") as HTMLTextAreaElement).value;
+  }
+
+  /** The composer strip's thumbnail file names, LEFT TO RIGHT — i.e. the
+   * attachment ORDER the `[image #N]` markers count against. */
+  function composerThumbs(): string[] {
+    const composer = document.querySelector('[data-testid="composer-island"]')!;
+    return Array.from(composer.querySelectorAll("img")).map(
+      (el) => el.getAttribute("alt") ?? "",
+    );
+  }
+
+  const png = (name: string, byte: number): File =>
+    new File([new Uint8Array([byte, byte + 1, byte + 2])], name, {
+      type: "image/png",
+    });
+
+  it("a failed send renumbers the draft when it re-prepends the held attachments",
+    async () => {
+      // The marker numbers are POSITIONAL (they count THIS message's
+      // attachments in list order), and the restore merges the held list IN
+      // FRONT of whatever was staged during the turn. So staging A, sending
+      // (A leaves the list), then pasting B mid-turn numbers B `#1` — and a
+      // restore that puts A back in front without moving the draft's numbers
+      // leaves `[image #1]` naming A while the user means B: the next prompt
+      // names the wrong picture, which is exactly what the marker contract
+      // exists to prevent.
+      seedLiveSessionWithImages();
+      const inflight = deferred<StopReason>();
+      vi.mocked(sendPrompt).mockImplementationOnce(() => inflight.promise);
+      render(<ChatStream />);
+      pasteToComposer([png("a.png", 1)]);
+      expect(composerValue()).toBe("[image #1]");
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      // Wait until the send is genuinely IN FLIGHT: only then has the draft
+      // been cleared and A moved to the held map (pasting earlier would edit
+      // the draft mid-read, and `send()`'s stale-draft guard would abort the
+      // send before `sendPrompt` — a different test entirely).
+      await waitFor(() => expect(sendPrompt).toHaveBeenCalled());
+      await flush();
+      pasteToComposer([png("b.png", 4)]);
+      // B is numbered against the list as it stands NOW (empty — A is held),
+      // so it is `#1`. This is the premise of the bug, not a bug itself.
+      expect(composerValue()).toBe("[image #1]");
+      await act(async () => {
+        inflight.reject(new Error("boom"));
+      });
+      await waitFor(() => expect(screen.getByText("boom")).toBeTruthy());
+      // Both pictures are back, A first (the restore prepends).
+      expect(composerThumbs()).toEqual(["a.png", "b.png"]);
+      // …so B — still the picture the draft names — is position 2.
+      expect(composerValue()).toBe("[image #2]");
+      // And the contract end to end: the NEXT send ships the pictures in list
+      // order with the marker naming the right one.
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(sendPrompt).toHaveBeenCalledTimes(2));
+      expect(sendPrompt).toHaveBeenCalledWith("s1", "[image #2]", [
+        { name: "a.png", mimeType: "image/png", sizeBytes: 3, data: "AQID" },
+        { name: "b.png", mimeType: "image/png", sizeBytes: 3, data: "BAUG" },
+      ]);
+    });
+
+  it("a failed send restores at most MAX_CHAT_ATTACHMENTS and releases the overflow",
+    async () => {
+      // The cap lives inside `addImageAttachments` (staging time), so the
+      // restore path — which writes `attachments` directly — can rebuild a
+      // list the cap would never have allowed: send 8, paste a 9th during the
+      // turn, fail, and the composer holds 9. The next send would then be
+      // rejected server-side for a state the UI itself built.
+      seedLiveSessionWithImages();
+      const inflight = deferred<StopReason>();
+      vi.mocked(sendPrompt).mockImplementationOnce(() => inflight.promise);
+      render(<ChatStream />);
+      // 8 staged in ONE batch (the cap: 8 is allowed, a 9th would not be).
+      pasteToComposer(
+        Array.from({ length: MAX_CHAT_ATTACHMENTS }, (_, i) =>
+          png(`h${i + 1}.png`, i + 1),
+        ),
+      );
+      expect(composerThumbs()).toHaveLength(MAX_CHAT_ATTACHMENTS);
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(sendPrompt).toHaveBeenCalled());
+      await flush();
+      // The 9th, staged while the turn runs (the live list is empty — all 8
+      // are held), so its marker is `#1`.
+      pasteToComposer([png("late.png", 90)]);
+      expect(composerValue()).toBe("[image #1]");
+      await act(async () => {
+        inflight.reject(new Error("boom"));
+      });
+      await waitFor(() => expect(screen.getByText("boom")).toBeTruthy());
+      // The list ends up AT the cap, not above it: the held block keeps only
+      // the room the live list leaves, so the LAST held item is the overflow —
+      // and the drop mirrors `addImageAttachments`'s silent cap rejection at
+      // staging time (the same limit, the same non-error treatment).
+      expect(composerThumbs()).toHaveLength(MAX_CHAT_ATTACHMENTS);
+      // The strip's badges stop at the cap too (each thumbnail carries `#N`, so
+      // a `#9` badge would mean the strip still renders the overflow).
+      expect(
+        document
+          .querySelector('[data-testid="composer-island"]')!
+          .querySelectorAll("img"),
+      ).toHaveLength(MAX_CHAT_ATTACHMENTS);
+      expect(composerThumbs()).toContain("late.png");
+      // The overflow is RELEASED, not silently dropped — a dropped-but-live
+      // object URL is a leak no path can reach again.
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:mock-h8.png");
+      // The draft's number still names the surviving picture: `late.png` is
+      // position 8 of the restored list.
+      expect(composerValue()).toBe("[image #8]");
+    });
 });

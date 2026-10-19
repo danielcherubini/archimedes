@@ -1,5 +1,5 @@
 import { describe, expect, test, vi, beforeAll } from "vitest";
-import { createChatComposerAttachment, readAttachmentAsBase64, releaseAttachment, addImageAttachments, agentSupportsImages, imageMarker, insertAtCaret, renumberImageMarkers, draftIsMarkerOnly } from "./chatAttachments";
+import { createChatComposerAttachment, readAttachmentAsBase64, releaseAttachment, addImageAttachments, agentSupportsImages, imageMarker, insertAtCaret, renumberImageMarkers, shiftImageMarkers, draftIsMarkerOnly } from "./chatAttachments";
 
 describe("chatAttachments", () => {
   beforeAll(() => {
@@ -214,6 +214,73 @@ describe("chatAttachments", () => {
         "[image #1] [image #2]",
       );
     });
+  });
+
+  describe("shiftImageMarkers", () => {
+    // WHY THIS EXISTS: the numbers a draft's markers use are POSITIONAL — they
+    // count the attachments of THIS message in list order (see `imageMarker`).
+    // A send moves its attachments out of the composer, so anything staged
+    // while the turn runs is numbered against the SHORTER list; when a failed
+    // send puts the held attachments back IN FRONT, every list position below
+    // the inserted block moves down by exactly the number restored, and the
+    // draft's numbers have to move with it or each marker names its
+    // predecessor's picture.
+    test("moves EVERY marker up by `by` (the restore-prepends-N case)", () => {
+      expect(shiftImageMarkers("look at [image #1]", 1)).toBe(
+        "look at [image #2]",
+      );
+      expect(shiftImageMarkers("[image #1] and [image #2]", 3)).toBe(
+        "[image #4] and [image #5]",
+      );
+    });
+
+    test("is a NO-OP for `by === 0` (nothing was restored)", () => {
+      expect(shiftImageMarkers("look at [image #1]", 0)).toBe(
+        "look at [image #1]",
+      );
+    });
+
+    test("matches ONLY the exact literal (prose `#3` is not a marker)", () => {
+      // The same no-looser-pattern discipline as `renumberImageMarkers`: a bare
+      // `#3`, a bracketed-but-not-ours `[foo #3]` and a marker missing its `]`
+      // are all the user's own text and stay byte-identical.
+      expect(shiftImageMarkers("issue #3 [foo #3] [image #3", 1)).toBe(
+        "issue #3 [foo #3] [image #3",
+      );
+      expect(shiftImageMarkers("issue #3 and [image #3]", 1)).toBe(
+        "issue #3 and [image #4]",
+      );
+    });
+
+    test("shifts markers in ANY text order (the shift is keyed on the number)",
+      () => {
+        // A marker lands at the caret, so a draft can hold `#2` before `#1`;
+        // shifting by number (not by scan position) keeps both correct.
+        expect(shiftImageMarkers("[image #2] before [image #1]", 2)).toBe(
+          "[image #4] before [image #3]",
+        );
+      });
+
+    test("shifts DOWN for a negative `by`, and never invents a number below 1",
+      () => {
+        // The restore drops the overflow past the attachment cap, so the count
+        // it actually restored can differ from the block that left the
+        // composer — the shift uses that real count. A marker the shift would
+        // drive to `#0` names nothing at all, so it is left alone rather than
+        // rewritten into a number no attachment holds.
+        expect(shiftImageMarkers("[image #4] and [image #3]", -2)).toBe(
+          "[image #2] and [image #1]",
+        );
+        expect(shiftImageMarkers("[image #3] and [image #2]", -2)).toBe(
+          "[image #1] and [image #2]",
+        );
+      });
+
+    test("leaves a marker-less draft untouched (a shift never invents text)",
+      () => {
+        expect(shiftImageMarkers("no markers here", 4)).toBe("no markers here");
+        expect(shiftImageMarkers("", 4)).toBe("");
+      });
   });
 
   describe("draftIsMarkerOnly", () => {

@@ -29,9 +29,11 @@ import {
   draftIsMarkerOnly,
   imageMarker,
   insertAtCaret,
+  MAX_CHAT_ATTACHMENTS,
   readAttachmentAsBase64,
   releaseAttachment,
   renumberImageMarkers,
+  shiftImageMarkers,
   type ChatComposerAttachment,
 } from "../lib/chatAttachments";
 import { inferAttachmentMimeType, shouldPreferSpreadsheetClipboardText } from "../lib/chatAttachmentMetadata";
@@ -1034,20 +1036,54 @@ export default function ChatStream() {
       // prompt the user never asked for. So the markers are lifted out BEFORE
       // the expansion and put back byte-exact AFTER it: `expandMentions` sees no
       // `#` token from a marker at all, and the marker text is stashed rather
-      // than re-derived, so the round trip is exact. The sentinel is a Private
-      // Use Area codepoint, which no ordinary input path can type.
+      // than re-derived, so the round trip is exact.
+      //
+      // THE SENTINEL IS PASTABLE, and that is what the collision guard below is
+      // for. `\uE000` is a Private Use Area codepoint: no keyboard produces it —
+      // TRUE — but a PASTE carries arbitrary codepoints, and pasted logs, data
+      // dumps and mojibake are exactly where PUA characters live. So the mask is
+      // NOT structurally un-obtainable and the round trip is not automatically a
+      // bijection: a draft can arrive at the un-mask holding a sentinel that no
+      // marker put there. What makes the design safe is the guard, not the
+      // choice of codepoint.
       const marks: string[] = [];
       const masked = rawText.replace(/\[image #(\d+)\]/g, (marker) => {
         marks.push(marker);
         return "\uE000";
       });
-      const expanded = expandMentions(masked, {
-        skills,
-        agents,
-        mcpServers: mcpMentionsEnabled ? mcpServers : [],
-      });
-      let markIndex = 0;
-      const text = expanded.replace(/\uE000/g, () => marks[markIndex++]);
+      // A PASTED sentinel sitting in a draft that also has a marker: the un-mask
+      // cannot tell the user's stray byte from one of our placeholders, so the
+      // round trip could hand a marker's text to the wrong position. Such a
+      // draft is pathological (nothing the composer produces writes a PUA
+      // character), and the two ways out are not equal: sending the user's own
+      // text UNEXPANDED costs one send its `<mcp>` / `<skill>` blocks, while
+      // continuing would CORRUPT the prompt the model reads. Degrading is the
+      // safe side, so that is what this does.
+      //
+      // A sentinel in a draft with NO marker needs no guard: nothing was masked,
+      // so nothing can be mis-restored — the bounded replacer below just lets the
+      // user's byte pass through, and expansion runs normally.
+      let text: string;
+      if (marks.length > 0 && rawText.includes("\uE000")) {
+        text = rawText;
+      } else {
+        const expanded = expandMentions(masked, {
+          skills,
+          agents,
+          mcpServers: mcpMentionsEnabled ? mcpServers : [],
+        });
+        let markIndex = 0;
+        // BOUNDED on purpose, and it is not defensive noise: an unbounded
+        // `marks[markIndex++]` returns `undefined` once the stashes run out, and
+        // `String.prototype.replace` STRINGIFIES what a replacer returns — so a
+        // pasted sentinel would ship the literal word "undefined" to the model in
+        // place of the user's character. Returning the sentinel itself keeps the
+        // text byte-identical to what the user had.
+        text = expanded.replace(
+          /\uE000/g,
+          () => (markIndex < marks.length ? marks[markIndex++] : "\uE000"),
+        );
+      }
       // Every staged image was removed during the read (the composer isn't
       // locked until `beginTurn`, so a thumbnail can be removed during the
       // read): with no text there's nothing meaningful left to send; with
@@ -1124,8 +1160,9 @@ export default function ChatStream() {
       // composer AT send (see `heldForSendRef`), so this is where they come
       // back: the held list is merged in FRONT of whatever is staged now (the
       // user can stage during a turn), de-duplicated by `id` so a re-staged
-      // item is not doubled. Their object URLs are NOT revoked — that is what
-      // makes the restored thumbnail render again.
+      // item is not doubled. The RESTORED ones' object URLs are NOT revoked —
+      // that is what makes the restored thumbnail render again (only the
+      // overflow the cap forces out below is released).
       //
       // This block MUST stay in the same synchronous block as `setError`
       // above: the existing test waits on the error line, and it only passes
@@ -1135,13 +1172,51 @@ export default function ChatStream() {
       if (held && held.length > 0 && activeSessionIdRef.current === targetSessionId) {
         const live = attachmentsRef.current;
         const ids = new Set(live.map((a) => a.id));
-        const back = held.filter((a) => !ids.has(a.id));
+        const fitting = held.filter((a) => !ids.has(a.id));
+        // ── The restore respects MAX_CHAT_ATTACHMENTS ──────────────────────
+        // The cap is enforced inside `addImageAttachments`, i.e. only at
+        // STAGING time, and this path writes `attachments` directly — so
+        // without a ceiling here a failed send can rebuild a list the cap
+        // would never have admitted (send 8, paste a 9th during the turn,
+        // fail: 9 staged). Nothing in the UI catches that, and the NEXT send
+        // is then rejected server-side for a state this component built.
+        // Dropping the overflow mirrors `addImageAttachments`'s silent cap
+        // rejection at staging time: the same limit, the same non-error
+        // treatment (the user sees a full strip, not an error line).
+        const room = Math.max(0, MAX_CHAT_ATTACHMENTS - live.length);
+        const back = fitting.slice(0, room);
+        // The overflow's object URL has no owner left once it is dropped — no
+        // state holds it, so no remove / session-switch / unmount path can
+        // ever revoke it. Release it here or it leaks for the process lifetime.
+        fitting.slice(room).forEach(releaseAttachment);
         const merged = [...back, ...live];
         attachmentsRef.current = merged;
         setAttachments(merged);
+        // ── The draft's marker numbers move WITH the pictures ──────────────
+        // The numbers are POSITIONAL (they count THIS message's attachments in
+        // list order), and this restore inserts `back` IN FRONT of everything
+        // staged during the turn. Anything staged mid-turn was numbered against
+        // the SHORTER list — stage A, send (A held, list empty), paste B and
+        // `stageFiles` numbers B `#1` — so after the merge slot 1 is A and the
+        // draft's `#1` names the wrong picture: the next prompt asks about a
+        // screenshot the user never meant. Shifting by the number ACTUALLY
+        // restored (not the number that left the composer — the cap can make
+        // those differ) is what keeps the marker→image mapping the whole
+        // marker feature exists to guarantee.
+        //
+        // The live draft (`draftRef`, not the `send()` closure — the composer
+        // stays editable across the awaits) is the text being rewritten, and
+        // the write lands in this SAME synchronous block for the batching
+        // reason above.
+        if (back.length > 0) {
+          setDraft(shiftImageMarkers(draftRef.current, back.length));
+        }
       }
       heldForSendRef.current.delete(targetSessionId);
-      // The draft is lost on failure (pre-existing behavior, unchanged).
+      // The text the user had typed when they pressed Send is still lost on
+      // failure (`setDraft("")` ran at send, pre-existing behaviour): what
+      // survives is whatever was typed AFTER that, and the shift above keeps
+      // ITS markers honest about the restored list.
     } finally {
       sendingSessionsRef.current.delete(targetSessionId);
     }

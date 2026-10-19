@@ -279,3 +279,31 @@ export function renumberImageMarkers(text: string, removedAt: number): string {
     return n > removedAt ? imageMarker(n - 1) : whole;
   });
 }
+
+/**
+ * Bump every `[image #N]` marker's number by `by` (used when attachments are
+ * re-prepended ahead of ones the user staged meanwhile).
+ *
+ * `renumberImageMarkers` answers "an attachment LEFT the list"; this answers
+ * the mirror image, "N attachments joined the FRONT of it". The numbers are
+ * POSITIONAL (see `imageMarker`), so inserting ahead of a picture moves that
+ * picture — and every marker naming it — down by `N`. Skipping the shift is
+ * the inverted-mapping bug: the draft says `[image #1]`, the list's slot 1 now
+ * holds a different picture, and the prompt names the wrong image.
+ *
+ * The SAME no-looser-pattern discipline as the renumber: the match is the
+ * exact literal via `IMAGE_MARKER_RE`, so prose like `issue #3` never moves.
+ * `by === 0` returns the text untouched (nothing was inserted, so nothing is
+ * ours to rewrite — and a `replace` would still re-emit every marker).
+ */
+export function shiftImageMarkers(text: string, by: number): string {
+  if (by === 0) return text;
+  return text.replace(IMAGE_MARKER_RE, (whole, digits: string) => {
+    const n = Number(digits);
+    // Guard the one case the arithmetic cannot express: a shift that would
+    // drive a marker to 0 or below invents a number no attachment holds, so
+    // leaving it alone is the only honest answer. Unreachable from the current
+    // caller (`by` is a list length), pinned rather than assumed.
+    return n + by >= 1 ? imageMarker(n + by) : whole;
+  });
+}
