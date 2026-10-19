@@ -1,11 +1,12 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import SidePane from "./SidePane";
 import { useSubagents } from "../store/subagents";
 import { useInteractive } from "../store/interactive";
 import { useSessions } from "../store/sessions";
 import type { Message } from "../store/sessions";
 import { usePermissions } from "../store/permissions";
+import { setSessionConfigOption } from "../lib/tauri";
 import { getSidePaneCollapsed, setSidePaneCollapsed, SIDE_PANE_RAIL } from "../lib/sidePaneState";
 
 // Mock the Tauri IPC layer; everything else (stores) is the real code.
@@ -15,6 +16,12 @@ vi.mock("../lib/tauri", async () => {
     ...actual,
     respondInteractiveRequest: vi.fn().mockResolvedValue(undefined),
     respondPermission: vi.fn().mockResolvedValue(undefined),
+    // The pane's config block WRITES through this (the model picker's `onSet`):
+    // un-mocked, the real export reaches `invoke` and rejects on jsdom's missing
+    // `window.__TAURI_INTERNALS__`, so the write-path test would be pinning a
+    // rejection instead of the call. Resolves to a fresh option list (what the
+    // command returns) so `applyConfigOptions` has something to apply.
+    setSessionConfigOption: vi.fn().mockResolvedValue([]),
   };
 });
 
@@ -71,16 +78,103 @@ beforeEach(() => {
   // exactly what those cases exercise).
   useInteractive.getState().dismissSession("main2");
   useInteractive.getState().dismissSession("sub2");
-  useSessions.setState({ messages: {}, activeSessionId: null });
+  // The WHOLE session slice, not just `messages`: the relocated config-block
+  // cases (Model / Reasoning / Context, ported from `ChatStream.test.tsx`) seed
+  // `sessions` / `historySessions` / `configOptions` / `contextUsage`, and the
+  // pane reads all of them for that block. Left seeded, a config case would leak
+  // a live session into the pane's own cases — which read the store for the
+  // title, the boards AND (now) the config block.
+  vi.mocked(setSessionConfigOption).mockClear();
+  useSessions.setState({
+    messages: {},
+    activeSessionId: null,
+    sessions: [],
+    historySessions: [],
+    archivedSessions: [],
+    spaces: [],
+    inTurn: {},
+    stopReasons: {},
+    closeReasons: {},
+    configOptions: {},
+    contextUsage: {},
+    compacting: {},
+  });
 });
 
+/**
+ * Seed a LIVE session (the shape `ChatStream.test.tsx`'s `seedLiveSession`
+ * used — these config-block cases came from that file). `id` stays `s1` so the
+ * ported fixtures could move verbatim.
+ */
+function seedLiveSession(): void {
+  useSessions.setState({
+    activeSessionId: "s1",
+    sessions: [
+      { sessionId: "s1", cwd: "/home/u/proj", capabilities: {}, archived: false },
+    ],
+    spaces: [{ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1, trusted: false }],
+    historySessions: [],
+    messages: { s1: [] },
+    inTurn: {},
+    stopReasons: {},
+    closeReasons: {},
+    configOptions: {},
+    contextUsage: {},
+  });
+}
+
+/**
+ * Seed a STORED (non-live) session: `sessions` is empty, the session lives in
+ * `historySessions`, so the pane's block treats it as closed (the selectors are
+ * populated but DISABLED).
+ */
+function seedStoredSession(capabilities: Record<string, unknown> = {}): void {
+  useSessions.setState({
+    activeSessionId: "s1",
+    sessions: [],
+    spaces: [{ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1, trusted: false }],
+    historySessions: [
+      { sessionId: "s1", cwd: "/home/u/proj", capabilities, archived: false },
+    ],
+    messages: { s1: [] },
+    inTurn: {},
+    stopReasons: {},
+    closeReasons: {},
+    configOptions: {},
+    contextUsage: {},
+  });
+}
+
 describe("SidePane (the status panel)", () => {
-  it("renders NO sections when there are no todos", () => {
+  it("renders NO TODO section when there are no todos (the config block is always there)", () => {
     const { container } = render(<SidePane />);
-    // The section is data-gated (the ZCode `canRender*` treatment): an
-    // empty pane is an empty frame — no "No todos yet" placeholders.
+    // The todo section is data-gated (the ZCode `canRender*` treatment): an
+    // empty board is no section at all — no "No todos yet" placeholder.
     expect(screen.queryByText("Todos")).toBeNull();
-    expect(container.textContent).toBe("");
+    // What the frame DOES hold, always: the config block (Model / Reasoning /
+    // Context). It is not data-gated, so with no active session it renders the
+    // two DISABLED stubs and an empty 0% track — the same treatment a closed
+    // session gets (the pane cannot know a config it does not have, but the
+    // control's identity stays). The pane's frame is therefore never empty
+    // text-wise; only its TODO content is.
+    const block = container.querySelector(
+      '[data-testid="session-config-block"]',
+    ) as HTMLElement;
+    expect(block).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Model" }) as HTMLButtonElement).hasAttribute("disabled")).toBe(true);
+    expect((screen.getByRole("button", { name: "Thinking" }) as HTMLButtonElement).hasAttribute("disabled")).toBe(true);
+    const bar = block.querySelector(
+      '[role="progressbar"][aria-label="Context used"]',
+    ) as HTMLElement;
+    expect(bar.getAttribute("aria-valuenow")).toBe("0");
+    expect(block.querySelector('[data-testid="context-usage"]')).toBeNull();
+    // And nothing else: the frame's text is exactly the block's two stub labels
+    // (no todo copy hiding behind them). The `○` is the thinking stub's
+    // off-level glyph, which precedes its label inside the trigger. Read on
+    // `container` rather than on the block, so a stray label elsewhere in the
+    // frame would show up here — the toggle button and (with no session, hence
+    // no boards) the rail both carry zero text.
+    expect(container.textContent).toBe("Model○Thinking");
   });
 
   it("shows the session title (the first user message, truncated to 80 chars) at the top of the pane", () => {
@@ -1005,5 +1099,599 @@ describe("SidePane (the status panel)", () => {
     // became unopenable (no keyboard shortcut exists). Hence arithmetic:
     //   24px button (`size-6`) + 8px inset/padding + 8px clear of the edge.
     expect(SIDE_PANE_RAIL).toBeGreaterThanOrEqual(24 + 8 + 8);
+  });
+
+  // ===========================================================================
+  // THE CONFIG BLOCK (Model / Reasoning / Context) — the three lines that left
+  // the composer's bottom row and now sit pinned at the bottom of this pane.
+  //
+  // These cases were ported from `ChatStream.test.tsx` when the surface moved;
+  // only the render target and the container they query changed. Read them as
+  // the block's contract, not as history: the composer no longer hosts ANY of
+  // these controls (pinned by the "composer no longer hosts" cases there).
+  //
+  // The behaviour the move had to preserve, all of it previously living in
+  // `ChatStream`'s derivations and now in `src/lib/sessionConfig.ts`:
+  //   - the four-way fallback for BOTH config options and context usage (the
+  //     live map → `sessions` → `historySessions` → `archivedSessions`),
+  //   - `disabled` for a session that is not live,
+  //   - the traffic-light ramp (success < 50, caution < 70, warning < 90,
+  //     destructive from 90).
+  // ===========================================================================
+
+  it("renders the config block for a closed (history-only) session (the stubs + the empty track — there is no `isLive` gate on rendering)", () => {
+    seedStoredSession();
+    const { container } = render(<SidePane />);
+    const block = container.querySelector(
+      '[data-testid="session-config-block"]',
+    ) as HTMLElement;
+    expect(block).toBeTruthy();
+    // The context bar renders (an empty 0% track — the session's context is
+    // dropped on close and re-emits on resume; the label waits for data).
+    const bar = block.querySelector(
+      '[data-testid="context-usage-bar"]',
+    ) as HTMLElement;
+    expect(bar).toBeTruthy();
+    const progress = bar.querySelector(
+      '[role="progressbar"][aria-label="Context used"]',
+    ) as HTMLElement;
+    expect(progress.getAttribute("aria-valuenow")).toBe("0");
+    expect(bar.querySelector('[data-testid="context-usage"]')).toBeNull();
+    // The model/thinking selects render as DISABLED stubs (the config
+    // options are dropped on close — no data to show; the identity stays).
+    const model = block.querySelector('[aria-label="Model"]') as HTMLElement;
+    expect(model).toBeTruthy();
+    expect(model.hasAttribute("disabled")).toBe(true);
+    const thinking = block.querySelector(
+      '[aria-label="Thinking"]',
+    ) as HTMLElement;
+    expect(thinking).toBeTruthy();
+    expect(thinking.hasAttribute("disabled")).toBe(true);
+  });
+
+  it("a live session WITH a model + thinking config option renders BOTH selects IN THE PANE (the composer carries neither)", async () => {
+    seedLiveSession();
+    useSessions.setState({
+      configOptions: {
+        s1: [
+          {
+            id: "model",
+            name: "Model",
+            type: "select",
+            currentValue: "acme/alpha",
+            options: [
+              { value: "acme/alpha", name: "acme/Alpha" },
+              { value: "acme/beta", name: "acme/Beta" },
+            ],
+          },
+          {
+            id: "thought_level",
+            name: "Thinking",
+            type: "select",
+            currentValue: "medium",
+            options: [
+              { value: "low", name: "Low" },
+              { value: "medium", name: "Medium" },
+            ],
+          },
+        ],
+      },
+    });
+    const { container } = render(<SidePane />);
+    // The pane's block carries the model/thought controls (it used to be the
+    // composer's toolbar — left of the send button).
+    const block = container.querySelector(
+      '[data-testid="session-config-block"]',
+    ) as HTMLElement;
+    expect(block.querySelector('[aria-label="Model"]')).toBeTruthy();
+    expect(block.querySelector('[aria-label="Thinking"]')).toBeTruthy();
+    // The model trigger shows the BARE id + the provider suffix (the
+    // composed `provider/id` key is the VALUE, not the display text).
+    expect(screen.getByText(/alpha/)).toBeTruthy();
+    expect(screen.getByText("Medium")).toBeTruthy();
+  });
+
+  it("stacks the three lines ONE PER LINE in the order Model → Reasoning → Context (they are no longer a side-by-side cluster)", () => {
+    seedLiveSession();
+    useSessions.setState({
+      configOptions: {
+        s1: [
+          {
+            id: "model",
+            name: "Model",
+            type: "select",
+            currentValue: "acme/alpha",
+            options: [{ value: "acme/alpha", name: "acme/Alpha" }],
+          },
+          {
+            id: "thought_level",
+            name: "Thinking",
+            type: "select",
+            currentValue: "medium",
+            options: [{ value: "medium", name: "Medium" }],
+          },
+        ],
+      },
+      contextUsage: { s1: { used: 53760, window: 128000 } },
+    });
+    const { container } = render(<SidePane />);
+    // The old composer premise was ONE tight cluster: both triggers inside one
+    // wrapper whose `gap-1` was tighter than the `gap-2` separating the cluster
+    // from Send. That premise died with the move — the pane is 240–480px wide
+    // and stacks, so the contract is now ORDER and ONE CONTROL PER LINE.
+    const lines = Array.from(
+      container.querySelectorAll('[data-testid="session-config-controls"] > div'),
+    ) as HTMLElement[];
+    expect(lines).toHaveLength(3);
+    // One control per line (a line holding two is the old cluster back again),
+    // in the stated order.
+    expect(lines[0]!.querySelector('[aria-label="Model"]')).toBeTruthy();
+    expect(lines[0]!.querySelector('[aria-label="Thinking"]')).toBeNull();
+    expect(lines[1]!.querySelector('[aria-label="Thinking"]')).toBeTruthy();
+    expect(lines[1]!.querySelector('[aria-label="Model"]')).toBeNull();
+    expect(lines[2]!.getAttribute("data-testid")).toBe("context-usage-bar");
+    // And each line is FULL WIDTH (`w-full` on the trigger, `flex-1` on the
+    // bar's track) rather than hugging its text.
+    expect(
+      (lines[0]!.querySelector('[aria-label="Model"]') as HTMLElement).className,
+    ).toContain("w-full");
+    expect(
+      (lines[1]!.querySelector('[aria-label="Thinking"]') as HTMLElement).className,
+    ).toContain("w-full");
+    // The vertical stack (`flex-col`) is what makes them lines rather than a row.
+    const group = container.querySelector(
+      '[data-testid="session-config-controls"]',
+    ) as HTMLElement;
+    expect(group.className).toContain("flex-col");
+  });
+
+  // --- The context bar (the dynamic percentage — a progress bar with the
+  // reference UI's `🧠 [====bar====] 61%` look). ---
+
+  it("renders a dynamic context bar in the pane when the usage is known", () => {
+    seedLiveSession();
+    useSessions.setState({
+      contextUsage: { s1: { used: 53760, window: 128000 } },
+    });
+    const { container } = render(<SidePane />);
+    // 53760 / 128000 = 42% — inside the pane's block (NOT the composer).
+    const block = container.querySelector(
+      '[data-testid="session-config-block"]',
+    ) as HTMLElement;
+    const group = block.querySelector(
+      '[data-testid="context-usage-bar"]',
+    ) as HTMLElement | null;
+    expect(group).toBeTruthy();
+    const bar = group!.querySelector(
+      '[role="progressbar"][aria-label="Context used"]',
+    ) as HTMLElement | null;
+    expect(bar).toBeTruthy();
+    expect(bar!.getAttribute("aria-valuemin")).toBe("0");
+    expect(bar!.getAttribute("aria-valuemax")).toBe("100");
+    expect(bar!.getAttribute("aria-valuenow")).toBe("42");
+    // The fill's width follows the percentage, and 42% (< 50%) is the
+    // green band (the label follows the fill's color).
+    const fill = bar!.firstElementChild as HTMLElement;
+    expect(fill.style.width).toBe("42%");
+    expect(fill.className).toContain("bg-success");
+    expect(fill.className).not.toContain("bg-caution");
+    // The label sits at the bar's right edge (the reference UI's `61%`).
+    const labelEl = group!.querySelector('[data-testid="context-usage"]') as HTMLElement;
+    expect(labelEl.textContent).toBe("42%");
+    expect(labelEl.className).toContain("text-success");
+    // The brain icon cues the bar (the reference UI's `🧠` placement).
+    expect(group!.querySelector('[data-testid="context-bar-icon"]')).toBeTruthy();
+  });
+
+  it("the Context line's track sits in a `bg-input` well (the bar left the composer's own surface, so it needs its own)", () => {
+    seedLiveSession();
+    useSessions.setState({
+      contextUsage: { s1: { used: 53760, window: 128000 } },
+    });
+    const { container } = render(<SidePane />);
+    // The bar used to paint on `--color-composer` (`#21222c`), where the
+    // `#343746` track measured 1.339. On the pane's `--color-inspector`
+    // (`#282a36`) it measures 1.208 — under the 1.3 floor, so the bar's EXTENT
+    // (the only thing it reports) is unreadable. The fix is a WELL, not a new
+    // hex: the row wrapping the track carries `bg-input` (`#191a21`), which
+    // puts track-vs-well back to 1.471. Pinned as a class assertion because
+    // jsdom runs no layout and the ratio lives in the CSS gates — and queried
+    // through the block, so it also proves the well lives in the PANE.
+    const block = container.querySelector(
+      '[data-testid="session-config-block"]',
+    ) as HTMLElement;
+    const row = block.querySelector(
+      '[data-testid="context-usage-bar"]',
+    ) as HTMLElement;
+    expect(row.className).toContain("bg-input");
+    const bar = row.querySelector(
+      '[role="progressbar"][aria-label="Context used"]',
+    ) as HTMLElement;
+    expect(bar.className).toContain("bg-context-track");
+  });
+
+  // The token counts are HOVER-ONLY on the number (the bar row is dense —
+  // `53,760 / 128,000 tokens` inline would push the model selector off the
+  // row, and the native `title` tooltip is unstyled and ~1s slow).
+  it("the context number reveals the token counts on hover, not inline", () => {
+    seedLiveSession();
+    useSessions.setState({
+      contextUsage: { s1: { used: 53760, window: 128000 } },
+    });
+    render(<SidePane />);
+    const label = screen.getByTestId("context-usage");
+    // The inline text stays the bare percentage.
+    expect(label.textContent).toBe("42%");
+    // No native tooltip (the styled Radix one replaces it).
+    expect(label.getAttribute("title")).toBeNull();
+    // CLOSED until hover — the counts are not in the DOM at rest.
+    expect(document.body.textContent).not.toContain("53,760");
+    // Radix `TooltipTrigger` opens on pointer/focus (see the
+    // `ToolCallCard` failure-tooltip test — `mouseEnter` does not fire it
+    // in this Radix version; `focus` does; `TooltipProvider`'s
+    // `delayDuration = 0` mounts the portal synchronously).
+    fireEvent.focus(label);
+    expect(document.body.textContent).toContain("53,760 / 128,000 tokens");
+  });
+
+  // The counts are keyboard-accessible: the tooltip trigger is a focusable
+  // control (a Tab stop) whose accessible name carries the token counts,
+  // and the progressbar exposes them as its text alternative — so nothing
+  // about the context is hover-only.
+  it("the context counts are reachable by keyboard, not hover alone", () => {
+    seedLiveSession();
+    useSessions.setState({
+      contextUsage: { s1: { used: 53760, window: 128000 } },
+    });
+    render(<SidePane />);
+    const label = screen.getByTestId("context-usage");
+    // A real control in the tab order (a bare `<span>` was not).
+    expect(label.tagName).toBe("BUTTON");
+    expect(label.getAttribute("tabindex")).not.toBe("-1");
+    // The accessible name carries the counts (a screen reader hears them
+    // without opening the tooltip).
+    expect(label.getAttribute("aria-label")).toBe(
+      "Context used: 53,760 of 128,000 tokens (42%)",
+    );
+    // The progressbar's text alternative carries them too.
+    const bar = screen
+      .getByTestId("context-usage-bar")
+      .querySelector('[role="progressbar"][aria-label="Context used"]') as HTMLElement;
+    expect(bar.getAttribute("aria-valuetext")).toBe(
+      "53,760 of 128,000 tokens (42%)",
+    );
+    // And focus (keyboard) opens the tooltip, as hover does.
+    fireEvent.focus(label);
+    expect(document.body.textContent).toContain("53,760 / 128,000 tokens");
+  });
+
+  it("a caution-band context percentage (50–69%) renders the fill in caution", () => {
+    seedLiveSession();
+    useSessions.setState({
+      contextUsage: { s1: { used: 78080, window: 128000 } },
+    });
+    render(<SidePane />);
+    const group = screen.getByTestId("context-usage-bar");
+    const bar = group.querySelector(
+      '[role="progressbar"][aria-label="Context used"]',
+    ) as HTMLElement;
+    expect(bar.getAttribute("aria-valuenow")).toBe("61");
+    // 61% is the caution band (50–69%): caution (NOT green, NOT warning),
+    // and the label follows the fill's color.
+    const fill = bar.firstElementChild as HTMLElement;
+    expect(fill.className).toContain("bg-caution");
+    expect(fill.className).not.toContain("bg-success");
+    expect(fill.className).not.toContain("bg-warning");
+    const label = group.querySelector('[data-testid="context-usage"]') as HTMLElement;
+    expect(label.textContent).toBe("61%");
+    expect(label.className).toContain("text-caution");
+  });
+
+  it("a mid context percentage (70–89%) escalates the fill to the warning color", () => {
+    seedLiveSession();
+    useSessions.setState({
+      contextUsage: { s1: { used: 96000, window: 128000 } },
+    });
+    render(<SidePane />);
+    const group = screen.getByTestId("context-usage-bar");
+    const bar = group.querySelector(
+      '[role="progressbar"][aria-label="Context used"]',
+    ) as HTMLElement;
+    expect(bar.getAttribute("aria-valuenow")).toBe("75");
+    // 75% is the warning band (70–89%): warning (NOT caution, NOT red),
+    // and the label follows the fill's color.
+    const fill = bar.firstElementChild as HTMLElement;
+    expect(fill.className).toContain("bg-warning");
+    expect(fill.className).not.toContain("bg-caution");
+    expect(fill.className).not.toContain("bg-destructive");
+    const label = group.querySelector('[data-testid="context-usage"]') as HTMLElement;
+    expect(label.textContent).toBe("75%");
+    expect(label.className).toContain("text-warning");
+  });
+
+  it("a high context percentage (>= 90%) escalates the fill to the destructive color", () => {
+    seedLiveSession();
+    useSessions.setState({
+      contextUsage: { s1: { used: 115200, window: 128000 } },
+    });
+    render(<SidePane />);
+    const group = screen.getByTestId("context-usage-bar");
+    const bar = group.querySelector(
+      '[role="progressbar"][aria-label="Context used"]',
+    ) as HTMLElement;
+    expect(bar.getAttribute("aria-valuenow")).toBe("90");
+    // 90% is the red band (90–100%): the destructive red (the label
+    // follows the fill's color).
+    const fill = bar.firstElementChild as HTMLElement;
+    expect(fill.className).toContain("bg-destructive");
+    expect(fill.className).not.toContain("bg-warning");
+    const label = group.querySelector('[data-testid="context-usage"]') as HTMLElement;
+    expect(label.textContent).toBe("90%");
+    expect(label.className).toContain("text-destructive");
+  });
+
+  it("renders an empty context bar (no label) when the usage is unknown", () => {
+    seedLiveSession();
+    useSessions.setState({ contextUsage: {} });
+    render(<SidePane />);
+    // The bar renders from the start (layout stability — the fill appears
+    // as the session grows) but the label waits for the first frame.
+    const bar = screen.getByRole("progressbar", { name: "Context used" });
+    expect(bar.getAttribute("aria-valuenow")).toBe("0");
+    const fill = bar.firstElementChild as HTMLElement;
+    expect(fill.style.width).toBe("0%");
+    expect(bar.querySelector('[data-testid="context-usage"]')).toBeNull();
+  });
+
+  it("renders the context bar for a stored session as an empty 0% track (the context is dropped on close and re-emits on resume)", () => {
+    seedStoredSession();
+    render(<SidePane />);
+    // The bar is ALWAYS rendered (there is no `isLive` gate on rendering): a
+    // stored session's context is dropped on close — the track is the empty 0%
+    // fill (the label waits for the resume to re-emit the usage).
+    const bar = screen.getByRole("progressbar", { name: "Context used" });
+    expect(bar.getAttribute("aria-valuenow")).toBe("0");
+    expect(screen.queryByTestId("context-usage")).toBeNull();
+  });
+
+  it("renders the block POPULATED for a stored session (config options + context usage from the session row — the selectors are disabled)", () => {
+    // The `list_sessions` shape: the row carries `configOptions` (the
+    // stored `model` / `thinkingLevel` synthesized) + `contextUsage` (the
+    // last known usage — persisted on every `context_usage_update` frame).
+    useSessions.setState({
+      activeSessionId: "s1",
+      sessions: [],
+      spaces: [{ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1, trusted: false }],
+      historySessions: [
+        {
+          sessionId: "s1",
+          cwd: "/home/u/proj",
+          capabilities: { loadSession: true },
+          archived: false,
+          configOptions: [
+            {
+              id: "model",
+              name: "Model",
+              type: "select",
+              currentValue: "tama/m1",
+              options: [{ value: "tama/m1", name: "m1" }],
+            },
+            {
+              id: "thought_level",
+              name: "Thinking",
+              category: "thought_level",
+              type: "select",
+              currentValue: "high",
+              options: [{ value: "high", name: "High" }],
+            },
+          ],
+          contextUsage: { used: 53760, window: 128000 },
+        },
+      ],
+      messages: { s1: [] },
+      inTurn: {},
+      stopReasons: {},
+      closeReasons: {},
+      configOptions: {},
+      contextUsage: {},
+    });
+    render(<SidePane />);
+    // The context bar is FILLED from the row's usage (53760 / 128000 ≈
+    // 42% — the green band).
+    const bar = screen.getByRole("progressbar", { name: "Context used" });
+    expect(bar.getAttribute("aria-valuenow")).toBe("42");
+    expect(screen.getByTestId("context-usage").textContent).toBe("42%");
+    // The model selector is POPULATED with the stored model's name, but
+    // DISABLED (a stored session can't set config — no agent process to
+    // deliver `set_config_option` to).
+    const model = screen.getByRole("button", { name: "Model" });
+    expect(model.hasAttribute("disabled")).toBe(true);
+    expect(model.textContent).toContain("m1 · tama");
+    // The thinking selector is POPULATED with the stored level + disabled.
+    const thinking = screen.getByRole("combobox");
+    expect(thinking.hasAttribute("disabled")).toBe(true);
+    expect(thinking.textContent).toContain("High");
+  });
+
+  it("a stored session's live config options win over the row's (the store's map is fresher — the last frame before the close)", () => {
+    // The store's map has a FRESHER value (the session was live in this
+    // app session, closed, and the store kept its last known config — the
+    // `handleSessionClosed` no longer drops it); the row's value is the
+    // DB's (persisted on the same frame — same value, but the store's
+    // map is the primary source).
+    seedStoredSession();
+    useSessions.setState({
+      configOptions: {
+        s1: [
+          {
+            id: "model",
+            name: "Model",
+            type: "select",
+            currentValue: "tama/m2",
+            options: [{ value: "tama/m2", name: "m2" }],
+          },
+        ],
+      },
+      contextUsage: { s1: { used: 100000, window: 128000 } },
+    });
+    render(<SidePane />);
+    const model = screen.getByRole("button", { name: "Model" });
+    expect(model.textContent).toContain("m2 · tama");
+    const bar = screen.getByRole("progressbar", { name: "Context used" });
+    expect(bar.getAttribute("aria-valuenow")).toBe("78"); // 100000/128000 ≈ 78%
+  });
+
+  it("choosing a model item invokes setSessionConfigOption (the pane owns the write path now)", async () => {
+    seedLiveSession();
+    useSessions.setState({
+      configOptions: {
+        s1: [
+          {
+            id: "model",
+            name: "Model",
+            type: "select",
+            currentValue: "acme/alpha",
+            options: [
+              { value: "acme/alpha", name: "acme/Alpha" },
+              { value: "acme/beta", name: "acme/Beta" },
+            ],
+          },
+        ],
+      },
+    });
+    render(<SidePane />);
+    // The model picker is a DIALOG (the trigger is a button — the catalog
+    // is too long for a Radix dropdown).
+    fireEvent.click(screen.getByRole("button", { name: "Model" }));
+    // The row name is the BARE id; the sent value is the full composed key.
+    fireEvent.click(screen.getByText("beta"));
+    // The handler is async (`await setSessionConfigOption`, then
+    // `applyConfigOptions`), so the call lands a microtask after the click.
+    await waitFor(() =>
+      expect(setSessionConfigOption).toHaveBeenCalledWith("s1", "model", "acme/beta"),
+    );
+  });
+
+  it("a live session WITHOUT configOptions renders neither selector (the stubs are the whole block)", () => {
+    seedLiveSession();
+    render(<SidePane />);
+    // A live session with no `configOptions` is the STUB case: the block
+    // renders two disabled stubs and no real control. (Moved here with the
+    // controls — in the composer this assertion had gone vacuous, since
+    // nothing in the composer can be a combobox any more.)
+    expect(screen.queryByRole("combobox", { name: "Model" })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Thinking" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Model" })).toBeTruthy();
+  });
+
+  it("a STORED session with configOptions still renders no SELECTOR control (it is populated but read-only)", () => {
+    seedStoredSession();
+    useSessions.setState({
+      configOptions: {
+        s1: [
+          {
+            id: "model",
+            name: "Model",
+            type: "select",
+            currentValue: "acme/alpha",
+            options: [{ value: "acme/alpha", name: "acme/Alpha" }],
+          },
+        ],
+      },
+    });
+    render(<SidePane />);
+    // The original meaning survives the move: a stored session's model option
+    // is never an interactive combobox — the pane renders the model trigger as
+    // a (disabled) dialog BUTTON, so `queryByRole("combobox")` stays null.
+    expect(screen.queryByRole("combobox", { name: "Model" })).toBeNull();
+  });
+
+  // --- The block's PINNING inside the pane (the three geometry traps). ---
+
+  it("pins the config block with shrink-0 (the pane's scroller is `flex-1`, so the block must not absorb the height shortfall)", () => {
+    const { container } = render(<SidePane />);
+    // The frame is a `flex-col` whose content div is `flex-1` (basis 0). A new
+    // sibling with the default `flex-basis: auto` would be the ONLY item that
+    // can shrink, so a long todo board would squash the block instead of
+    // scrolling — the exact failure the composer island documents for itself.
+    // Classes are all jsdom can grade, so that is what is asserted.
+    const block = container.querySelector(
+      '[data-testid="session-config-block"]',
+    ) as HTMLElement;
+    expect(block.className).toContain("shrink-0");
+    expect(block.className).not.toMatch(/\bflex-1\b/);
+  });
+
+  it("clears the collapse toggle out of the block's bottom-left corner (the toggle is absolutely positioned over it)", () => {
+    const { container } = render(<SidePane />);
+    // The toggle is `absolute bottom-2 left-2 z-10 size-6`, so it overlays the
+    // block's bottom-left corner for ~40px of height. Without bottom padding the
+    // Context line would sit under it and be unclickable.
+    const block = container.querySelector(
+      '[data-testid="session-config-block"]',
+    ) as HTMLElement;
+    const pb = block.className.match(/(^|\s)pb-(\[[0-9.]+rem\]|[0-9]+)/);
+    expect(pb, "the block carries no bottom padding to clear the toggle").toBeTruthy();
+    const raw = pb![2]!;
+    const px = raw.startsWith("[")
+      ? Number(raw.replace(/[\[\]rem]/g, "")) * 16
+      : Number(raw) * 4;
+    // The toggle is 24px (`size-6`) inset 8px from the bottom → it reaches 32px
+    // up from the frame's bottom edge.
+    expect(px, `pb of ${px}px does not clear a 32px-tall overlay`).toBeGreaterThanOrEqual(32);
+  });
+
+  it("hides the config block in the sliver with its own `invisible` (it sits OUTSIDE the scroller, so the scroller's class cannot reach it)", () => {
+    seedLiveSession();
+    useSessions.setState({
+      contextUsage: { s1: { used: 53760, window: 128000 } },
+    });
+    act(() => {
+      setSidePaneCollapsed(true);
+    });
+    const { container } = render(<SidePane />);
+    const block = container.querySelector(
+      '[data-testid="session-config-block"]',
+    ) as HTMLElement;
+    // The scroller's `invisible`-while-collapsed class is what takes the board
+    // and its scrollbar out of the 40px paint — and the block is a SIBLING of
+    // the scroller, not inside it, so it needs its own. `visibility: hidden`
+    // keeps it mounted (the collapse clips, it never unmounts) while painting
+    // nothing; jsdom runs no layout, so the class IS the check.
+    expect(block.className).toContain("invisible");
+    // Still mounted (the pane keeps its content across a collapse).
+    expect(screen.getByTestId("context-usage")).toBeTruthy();
+    // And it comes back when the pane opens.
+    act(() => {
+      setSidePaneCollapsed(false);
+    });
+    expect(
+      container.querySelector(
+        '[data-testid="session-config-block"]',
+      )!.className,
+    ).not.toContain("invisible");
+    // The scroller keeps its own copy of the class (this did not replace it).
+    expect(
+      (container.querySelector(".overflow-y-auto") as HTMLElement).className,
+    ).toContain("overflow-y-auto");
+  });
+
+  it("mounts the config block AFTER the scroll area (so a growing todo board cannot push it away or scroll it out of sight)", () => {
+    useSessions.setState({ activeSessionId: "main1" });
+    useInteractive.getState().applyTodoUpdate("main1", {
+      source: "main",
+      todos: [{ content: "a", status: "pending" }],
+    });
+    const { container } = render(<SidePane />);
+    const scroller = container.querySelector(".overflow-y-auto") as HTMLElement;
+    const block = container.querySelector(
+      '[data-testid="session-config-block"]',
+    ) as HTMLElement;
+    // A SIBLING after the scroller — not a child of it. Inside the scroller the
+    // block would scroll away with the board and drift with its length.
+    expect(scroller.contains(block)).toBe(false);
+    expect(block.previousElementSibling).toBe(scroller);
+    // Both are direct children of the frame.
+    expect(block.parentElement).toBe(scroller.parentElement);
   });
 });

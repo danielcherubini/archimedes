@@ -13,6 +13,7 @@ import {
 } from "../lib/sidePaneState";
 import TodoBoardPanel, { useBoardOpenCount, useMainTodoItems } from "./TodoBoardPanel";
 import TodoRail from "./TodoRail";
+import SessionConfigBlock from "./SessionConfigBlock";
 
 const WIDTH_KEY = "side-pane-width";
 const MIN_WIDTH = 240;
@@ -442,6 +443,17 @@ export default function SidePane() {
           <TodoBoardPanel sessionId={activeSessionId} />
         </div>
       </div>
+      {/* The session's config lines (Model / Reasoning / Context) — the three
+          that left the composer's bottom row. Mounted AFTER the scroll area and
+          BEFORE the toggle: inside the scroller the block would scroll away with
+          a growing todo board, and before the scroller it would sit above the
+          title. NOT data-gated (unlike the todo section): with no active session
+          it renders the two disabled stubs and an empty 0% track, because the
+          control's identity does not depend on having data. `collapsed` is
+          passed rather than re-read — the block lives outside the scroller, so
+          the scroller's `invisible`-while-collapsed class cannot reach it and it
+          needs its own (see `SessionConfigBlock`). */}
+      <SessionConfigBlock collapsed={collapsed} />
       {/* The pane's OWN collapse toggle, at the frame's inner-bottom corner
           (bottom LEFT for a right-hand pane — it points back at the chat).
           `left-2` (8px) is not cosmetic: the 4px resize handle spans the

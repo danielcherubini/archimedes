@@ -112,6 +112,76 @@ describe("SessionConfigSelect", () => {
     expect(thinking.className.split(/\s+/)).toContain("pl-1");
   });
 
+  it("FULL WIDTH (the side pane's line): the live model trigger stretches to the line and drops the 18rem cap", () => {
+    render(
+      <SessionConfigSelect option={mockOption} onSet={vi.fn()} fullWidth />,
+    );
+    const trigger = screen.getByRole("button", { name: "Model" });
+    expect(trigger.className).toContain("w-full");
+    // `max-w-72` must be ABSENT, not merely out-merged: `w-full` and
+    // `max-w-72` are separate tailwind-merge groups, so `cn` keeps BOTH and the
+    // trigger would stay capped at 18rem inside a wider line.
+    expect(trigger.className).not.toContain("max-w-72");
+    expect(trigger.className).toContain("min-w-0");
+  });
+
+  it("FULL WIDTH: the live thinking trigger (a Radix SelectTrigger) stretches too", () => {
+    render(
+      <SessionConfigSelect
+        option={thinkingOption}
+        onSet={vi.fn()}
+        kind="thinking"
+        fullWidth
+      />,
+    );
+    const trigger = screen.getByRole("combobox", { name: "Thinking" });
+    expect(trigger.className).toContain("w-full");
+    expect(trigger.className).not.toContain("max-w-72");
+    expect(trigger.className).toContain("min-w-0");
+  });
+
+  it("FULL WIDTH: the NULL-model stub stretches too (the pane renders it for a session with no config)", () => {
+    render(
+      <SessionConfigSelect kind="model" option={null} onSet={vi.fn()} fullWidth />,
+    );
+    const trigger = screen.getByRole("button", { name: "Model" });
+    expect(trigger.className).toContain("w-full");
+    expect(trigger.className).not.toContain("max-w-72");
+    expect(trigger.className).toContain("min-w-0");
+  });
+
+  it("FULL WIDTH: the NULL-thinking stub stretches too (it is a Button, not a SelectTrigger — the fourth site)", () => {
+    render(
+      <SessionConfigSelect
+        kind="thinking"
+        option={null}
+        onSet={vi.fn()}
+        fullWidth
+      />,
+    );
+    // The null-thinking stub is a plain `Button` (there is no Radix select to
+    // render without options), so it needs the same treatment at its own site.
+    const trigger = screen.getByRole("button", { name: "Thinking" });
+    expect(trigger.tagName).toBe("BUTTON");
+    expect(trigger.className).toContain("w-full");
+    expect(trigger.className).not.toContain("max-w-72");
+    expect(trigger.className).toContain("min-w-0");
+  });
+
+  it("without fullWidth the triggers keep the composer's content-sized contract", () => {
+    const { unmount } = render(
+      <SessionConfigSelect option={mockOption} onSet={vi.fn()} />,
+    );
+    expect(screen.getByRole("button", { name: "Model" }).className).toContain(
+      "max-w-72",
+    );
+    unmount();
+    render(<SessionConfigSelect kind="thinking" option={null} onSet={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Thinking" }).className).toContain(
+      "max-w-72",
+    );
+  });
+
   it("renders a bot icon for a model option (category 'model')", () => {
     const { container } = render(
       <SessionConfigSelect option={mockOption} onSet={vi.fn()} />,

@@ -33,6 +33,20 @@ type OnSet = (optionId: string, value: string) => Promise<void>;
  * the pair read as two unrelated controls.
  */
 const COMPOSER_TRIGGER_WIDTH = "min-w-0 shrink max-w-72";
+/**
+ * The SAME contract for a trigger that owns a WHOLE LINE (the side pane's
+ * `SessionConfigBlock`): stretch to the line, and the cap is GONE rather than
+ * merely out-joined. `w-full` and `max-w-72` are separate `tailwind-merge`
+ * groups (`src/components/lib/utils.ts`), so `cn` keeps BOTH when they arrive
+ * together — and a `w-full max-w-72` trigger inside a 300px line still stops at
+ * 18rem, i.e. the "full width" prop would be a lie. Hence two branch strings,
+ * never a join.
+ *
+ * The SEAM edges (`pr-1` / `pl-1`, see below) are dropped here too: they exist
+ * only because the two composer triggers face each other across a 4px gap, and
+ * on a line of its own a trigger has no neighbour to share a seam with.
+ */
+const FULL_WIDTH_TRIGGER = "min-w-0 shrink w-full";
 /** The model trigger's right edge (it faces the thinking trigger). */
 const COMPOSER_MODEL_EDGE = "pr-1";
 /** The thinking trigger's left edge (it faces the model trigger). */
@@ -46,8 +60,20 @@ const COMPOSER_THINKING_EDGE = "pl-1";
  * identity, no data — the config re-emits on resume).
  */
 type SessionConfigSelectProps =
-  | { option: SessionConfigOption; onSet: OnSet; kind?: "model" | "thinking"; disabled?: boolean }
-  | { option: null; kind: "model" | "thinking"; onSet: OnSet; disabled?: boolean };
+  | {
+      option: SessionConfigOption;
+      onSet: OnSet;
+      kind?: "model" | "thinking";
+      disabled?: boolean;
+      fullWidth?: boolean;
+    }
+  | {
+      option: null;
+      kind: "model" | "thinking";
+      onSet: OnSet;
+      disabled?: boolean;
+      fullWidth?: boolean;
+    };
 
 /**
  * The thinking-level indicator (the pi-archimedes footer's
@@ -87,7 +113,13 @@ function thinkingLevelIndicator(
   return { glyph, className };
 }
 
-function SessionConfigSelect({ option, kind, onSet, disabled }: SessionConfigSelectProps) {
+function SessionConfigSelect({
+  option,
+  kind,
+  onSet,
+  disabled,
+  fullWidth,
+}: SessionConfigSelectProps) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The base disabled state (the call site — a STORED session's selector
@@ -123,6 +155,17 @@ function SessionConfigSelect({ option, kind, onSet, disabled }: SessionConfigSel
     option?.id === "thought_level";
   const isModel =
     kind === "model" || option?.category === "model" || option?.id === "model";
+  // The trigger's WIDTH contract, chosen per call site and not merged (see
+  // `FULL_WIDTH_TRIGGER`): the composer hugs its text and caps at 18rem, the
+  // side pane's line stretches. The seam edges ride only the composer branch —
+  // they exist to tighten the pair's shared seam, and a full-width line has no
+  // neighbouring trigger to share one with. FOUR sites consume these two
+  // strings (the null-model stub, the null-thinking stub, the live model, the
+  // live thinking trigger); missing one leaves that one trigger content-sized
+  // inside a line that is supposed to be full-width.
+  const width = fullWidth ? FULL_WIDTH_TRIGGER : COMPOSER_TRIGGER_WIDTH;
+  const modelEdge = fullWidth ? "" : ` ${COMPOSER_MODEL_EDGE}`;
+  const thinkingEdge = fullWidth ? "" : ` ${COMPOSER_THINKING_EDGE}`;
   // A `null` option (a closed session's config is dropped — re-emitted on
   // resume): render a DISABLED stub (the control's identity, no data).
   if (option === null) {
@@ -136,7 +179,7 @@ function SessionConfigSelect({ option, kind, onSet, disabled }: SessionConfigSel
             items={[]}
             onSelect={() => {}}
             variant="ghost"
-            triggerClassName={`${COMPOSER_TRIGGER_WIDTH} ${COMPOSER_MODEL_EDGE}`}
+            triggerClassName={`${width}${modelEdge}`}
             disabled
             icon={
               <Bot
@@ -154,7 +197,7 @@ function SessionConfigSelect({ option, kind, onSet, disabled }: SessionConfigSel
         <Button
           variant="ghost"
           size="sm"
-          className={`${COMPOSER_TRIGGER_WIDTH} ${COMPOSER_THINKING_EDGE} justify-start`}
+          className={`${width}${thinkingEdge} justify-start`}
           aria-label="Thinking"
           disabled
         >
@@ -218,7 +261,7 @@ function SessionConfigSelect({ option, kind, onSet, disabled }: SessionConfigSel
           items={modelItems}
           onSelect={(val) => void handleValueChange(val)}
           variant="ghost"
-          triggerClassName={`${COMPOSER_TRIGGER_WIDTH} ${COMPOSER_MODEL_EDGE}`}
+          triggerClassName={`${width}${modelEdge}`}
           disabled={isDisabled}
           icon={
             <Bot
@@ -244,7 +287,7 @@ function SessionConfigSelect({ option, kind, onSet, disabled }: SessionConfigSel
         <SelectTrigger
           variant="ghost"
           size="sm"
-          className={`${COMPOSER_TRIGGER_WIDTH} ${COMPOSER_THINKING_EDGE}`}
+          className={`${width}${thinkingEdge}`}
           disabled={isDisabled}
           aria-label={option.name}
         >

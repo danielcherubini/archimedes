@@ -652,7 +652,7 @@ describe("the .theme-dracula block follows the official Dracula spec", () => {
     ["color-input", "#191a21"],
     ["color-secondary", "#343746"], // Background Light — with the raised card
     ["color-tag", "#343746"],
-    ["color-context-track", "#343746"], // best visible track against the `#21222c` island (1.34, worst band 4.33)
+    ["color-context-track", "#343746"], // best visible track against the `#191a21` side-pane well (1.47, worst band 4.33)
     // De-emphasis TEXT is no longer Comment: `#6272a4` scored 2.51–3.68 across
     // the surfaces its 88 consumers actually paint. See the token's comment.
     ["color-foreground-subtlest", "color-mix(in oklab, #f8f8f2 55%, transparent)"],
@@ -1258,16 +1258,23 @@ describe("the .theme-dracula block follows the official Dracula spec", () => {
     // The bar's meaning is the band FILL (green → caution → warning → red), and
     // the only thing separating it from the unfilled remainder is the track.
     // Graded against the four fills the component actually emits
-    // (`ChatStream.tsx`: `bg-success` / `bg-caution` / `bg-warning` /
-    // `bg-destructive`), on the surface the track really paints on.
+    // (`lib/sessionConfig.ts`'s ramp, rendered by `SessionConfigBlock.tsx`:
+    // `bg-success` / `bg-caution` / `bg-warning` / `bg-destructive`), on the
+    // surface the track really paints on.
     //
-    // THAT SURFACE MOVED. The bar used to sit in a `bg-input` `#21222c` well; the
-    // island layout moved the composer onto the content slab, so the track now
-    // paints on `--color-chat`. Reading the wrong token here would
-    // grade a real relationship against a surface that no longer exists at that
-    // site — which is exactly the failure the ADR's amendments keep recording —
-    // so it is derived from the token the composer island actually wears.
-    const well = DRACULA_VALUES["color-composer"]!;
+    // THAT SURFACE HAS MOVED TWICE. The bar used to sit in a `bg-input` well; the
+    // island layout moved the composer onto its own plane, so the gate was
+    // re-pointed at `--color-composer`; the config lines have now left the
+    // composer for the bottom of the side pane, and the bar sits in a `bg-input`
+    // WELL again there (`SessionConfigBlock.tsx`) — so this reads `color-input`.
+    // Reading the wrong token here grades a real relationship against a surface
+    // that no longer exists at that site, which is exactly the failure the ADR's
+    // amendments keep recording (and the reason this file derives the well rather
+    // than trusting the prose above it). It is NOT a hypothetical: dropped onto
+    // the pane with no well the bar would paint on `--color-inspector`
+    // (`#282a36`) at 1.208 — under the 1.3 floor below — and neither contrast gate
+    // would notice, because both named the `composer` token, which kept its value.
+    const well = DRACULA_VALUES["color-input"]!;
     const track = DRACULA_VALUES["color-context-track"]!;
     const lumOf = (hex: string) => {      const n = parseInt(hex.slice(1), 16);
       const f = (v: number) => {
@@ -1300,9 +1307,9 @@ describe("the .theme-dracula block follows the official Dracula spec", () => {
     // (how much is left) is invisible and the track is doing no work at all.
     expect(
       contrast(track, well),
-      `the track ${track} is invisible against the composer well ${well}`,
+      `the track ${track} is invisible against the side pane's ${well} well`,
     ).toBeGreaterThanOrEqual(1.3);
-    // WHY `#191a21`, stated as a measurable criterion rather than as taste.
+    // WHY `#343746`, stated as a measurable criterion rather than as taste.
     //
     // The track has TWO jobs, and they pull in opposite directions:
     //   (a) separate the band fill from the unfilled remainder  → wants the track
@@ -1311,28 +1318,29 @@ describe("the .theme-dracula block follows the official Dracula spec", () => {
     //   (b) be visible itself, so the bar's EXTENT reads           → wants the
     //       track FAR FROM THE SURFACE IT SITS ON.
     // So the criterion is two-stage, and the order matters: FILTER to tracks that
-    // read against the island (>= 1.3), then MAXIMISE THE WORST BAND among them.
+    // read against the well (>= 1.3), then MAXIMISE THE WORST BAND among them.
     // Doing it the other way round (maximising the weakest link) degenerates into
-    // "pick whichever is furthest from the surface", because track-vs-island is
+    // "pick whichever is furthest from the surface", because track-vs-well is
     // usually the binding term — that formulation selects `#44475a`, which is
     // Selection and banned as a resting surface, and whose bands (3.36) are the
     // worst of any candidate.
     //
-    // THE TABLE FLIPPED when the composer island took the slab. Against the old
-    // `#21222c` well the DARK end was invisible and the bright end won on
-    // visibility, so `#343746` was the compromise. Against the `#343746` island
-    // the bright end is now the invisible one (it IS the island) and the dark end
-    // clears the floor outright — so `#191a21` wins BOTH jobs instead of
-    // splitting them. This is the rare case where a layout change made a token
-    // strictly better rather than forcing a trade-off.
+    // Against the `#191a21` WELL the dark end is invisible (it IS the well) and
+    // `#282a36` — the pane's own plane, what the well exists to avoid — lands at
+    // 1.22 and is excluded too. The `#343746` plateau is the brightest thing still
+    // legible as a band separator, so `#343746` wins on both jobs and the token
+    // needs no re-valuing: the well, not the hex, is what makes the pair work.
+    // (Re-valuing the track instead was tried and rejected — `#424450` is
+    // `color-card-selected`, which the elevation ladder asserts appears nowhere
+    // else at all, and it reddens four gates in this file.)
     //
-    //   candidate  vs the island  worst band
-    //   #191a21       1.47           6.36    <- winner
-    //   #21222c       1.34           5.80
-    //   #282a36       1.21           5.23    excluded (invisible)
-    //   #343746       1.00           4.33    excluded (invisible: it IS the slab)
-    //   #424450       1.22           3.54    excluded (invisible)
-    //   #44475a       1.29           3.36    excluded + Selection: not a resting surface
+    //   candidate  vs the well   worst band
+    //   #191a21       1.00           6.36    excluded (invisible: it IS the well)
+    //   #21222c       1.10           5.80    excluded (invisible)
+    //   #282a36       1.22           5.23    excluded (invisible — the bare pane)
+    //   #343746       1.47           4.33    <- winner
+    //   #424450       1.80           3.54
+    //   #44475a       1.89           3.36    not a candidate + Selection: not a resting surface
     const candidates = Object.entries(DRACULA_VALUES).filter(
       ([t, v]) =>
         /^#[0-9a-f]{6}$/i.test(v) &&

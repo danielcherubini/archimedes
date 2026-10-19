@@ -1,6 +1,5 @@
 import {
   useEffect,
-  useCallback,
   useMemo,
   useRef,
   useState,
@@ -11,7 +10,6 @@ import {
   readClipboardImage,
   readFileBytes,
   sendPrompt,
-  setSessionConfigOption,
   compactSession,
 } from "../lib/tauri";
 import { basenameOfPath } from "../lib/paths";
@@ -225,88 +223,13 @@ export default function ChatStream() {
   // branch would be a conditional hook call and crash React when the
   // state flips).
   const quip = useSpinQuip(workingOrInTurn);
-  // The session's config options (model / thinking-level selectors):
-  // the store's map FIRST (the freshest — the live frames; a session
-  // closed in this app session keeps its last known entry — the close
-  // no longer drops it), falling back to the session row's
-  // `configOptions` (the Rust `list_sessions` shape — synthesized from
-  // the stored `model` / `thinkingLevel`): a STORED session's bottom bar
-  // is POPULATED (the selectors render disabled — a stored session can't
-  // set config; a resume re-emits the fresh values).
-  const configOptions = useSessions((s) => {
-    const id = s.activeSessionId;
-    if (!id) return null;
-    return (
-      s.configOptions[id] ??
-      s.sessions.find((x) => x.sessionId === id)?.configOptions ??
-      s.historySessions.find((x) => x.sessionId === id)?.configOptions ??
-      s.archivedSessions.find((x) => x.sessionId === id)?.configOptions ??
-      null
-    );
-  });
-  // The session's context usage (the context-percentage display — from
-  // the harness's `context_usage_update` frames; the store's map first,
-  // falling back to the session row's `contextUsage` — a STORED
-  // session's last known usage, persisted on every frame): `undefined`
-  // until the first frame, so a fresh session shows no percentage.
-  const contextUsage = useSessions((s) => {
-    const id = s.activeSessionId;
-    if (!id) return undefined;
-    return (
-      s.contextUsage[id] ??
-      s.sessions.find((x) => x.sessionId === id)?.contextUsage ??
-      s.historySessions.find((x) => x.sessionId === id)?.contextUsage ??
-      s.archivedSessions.find((x) => x.sessionId === id)?.contextUsage
-    );
-  });
-  const contextPercent =
-    contextUsage && contextUsage.window > 0
-      ? Math.min(100, Math.round((contextUsage.used / contextUsage.window) * 100))
-      : undefined;
-  // The context bar's color ramp (the traffic-light scheme — the label
-  // follows the fill's color): green at 0–49%, caution at 50–69%, warning
-  // at 70–89%, the destructive red at 90–100%. Context pressure IS a status
-  // ramp, so every band rides a semantic token (no raw hue to stand beside a
-  // Palette's own yellow); `caution` is the band `success` and `warning` have
-  // no room for.
-  const contextRamp =
-    contextPercent === undefined
-      ? { fill: "bg-success", label: "text-success" }
-      : contextPercent < 50
-        ? { fill: "bg-success", label: "text-success" }
-        : contextPercent < 70
-          ? { fill: "bg-caution", label: "text-caution" }
-          : contextPercent < 90
-            ? { fill: "bg-warning", label: "text-warning" }
-            : { fill: "bg-destructive", label: "text-destructive" };
-  const findOption = (category: string, id: string) =>
-    configOptions?.find(
-      (o) =>
-        (o.category === category || o.id === id) &&
-        o.type === "select" &&
-        (o.options?.length ?? 0) > 0,
-    );
-  const modelOption = findOption("model", "model");
-  const thinkingOption = findOption("thought_level", "thought_level");
-  const applyConfigOptions = useSessions((s) => s.applyConfigOptions);
-  // ONE stable callback for both config selects (the consumer-side half of
-  // the SessionConfigSelect memo fix): a per-option closure minted per
-  // render would re-render the ~600 mounted model-catalog SelectItems on
-  // EVERY composer keystroke (~140ms each — see SessionConfigSelect.tsx).
-  // `applyConfigOptions` is a zustand action — a stable reference, so this
-  // callback's identity only changes when the active session changes.
-  const setConfigValue = useCallback(
-    async (optionId: string, value: string) => {
-      if (!activeSessionId) return;
-      const options = await setSessionConfigOption(
-        activeSessionId,
-        optionId,
-        value,
-      );
-      applyConfigOptions(activeSessionId, options);
-    },
-    [activeSessionId, applyConfigOptions],
-  );
+  // The session's config options, its context usage and the derived percentage /
+  // ramp used to be computed HERE and threaded down as props, because the
+  // composer's bottom row hosted the model / thinking selectors and the context
+  // bar. That row is gone: the three lines live at the bottom of the side pane
+  // (`SessionConfigBlock.tsx`), which runs the SHARED derivations
+  // (`lib/sessionConfig.ts`) inside its own selectors. `isLive` below stays — the
+  // composer still needs it for the auto-resume path.
 
   // Whether the user owes an answer — the ACTIVE session's own prompts/pauses,
   // or ANY child's gate anywhere in the app — and here it drives the "Send a
@@ -1643,13 +1566,6 @@ export default function ChatStream() {
         composerLocked={composerLocked}
         imageCapable={imageCapable}
         hasImages={hasImages}
-        contextPercent={contextPercent}
-        contextRamp={contextRamp}
-        contextUsage={contextUsage}
-        modelOption={modelOption}
-        thinkingOption={thinkingOption}
-        setConfigValue={setConfigValue}
-        isLive={isLive}
       />
       {/* Interactive modals (rendered at the `ChatStream` root — `fixed`
           overlays, NOT inside the scroll region). */}

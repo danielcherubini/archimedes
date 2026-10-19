@@ -152,21 +152,26 @@ describe("floats over the content slab (the accepted collision)", () => {
     expect(cls).not.toMatch(/shadow-/);
   });
 
-  it("keeps the context bar's track legible against the island that holds it", () => {
-    // GRADED AGAINST `composer`, not the chat column: the bar is painted INSIDE
-    // the composer island, so that is the surface its track must read against.
-    // An earlier version of this test compared it to the chat slab and asserted
-    // the track sits BELOW that surface — two errors that happened to pass while
-    // the composer shared the slab's colour, and both became false the moment the
-    // composer got its own token. The invariant is SEPARATION, not direction: a
-    // track can be lighter or darker than its backdrop and still work, but it
-    // cannot be the same colour, or the bar's extent — how much context is left,
-    // which is the only thing the bar reports — is invisible.
+  it("keeps the context bar's track legible against the side pane's well that holds it", () => {
+    // GRADED AGAINST `input`, not the chat column and NOT the composer: the bar
+    // left the composer's bottom row and now sits in the side pane's own
+    // `bg-input` WELL (`SessionConfigBlock.tsx`), so that is the surface its
+    // track must read against. An earlier version of this test compared it to
+    // the chat slab and asserted the track sits BELOW that surface — two errors
+    // that happened to pass while the composer shared the slab's colour, and
+    // both became false the moment the composer got its own token. It then
+    // graded against `composer`, which became a fiction the moment the bar moved
+    // out of the island — a gate must name the surface the pixels actually land
+    // on. The invariant is SEPARATION, not direction: a track can be lighter or
+    // darker than its backdrop and still work, but it cannot be the same colour,
+    // or the bar's extent — how much context is left, which is the only thing
+    // the bar reports — is invisible. (The pane's own `inspector` `#282a36` is
+    // what the well exists to avoid: 1.208, under the floor this gate enforces.)
     const track = dracula("context-track");
-    const island = dracula("composer");
+    const well = dracula("input");
     expect(
-      contrast(track, island),
-      `track ${track} is invisible against the composer island ${island}`,
+      contrast(track, well),
+      `track ${track} is invisible against the side pane's well ${well}`,
     ).toBeGreaterThanOrEqual(1.3);
   });
 });

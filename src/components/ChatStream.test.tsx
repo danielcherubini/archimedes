@@ -3,7 +3,6 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import ChatStream from "./ChatStream";
 import {
   sendPrompt,
-  setSessionConfigOption,
   resumeSession,
   readClipboardImage,
   readFileBytes,
@@ -484,7 +483,10 @@ describe("ChatStream", () => {
     
     render(<ChatStream />);
     // Verify the "Thinking" label (scoped to the transcript's gradient text —
-    // the composer's thinking stub shows a "Thinking" placeholder too).
+    // the thinking STUB that used to sit in the composer and show the same
+    // "Thinking" placeholder is now the side pane's config block, and the pane
+    // is not part of this render; the scope stays so the two can never collide
+    // again if the pane is ever mounted under `ChatStream`).
     expect(screen.getByText("Thinking", { selector: ".animated-gradient-text" })).toBeTruthy();
     
     // Complete the turn
@@ -952,33 +954,6 @@ describe("ChatStream", () => {
     ).toBe(true);
   });
 
-  it("renders the composer's bottom row for a closed (history-only) session (the context bar + model/thinking selects — the `isLive` gates are gone)", () => {
-    seedStoredSession();
-    const { container } = render(<ChatStream />);
-    const composer = container.querySelector('[data-testid="composer-island"]')!;
-    // The context bar renders (an empty 0% track — the session's context is
-    // dropped on close and re-emits on resume; the label waits for data).
-    const bar = composer.querySelector(
-      '[data-testid="context-usage-bar"]',
-    ) as HTMLElement;
-    expect(bar).toBeTruthy();
-    const progress = bar.querySelector(
-      '[role="progressbar"][aria-label="Context used"]',
-    ) as HTMLElement;
-    expect(progress.getAttribute("aria-valuenow")).toBe("0");
-    expect(bar.querySelector('[data-testid="context-usage"]')).toBeNull();
-    // The model/thinking selects render as DISABLED stubs (the config
-    // options are dropped on close — no data to show; the identity stays).
-    const model = composer.querySelector('[aria-label="Model"]') as HTMLElement;
-    expect(model).toBeTruthy();
-    expect(model.hasAttribute("disabled")).toBe(true);
-    const thinking = composer.querySelector(
-      '[aria-label="Thinking"]',
-    ) as HTMLElement;
-    expect(thinking).toBeTruthy();
-    expect(thinking.hasAttribute("disabled")).toBe(true);
-  });
-
   it("send in a resumable stored session auto-resumes it, then sends", async () => {
     seedStoredSession({ loadSession: true, promptCapabilities: { image: true } });
     render(<ChatStream />);
@@ -1321,47 +1296,17 @@ describe("ChatStream", () => {
     expect(screen.queryByRole("status")).toBeNull();
   });
 
-  it("a live session WITH a model + thinking config option renders BOTH selects IN THE COMPOSER (ZCode's placement — the header carries no config selects)", async () => {
-    seedLiveSession();
-    useSessions.setState({
-      configOptions: {
-        s1: [
-          {
-            id: "model",
-            name: "Model",
-            type: "select",
-            currentValue: "acme/alpha",
-            options: [
-              { value: "acme/alpha", name: "acme/Alpha" },
-              { value: "acme/beta", name: "acme/Beta" },
-            ],
-          },
-          {
-            id: "thought_level",
-            name: "Thinking",
-            type: "select",
-            currentValue: "medium",
-            options: [
-              { value: "low", name: "Low" },
-              { value: "medium", name: "Medium" },
-            ],
-          },
-        ],
-      },
-    });
-    const { container } = render(<ChatStream />);
-    // ZCode's composer carries the model/thought controls in its toolbar
-    // (left of the send button).
-    const composer = container.querySelector('[data-testid="composer-island"]')!;
-    expect(composer.querySelector('[aria-label="Model"]')).toBeTruthy();
-    expect(composer.querySelector('[aria-label="Thinking"]')).toBeTruthy();
-    // The model trigger shows the BARE id + the provider suffix (the
-    // composed `provider/id` key is the VALUE, not the display text).
-    expect(screen.getByText(/alpha/)).toBeTruthy();
-    expect(screen.getByText("Medium")).toBeTruthy();
-  });
-
-  it("groups the model + thinking triggers in ONE tight cluster (they are one block of session config, not three evenly-spaced controls)", () => {
+  // The composer's bottom row is TWO BUTTONS. The three config lines (context
+  // bar, model, reasoning) left for the side pane's `SessionConfigBlock`, and
+  // these two pins keep them out — a re-landed bar or trigger would put ~600
+  // mounted model `SelectItem`s back into the subtree that re-renders on every
+  // keystroke (`draft` is the composer's state), which is the perf coupling the
+  // move exists to kill.
+  it("the composer island hosts NO config line (they are the side pane's now)", () => {
+    // A FULL session: usage known AND both config options present — the state
+    // in which a re-landed bar/trigger would definitely render. Anything the
+    // composer still renders for these is a regression; the pane is asserted
+    // separately (`SidePane.test.tsx`).
     seedLiveSession();
     useSessions.setState({
       configOptions: {
@@ -1382,293 +1327,50 @@ describe("ChatStream", () => {
           },
         ],
       },
+      contextUsage: { s1: { used: 53760, window: 128000 } },
     });
     const { container } = render(<ChatStream />);
-    // Both triggers sit inside a single wrapper whose inner gap (`gap-1`) is
-    // TIGHTER than the `gap-2` that separates the cluster from Send.
-    const group = container.querySelector(
-      '[data-testid="composer-config-controls"]',
+    const composer = container.querySelector(
+      '[data-testid="composer-island"]',
     ) as HTMLElement;
-    expect(group).toBeTruthy();
-    expect(group.className).toContain("gap-1");
-    expect(group.className).not.toContain("gap-2");
+    expect(composer).toBeTruthy();
+    // Neither the context bar nor its track / label / icon.
     expect(
-      group.querySelector('[aria-label="Model"]') &&
-        group.querySelector('[aria-label="Thinking"]'),
-    ).toBeTruthy();
-    // The cluster is the toolbar's last item before Send (the toolbar's own
-    // `gap-2` is the wider separation).
-    const toolbar = group.parentElement!;
-    expect(toolbar.className).toContain("gap-2");
-    expect(toolbar.lastElementChild?.getAttribute("aria-label")).toBe("Send");
+      composer.querySelector('[data-testid="context-usage-bar"]'),
+    ).toBeNull();
+    // Neither config trigger — the model trigger is a dialog BUTTON and the
+    // thinking trigger a `combobox`, so check both roles and the raw labels.
+    expect(composer.querySelector('[aria-label="Model"]')).toBeNull();
+    expect(composer.querySelector('[aria-label="Thinking"]')).toBeNull();
+    expect(
+      composer.querySelector('[data-testid="session-config-controls"]'),
+    ).toBeNull();
+    // And nothing in the composer's subtree is a progressbar any more.
+    expect(composer.querySelector('[role="progressbar"]')).toBeNull();
   });
 
-  // --- The context bar (the dynamic percentage — a progress bar spanning
-  // from the `+` button to the model selector, the reference UI's
-  // `🧠 [====bar====] 61%` look). ---
-
-  it("renders a dynamic context bar in the composer when the usage is known", () => {
+  it("keeps BOTH action buttons in the composer's bottom row, right-aligned together", () => {
     seedLiveSession();
-    useSessions.setState({
-      contextUsage: { s1: { used: 53760, window: 128000 } },
-    });
     const { container } = render(<ChatStream />);
-    // 53760 / 128000 = 42% — inside the composer (NOT the header).
-    const composer = container.querySelector('[data-testid="composer-island"]')!;
-    const group = composer.querySelector(
-      '[data-testid="context-usage-bar"]',
-    ) as HTMLElement | null;
-    expect(group).toBeTruthy();
-    const bar = group!.querySelector(
-      '[role="progressbar"][aria-label="Context used"]',
-    ) as HTMLElement | null;
-    expect(bar).toBeTruthy();
-    expect(bar!.getAttribute("aria-valuemin")).toBe("0");
-    expect(bar!.getAttribute("aria-valuemax")).toBe("100");
-    expect(bar!.getAttribute("aria-valuenow")).toBe("42");
-    // The fill's width follows the percentage, and 42% (< 50%) is the
-    // green band (the label follows the fill's color).
-    const fill = bar!.firstElementChild as HTMLElement;
-    expect(fill.style.width).toBe("42%");
-    expect(fill.className).toContain("bg-success");
-    expect(fill.className).not.toContain("bg-caution");
-    // The label sits at the bar's right edge (the reference UI's `61%`).
-    const labelEl = group!.querySelector('[data-testid="context-usage"]') as HTMLElement;
-    expect(labelEl.textContent).toBe("42%");
-    expect(labelEl.className).toContain("text-success");
-    // The brain icon cues the bar (the reference UI's `🧠` placement).
-    expect(group!.querySelector('[data-testid="context-bar-icon"]')).toBeTruthy();
-  });
-
-  // The token counts are HOVER-ONLY on the number (the bar row is dense —
-  // `53,760 / 128,000 tokens` inline would push the model selector off the
-  // row, and the native `title` tooltip is unstyled and ~1s slow).
-  it("the context number reveals the token counts on hover, not inline", () => {
-    seedLiveSession();
-    useSessions.setState({
-      contextUsage: { s1: { used: 53760, window: 128000 } },
-    });
-    render(<ChatStream />);
-    const label = screen.getByTestId("context-usage");
-    // The inline text stays the bare percentage.
-    expect(label.textContent).toBe("42%");
-    // No native tooltip (the styled Radix one replaces it).
-    expect(label.getAttribute("title")).toBeNull();
-    // CLOSED until hover — the counts are not in the DOM at rest.
-    expect(document.body.textContent).not.toContain("53,760");
-    // Radix `TooltipTrigger` opens on pointer/focus (see the
-    // `ToolCallCard` failure-tooltip test — `mouseEnter` does not fire it
-    // in this Radix version; `focus` does; `TooltipProvider`'s
-    // `delayDuration = 0` mounts the portal synchronously).
-    fireEvent.focus(label);
-    expect(document.body.textContent).toContain("53,760 / 128,000 tokens");
-  });
-
-  // The counts are keyboard-accessible: the tooltip trigger is a focusable
-  // control (a Tab stop) whose accessible name carries the token counts,
-  // and the progressbar exposes them as its text alternative — so nothing
-  // about the context is hover-only.
-  it("the context counts are reachable by keyboard, not hover alone", () => {
-    seedLiveSession();
-    useSessions.setState({
-      contextUsage: { s1: { used: 53760, window: 128000 } },
-    });
-    render(<ChatStream />);
-    const label = screen.getByTestId("context-usage");
-    // A real control in the tab order (a bare `<span>` was not).
-    expect(label.tagName).toBe("BUTTON");
-    expect(label.getAttribute("tabindex")).not.toBe("-1");
-    // The accessible name carries the counts (a screen reader hears them
-    // without opening the tooltip).
-    expect(label.getAttribute("aria-label")).toBe(
-      "Context used: 53,760 of 128,000 tokens (42%)",
-    );
-    // The progressbar's text alternative carries them too.
-    const bar = screen
-      .getByTestId("context-usage-bar")
-      .querySelector('[role="progressbar"][aria-label="Context used"]') as HTMLElement;
-    expect(bar.getAttribute("aria-valuetext")).toBe(
-      "53,760 of 128,000 tokens (42%)",
-    );
-    // And focus (keyboard) opens the tooltip, as hover does.
-    fireEvent.focus(label);
-    expect(document.body.textContent).toContain("53,760 / 128,000 tokens");
-  });
-
-  it("a caution-band context percentage (50–69%) renders the fill in caution", () => {
-    seedLiveSession();
-    useSessions.setState({
-      contextUsage: { s1: { used: 78080, window: 128000 } },
-    });
-    render(<ChatStream />);
-    const group = screen.getByTestId("context-usage-bar");
-    const bar = group.querySelector(
-      '[role="progressbar"][aria-label="Context used"]',
+    const composer = container.querySelector(
+      '[data-testid="composer-island"]',
     ) as HTMLElement;
-    expect(bar.getAttribute("aria-valuenow")).toBe("61");
-    // 61% is the caution band (50–69%): caution (NOT green, NOT warning),
-    // and the label follows the fill's color.
-    const fill = bar.firstElementChild as HTMLElement;
-    expect(fill.className).toContain("bg-caution");
-    expect(fill.className).not.toContain("bg-success");
-    expect(fill.className).not.toContain("bg-warning");
-    const label = group.querySelector('[data-testid="context-usage"]') as HTMLElement;
-    expect(label.textContent).toBe("61%");
-    expect(label.className).toContain("text-caution");
-  });
-
-  it("a mid context percentage (70–89%) escalates the fill to the warning color", () => {
-    seedLiveSession();
-    useSessions.setState({
-      contextUsage: { s1: { used: 96000, window: 128000 } },
-    });
-    render(<ChatStream />);
-    const group = screen.getByTestId("context-usage-bar");
-    const bar = group.querySelector(
-      '[role="progressbar"][aria-label="Context used"]',
+    const attach = composer.querySelector(
+      '[aria-label="Attach files"]',
     ) as HTMLElement;
-    expect(bar.getAttribute("aria-valuenow")).toBe("75");
-    // 75% is the warning band (70–89%): warning (NOT caution, NOT red),
-    // and the label follows the fill's color.
-    const fill = bar.firstElementChild as HTMLElement;
-    expect(fill.className).toContain("bg-warning");
-    expect(fill.className).not.toContain("bg-caution");
-    expect(fill.className).not.toContain("bg-destructive");
-    const label = group.querySelector('[data-testid="context-usage"]') as HTMLElement;
-    expect(label.textContent).toBe("75%");
-    expect(label.className).toContain("text-warning");
-  });
-
-  it("a high context percentage (>= 90%) escalates the fill to the destructive color", () => {
-    seedLiveSession();
-    useSessions.setState({
-      contextUsage: { s1: { used: 115200, window: 128000 } },
-    });
-    render(<ChatStream />);
-    const group = screen.getByTestId("context-usage-bar");
-    const bar = group.querySelector(
-      '[role="progressbar"][aria-label="Context used"]',
-    ) as HTMLElement;
-    expect(bar.getAttribute("aria-valuenow")).toBe("90");
-    // 90% is the red band (90–100%): the destructive red (the label
-    // follows the fill's color).
-    const fill = bar.firstElementChild as HTMLElement;
-    expect(fill.className).toContain("bg-destructive");
-    expect(fill.className).not.toContain("bg-warning");
-    const label = group.querySelector('[data-testid="context-usage"]') as HTMLElement;
-    expect(label.textContent).toBe("90%");
-    expect(label.className).toContain("text-destructive");
-  });
-
-  it("renders an empty context bar (no label) when the usage is unknown", () => {
-    seedLiveSession();
-    useSessions.setState({ contextUsage: {} });
-    render(<ChatStream />);
-    // The bar renders from the start (layout stability — the fill appears
-    // as the session grows) but the label waits for the first frame.
-    const bar = screen.getByRole("progressbar", { name: "Context used" });
-    expect(bar.getAttribute("aria-valuenow")).toBe("0");
-    const fill = bar.firstElementChild as HTMLElement;
-    expect(fill.style.width).toBe("0%");
-    expect(bar.querySelector('[data-testid="context-usage"]')).toBeNull();
-  });
-
-  it("renders the context bar for a stored session as an empty 0% track (the context is dropped on close and re-emits on resume)", () => {
-    seedStoredSession();
-    render(<ChatStream />);
-    // The bar is ALWAYS rendered (the `isLive` gate is gone): a stored
-    // session's context is dropped on close — the track is the empty 0%
-    // fill (the label waits for the resume to re-emit the usage).
-    const bar = screen.getByRole("progressbar", { name: "Context used" });
-    expect(bar.getAttribute("aria-valuenow")).toBe("0");
-    expect(screen.queryByTestId("context-usage")).toBeNull();
-  });
-
-  it("renders the bottom bar POPULATED for a stored session (config options + context usage from the session row — the selectors are disabled)", () => {
-    // The `list_sessions` shape: the row carries `configOptions` (the
-    // stored `model` / `thinkingLevel` synthesized) + `contextUsage` (the
-    // last known usage — persisted on every `context_usage_update` frame).
-    useSessions.setState({
-      activeSessionId: "s1",
-      sessions: [],
-      spaces: [{ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1, trusted: false }],
-      historySessions: [
-        {
-          sessionId: "s1",
-          cwd: "/home/u/proj",
-          capabilities: { loadSession: true },
-          archived: false,
-          configOptions: [
-            {
-              id: "model",
-              name: "Model",
-              type: "select",
-              currentValue: "tama/m1",
-              options: [{ value: "tama/m1", name: "m1" }],
-            },
-            {
-              id: "thought_level",
-              name: "Thinking",
-              category: "thought_level",
-              type: "select",
-              currentValue: "high",
-              options: [{ value: "high", name: "High" }],
-            },
-          ],
-          contextUsage: { used: 53760, window: 128000 },
-        },
-      ],
-      messages: { s1: [] },
-      inTurn: {},
-      stopReasons: {},
-      closeReasons: {},
-      configOptions: {},
-      contextUsage: {},
-    });
-    render(<ChatStream />);
-    // The context bar is FILLED from the row's usage (53760 / 128000 ≈
-    // 42% — the green band).
-    const bar = screen.getByRole("progressbar", { name: "Context used" });
-    expect(bar.getAttribute("aria-valuenow")).toBe("42");
-    expect(screen.getByTestId("context-usage").textContent).toBe("42%");
-    // The model selector is POPULATED with the stored model's name, but
-    // DISABLED (a stored session can't set config — no agent process to
-    // deliver `set_config_option` to).
-    const model = screen.getByRole("button", { name: "Model" });
-    expect(model.hasAttribute("disabled")).toBe(true);
-    expect(model.textContent).toContain("m1 · tama");
-    // The thinking selector is POPULATED with the stored level + disabled.
-    const thinking = screen.getByRole("combobox");
-    expect(thinking.hasAttribute("disabled")).toBe(true);
-    expect(thinking.textContent).toContain("High");
-  });
-
-  it("a stored session's live config options win over the row's (the store's map is fresher — the last frame before the close)", () => {
-    // The store's map has a FRESHER value (the session was live in this
-    // app session, closed, and the store kept its last known config — the
-    // `handleSessionClosed` no longer drops it); the row's value is the
-    // DB's (persisted on the same frame — same value, but the store's
-    // map is the primary source).
-    seedStoredSession();
-    useSessions.setState({
-      configOptions: {
-        s1: [
-          {
-            id: "model",
-            name: "Model",
-            type: "select",
-            currentValue: "tama/m2",
-            options: [{ value: "tama/m2", name: "m2" }],
-          },
-        ],
-      },
-      contextUsage: { s1: { used: 100000, window: 128000 } },
-    });
-    render(<ChatStream />);
-    const model = screen.getByRole("button", { name: "Model" });
-    expect(model.textContent).toContain("m2 · tama");
-    const bar = screen.getByRole("progressbar", { name: "Context used" });
-    expect(bar.getAttribute("aria-valuenow")).toBe("78"); // 100000/128000 ≈ 78%
+    const send = composer.querySelector('[aria-label="Send"]') as HTMLElement;
+    expect(attach).toBeTruthy();
+    expect(send).toBeTruthy();
+    // Both ride ONE `ml-auto` wrapper — that is what right-aligns them as a
+    // pair. Splitting them (or dropping `ml-auto`) un-aligns the pair, which is
+    // the layout the config lines' departure left behind and the reason the
+    // wrapper still exists.
+    expect(send.parentElement).toBe(attach.parentElement);
+    expect(send.parentElement!.className).toContain("ml-auto");
+    // They are the wrapper's ONLY children: the row is two buttons and nothing
+    // else (the deleted cluster left no container behind).
+    expect(send.parentElement!.childElementCount).toBe(2);
+    expect(send.parentElement!.lastElementChild).toBe(send);
   });
 
   // --- The `+` attach button (the native file picker) ---
@@ -1746,40 +1448,6 @@ describe("ChatStream", () => {
     expect(screen.queryByRole("button", { name: "Remove image attachment" })).toBeNull();
   });
 
-  it("choosing a model item invokes setSessionConfigOption", async () => {
-    seedLiveSession();
-    useSessions.setState({
-      configOptions: {
-        s1: [
-          {
-            id: "model",
-            name: "Model",
-            type: "select",
-            currentValue: "acme/alpha",
-            options: [
-              { value: "acme/alpha", name: "acme/Alpha" },
-              { value: "acme/beta", name: "acme/Beta" },
-            ],
-          },
-        ],
-      },
-    });
-    render(<ChatStream />);
-    // The model picker is a DIALOG (the trigger is a button — the catalog
-    // is too long for a Radix dropdown).
-    fireEvent.click(screen.getByRole("button", { name: "Model" }));
-    // The row name is the BARE id; the sent value is the full composed key.
-    fireEvent.click(screen.getByText("beta"));
-    expect(setSessionConfigOption).toHaveBeenCalledWith("s1", "model", "acme/beta");
-  });
-
-  it("a live session WITHOUT configOptions renders neither selector", () => {
-    seedLiveSession();
-    render(<ChatStream />);
-    expect(screen.queryByRole("combobox", { name: "Model" })).toBeNull();
-    expect(screen.queryByRole("combobox", { name: "Thinking" })).toBeNull();
-  });
-
   it("does NOT leak Reasoning state across sessions (per-session key)", () => {
     useSessions.setState({
       activeSessionId: "s1",
@@ -1818,25 +1486,6 @@ describe("ChatStream", () => {
     });
     expect(screen.queryByText("thought-two")).toBeNull();
     expect(screen.queryByText("thought-one")).toBeNull();
-  });
-
-  it("a STORED session with configOptions renders neither selector", () => {
-    seedStoredSession();
-    useSessions.setState({
-      configOptions: {
-        s1: [
-          {
-            id: "model",
-            name: "Model",
-            type: "select",
-            currentValue: "acme/alpha",
-            options: [{ value: "acme/alpha", name: "acme/Alpha" }],
-          },
-        ],
-      },
-    });
-    render(<ChatStream />);
-    expect(screen.queryByRole("combobox", { name: "Model" })).toBeNull();
   });
 
   // --- Image attachments: paste / drop / thumbnail strip / capability gate. ---
