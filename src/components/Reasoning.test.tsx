@@ -41,6 +41,42 @@ describe("Reasoning component", () => {
     expect(screen.queryByText("body")).toBeNull();
   });
 
+  it("paints the settled row with the row token family, and the streaming one with the shimmer", () => {
+    // ADR 0062: the `Thought` row is one of the three `TRANSCRIPT_ROW`
+    // consumers, so its glyph takes `text-row-icon` and its settled verb takes
+    // `text-row-verb` — while the streaming variant keeps `animated-gradient-
+    // text` and NO verb colour, exactly like the tool rows. Checking both rows
+    // of the pair per render is what stops a repaint that colours the streaming
+    // label, or that forgets the verb and leaves only the glyph.
+    // Rendered one at a time and unmounted in between, so the queries are bound
+    // to one tree: `screen` would be ambiguous with both mounted, and RTL's
+    // auto-cleanup only runs BETWEEN tests, not mid-test.
+    const settled = render(
+      <Reasoning isStreaming={false} duration={5}>
+        <ReasoningTrigger />
+      </Reasoning>,
+    );
+    const trigger = settled.getByTestId("reasoning-trigger");
+    expect(trigger.querySelector(".text-row-icon")).not.toBeNull();
+    expect(settled.getByText("Thought").className).toContain("text-row-verb");
+    // The separator and the duration are de-emphasis TEXT, not row decoration:
+    // they must keep the foreground utility so the verb stays the only cyan word.
+    expect(settled.getByText("·").className).toContain("text-foreground-subtlest");
+    expect(settled.getByText("5 seconds").className).toContain("text-foreground-subtlest");
+    settled.unmount();
+
+    const streaming = render(
+      <Reasoning isStreaming={true}>
+        <ReasoningTrigger />
+      </Reasoning>,
+    );
+    const streamingTrigger = streaming.getByTestId("reasoning-trigger");
+    // The glyph is row decoration in BOTH states — it is the verb that waits.
+    expect(streamingTrigger.querySelector(".text-row-icon")).not.toBeNull();
+    expect(streamingTrigger.querySelector(".animated-gradient-text")).not.toBeNull();
+    expect(streamingTrigger.querySelector(".text-row-verb")).toBeNull();
+  });
+
   it("streaming label shows Thinking", () => {
     render(
       <Reasoning isStreaming={true}>

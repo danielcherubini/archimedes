@@ -84,12 +84,17 @@ export function ToolCallCardHeader({
       onClick={onToggle}
       className={`group/tool-summary ${TRANSCRIPT_ROW}`}
     >
-      <Icon className="size-4 shrink-0 text-foreground-subtle" />
+      {/* The row glyph (ADR 0062): `text-row-icon`, not a foreground utility, so
+          a Palette can re-hue every transcript row's glyph — and only that —
+          without touching this file.
+          The verb below takes `text-row-verb`, but only ONCE SETTLED: a pending
+          call keeps `animated-gradient-text`, because the shimmer is the "this
+          call is working" cue and outranks a static colour. Do not collapse that
+          conditional into one class and lose the motion signal. */}
+      <Icon className="size-4 shrink-0 text-row-icon" />
       <span
         className={`shrink-0 whitespace-nowrap font-medium ${
-          status === "pending"
-            ? "animated-gradient-text"
-            : "text-foreground-subtlest"
+          status === "pending" ? "animated-gradient-text" : "text-row-verb"
         }`}
       >
         {verb ?? title}

@@ -363,7 +363,7 @@ export const ReasoningTrigger = memo(
         <span className="inline-flex items-center gap-2">
           {/* 完成态“思考”单独使用 semibold，比同列工具类型标签更粗。
               统一为 medium，保持对话时间线的视觉层级一致。 */}
-          <span className="font-medium text-foreground-subtlest">
+          <span className="font-medium text-row-verb">
             Thought
           </span>
           <span className="font-normal text-foreground-subtlest">·</span>
@@ -373,7 +373,7 @@ export const ReasoningTrigger = memo(
         </span>
       ) : (
         <span className="inline-flex items-center gap-2">
-          <span className="font-medium text-foreground-subtlest">
+          <span className="font-medium text-row-verb">
             Thought
           </span>
           <span className="font-normal text-foreground-subtlest">·</span>
@@ -392,8 +392,13 @@ export const ReasoningTrigger = memo(
         {children ?? (
           <>
             {/* thinking 会在长流式回复里持续存在，旋转 loader 会长期占用渲染资源；
-            运行态保留文案扫光，图标固定为静态思考语义。 */}
-            <BrainIcon className="size-4 shrink-0 text-foreground-subtlest" />
+            运行态保留文案扫光，图标固定为静态思考语义。
+            配色走 row token（ADR 0062）：`text-row-icon` / `text-row-verb`，
+            与工具行、`Changes` 组同族，Palette 改一次即改三处。注意此前本图标用
+            `text-foreground-subtlest`，而另两个消费者的图标用 `text-foreground-subtle`，
+            统一到 icon token 后这个大脑会略微变实——这正是三个同族字形应一致的结果
+            （ADR 0062 的 Correction 1）。 */}
+            <BrainIcon className="size-4 shrink-0 text-row-icon" />
             {/* 右侧流式摘要是可伸缩内容；如果左侧标签也参与 flex shrink，
                 长摘要会把思考状态标签挤成多行。固定语义标签宽度，只让摘要占剩余空间。 */}
             <span className="shrink-0 whitespace-nowrap" data-reasoning-label="true">

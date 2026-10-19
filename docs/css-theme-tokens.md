@@ -12,7 +12,10 @@ explain the dark readings (and the `--color-context-track` split), and the
 spec-gate record, which is its own document and stays with the block.
 
 `src/lib/themeTokens.test.ts` is the gate for the ramp section below (hue
-pairing, cool→hot ordering, status-collision, contrast floors) and
+pairing, cool→hot ordering, status-collision, contrast floors) and for the
+**row token family** (`--color-row-icon` / `--color-row-verb`), whose rationale
+is ADR 0062 rather than a section here — that family's readings are an alias in
+all four non-Dracula layers, so there is no base reading of its own to record.
 `src/lib/fileIconContrast.test.ts` grades the descriptor hues against their
 real surfaces.
 
@@ -44,7 +47,7 @@ real surfaces.
    * yellows that vanish there); `.theme-zai-dark` overrides them with
    * ZCode's exact glyph fills, which are tuned for a dark surface. A file
    * type is not a light/dark concern, so the pair is the hue's two readings
-   * of the same identity — like `--color-trajectory-*`.
+   * of the same identity — like the git-status hues.
    *
    * The extension → hue mapping follows ZCode's `resolveIconName`. */
 

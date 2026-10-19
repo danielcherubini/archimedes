@@ -223,6 +223,14 @@ const MEANINGFUL_TOKENS = [
   "color-foreground",
   "color-foreground-subtle",
   "color-foreground-subtlest",
+  // The row token family (ADR 0062). Adding these WIDENS the set the
+  // `statusCollisions` loop compares — a thinking level may not print the same
+  // hex as a row glyph or a row verb either. Dracula's ramp is built from the
+  // ANSI BRIGHTS and uses neither `#ffb86c` nor `#8be9fd`, so this costs
+  // nothing today; it is here so the two families cannot be collapsed onto each
+  // other later without failing by name.
+  "color-row-icon",
+  "color-row-verb",
   "color-border",
 ];
 
@@ -589,3 +597,345 @@ describe("the ramp tokens (--color-caution + --color-thinking-*)", () => {
     expect(hueOf(hexes[4]!)).toBeLessThan(15);
   });
 });
+
+/**
+ * The ROW token family — `--color-row-icon` / `--color-row-verb` (ADR 0062).
+ *
+ * Named for `TRANSCRIPT_ROW` (`src/components/lib/transcriptRow.ts`), the class
+ * constant the tool rows, the `Thought` trigger and the `Changes` group share,
+ * so all three consumers are in scope and not only the tools. Four rules are
+ * pinned below.
+ *
+ * (1) PRESENT IN ALL FIVE LAYERS. This app's class model (ADR 0027, and the
+ *     header comment of this file) means a token a palette forgets does not
+ *     fail — it silently inherits the `@theme` reading. A row token is no
+ *     exception: `.theme-dracula` must state its own orange/cyan or every Dracula
+ *     row renders Zai's greys, and nothing would complain.
+ * (2) THE ALIAS IS THE CONTRACT in the four non-Dracula layers. `var(–color-
+ *     foreground-subtle)` / `var(–color-foreground-subtlest)` are TODAY's
+ *     readings, restated as an indirection so a palette can re-hue a row without
+ *     a component being touched. A literal hex there would freeze the value
+ *     across a palette swap while still passing rule (1) — hence pinning the
+ *     value as a `var()` and not merely as "declared".
+ * (3) DRACULA'S TWO HEXES ARE PINNED BY VALUE. This is deliberately NOT a
+ *     generic "collides with no other `MEANINGFUL_TOKENS` entry" gate, because
+ *     the family's own design makes such a gate false on day one:
+ *
+ *       - the ICON is `#ffb86c`, verbatim `--color-warning`, the collision ADR
+ *         0062 records and accepts;
+ *       - the VERB is `#8be9fd`, which `--color-interaction-ask-foreground`
+ *         already carried BEFORE this family existed — and that token is itself
+ *         in `MEANINGFUL_TOKENS`.
+ *
+ *     So a collision gate would have to allow-list two entries to pass, and an
+ *     allow-list that big is how a gate stops meaning anything. Pinning the
+ *     values instead makes the job "someone chose these two hexes, on purpose,
+ *     per palette": collapsing the icon onto `--color-warning` or the verb onto
+ *     the ask-foreground token is then a decision with a failing test attached
+ *     rather than a silent simplification.
+ * (4) THE DEAD ROW-KIND FAMILY STAYS DEAD. The predecessor family split by row
+ *     KIND and rendered nothing; ADR 0062 deletes it so the codebase ships one
+ *     row-hue family rather than two. Its name is asserted absent from every
+ *     CSS layer and from every file under `src/`, so a re-introduction — or a
+ *     half-migration that leaves the old names in a glossary-adjacent test list
+ *     — fails here.
+ */
+
+/**
+ * The dead family's name, CONSTRUCTED rather than written out.
+ *
+ * The whole point of the deletion gate below is that this word appears NOWHERE
+ * under `src/` — which is also the manual check the task states (a recursive
+ * grep for it over `src/` must return nothing). A test that spelled the word in
+ * its own prose would BE the single file that made that grep return a hit, and
+ * would then have to exempt itself to pass — a gate with a hole the size of the
+ * gate. So the string is assembled from two halves, exactly like `cssSource.ts`
+ * assembles `node:fs` to stay inside a DOM-only `@types` budget: the constant
+ * holds the value, no file holds the word. The non-vacuity test below asserts
+ * that this file really is word-free, so the trick cannot silently rot into a
+ * file that names the word AND passes.
+ */
+const DEAD_ROW_KIND_PREFIX = "traje" + "ctory";
+
+/**
+ * Reading FILES (not just the stylesheet) is what lets the gates below check the
+ * three consumer components and sweep the whole of `src/`. `cssSource.ts` owns
+ * the CSS read and deliberately exposes no directory listing, so this file goes
+ * to Node directly — through the same COMPUTED specifier the sibling
+ * `paletteCompleteness.test.ts` and `cssSource.ts` use, because this app ships
+ * no `@types/node` and a bare `node:fs` import would not typecheck.
+ */
+const NODE_FS = "node:" + "fs";
+const { readFileSync, readdirSync } = (await import(NODE_FS)) as {
+  readFileSync: (path: string, encoding: string) => string;
+  readdirSync: (path: string, options: { recursive: true; encoding: string }) => string[];
+};
+
+/** A file's text, relative to the repo root (the cwd every test here runs in). */
+const readTextFile = (relPath: string): string => readFileSync(relPath, "utf8");
+
+/**
+ * Remove COMMENTS from a TS/TSX source, so a class name that appears only in
+ * PROSE cannot be counted as a consumer — the exact hazard every CSS test in
+ * this repo already guards against, and which this file's own `Thought` comment
+ * demonstrated by failing the utility count below before the strip went in.
+ *
+ * The coverage is deliberately narrow and stated rather than implied: block
+ * comments (`/* … *\/`, which is also how a `{…}` JSX comment looks) and
+ * WHOLE-LINE `//` comments. A trailing `// note` is NOT stripped, because
+ * telling a comment from a `"https://…"` string needs a real parser and this
+ * repo ships none. That boundary is enforced rather than trusted — the last
+ * assertion of the non-vacuity test scans the three row components for a
+ * utility name to the right of a `//` and fails if one appears, so the blind
+ * spot cannot start mattering unnoticed.
+ */
+const stripJsComments = (source: string): string =>
+  source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .filter((line) => !/^\s*\/\//.test(line))
+    .join("\n");
+
+/** Text files under a directory, recursively. Measured on this tree, `src/`
+ *  holds 124 `.ts`, 123 `.tsx` and 5 `.css` files and NOTHING else, so the
+ *  extension filter is not skipping real input today; it is here so that adding
+ *  a font or an image later cannot turn the sweep below into a binary read.
+ *  A `readdirSync` that returned only names (not paths) is why the mapping
+ *  prefixes the directory. */
+const textFilesUnder = (dir: string): string[] =>
+  readdirSync(dir, { recursive: true, encoding: "utf8" })
+    .filter((p) => /\.[cm]?[jt]sx?$|\.css$/.test(p))
+    .map((p) => `${dir}/${p}`);
+
+/** Every layer of the cascade, in source order (the order itself is pinned by
+ *  `paletteCompleteness.test.ts`; it is listed here so "all five" is a loop
+ *  rather than five copy-pasted assertions that can lose one). */
+const ALL_LAYERS: { name: string; tokens: Record<string, string> }[] = [
+  { name: "@theme", tokens: THEME },
+  { name: ".dark", tokens: DARK },
+  { name: ".theme-zai-light", tokens: ZAI_LIGHT },
+  { name: ".theme-zai-dark", tokens: ZAI_DARK },
+  { name: ".theme-dracula", tokens: DRACULA },
+];
+
+/** The row family, and the value each layer is REQUIRED to carry. The four
+ *  non-Dracula layers alias; Dracula is the only palette with its own reading. */
+const ROW_ICON = "color-row-icon";
+const ROW_VERB = "color-row-verb";
+const ALIAS_ICON = "var(--color-foreground-subtle)";
+const ALIAS_VERB = "var(--color-foreground-subtlest)";
+
+/** Per-palette readings, pinned BY VALUE — see rule (3) of the block comment. */
+const ROW_READINGS: Record<string, { icon: string; verb: string }> = {
+  "@theme": { icon: ALIAS_ICON, verb: ALIAS_VERB },
+  ".dark": { icon: ALIAS_ICON, verb: ALIAS_VERB },
+  ".theme-zai-light": { icon: ALIAS_ICON, verb: ALIAS_VERB },
+  ".theme-zai-dark": { icon: ALIAS_ICON, verb: ALIAS_VERB },
+  ".theme-dracula": { icon: "#ffb86c", verb: "#8be9fd" },
+};
+
+const LAYER_NAMES = ALL_LAYERS.map((l) => l.name);
+
+/** The three `TRANSCRIPT_ROW` consumers the family repaints. One list, so the
+ *  "carries both utilities" gate and the "kept its other muted spans" gate
+ *  cannot drift to cover different sets of files. */
+const ROW_CONSUMER_FILES = [
+  "src/components/ToolCallCardHeader.tsx",
+  "src/components/ChangesGroupCard.tsx",
+  "src/components/Reasoning.tsx",
+];
+
+describe("the row token family (--color-row-icon / --color-row-verb, ADR 0062)", () => {
+  it.each(LAYER_NAMES)("%s declares both row tokens", (name) => {
+    // Rule (1). A palette that forgets one silently inherits `@theme`'s grey,
+    // so this fails only if the message can name the layer — hence `it.each`.
+    const tokens = ALL_LAYERS.find((l) => l.name === name)!.tokens;
+    expect(tokens[ROW_ICON], `${ROW_ICON} missing from ${name}`).toBeTruthy();
+    expect(tokens[ROW_VERB], `${ROW_VERB} missing from ${name}`).toBeTruthy();
+  });
+
+  it.each(LAYER_NAMES)("%s carries exactly the ADR's reading for both tokens", (name) => {
+    // Rules (2) and (3) in one table: the alias layers must read `var()`, and
+    // Dracula must read its two spec hexes. Comparing the whole value (not just
+    // "contains `var(`") is what stops a re-anchor onto a different token — e.g.
+    // aliasing the icon to `--color-warning`, which is the "cleanup" ADR 0062
+    // says must fail by name.
+    const tokens = ALL_LAYERS.find((l) => l.name === name)!.tokens;
+    expect(tokens[ROW_ICON]?.toLowerCase(), `${ROW_ICON} in ${name}`).toBe(
+      ROW_READINGS[name]!.icon,
+    );
+    expect(tokens[ROW_VERB]?.toLowerCase(), `${ROW_VERB} in ${name}`).toBe(
+      ROW_READINGS[name]!.verb,
+    );
+  });
+
+  it("aliases in all four non-Dracula layers, so a palette can re-hue without touching a component", () => {
+    // The point of the family, asserted as a COUNT and not only per layer: if
+    // somebody replaces four aliases with four literals, the per-layer table
+    // above would be edited along with it and stay green, whereas "exactly one
+    // layer states a hex" is the structural claim the ADR rests on.
+    const aliased = ALL_LAYERS.filter((l) =>
+      (l.tokens[ROW_ICON] ?? "").startsWith("var(--color-foreground-subtle)"),
+    );
+    expect(aliased.map((l) => l.name).sort()).toEqual([
+      ".dark",
+      ".theme-zai-dark",
+      ".theme-zai-light",
+      "@theme",
+    ]);
+    const literal = ALL_LAYERS.filter((l) => /^#[0-9a-f]{6}$/i.test(l.tokens[ROW_ICON] ?? ""));
+    expect(literal.map((l) => l.name)).toEqual([".theme-dracula"]);
+  });
+
+  it("keeps the three TRANSCRIPT_ROW consumers reading the tokens, not the greys", () => {
+    // The repaint is half the change: a token declared five times and consumed
+    // by nothing is the exact mistake this task deletes the old family for. So
+    // each of the three components is required to carry BOTH utilities on the
+    // glyph and the verb, and to have DROPPED the old muted utility there.
+    for (const file of ROW_CONSUMER_FILES) {
+      const source = readTextFile(file);
+      expect(source, `${file} must colour its glyph with text-row-icon`).toContain(
+        "text-row-icon",
+      );
+      expect(source, `${file} must colour its verb with text-row-verb`).toContain(
+        "text-row-verb",
+      );
+    }
+    // And the pending call keeps the shimmer: `--color-row-verb` is the SETTLED
+    // reading (ADR 0062's consequence), so the conditional must survive a
+    // "simplify the verb to one colour" refactor.
+    const header = readTextFile("src/components/ToolCallCardHeader.tsx");
+    expect(header).toContain("animated-gradient-text");
+    expect(header).toMatch(/status === "pending"[\s\S]{0,120}text-row-verb/);
+  });
+
+  it("leaves the row's OTHER muted spans on the foreground utilities", () => {
+    // The repaint touches a glyph and a verb and nothing else. Each row also
+    // carries separators, durations, counts and ranges that are de-emphasis
+    // TEXT, not row decoration — repainting those would make a timestamp the
+    // same cyan as the verb. Pinned by counting: the number of
+    // `text-foreground-subtle*` utilities still present in each of the three
+    // files, so deleting one (rather than retargeting it) fails by file.
+    const expected: Record<string, number> = {
+      // 7 before, less the icon and the verb: the range, command and summary
+      // spans, the copy-button icon and the hover chevron.
+      "src/components/ToolCallCardHeader.tsx": 5,
+      // 6 before, less the icon and the label: filesCountLabel, one separator,
+      // the pending chip and the hover chevron.
+      "src/components/ChangesGroupCard.tsx": 4,
+      // 12 before, less the brain icon and the two `Thought` spans: the
+      // separators, the two duration spans, the summary separator, the streaming
+      // summary, the chevron and the two body-copy spans.
+      "src/components/Reasoning.tsx": 9,
+    };
+    for (const [file, count] of Object.entries(expected)) {
+      // COMMENTS STRIPPED FIRST, for the same reason the CSS tests do it: a
+      // doc-comment that NAMES a utility is prose, not a consumer, and counting
+      // it would make an explanatory comment fail a gate about the rendered
+      // classes. (This file's own comment about the `Thought` glyph is exactly
+      // that case, and it did fail this assertion until the strip went in.)
+      const source = stripJsComments(readTextFile(file));
+      const found = source.match(/text-foreground-subtle(?:st)?\b/g) ?? [];
+      expect(
+        found.length,
+        `${file} should still carry ${count} de-emphasis text utilities (found ${found.length}) — a row repaint takes the glyph and the verb only`,
+      ).toBe(count);
+    }
+  });
+
+  it("declares no dead row-kind token, in any layer", () => {
+    // Rule (4), the CSS half. Checked against EVERY block body rather than the
+    // raw stylesheet so a leftover in a layer the parser does not read cannot
+    // hide, and checked as a regex over the parsed key set rather than as "the
+    // five known names are absent" — the family had five members today and a
+    // sixth could be invented tomorrow; the prefix catches either.
+    for (const layer of ALL_LAYERS) {
+      const dead = Object.keys(layer.tokens).filter((n) =>
+        n.includes(DEAD_ROW_KIND_PREFIX),
+      );
+      expect(dead, `${layer.name} still declares the dead family`).toEqual([]);
+    }
+    // And in the WHOLE resolved stylesheet, comment-stripped: a declaration
+    // parked outside the five blocks (a `:root`, a stray media query) would
+    // escape the loop above entirely.
+    expect(
+      [
+        ...stripCssComments(readResolvedIndexCss()).matchAll(
+          new RegExp(`--[\\w-]*${DEAD_ROW_KIND_PREFIX}[\\w-]*\\s*:`, "g"),
+        ),
+      ].map((m) => m[0]),
+      "a dead row-kind declaration survives outside the five layers",
+    ).toEqual([]);
+  });
+
+  it("names the dead family in no file under src/", () => {
+    // Rule (4), the source half. The CSS gate above cannot see a test list that
+    // still carries the old names — which is exactly how the family stayed
+    // "alive" in the first place (a completeness list was its only consumer).
+    // So the sweep is over every text file under `src/`, and it is a PREFIX
+    // sweep, so re-adding one name to a list fails it too.
+    const hits = textFilesUnder("src").filter((f) =>
+      readTextFile(f).includes(DEAD_ROW_KIND_PREFIX),
+    );
+    expect(hits, `dead row-kind family still named in: ${hits.join(", ")}`).toEqual([]);
+  });
+
+  it("is non-vacuous: the sweep can read files, and the detector detects", () => {
+    // A gate over an empty file list, or over a detector that matches nothing, is
+    // indistinguishable from a clean tree. So pin the machinery rather than the
+    // conclusion: the walk finds real files, the detector fires on a planted name
+    // and stays quiet on a live one, and THIS file — the one that would most
+    // naturally re-introduce the word while documenting its removal — really is
+    // word-free because the prefix is constructed.
+    const namesTheDeadFamily = (text: string): boolean =>
+      text.includes(DEAD_ROW_KIND_PREFIX);
+    const files = textFilesUnder("src");
+    expect(files.length, "the sweep found almost nothing to read").toBeGreaterThan(100);
+    expect(files.some((f) => f.endsWith("themeTokens.test.ts"))).toBe(true);
+    expect(namesTheDeadFamily(`--color-${DEAD_ROW_KIND_PREFIX}-user: #2563eb;`)).toBe(true);
+    expect(namesTheDeadFamily("--color-row-icon: #ffb86c;")).toBe(false);
+    expect(
+      namesTheDeadFamily(readTextFile("src/lib/themeTokens.test.ts")),
+      "this file must not contain the word it gates on, or its own sweep cannot pass",
+    ).toBe(false);
+    // And the comment-stripper's known blind spot is measured, not assumed: it
+    // drops BLOCK comments and whole-line `//` comments but NOT a trailing
+    // `// note` (telling one from a `"https://…"` string needs a parser this
+    // repo does not ship). That gap is only safe while no trailing comment in
+    // the three row components names a utility, so look for exactly that: strip
+    // the block comments the stripper already handles, then ask whether any
+    // remaining line still carries a utility name to the right of a `//`. If it
+    // ever does, the blind spot has started to matter and this names the file.
+    const UTILITY = /text-foreground-subtle(?:st)?\b/;
+    for (const file of ROW_CONSUMER_FILES) {
+      const offenders = stripJsComments(readTextFile(file))
+        .split("\n")
+        .filter((line) => {
+          const at = line.indexOf("//");
+          return at >= 0 && UTILITY.test(line.slice(at));
+        });
+      expect(
+        offenders,
+        `${file}: a trailing // comment names a text utility, which stripJsComments cannot see — the count gate would then be reading prose as a consumer`,
+      ).toEqual([]);
+    }
+  });
+
+  it("documents Dracula's two accepted collisions instead of gating them away", () => {
+    // The asymmetry rule (3) describes, pinned as a measurement so the comment
+    // cannot rot. `#ffb86c` is THIS palette's own `--color-warning`, and
+    // `#8be9fd` is what `--color-interaction-ask-foreground` already carried.
+    // Both are therefore collisions with tokens that live in `MEANINGFUL_TOKENS`
+    // — which is precisely why the gate above pins VALUES and this test asserts
+    // the collisions EXIST rather than forbidding them.
+    expect(DRACULA[ROW_ICON]).toBe(DRACULA["color-warning"]);
+    expect(DRACULA[ROW_VERB]).toBe(DRACULA["color-interaction-ask-foreground"]);
+    expect(MEANINGFUL_TOKENS).toContain("color-interaction-ask-foreground");
+    // And they are spec-published values, which is why the spec gate in
+    // `paletteCompleteness.test.ts` needs no new allow-list entry.
+    for (const hex of [DRACULA[ROW_ICON]!, DRACULA[ROW_VERB]!]) {
+      expect(hex.toLowerCase()).toMatch(/^#[0-9a-f]{6}$/);
+    }
+  });
+});
+

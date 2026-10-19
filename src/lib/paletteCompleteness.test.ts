@@ -139,13 +139,13 @@ const FILE_DESCRIPTORS = [
 ];
 
 /**
- * The 59 tokens `.theme-zai-dark` declares that `.theme-dracula` deliberately
+ * The 54 tokens `.theme-zai-dark` declares that `.theme-dracula` deliberately
  * does NOT. Each is inherited from `.dark` by design (ADR 0027's "data-identity
  * palettes stay inherited" consequence), NOT by omission:
  *
  * - 11 usage scales (`usage-chart-*`, `usage-heatmap-*`) and 7
  *   `context-breakdown-*` — ordinal data scales whose STEPS are the signal.
- * - 8 `git-*` and 5 `trajectory-*` — git state and transcript-role hues.
+ * - 8 `git-*` — git state hues.
  * - 18 role chips (`file-node*`, `skill-*`, `command-*`, `session-*`,
  *   `plugin-*`, `subagent-node*`) — "what kind of row is this".
  * - `feedback-privacy-hint` — the same warning hue as the ramp, not a palette hue.
@@ -221,11 +221,6 @@ const INHERITED = [
   "color-subagent-node-hover",
   "color-surface",
   "color-surface-hover",
-  "color-trajectory-assistant",
-  "color-trajectory-reasoning",
-  "color-trajectory-tool-call",
-  "color-trajectory-tool-result",
-  "color-trajectory-user",
   "color-usage-chart-1",
   "color-usage-chart-2",
   "color-usage-chart-3",
@@ -392,7 +387,7 @@ const SPEC_HEX = new Set([
 const OFF_SPEC_ALLOW_LIST = FILE_DESCRIPTORS.filter((n) => n !== "color-file-css");
 
 describe("the .theme-dracula palette block (ADR 0027 completeness)", () => {
-  it("inherits exactly the 59 identity/overlay tokens — nothing dropped", () => {
+  it("inherits exactly the 54 identity/overlay tokens — nothing dropped", () => {
     // In .theme-zai-dark but NOT in .theme-dracula: must be exactly INHERITED.
     expect(diff(ZAI_DARK, DRACULA)).toEqual([...INHERITED].sort());
   });
@@ -455,20 +450,34 @@ describe("the .theme-dracula palette block (ADR 0027 completeness)", () => {
     expect(diff(DARK, new Set(INHERITED)).filter((n) => !DRACULA.has(n))).toEqual([]);
   });
 
-  it("is 117 declarations: 86 structural + 25 descriptors + 6 ramp", () => {
-    // The arithmetic that proves nothing was double-counted: 86 structural + 6
-    // ramp = the 92 tokens `.dark` declares once INHERITED is removed, plus the
-    // 25 descriptors `.dark` never declares at all = 117. The REGION RENAME
+  it("is 119 declarations: 88 structural + 25 descriptors + 6 ramp", () => {
+    // The arithmetic that proves nothing was double-counted: 88 structural + 6
+    // ramp = the 94 tokens `.dark` declares once INHERITED is removed, plus the
+    // 25 descriptors `.dark` never declares at all = 119. The REGION RENAME
     // (`sidebar`->`frame`, `background-alt`->`chat`) is count-neutral, and the
     // two NEW tokens `--color-inspector` / `--color-composer` are declared in
     // EVERY layer (aliased in the four non-dracula ones, so zai renders
     // byte-identically), which is why all four counts below moved by two.
-    expect([...DRACULA].length).toBe(117);
-    expect(diff(DARK, new Set(INHERITED)).length).toBe(92);
-    expect(ZAI_DARK.size).toBe(170);
+    //
+    // ADR 0062 then moved all FOUR, and it is worth stating why the two halves
+    // of that change are not a wash: it adds `--color-row-icon` /
+    // `--color-row-verb` to EVERY layer, and deletes the five dead row-KIND
+    // tokens from `@theme`, `.dark`, `.theme-zai-light` and `.theme-zai-dark` —
+    // all four, while `.theme-dracula` declared none of them to begin with. So:
+    // Dracula only ever gains (+2 = 119); `diff(DARK, INHERITED)` is unmoved by
+    // the deletion, because the five deleted `.dark` tokens were all members of
+    // `INHERITED` and so already excluded, and it gains the two new ones (+2 =
+    // 94); `ZAI_DARK` loses five and gains two (−3 = 167); `INHERITED` loses the
+    // five it listed (−5 = 54). That leaves the cross-check below at 48 == 48.
+    // A partial edit — the addition without the deletion, or the reverse —
+    // breaks that line loudly rather than passing quietly, which is exactly what
+    // a completeness gate is for.
+    expect([...DRACULA].length).toBe(119);
+    expect(diff(DARK, new Set(INHERITED)).length).toBe(94);
+    expect(ZAI_DARK.size).toBe(167);
     // And the two directions of the difference add up the same way: zai dark
-    // withholds 59 from Dracula, Dracula adds the 6 ramp tokens zai dark
-    // leaves to `.dark`, so the block sizes differ by 59 − 6.
+    // withholds 54 from Dracula, Dracula adds the 6 ramp tokens zai dark
+    // leaves to `.dark`, so the block sizes differ by 54 − 6.
     expect(ZAI_DARK.size - DRACULA.size).toBe(INHERITED.length - 6);
   });
 
@@ -491,7 +500,7 @@ describe("the .theme-dracula palette block (ADR 0027 completeness)", () => {
     //
     // `.dark`'s slot is the one that used to be unpinned, and it is the load-
     // bearing one: the palette blocks are deliberately PARTIAL diffs over
-    // `.dark` (59 tokens are inherited on purpose — see `INHERITED`), so
+    // `.dark` (54 tokens are inherited on purpose — see `INHERITED`), so
     // `.dark` must lose every tie against them. Move the `.dark` block to the
     // end of the file and it silently out-specifies every `.theme-*` block:
     // Dracula renders Zai's colours, `.theme-zai-light` renders dark-mode
@@ -627,9 +636,9 @@ describe("the .theme-dracula block follows the official Dracula spec", () => {
       ),
     );
     expect(offSpec.length).toBe(24);
-    // And the gate really does look at the block: it sees 117 declarations, not
+    // And the gate really does look at the block: it sees 119 declarations, not
     // zero. (A parser that returned {} would pass the offender scan outright.)
-    expect(Object.keys(DRACULA_VALUES).length).toBe(117);
+    expect(Object.keys(DRACULA_VALUES).length).toBe(119);
   });
 
   it.each([

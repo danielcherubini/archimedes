@@ -150,8 +150,13 @@ export default function ChangesGroupCard({
         onClick={() => setOpen((o) => !o)}
         className={`group/tool-summary ${TRANSCRIPT_ROW}`}
       >
-        <PencilIcon className="size-4 shrink-0 text-foreground-subtle" />
-        <span className="shrink-0 whitespace-nowrap font-medium text-foreground-subtlest">
+        {/* The row glyph and the `Changes` verb (ADR 0062) — the same two row
+            tokens the tool rows and the `Thought` trigger use, so one Palette
+            re-hues all three consumers. Everything else on this row (the count,
+            the separators, the failure mark) keeps its own token: only the glyph
+            and the verb are row decoration. */}
+        <PencilIcon className="size-4 shrink-0 text-row-icon" />
+        <span className="shrink-0 whitespace-nowrap font-medium text-row-verb">
           Changes
         </span>
         {anyFailed && (

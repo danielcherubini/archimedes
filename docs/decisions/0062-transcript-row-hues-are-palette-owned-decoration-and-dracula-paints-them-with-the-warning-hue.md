@@ -37,3 +37,15 @@ The collision is reversible in one line, which is the whole argument for taking 
 - **`CONTEXT.md`'s Identity color entry is corrected here, and ADR 0027's body is not touched.** 0027 names `trajectory-*` in its identity rule and in its amendment; `docs/decisions/` is append-only, so those mentions stay as written and this document is what records the deletion. The glossary is a living document and its entry is fixed. A reader of 0027 alone will see a deleted token named — this ADR is the answer to "why is that not in the CSS?"
 - **A pending tool call keeps the shimmer, not the verb hue.** `animated-gradient-text` is the "this call is working" cue and outranks a static colour while `status === "pending"`; `--color-row-verb` applies once the call settles. A future reader should not "simplify" the verb to one colour and lose the motion signal.
 - **Any future row hue must state which axis it splits on.** The failure mode here was two families with similar names splitting on different axes, one of them dead. Row kind is identity and stays inherited; role within a row is decoration and belongs to the palette. Say which in the token's comment.
+
+## Amendment (same change, before it shipped)
+
+**Correction 1: "zai renders byte-identically" is too strong — the `Thought` glyph moves, and that is the intended outcome.**
+
+The body above claims the alias-back leaves zai "byte-identically". It does leave every *token* reading identical, and every row of zai renders as it did, with **one glyph** as the exception, and the reason is an asymmetry in the three consumers that the family's naming exposes.
+
+The three `TRANSCRIPT_ROW` glyphs did not agree with each other before this change: `ToolCallCardHeader`'s icon and `ChangesGroupCard`'s icon both read `text-foreground-subtle`, while `Reasoning`'s `BrainIcon` read `text-foreground-subtlest` — one step dimmer than its two siblings for no recorded reason. A single `--color-row-icon` token can only hold one value, and the alias takes `--color-foreground-subtle`, so the `Thought` brain glyph becomes very slightly more opaque under zai. Measured on the zai dark page that is `foreground-subtle` at 60% instead of 30% of the same foreground; nothing about the row's layout, size or wording moves.
+
+This is a **fix, not a regression**, and it is the argument for naming the token after the shared row class rather than after `ToolCall`: the three glyphs are the same affordance in three components, and a token that describes the row cannot express the drift that let them disagree in the first place. Recording it here rather than silently widening the claim keeps "the alias is free" checkable — it is free in four of five layers and costs one glyph's opacity everywhere, which is precisely the price of making three siblings agree.
+
+The `--color-row-verb` half has no such asymmetry: all three verbs/labels (`Ran`/`Edited`, `Changes`, `Thought`) already read `text-foreground-subtlest`, so aliasing to that token is byte-identical for every verb in every palette but Dracula's.

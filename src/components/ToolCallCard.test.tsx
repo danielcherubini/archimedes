@@ -126,6 +126,31 @@ describe("ToolCallCard (rendering)", () => {
     expect(screen.getByText("Running")).toBeTruthy();
     expect(container.querySelector(".animated-gradient-text")).not.toBeNull();
   });
+  it("colours the SETTLED verb with the row token, and the pending one not at all", () => {
+    // ADR 0062's pending consequence, graded on the rendered classes: the
+    // shimmer is the "this call is working" cue and outranks a static colour, so
+    // `text-row-verb` must appear only once the call has settled. The two
+    // branches are asserted from BOTH renders on purpose — checking only the
+    // settled one would pass a component that dropped the shimmer, and checking
+    // only the pending one would pass a verb that never got a colour at all.
+    const { container: pendingContainer, unmount } = render(
+      <ToolCallCard title="bash" status="pending" rawInput={{ command: "ls" }} />,
+    );
+    const pendingVerb = within(pendingContainer).getByText("Running");
+    expect(pendingVerb.className).toContain("animated-gradient-text");
+    expect(pendingVerb.className).not.toContain("text-row-verb");
+    unmount();
+
+    const { container: settledContainer } = render(
+      <ToolCallCard title="bash" status="completed" rawInput={{ command: "ls" }} />,
+    );
+    const settledVerb = within(settledContainer).getByText("Ran");
+    expect(settledVerb.className).toContain("text-row-verb");
+    expect(settledVerb.className).not.toContain("animated-gradient-text");
+    // And the glyph takes the icon token, so a Palette re-hues both halves of
+    // the row without the component being touched.
+    expect(settledContainer.querySelector(".text-row-icon")).not.toBeNull();
+  });
   it("shows the raw title for an unknown tool", () => {
     render(
       <ToolCallCard
