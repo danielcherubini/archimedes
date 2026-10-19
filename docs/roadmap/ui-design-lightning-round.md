@@ -432,7 +432,7 @@ Behaviour that must survive the move, all of it currently in `ChatStream`: the f
    - `"splits the subtlest-TEXT role from the context-bar TRACK role"` (`:1201`) pins `#343746` again.
    - `"gives the context bar a track that keeps every band legible"` (`:1262`) requires the track to be the *best visible* candidate against the surface it paints on.
 
-   **The fix is a well.** Wrap the Context line's bar in `bg-input` (Dracula `#191a21`, `dracula.css:303`): track vs well = **1.471**, worst band vs track = **3.752**, both above their floors, and **no CSS value changes** — verified by running all four CSS-reading suites against a patched copy (`77 passed`). It is also the design's own history: `paletteCompleteness.test.ts:1255-1260` records that the bar originally sat in a `bg-input` well and broke twice when the island layout moved it. This puts it back.
+   **The fix is a well.** Wrap the Context line's bar in `bg-input` (Dracula `#191a21`, `dracula.css:303`): track vs well = **1.471**, worst band vs track = **4.328** (`destructive` is `#ff6e6e`, AnsiBrightRed — an earlier draft of this plan said 3.752 because it graded against `#ff5555`), both above their floors, and **no CSS value changes** — verified by running all four CSS-reading suites against a patched copy (`77 passed`). It is also the design's own history: `paletteCompleteness.test.ts:1255-1260` records that the bar originally sat in a `bg-input` well and broke twice when the island layout moved it. This puts it back.
 
    Then re-point the two gates at the new surface, keeping the composer comparison where it still describes a real site:
    - `slabFloatSeparation.test.ts:155-171` — the island that holds the bar is now the pane's well, so compare `context-track` to `input`. Update the test's title/comment to say the bar moved into the pane.
@@ -462,7 +462,7 @@ Behaviour that must survive the move, all of it currently in `ChatStream`: the f
 **Acceptance criteria:**
 - [ ] All **14** relocated tests pass in `SidePane.test.tsx`, and each still asserts what it asserted in `ChatStream.test.tsx` (spot-check the ramp band tests: they must still distinguish caution / warning / destructive). The write-path test `:1749` must still prove `setSessionConfigOption` is invoked with the chosen model id.
 - [ ] `SidePane.test.tsx:78-84` rewritten (no **todo** section, config block present) — the old empty-textContent assertion cannot survive an always-rendering block.
-- [ ] The Context line renders inside a `bg-input` well; both contrast gates are re-pointed at `input` and pass (track vs well **1.471**, worst band vs track **3.752**), with `--color-context-track` still `#343746`.
+- [ ] The Context line renders inside a `bg-input` well; both contrast gates are re-pointed at `input` and pass (track vs well **1.471**, worst band vs track **4.328**), with `--color-context-track` still `#343746`.
 - [ ] `npx vitest run src/lib/paletteCompleteness.test.ts src/lib/slabFloatSeparation.test.ts src/lib/themeTokens.test.ts src/lib/fileIconContrast.test.ts` green — **330 tests** (measured after Task 4, which added 17 gates). If the ladder or spec-hex test fails, the wrong approach was taken: use the well, not a new hex.
 - [ ] The stored-session test still shows populated-but-**disabled** selectors, and the "live config options win over the row's" test still proves the store's map wins.
 - [ ] `npx vitest run src/components/ChatStream.test.tsx` green with the new "composer no longer hosts these" pins.
