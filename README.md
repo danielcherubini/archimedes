@@ -381,7 +381,10 @@ What is in there:
   one) and a fresh file starts. **This file only exists if you asked for it** —
   see the switch below. (The `ipc … FAILED:` lines exist only from the build that
   added them — a log from an older release has the lifecycle and protocol lines
-  and no record of a rejected command.)
+  and no record of a rejected command.) **It holds your conversation:** the raw
+  lines are the Worker's frames written verbatim, so an outbound (`→`) line
+  carries the prompt you sent and, on a resumed session, the whole transcript the
+  Supervisor handed the Worker. See the warning before sharing it below.
 - **`crash-<timestamp>-<tag>-<pid>.log`** — one file per **panic**, from the panic
   hook, holding the panic message, its `file:line:column` and a backtrace, kept
   for **30 days** and at most **50 files**. `<tag>` is `supervisor` (the app
@@ -420,6 +423,16 @@ missing, run the installed binary directly from a terminal where you have set it
 Then reproduce the problem and read (or attach) `supervisor.log`. If you are
 reporting a failure you saw on screen, the log contains that same sentence,
 character for character — the app logs exactly what it prints.
+
+> **Read it before you send it — it holds your conversation.** The log records
+> the raw Worker frames, and they are written verbatim: an outbound (`→`) frame
+> is the prompt you sent, and a resumed session's `Start` frame carries the
+> whole transcript rehydrated from the database. The 2 KB-per-line cutoff only
+> cuts long frames, so a short prompt — the usual case in a bug report — lands
+> in the file whole. Paths, session ids and the model name are in it too. Before
+> posting it publicly, open it and delete the lines you would not want read (or
+> send only the window around the failure). The privacy warning above covers
+> `archimedes.db`; this one covers the log.
 
 Two things worth knowing when you are the person being handed these files:
 
