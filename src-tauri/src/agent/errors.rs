@@ -141,6 +141,186 @@ impl From<FilesError> for tauri::ipc::InvokeError {
     }
 }
 
+trait InvokeErrorExt {
+    fn from_value(value: serde_json::Value) -> Self;
+}
+
+impl InvokeErrorExt for tauri::ipc::InvokeError {
+    fn from_value(value: serde_json::Value) -> Self {
+        Self(value)
+    }
+}
+
+/// Errors surfaced by settings commands.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SettingsError {
+    #[error("failed to save settings: {0}")]
+    SaveFailed(String),
+
+    #[error("invalid MCP server entry ({0})")]
+    InvalidMcpServer(String),
+
+    #[error("MCP server test failed: {0}")]
+    McpTestFailed(String),
+
+    #[error("MCP server auth failed: {0}")]
+    McpAuthFailed(String),
+
+    #[error("Unknown search provider '{0}'. Valid providers: {1}")]
+    UnknownSearchProvider(String, String),
+
+    #[error("Search provider '{0}' is not configured with an API key or URL")]
+    SearchNotConfigured(String),
+
+    #[error("Search provider '{0}' timed out after 10s")]
+    SearchTimeout(String),
+
+    #[error("search provider failed: {0}")]
+    SearchFailed(String),
+
+    #[error("{0}")]
+    Other(String),
+}
+
+impl SettingsError {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            SettingsError::SaveFailed(_) => "save_failed",
+            SettingsError::InvalidMcpServer(_) => "invalid_mcp_server",
+            SettingsError::McpTestFailed(_) => "mcp_test_failed",
+            SettingsError::McpAuthFailed(_) => "mcp_auth_failed",
+            SettingsError::UnknownSearchProvider(_, _) => "unknown_search_provider",
+            SettingsError::SearchNotConfigured(_) => "search_not_configured",
+            SettingsError::SearchTimeout(_) => "search_timeout",
+            SettingsError::SearchFailed(_) => "search_failed",
+            SettingsError::Other(_) => "other",
+        }
+    }
+}
+
+impl From<SettingsError> for tauri::ipc::InvokeError {
+    fn from(err: SettingsError) -> Self {
+        let payload = serde_json::json!({
+            "kind": err.kind(),
+            "message": err.to_string(),
+        });
+        Self::from_value(payload)
+    }
+}
+
+/// Errors surfaced by space registry commands.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SpacesError {
+    #[error("no such folder: {0}")]
+    FolderNotFound(String),
+
+    #[error("not a folder: {0}")]
+    NotAFolder(String),
+
+    #[error("database error: {0}")]
+    Database(String),
+
+    #[error("{0}")]
+    Other(String),
+}
+
+impl SpacesError {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            SpacesError::FolderNotFound(_) => "folder_not_found",
+            SpacesError::NotAFolder(_) => "not_a_folder",
+            SpacesError::Database(_) => "database",
+            SpacesError::Other(_) => "other",
+        }
+    }
+}
+
+impl From<rusqlite::Error> for SpacesError {
+    fn from(e: rusqlite::Error) -> Self {
+        SpacesError::Database(e.to_string())
+    }
+}
+
+impl From<SpacesError> for tauri::ipc::InvokeError {
+    fn from(err: SpacesError) -> Self {
+        let payload = serde_json::json!({
+            "kind": err.kind(),
+            "message": err.to_string(),
+        });
+        Self::from_value(payload)
+    }
+}
+
+/// Errors surfaced by MCP commands.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum McpError {
+    #[error("failed to load MCP servers: {0}")]
+    LoadFailed(String),
+
+    #[error("server not found: {0}")]
+    NotFound(String),
+
+    #[error("MCP operation failed: {0}")]
+    Failed(String),
+
+    #[error("{0}")]
+    Other(String),
+}
+
+impl McpError {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            McpError::LoadFailed(_) => "load_failed",
+            McpError::NotFound(_) => "not_found",
+            McpError::Failed(_) => "failed",
+            McpError::Other(_) => "other",
+        }
+    }
+}
+
+impl From<McpError> for tauri::ipc::InvokeError {
+    fn from(err: McpError) -> Self {
+        let payload = serde_json::json!({
+            "kind": err.kind(),
+            "message": err.to_string(),
+        });
+        Self::from_value(payload)
+    }
+}
+
+/// Errors surfaced by agent listing commands.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AgentsError {
+    #[error("failed to discover agents: {0}")]
+    DiscoveryFailed(String),
+
+    #[error("agent not found: {0}")]
+    NotFound(String),
+
+    #[error("{0}")]
+    Other(String),
+}
+
+impl AgentsError {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            AgentsError::DiscoveryFailed(_) => "discovery_failed",
+            AgentsError::NotFound(_) => "not_found",
+            AgentsError::Other(_) => "other",
+        }
+    }
+}
+
+impl From<AgentsError> for tauri::ipc::InvokeError {
+    fn from(err: AgentsError) -> Self {
+        let payload = serde_json::json!({
+            "kind": err.kind(),
+            "message": err.to_string(),
+        });
+        Self::from_value(payload)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::SessionError;
@@ -304,5 +484,41 @@ mod tests {
             Some("i/o error: permission denied")
         );
         assert_eq!(wire_io.as_object().map(|m| m.len()), Some(2));
+    }
+
+    #[test]
+    fn settings_error_serializes_to_adr_0063_envelope() {
+        let err = super::SettingsError::SaveFailed("disk full".into());
+        let wire = tauri::ipc::InvokeError::from(err.clone()).0;
+        assert!(wire.is_object());
+        assert_eq!(wire["kind"].as_str(), Some("save_failed"));
+        assert_eq!(wire["message"].as_str(), Some(err.to_string().as_str()));
+    }
+
+    #[test]
+    fn spaces_error_serializes_to_adr_0063_envelope() {
+        let err = super::SpacesError::FolderNotFound("/missing".into());
+        let wire = tauri::ipc::InvokeError::from(err.clone()).0;
+        assert!(wire.is_object());
+        assert_eq!(wire["kind"].as_str(), Some("folder_not_found"));
+        assert_eq!(wire["message"].as_str(), Some(err.to_string().as_str()));
+    }
+
+    #[test]
+    fn mcp_error_serializes_to_adr_0063_envelope() {
+        let err = super::McpError::LoadFailed("corrupt config".into());
+        let wire = tauri::ipc::InvokeError::from(err.clone()).0;
+        assert!(wire.is_object());
+        assert_eq!(wire["kind"].as_str(), Some("load_failed"));
+        assert_eq!(wire["message"].as_str(), Some(err.to_string().as_str()));
+    }
+
+    #[test]
+    fn agents_error_serializes_to_adr_0063_envelope() {
+        let err = super::AgentsError::DiscoveryFailed("io error".into());
+        let wire = tauri::ipc::InvokeError::from(err.clone()).0;
+        assert!(wire.is_object());
+        assert_eq!(wire["kind"].as_str(), Some("discovery_failed"));
+        assert_eq!(wire["message"].as_str(), Some(err.to_string().as_str()));
     }
 }

@@ -11,13 +11,15 @@ use serde_json::Value;
 use tauri::State;
 
 use crate::agent::harness::{tool_specs, Model};
-use crate::agent::SessionManager;
+use crate::agent::{SessionManager, SettingsError};
 use crate::config::{load_settings, write_settings, KnownProvider, Settings, KNOWN_PROVIDERS};
 
 /// Read the settings. Always succeeds (see `load_settings`); the `Result`
 /// is kept for command-shape stability but is never `Err`.
 #[tauri::command]
-pub async fn get_settings(state: State<'_, Arc<SessionManager>>) -> Result<Settings, String> {
+pub async fn get_settings(
+    state: State<'_, Arc<SessionManager>>,
+) -> Result<Settings, SettingsError> {
     Ok(load_settings(state.config_dir()))
 }
 
@@ -26,8 +28,8 @@ pub async fn get_settings(state: State<'_, Arc<SessionManager>>) -> Result<Setti
 pub async fn save_settings(
     state: State<'_, Arc<SessionManager>>,
     settings: Settings,
-) -> Result<(), String> {
-    write_settings(state.config_dir(), &settings)
+) -> Result<(), SettingsError> {
+    write_settings(state.config_dir(), &settings).map_err(SettingsError::SaveFailed)
 }
 
 /// The effective catalog's models (the frontend's Default-model select +
@@ -38,7 +40,7 @@ pub async fn save_settings(
 pub async fn list_models(
     state: State<'_, Arc<SessionManager>>,
     force_refresh: Option<String>,
-) -> Result<Vec<ModelDto>, String> {
+) -> Result<Vec<ModelDto>, SettingsError> {
     Ok(state
         .effective_catalog(force_refresh.as_deref())
         .await
@@ -78,7 +80,7 @@ impl From<&Model> for ModelDto {
 /// enabled-tools checkbox list). STATELESS (no `tauri::State` param — the
 /// command needs no state: `tool_specs()` is a free function).
 #[tauri::command]
-pub async fn list_tools() -> Result<Vec<String>, String> {
+pub async fn list_tools() -> Result<Vec<String>, SettingsError> {
     let mut names: Vec<String> = tool_specs().iter().map(|t| t.name.clone()).collect();
     names.sort(); // deterministic UI order
     Ok(names)
@@ -113,7 +115,7 @@ impl From<&KnownProvider> for KnownProviderDto {
 /// ADR 0024). STATELESS (no `tauri::State` param — the `list_tools`
 /// pattern: the command needs no state).
 #[tauri::command]
-pub async fn list_known_providers() -> Result<Vec<KnownProviderDto>, String> {
+pub async fn list_known_providers() -> Result<Vec<KnownProviderDto>, SettingsError> {
     Ok(KNOWN_PROVIDERS.iter().map(KnownProviderDto::from).collect())
 }
 
@@ -123,21 +125,26 @@ pub async fn list_known_providers() -> Result<Vec<KnownProviderDto>, String> {
 /// `needs-auth` / a network failure). The entry is the `settings.json`
 /// `mcpServers` entry VERBATIM (pi's shape — classified, not re-shaped).
 #[tauri::command]
-pub async fn test_mcp_server(name: Option<String>, entry: Value) -> Result<u32, String> {
-    let def = crate::agent::mcp::types::classify_server(&entry)
-        .ok_or_else(|| "invalid MCP server entry (need a `url` or a `command`)".to_string())?;
+pub async fn test_mcp_server(name: Option<String>, entry: Value) -> Result<u32, SettingsError> {
+    let def = crate::agent::mcp::types::classify_server(&entry).ok_or_else(|| {
+        SettingsError::InvalidMcpServer("need a `url` or a `command`".to_string())
+    })?;
     let timeout = std::time::Duration::from_secs(10);
     crate::agent::mcp::manager::test_server(name.as_deref(), &def, Path::new("."), timeout)
         .await
         .map(|n| n as u32)
+        .map_err(SettingsError::McpTestFailed)
 }
 
 /// Run interactive OAuth authentication for an MCP server (Settings UI).
 #[tauri::command]
-pub async fn auth_mcp_server(name: String, entry: Value) -> Result<String, String> {
-    let def = crate::agent::mcp::types::classify_server(&entry)
-        .ok_or_else(|| "invalid MCP server entry (need a `url` or a `command`)".to_string())?;
-    crate::agent::mcp::manager::authenticate_server(&name, &def).await
+pub async fn auth_mcp_server(name: String, entry: Value) -> Result<String, SettingsError> {
+    let def = crate::agent::mcp::types::classify_server(&entry).ok_or_else(|| {
+        SettingsError::InvalidMcpServer("need a `url` or a `command`".to_string())
+    })?;
+    crate::agent::mcp::manager::authenticate_server(&name, &def)
+        .await
+        .map_err(SettingsError::McpAuthFailed)
 }
 
 /// Test ONE Search provider: one canned query, reporting the hit count or the
@@ -148,14 +155,14 @@ pub async fn auth_mcp_server(name: String, entry: Value) -> Result<String, Strin
 pub async fn test_search_provider(
     provider: String,
     settings: serde_json::Value,
-) -> Result<usize, String> {
+) -> Result<usize, SettingsError> {
     use crate::agent::web::config::{WebConfig, SEARCH_PROVIDERS};
     use crate::config::WebSettings;
 
     if !SEARCH_PROVIDERS.contains(&provider.as_str()) {
-        return Err(format!(
-            "Unknown search provider '{provider}'. Valid providers: {}",
-            SEARCH_PROVIDERS.join(", ")
+        return Err(SettingsError::UnknownSearchProvider(
+            provider,
+            SEARCH_PROVIDERS.join(", "),
         ));
     }
 
@@ -172,16 +179,11 @@ pub async fn test_search_provider(
         .iter()
         .find(|p| p.id() == provider)
         .ok_or_else(|| {
-            format!(
-                "Unknown search provider '{provider}'. Valid providers: {}",
-                SEARCH_PROVIDERS.join(", ")
-            )
+            SettingsError::UnknownSearchProvider(provider.clone(), SEARCH_PROVIDERS.join(", "))
         })?;
 
     if !target.is_available(&web_config) {
-        return Err(format!(
-            "Search provider '{provider}' is not configured with an API key or URL"
-        ));
+        return Err(SettingsError::SearchNotConfigured(provider));
     }
 
     let timeout = std::time::Duration::from_secs(10);
@@ -201,7 +203,8 @@ pub async fn test_search_provider(
         ),
     )
     .await
-    .map_err(|_| format!("Search provider '{provider}' timed out after 10s"))??;
+    .map_err(|_| SettingsError::SearchTimeout(provider))?
+    .map_err(SettingsError::SearchFailed)?;
 
     Ok(outcome.results.len())
 }
@@ -212,7 +215,7 @@ pub async fn test_search_provider(
 /// Settings must grey the option out and say why rather than offer a choice
 /// that only produces errors. STATELESS (the `list_tools` pattern).
 #[tauri::command]
-pub async fn shell_sandbox_available() -> Result<bool, String> {
+pub async fn shell_sandbox_available() -> Result<bool, SettingsError> {
     Ok(crate::agent::tools::shell_sandbox_available())
 }
 
@@ -322,7 +325,7 @@ mod tests {
             ))
             .expect_err("a malformed entry is an error");
         assert!(
-            result.contains("invalid"),
+            result.to_string().contains("invalid"),
             "the error names the problem: {result}"
         );
     }
@@ -399,7 +402,8 @@ mod tests {
             .await
             .expect_err("unknown provider must fail");
         assert!(
-            err.contains("Valid providers: brave, tavily, perplexity, searxng, duckduckgo"),
+            err.to_string()
+                .contains("Valid providers: brave, tavily, perplexity, searxng, duckduckgo"),
             "error should list valid providers: {err}"
         );
     }
@@ -425,7 +429,7 @@ mod tests {
         }
         let err = result.expect_err("unconfigured provider must fail");
         assert_eq!(
-            err,
+            err.to_string(),
             "Search provider 'perplexity' is not configured with an API key or URL"
         );
     }

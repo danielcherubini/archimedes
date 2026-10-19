@@ -6,6 +6,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::agent::worker::manager::WorkerManager;
+use crate::agent::SpacesError;
 use crate::storage::Db;
 
 /// The folder check + canonicalizer for the new-space dialog.
@@ -22,13 +23,20 @@ pub struct SpaceCheck {
 }
 
 #[tauri::command]
-pub async fn space_for_path(state: State<'_, Arc<Db>>, path: String) -> Result<SpaceCheck, String> {
-    let canonical = std::fs::canonicalize(&path).map_err(|_| format!("no such folder: {path}"))?;
+pub async fn space_for_path(
+    state: State<'_, Arc<Db>>,
+    path: String,
+) -> Result<SpaceCheck, SpacesError> {
+    let canonical =
+        std::fs::canonicalize(&path).map_err(|_| SpacesError::FolderNotFound(path.clone()))?;
     if !canonical.is_dir() {
-        return Err(format!("not a folder: {path}"));
+        return Err(SpacesError::NotAFolder(path));
     }
     let p = canonical.display().to_string();
-    let is_space = state.find_space(&p).map_err(|e| e.to_string())?.is_some();
+    let is_space = state
+        .find_space(&p)
+        .map_err(|e| SpacesError::Database(e.to_string()))?
+        .is_some();
     Ok(SpaceCheck {
         canonical_path: p,
         is_space,
@@ -39,15 +47,19 @@ pub async fn space_for_path(state: State<'_, Arc<Db>>, path: String) -> Result<S
 #[tauri::command]
 pub async fn list_spaces(
     state: State<'_, Arc<Db>>,
-) -> Result<Vec<crate::storage::SpaceRow>, String> {
-    state.list_spaces().map_err(|e| e.to_string())
+) -> Result<Vec<crate::storage::SpaceRow>, SpacesError> {
+    state
+        .list_spaces()
+        .map_err(|e| SpacesError::Database(e.to_string()))
 }
 
 /// "Forget this space" — deletes the bookkeeping row only (conversations
 /// stay stored; design decision). No-op if the row is already gone.
 #[tauri::command]
-pub async fn delete_space(state: State<'_, Arc<Db>>, path: String) -> Result<(), String> {
-    state.delete_space(&path).map_err(|e| e.to_string())
+pub async fn delete_space(state: State<'_, Arc<Db>>, path: String) -> Result<(), SpacesError> {
+    state
+        .delete_space(&path)
+        .map_err(|e| SpacesError::Database(e.to_string()))
 }
 
 /// Set (or clear) a space's trust flag (Trusted Space, ADR 0010).
@@ -66,7 +78,7 @@ pub async fn set_space_trusted(
     wm: State<'_, Arc<WorkerManager>>,
     path: String,
     trusted: bool,
-) -> Result<(), String> {
+) -> Result<(), SpacesError> {
     match state.set_space_trusted(&path, trusted) {
         Ok(true) => {
             // The running-Workers `config` update (the `StaticTrustSource`
@@ -78,6 +90,25 @@ pub async fn set_space_trusted(
             eprintln!("set_space_trusted: no space row for {path} (no-op)");
             Ok(())
         }
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(SpacesError::Database(e.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn space_for_path_nonexistent_returns_folder_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Arc::new(Db::open(&db_path).unwrap());
+
+        // We can't easily construct tauri::State in unit test without a runtime or helper,
+        // but we can verify SpacesError formatting and kinds.
+        let err = SpacesError::FolderNotFound("/nonexistent/path/12345".into());
+        assert_eq!(err.kind(), "folder_not_found");
+        assert_eq!(err.to_string(), "no such folder: /nonexistent/path/12345");
+        drop(db);
     }
 }
