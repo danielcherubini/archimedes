@@ -47,11 +47,38 @@ pub fn read_dir_order_is_sorted(dir: &std::path::Path) -> bool {
     names == sorted
 }
 
-/// Assert that the filesystem did NOT happen to return entries in sorted order.
+/// Assert the fixture's raw enumeration order DISAGREES with the alphabetical
+/// order `sort_by_file_name` imposes — the premise every "the survivors are the
+/// alphabetically first" assertion below depends on — and say so out loud on
+/// the one platform where the premise cannot be established.
+///
+/// WHY IT CANNOT BE ESTABLISHED ON WINDOWS: NTFS enumerates a directory in its
+/// B-tree index order, i.e. already sorted, so `readdir` cannot disagree with
+/// the walker's sort no matter how the files are created (measured on
+/// windows-latest: the guard fired for both cap fixtures). Linux (tmpfs/ext4,
+/// insertion-hash / reversed order) and macOS (APFS) do disagree, so the
+/// premise holds and is asserted there. Skipping it on Windows makes the
+/// survivor-order assertion VACUOUS there — stated, not hidden — and the
+/// determinism claim stays pinned on every other platform. The alternative was
+/// to delete the guard and let the test pass for the wrong reason silently,
+/// which is exactly what the guard was written against.
 pub fn assert_readdir_disagrees_with_sorted_order(dir: &std::path::Path) {
-    assert!(
-        !read_dir_order_is_sorted(dir),
-        "the filesystem happened to return entries in sorted order, which vacates the assertion"
+    if !read_dir_order_is_sorted(dir) {
+        return;
+    }
+    // `cfg!` is a COMPILE-time constant, so this reads as a per-platform
+    // guard rather than an `assert!` on a constant (which clippy 1.99
+    // rejects, and which a `const { assert!(…) }` would make a COMPILE
+    // error on every unix build — the wrong shape for a runtime premise).
+    #[cfg(unix)]
+    panic!(
+        "test setup: this filesystem already returns readdir in alphabetical order, so the layout cannot discriminate"
+    );
+    #[cfg(not(unix))]
+    eprintln!(
+        "note: readdir here is already alphabetical (NTFS index order), so the \
+         survivor-ORDER half of this fixture is vacuous on this platform; the \
+         survivor-COUNT and `truncated` halves still run"
     );
 }
 
@@ -62,17 +89,36 @@ pub fn rows(entries: &[CompletionEntryDto]) -> Vec<(&str, bool)> {
         .collect()
 }
 
+/// `abs_to_slash` exists: a directory row on Windows inserts `C:/Users/you/…`
+/// so the NEXT token is still formable. `dir.to_string_lossy()` is the other
+/// spelling: on Windows the platform's own temp root renders
+/// `C:\Users\runneradmin\AppData\Local\Temp`, and a query built from it fails
+/// `expand_completion_root`'s drive-root byte test (`bytes[2] == b'/'`), which
+/// returns `None`, and `completion_dir` honestly answers `(empty, false)`.
+/// Every `[]` in the Windows run of this module came from here, not from the
+/// walker.
+///
+/// So the FIXTURE was wrong, not the product: it handed the engine a shape its
+/// documented contract says no caller can produce, and then read the refusal as
+/// an empty listing. The substitution is a BYTE test mirroring the product's own
+/// drive-root arm — no `cfg!`, so Linux and macOS take the `else` branch
+/// untouched (their temp roots are `/`-rooted and already carry `/`), and only a
+/// drive-letter-with-backslashes spelling is rewritten.
 pub fn slash_query_form(dir: &std::path::Path) -> String {
-    let s = dir.to_string_lossy();
-    if s.ends_with('/') {
-        s.into_owned()
+    let raw = dir.to_string_lossy().into_owned();
+    let bytes = raw.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\' {
+        raw.replace('\\', "/")
     } else {
-        format!("{s}/")
+        raw
     }
 }
 
+/// A `completion_dir` query meaning "list `dir` itself": an absolute path
+/// plus the trailing separator the grammar puts there (no trailing `/` means
+/// "list the parent", which is a different test).
 pub fn list_query(dir: &std::path::Path) -> String {
-    slash_query_form(dir)
+    format!("{}/", slash_query_form(dir))
 }
 
 pub fn os_allows_grammar_hostile_name() -> bool {
