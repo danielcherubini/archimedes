@@ -47,11 +47,9 @@ import { StatusIcon, STATUS_CHIP_STYLES } from "./SubagentStatusIcon";
  * a row).
  */
 export default function SubagentDetailHost() {
-  const entryList = Object.values(useSubagents((s) => s.entries));
   const selectedId = useSubagentSelection((s) => s.selectedSessionId);
+  const selected = useSubagents((s) => (selectedId ? s.entries[selectedId] : undefined));
   const select = useSubagentSelection((s) => s.select);
-  // The selected entry (or `undefined` — the sheet is hidden).
-  const selected = entryList.find((e) => e.sessionId === selectedId);
   // Esc closes the sheet (see the component doc for WHY this is a React
   // `onKeyDown` on the sheet and NOT a window-level handler).
   const handleEsc = (e: KeyboardEvent) => {

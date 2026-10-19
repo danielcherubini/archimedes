@@ -14,6 +14,7 @@ import {
   listSpaces,
 } from "./lib/tauri";
 import { createBatchedSessionUpdate } from "./lib/batchSessionUpdates";
+import { onSessionClosed } from "./lib/sessionLifecycle";
 import { discardSessionMessages, useSessions } from "./store/sessions";
 import { usePermissions } from "./store/permissions";
 import { useInteractive } from "./store/interactive";
@@ -85,20 +86,7 @@ function App() {
     );
     unlistenPromises.push(
       listenSessionClosed((payload) => {
-        // Dismiss the session's interactive state (its pending prompts are
-        // drained as cancelled server-side; the password is never kept).
-        useInteractive.getState().dismissSession(payload.sessionId);
-        useSessions
-          .getState()
-          .handleSessionClosed(payload.sessionId, payload.reason);
-        // Defensive for EPHEMERAL (subagent) sessions: their transcript has
-        // no stored history to keep, so a close that named one would delete
-        // it (`discardSessionMessages` no-ops for MAIN ids, whose
-        // `handleSessionClosed` behavior above stays unchanged). It is a
-        // guard, not the path: no `session-closed` ever names a CHILD id, so
-        // the child's transcript is freed by the `listenSubagentClosed`
-        // handler below.
-        discardSessionMessages(payload.sessionId);
+        onSessionClosed(payload.sessionId, payload.reason);
       }),
     );
     // A Worker crash (ADR 0025): the `session-stalled` event marks the

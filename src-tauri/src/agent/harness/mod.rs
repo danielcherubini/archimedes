@@ -17,6 +17,7 @@ pub mod prompt;
 pub mod provider;
 pub mod retry;
 pub mod store;
+pub mod tool_specs;
 pub mod trust;
 pub mod wire;
 
@@ -35,9 +36,9 @@ pub use provider::{
     ModelOptions, ModelRequest, OpenAiCompatibleProvider, OpenAiResponsesProvider, Provider,
     ProviderError, ProviderEvent, ToolCall, ToolCallDelta, ToolSpec, Usage,
 };
-pub(crate) use r#loop::tool_specs;
 pub use r#loop::{AgentLoop, ControlCmd, Prompt, SudoDeps};
 pub use retry::RetryPolicy;
 pub use store::{DisplayRow, NoopStore, SessionStore, Store};
+pub(crate) use tool_specs::tool_specs;
 pub use trust::{SqliteTrustSource, StaticTrustSource, TrustSource};
 pub use wire::WireApi;

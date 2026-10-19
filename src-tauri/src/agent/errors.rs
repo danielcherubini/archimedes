@@ -1,4 +1,4 @@
-//! Errors for the session layer: `SessionError` is the only error type
+//! Errors for the session and files layers: `SessionError` and `FilesError`.
 //! (the read-only pre-approval `FsBackend` has its own local `FsError`
 //! in `fs_backend.rs`).
 //!
@@ -112,6 +112,32 @@ impl From<SessionError> for tauri::ipc::InvokeError {
         }
 
         tauri::ipc::InvokeError(serde_json::Value::Object(body))
+    }
+}
+
+/// Errors surfaced by file commands (`read_file_bytes`).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FilesError {
+    #[error("the file is {size} bytes, which exceeds the 10 MiB limit")]
+    ImageTooLarge { size: u64, max: u64 },
+    #[error("i/o error: {0}")]
+    Io(String),
+}
+
+impl From<FilesError> for tauri::ipc::InvokeError {
+    fn from(e: FilesError) -> Self {
+        let kind = match &e {
+            FilesError::ImageTooLarge { .. } => "image_too_large",
+            FilesError::Io(_) => "io",
+        };
+        let mut map = serde_json::Map::new();
+        map.insert("kind".into(), serde_json::Value::String(kind.into()));
+        map.insert("message".into(), serde_json::Value::String(e.to_string()));
+        if let FilesError::ImageTooLarge { size, max } = e {
+            map.insert("size".into(), serde_json::Value::Number(size.into()));
+            map.insert("max".into(), serde_json::Value::Number(max.into()));
+        }
+        tauri::ipc::InvokeError(serde_json::Value::Object(map))
     }
 }
 
@@ -251,5 +277,32 @@ mod tests {
             !rendered.contains("cannot serialize"),
             "the serde complaint leaked to the wire instead of the real reason: {rendered}"
         );
+    }
+
+    #[test]
+    fn files_error_serializes_to_adr_0063_envelope() {
+        let err = super::FilesError::ImageTooLarge {
+            size: 15_000_000,
+            max: 10_485_760,
+        };
+        let wire = tauri::ipc::InvokeError::from(err).0;
+        assert!(wire.is_object());
+        assert_eq!(wire["kind"].as_str(), Some("image_too_large"));
+        assert_eq!(
+            wire["message"].as_str(),
+            Some("the file is 15000000 bytes, which exceeds the 10 MiB limit")
+        );
+        assert_eq!(wire["size"].as_u64(), Some(15_000_000));
+        assert_eq!(wire["max"].as_u64(), Some(10_485_760));
+
+        let io_err = super::FilesError::Io("permission denied".into());
+        let wire_io = tauri::ipc::InvokeError::from(io_err).0;
+        assert!(wire_io.is_object());
+        assert_eq!(wire_io["kind"].as_str(), Some("io"));
+        assert_eq!(
+            wire_io["message"].as_str(),
+            Some("i/o error: permission denied")
+        );
+        assert_eq!(wire_io.as_object().map(|m| m.len()), Some(2));
     }
 }

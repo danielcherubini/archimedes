@@ -26,7 +26,7 @@ pub mod web;
 pub mod worker;
 
 pub use crate::types::SessionInfo;
-pub use errors::SessionError;
+pub use errors::{FilesError, SessionError};
 pub use events::{EventSink, RpcEvent};
 pub use fs_backend::{FsBackend, FsError};
 pub use interactive::{
