@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tauri::State;
 
 use crate::agent::mcp::config::{load_servers, server_infos, McpServerInfo};
-use crate::agent::SessionManager;
+use crate::agent::{McpError, SessionManager};
 use crate::config::load_settings;
 
 /// The EFFECTIVE MCP server set for `cwd` (the `#`-mention picker —
@@ -24,7 +24,7 @@ use crate::config::load_settings;
 pub async fn list_mcp_servers_effective(
     state: State<'_, Arc<SessionManager>>,
     cwd: Option<String>,
-) -> Result<Vec<McpServerInfo>, String> {
+) -> Result<Vec<McpServerInfo>, McpError> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
     let desktop = load_settings(state.config_dir()).mcp_servers;
     let project = cwd
@@ -32,4 +32,16 @@ pub async fn list_mcp_servers_effective(
         .map(Path::new)
         .unwrap_or_else(|| Path::new("/"));
     Ok(server_infos(&load_servers(&home, project, Some(&desktop))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_error_kind_and_message() {
+        let err = McpError::NotFound("weather".into());
+        assert_eq!(err.kind(), "not_found");
+        assert_eq!(err.to_string(), "server not found: weather");
+    }
 }

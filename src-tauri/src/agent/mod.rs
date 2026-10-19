@@ -6,7 +6,7 @@ pub mod boundary;
 pub mod childproc;
 pub mod crashlog;
 pub mod debuglog;
-mod errors;
+pub mod errors;
 pub mod events;
 mod fs_backend;
 pub mod harness;
@@ -27,7 +27,7 @@ pub mod web;
 pub mod worker;
 
 pub use crate::types::SessionInfo;
-pub use errors::{FilesError, SessionError};
+pub use errors::{AgentsError, FilesError, McpError, SessionError, SettingsError, SpacesError};
 pub use events::{EventSink, RpcEvent};
 pub use fs_backend::{FsBackend, FsError};
 pub use ids::{GateKey, RequestId, SessionId};

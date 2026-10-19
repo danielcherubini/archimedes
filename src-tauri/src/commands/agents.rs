@@ -3,6 +3,7 @@
 
 use serde::Serialize;
 
+use crate::agent::AgentsError;
 use crate::agents::AgentDefinition;
 
 /// The camelCase wire shape. NOT the `AgentDefinition` struct itself —
@@ -38,7 +39,7 @@ impl From<AgentDefinition> for AgentDefinitionDto {
 /// override for it still applies by name at dispatch time and can be
 /// added by hand-editing `settings.json`).
 #[tauri::command]
-pub async fn list_agent_definitions() -> Result<Vec<AgentDefinitionDto>, String> {
+pub async fn list_agent_definitions() -> Result<Vec<AgentDefinitionDto>, AgentsError> {
     Ok(crate::agents::discover_agents(None)
         .into_iter()
         .map(AgentDefinitionDto::from)
@@ -65,7 +66,7 @@ pub async fn list_agent_definitions() -> Result<Vec<AgentDefinitionDto>, String>
 #[tauri::command]
 pub async fn list_agent_definitions_for_space(
     cwd: Option<String>,
-) -> Result<Vec<AgentDefinitionDto>, String> {
+) -> Result<Vec<AgentDefinitionDto>, AgentsError> {
     Ok(
         crate::agents::discover_agents(cwd.as_deref().map(std::path::Path::new))
             .into_iter()
@@ -434,6 +435,13 @@ mod tests {
                 "x\" onload=\"y".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn agents_error_kind_and_message() {
+        let err = AgentsError::NotFound("scout".into());
+        assert_eq!(err.kind(), "not_found");
+        assert_eq!(err.to_string(), "agent not found: scout");
     }
 
     fn scratch() -> std::path::PathBuf {
