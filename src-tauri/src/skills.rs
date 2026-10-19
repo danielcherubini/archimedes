@@ -39,6 +39,17 @@ pub struct SkillInfo {
     /// Frontmatter `disable-model-invocation: true` — the Skill is
     /// MODEL-HIDDEN: unadvertised and unresolvable by name (ADR 0036).
     pub disable_model_invocation: bool,
+    /// The Skills this name collision EXCLUDED, reported here on the winner
+    /// (ADR 0065: a shadow is a REPORT, not an entry — the losers stay
+    /// unaddressable by name). Additive, so every existing consumer of this
+    /// struct is unaffected.
+    ///
+    /// **UI-only**: the Skills dialog renders it; it is NEVER interpolated into
+    /// a prompt tag, so the advertised name sets cannot drift. Empty unless a
+    /// genuinely different `SKILL.md` lost the name (a byte-identical or
+    /// CRLF-only copy is a Duplicate and stays silent, and a candidate that
+    /// fails a validity check was never eligible, so it is not reported).
+    pub shadowed: Vec<Shadowed<SkillScope>>,
 }
 
 impl SkillInfo {
@@ -46,6 +57,20 @@ impl SkillInfo {
     pub fn model_visible(&self) -> bool {
         !self.disable_model_invocation
     }
+}
+
+/// One Skill (or Agent definition) excluded by **Shadowing**: another root
+/// contributed the same name first and this file is genuinely different.
+/// Generic over the scope enum because `skills.rs` and `agents.rs` share the
+/// rule with different tags — the shape `boundary::push_roots<T>` uses.
+/// ADR 0065. UI-only: never interpolated into a prompt tag.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Shadowed<T> {
+    pub name: String,
+    /// Canonical path to the shadowed `SKILL.md`.
+    pub path: String,
+    pub scope: T,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -89,6 +114,14 @@ pub fn discover_in_roots(roots: &[(PathBuf, SkillScope)]) -> Vec<SkillInfo> {
     // canonical-FILE dedupe and must stay shared.)
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut by_name: HashMap<String, SkillInfo> = HashMap::new();
+    // Run-local, alongside `by_name` and dropped with it: lowercased name ->
+    // the WINNER's NORMALIZED RAW content, so a collision can be told apart
+    // from a Duplicate. Compared against the whole file, NOT against
+    // `SkillInfo.body` — `body` is frontmatter-stripped AND trimmed, so a
+    // body-only comparison calls two Skills duplicates when they differ ONLY in
+    // frontmatter (e.g. a model-visible winner and a model-hidden loser with
+    // the same body: a real shadow, swallowed).
+    let mut content_by_name: HashMap<String, String> = HashMap::new();
 
     for (root, scope) in roots {
         if !root.is_dir() {
@@ -108,13 +141,6 @@ pub fn discover_in_roots(roots: &[(PathBuf, SkillScope)]) -> Vec<SkillInfo> {
             else {
                 continue;
             };
-            // First-wins across the whole run (a Space root shadows a
-            // same-named user skill; an innermost ancestor shadows an
-            // outer one).
-            let key = name.to_lowercase();
-            if by_name.contains_key(&key) {
-                continue;
-            }
             // BOTH canonical: `file` is already canonical (the walk
             // canonicalized it); canonicalize the dir too (a `tempdir()`
             // path can be a symlink prefix on some platforms).
@@ -129,6 +155,43 @@ pub fn discover_in_roots(roots: &[(PathBuf, SkillScope)]) -> Vec<SkillInfo> {
             if !is_tag_safe_name(&path) || !is_tag_safe_name(&dir) {
                 continue;
             }
+            // First-wins across the whole run (a Space root shadows a
+            // same-named user skill; an innermost ancestor shadows an
+            // outer one) — and the collision is RECORDED on the winner as a
+            // `shadowed` report (ADR 0065).
+            //
+            // THE ORDER MATTERS: this check sits BELOW the validity guards on
+            // purpose. A loser that was never eligible to be listed is not
+            // "hidden by" anything, and recording it would surface a path
+            // discovery deliberately refuses to surface. Verified against this
+            // loop: the tag-safety guard above is the ONLY rejection that runs
+            // after the dedupe — every other one (unparseable frontmatter, a
+            // `description` over 1024 chars, an unsafe `name`) lives inside
+            // `parse_skill_file`, which already runs before this point.
+            let key = name.to_lowercase();
+            // Normalized for the Duplicate test ONLY — never compared to
+            // `body`, and never compared RAW (a CRLF-vs-LF copy is the same
+            // Skill, not a shadow).
+            let normalized = normalize_line_endings(&content);
+            if let Some(winner) = by_name.get_mut(&key) {
+                if content_by_name.get(&key).is_some_and(|w| *w == normalized) {
+                    // A Duplicate, not a shadow (CONTEXT.md): the same file
+                    // bytes under two roots. Silent.
+                    continue;
+                }
+                // A genuine shadow: the loser rides on the WINNER, keeping its
+                // own name, canonical path and REAL scope (a user Skill can
+                // lose to another user root — `user_roots()` returns two, and
+                // each Space level contributes two — so the dialog derives its
+                // wording from the winner's scope, not from an assumption).
+                winner.shadowed.push(Shadowed {
+                    name,
+                    path,
+                    scope: *scope,
+                });
+                continue;
+            }
+            content_by_name.insert(key.clone(), normalized);
             by_name.insert(
                 key,
                 SkillInfo {
@@ -139,6 +202,7 @@ pub fn discover_in_roots(roots: &[(PathBuf, SkillScope)]) -> Vec<SkillInfo> {
                     scope: *scope,
                     body,
                     disable_model_invocation,
+                    shadowed: Vec::new(),
                 },
             );
         }
@@ -331,6 +395,17 @@ fn walk(
     }
 }
 
+/// The ONE owner of the line-ending rule: `\r\n` and a lone `\r` become `\n`.
+///
+/// `pub(crate)` because two callers need the SAME normalization, and a
+/// copy-pasted second copy would diverge: `parse_skill_file` (frontmatter
+/// parsing) and the **Shadowing** comparison in `discover_in_roots`, which must
+/// see a CRLF checkout of an otherwise-identical `SKILL.md` as the Duplicate it
+/// is rather than as a shadow.
+pub(crate) fn normalize_line_endings(s: &str) -> String {
+    s.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 /// The tolerant frontmatter reader (no YAML crate): any failure mode
 /// (missing closing `---`, a >1024-char description, …) → `None` (the
 /// skill is skipped, never a crash).
@@ -342,8 +417,9 @@ fn walk(
 /// (no space after the colon) is a second such place — pi's `yaml` throws
 /// `MISSING_CHAR` and drops the file, where this prefix match reads the key.
 fn parse_skill_file(content: &str, fallback_name: &str) -> Option<(String, String, String, bool)> {
-    // 1. Normalize `\r\n` and lone `\r` to `\n`.
-    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    // 1. Normalize `\r\n` and lone `\r` to `\n` (the shared helper — the
+    //    shadow comparison in `discover_in_roots` normalizes identically).
+    let normalized = normalize_line_endings(content);
     let lines: Vec<&str> = normalized.split('\n').collect();
 
     // 2. Frontmatter = a block starting at the very beginning: line 1
@@ -674,6 +750,15 @@ mod tests {
         fs::write(path, content).unwrap();
     }
 
+    /// Canonicalize for path comparisons (on macOS `std::env::temp_dir()` is a
+    /// symlinked PREFIX, so a raw `join` never string-equals the canonical
+    /// `path` `discover_in_roots` stores). Same helper `agents.rs` uses. Use it
+    /// ONLY on paths that EXIST — the fallback to the raw path is a silent
+    /// no-op otherwise.
+    fn canon(p: &Path) -> PathBuf {
+        fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    }
+
     #[test]
     fn is_tag_safe_name_rejects_quotes_and_control_chars_only() {
         assert!(is_tag_safe_name("scout"));
@@ -940,5 +1025,271 @@ mod tests {
 
         let out = discover_in_roots(&[(root, SkillScope::Space)]);
         assert_eq!(out.len(), 0, "node_modules stays pruned: {out:?}");
+    }
+
+    // ---- Shadowing: the loser is a REPORT on the winner (ADR 0065) -----
+    //
+    // `discover_in_roots` already dropped a name collision silently; these pin
+    // the disclosure. Assertions are on `name` / `scope` and on `path` compared
+    // through `canon` — never on a raw path string (`temp_dir()` is a symlinked
+    // prefix on macOS).
+
+    /// A byte-identical `SKILL.md` in two roots is a **Duplicate**, not a
+    /// shadow (`CONTEXT.md`), and ADR 0065 keeps it silent: one row, empty
+    /// `shadowed`. Reducing this to "any name collision is a shadow" would fill
+    /// the dialog with a copy the user made on purpose.
+    #[test]
+    fn a_byte_identical_copy_across_roots_is_silent() {
+        let space = scratch();
+        let user = scratch();
+        let bytes = "---\nname: discuss\ndescription: D.\n---\nSame body.\n";
+        write_file(&space.join("discuss").join("SKILL.md"), bytes);
+        write_file(&user.join("discuss").join("SKILL.md"), bytes);
+
+        let out = discover_in_roots(&[(space, SkillScope::Space), (user, SkillScope::User)]);
+        assert_eq!(out.len(), 1, "one row for a Duplicate: {out:?}");
+        assert!(
+            out[0].shadowed.is_empty(),
+            "a byte-identical copy is a Duplicate, not a shadow: {out:?}"
+        );
+    }
+
+    /// The comparison is on NORMALIZED content: a CRLF copy is the same Skill
+    /// with a different line ending, and reporting it would bury the real
+    /// shadows under Windows-checkout noise. Raw-bytes comparison fails this.
+    #[test]
+    fn a_crlf_copy_across_roots_is_silent() {
+        let space = scratch();
+        let user = scratch();
+        let lf = "---\nname: discuss\ndescription: D.\n---\nSame body.\n";
+        let crlf = lf.replace('\n', "\r\n");
+        write_file(&space.join("discuss").join("SKILL.md"), lf);
+        write_file(&user.join("discuss").join("SKILL.md"), &crlf);
+
+        let out = discover_in_roots(&[(space, SkillScope::Space), (user, SkillScope::User)]);
+        assert_eq!(out.len(), 1, "one row for a CRLF copy: {out:?}");
+        assert!(
+            out[0].shadowed.is_empty(),
+            "a CRLF-only difference is not a shadow: {out:?}"
+        );
+    }
+
+    /// THE comparison-target pin. `SkillInfo.body` is frontmatter-stripped AND
+    /// trimmed, so comparing BODIES calls these two duplicates and swallows a
+    /// real shadow — here the loser is model-HIDDEN while the winner is
+    /// model-visible, so which file loads is a behavioural difference the user
+    /// must be able to see. Compare normalized WHOLE-FILE content, never
+    /// `body`. This test goes RED for exactly that substitution.
+    #[test]
+    fn same_body_with_a_different_disable_model_invocation_is_a_shadow() {
+        let space = scratch();
+        let user = scratch();
+        let visible = "---\nname: discuss\ndescription: D.\n---\nIdentical body.\n";
+        let hidden =
+            "---\nname: discuss\ndescription: D.\ndisable-model-invocation: true\n---\nIdentical body.\n";
+        write_file(&space.join("discuss").join("SKILL.md"), visible);
+        write_file(&user.join("discuss").join("SKILL.md"), hidden);
+
+        let out = discover_in_roots(&[(space, SkillScope::Space), (user, SkillScope::User)]);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(
+            !out[0].disable_model_invocation,
+            "the Space winner stays model-visible: {out:?}"
+        );
+        assert_eq!(
+            out[0].shadowed.len(),
+            1,
+            "a frontmatter-only difference is a real shadow: {out:?}"
+        );
+    }
+
+    /// The headline contract: a genuinely different file under the same name is
+    /// reported ON THE WINNER, naming the loser with its own name, its
+    /// canonical path and its OWN scope — the winner and its scope are
+    /// unchanged.
+    #[test]
+    fn a_different_file_with_the_same_name_records_the_loser() {
+        let space = scratch();
+        let user = scratch();
+        let loser = user.join("discuss").join("SKILL.md");
+        write_file(
+            &space.join("discuss").join("SKILL.md"),
+            "---\nname: discuss\ndescription: space version\n---\nS.\n",
+        );
+        write_file(
+            &loser,
+            "---\nname: discuss\ndescription: user version\n---\nU.\n",
+        );
+
+        let out = discover_in_roots(&[(space, SkillScope::Space), (user, SkillScope::User)]);
+        assert_eq!(out.len(), 1, "the collision stays ONE entry: {out:?}");
+        assert_eq!(out[0].name, "discuss");
+        assert_eq!(
+            out[0].scope,
+            SkillScope::Space,
+            "the winner's scope is unchanged: {out:?}"
+        );
+        assert_eq!(out[0].description, "space version", "first-wins: {out:?}");
+        assert_eq!(out[0].shadowed.len(), 1, "{out:?}");
+        assert_eq!(out[0].shadowed[0].name, "discuss");
+        assert_eq!(out[0].shadowed[0].scope, SkillScope::User);
+        assert_eq!(
+            Path::new(&out[0].shadowed[0].path),
+            canon(&loser).as_path(),
+            "the loser's path must be canonical (compare via `canon`): {out:?}"
+        );
+    }
+
+    /// A shadow is NOT necessarily "a project skill hiding your global one":
+    /// `user_roots()` returns TWO roots and both are tagged `User` (likewise
+    /// each Space level contributes `.agents/skills` then `.pi/skills`), so a
+    /// user-scoped Skill can lose to another user-scoped one. The dialog derives
+    /// its wording from the WINNER's scope, so this case must exist in the data
+    /// rather than being flattened into "space wins".
+    #[test]
+    fn a_user_skill_shadowed_by_another_user_root_is_recorded_with_a_user_winner() {
+        let agents = scratch();
+        let pi = scratch();
+        write_file(
+            &agents.join("discuss").join("SKILL.md"),
+            "---\nname: discuss\ndescription: from .agents\n---\nA.\n",
+        );
+        write_file(
+            &pi.join("discuss").join("SKILL.md"),
+            "---\nname: discuss\ndescription: from .pi\n---\nP.\n",
+        );
+
+        let out = discover_in_roots(&[(agents, SkillScope::User), (pi, SkillScope::User)]);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].scope, SkillScope::User, "winner is a user skill");
+        assert_eq!(out[0].shadowed.len(), 1, "{out:?}");
+        assert_eq!(
+            out[0].shadowed[0].scope,
+            SkillScope::User,
+            "the loser's REAL scope must be carried, not assumed to be space: {out:?}"
+        );
+    }
+
+    /// A loser that is not ELIGIBLE to be listed is not reported as "hidden":
+    /// its path carries a `"` from the directory name, so discovery refuses to
+    /// surface that path at all. THIS is the test that exercises the reorder —
+    /// recording the shadow at the dedupe point (above the `is_tag_safe_name`
+    /// guard on `path`/`dir`) reports it and fails here.
+    ///
+    /// `name:` comes from frontmatter, so the directory name is NOT the rejection
+    /// reason: only the path/dir guard can reject this candidate.
+    #[test]
+    fn a_loser_with_an_unsafe_directory_name_is_not_reported() {
+        // The loser's DIRECTORY holds a `"`; its frontmatter name is clean, so
+        // `parse_skill_file` accepts it and only the path/dir guard can stop it.
+        //
+        // The two cfg blocks are ALTERNATIVES (exactly one compiles per
+        // platform, and no early `return` — the pattern, and the clippy reason,
+        // stated in `tests/skills.rs`): a `"` component is LEGAL on unix and
+        // REFUSED by NTFS, so on Windows the skip is unreachable-by-construction
+        // rather than skipped — and the guard RULE itself stays pinned there
+        // through the frontmatter route (`a_name_containing_a_quote_is_skipped`),
+        // which needs no illegal name.
+        #[cfg(windows)]
+        {
+            let user = scratch();
+            let built = fs::create_dir_all(user.join("we\"ird/SKILL.md"));
+            assert!(
+                built.is_err(),
+                "NTFS must REFUSE a `\"` component for this scenario to stay \
+                 unreachable — if this ever succeeds, drop the cfg branch and \
+                 run the real assertion"
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            let space = scratch();
+            let user = scratch();
+            write_file(
+                &space.join("discuss").join("SKILL.md"),
+                "---\nname: discuss\ndescription: space version\n---\nS.\n",
+            );
+            write_file(
+                &user.join("we\"ird").join("SKILL.md"),
+                "---\nname: discuss\ndescription: user version\n---\nU.\n",
+            );
+
+            let out = discover_in_roots(&[(space, SkillScope::Space), (user, SkillScope::User)]);
+            assert_eq!(out.len(), 1, "{out:?}");
+            assert!(
+                out[0].shadowed.is_empty(),
+                "a loser that could never be listed is not a shadow: {out:?}"
+            );
+        }
+    }
+
+    /// A `description` over 1024 chars is rejected INSIDE `parse_skill_file`,
+    /// which runs before the dedupe either way — so unlike the tag-safety guard
+    /// above, this test passes on both sides of the reorder. It is kept as a
+    /// pin for the ORDER: if the description cap ever moves into the loop (next
+    /// to the tag-safety guard), a shadow recorded before it would fail here.
+    #[test]
+    fn a_loser_over_the_description_limit_is_not_reported() {
+        let space = scratch();
+        let user = scratch();
+        let long = "x".repeat(1025);
+        write_file(
+            &space.join("discuss").join("SKILL.md"),
+            "---\nname: discuss\ndescription: space version\n---\nS.\n",
+        );
+        write_file(
+            &user.join("discuss").join("SKILL.md"),
+            &format!("---\nname: discuss\ndescription: {long}\n---\nU.\n"),
+        );
+
+        let out = discover_in_roots(&[(space, SkillScope::Space), (user, SkillScope::User)]);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(
+            out[0].shadowed.is_empty(),
+            "a parse-time rejection is not a shadow: {out:?}"
+        );
+    }
+
+    /// One winner can lose to several roots at once (ADR 0065 rejects the
+    /// "annotate the winning row" shape for exactly this reason), so the report
+    /// is a LIST, appended in root-precedence order.
+    #[test]
+    fn several_losers_from_several_roots_all_land_on_the_winner() {
+        let space = scratch();
+        let second = scratch();
+        let third = scratch();
+        let second_loser = second.join("discuss").join("SKILL.md");
+        let third_loser = third.join("discuss").join("SKILL.md");
+        write_file(
+            &space.join("discuss").join("SKILL.md"),
+            "---\nname: discuss\ndescription: one\n---\n1.\n",
+        );
+        write_file(
+            &second_loser,
+            "---\nname: discuss\ndescription: two\n---\n2.\n",
+        );
+        write_file(
+            &third_loser,
+            "---\nname: discuss\ndescription: three\n---\n3.\n",
+        );
+
+        let out = discover_in_roots(&[
+            (space, SkillScope::Space),
+            (second, SkillScope::Space),
+            (third, SkillScope::User),
+        ]);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].shadowed.len(), 2, "both losers reported: {out:?}");
+        // Root-precedence order, so the dialog reads outermost-last.
+        assert_eq!(
+            Path::new(&out[0].shadowed[0].path),
+            canon(&second_loser).as_path()
+        );
+        assert_eq!(
+            Path::new(&out[0].shadowed[1].path),
+            canon(&third_loser).as_path()
+        );
+        assert_eq!(out[0].shadowed[0].scope, SkillScope::Space);
+        assert_eq!(out[0].shadowed[1].scope, SkillScope::User);
     }
 }

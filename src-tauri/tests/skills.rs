@@ -461,6 +461,11 @@ fn first_wins_dedupe_and_order() {
         "from A",
         "first-wins dedupe: {rows:?}"
     );
+    assert_eq!(
+        find_row(&rows, "shared").shadowed.len(),
+        1,
+        "the shadowed loser must be reported at the integration surface: {rows:?}"
+    );
     let order: Vec<&str> = rows.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(order, vec!["Beta", "shared", "zeta"]);
     assert_eq!(rows[0].scope, SkillScope::User); // `Beta` lives in root B
