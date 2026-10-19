@@ -40,7 +40,7 @@ pub use permission::{permission_key, PendingPermissions, PermissionOutcome};
 pub use persist::TranscriptPersister;
 pub use session::{
     user_message_payload, ClosedReason, EffectiveCatalog, ImagePayload, ProviderFactory,
-    SessionManager, StalledInfo, StopReason, MAX_IMAGE_BYTES,
+    SessionManager, SessionManagerBuilder, StalledInfo, StopReason, MAX_IMAGE_BYTES,
 };
 pub use subagent::{LaunchConfig, SubagentMetrics, SubagentOutcome, SubagentSessionManager};
 pub use todo::{TodoItem, TodoStatus, TodoStore};

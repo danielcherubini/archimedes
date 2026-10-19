@@ -18,14 +18,17 @@ use tauri::Manager;
 
 use crate::agent::worker::client::WorkerHandle;
 use crate::agent::worker::manager::{WorkerFactory, WorkerManager};
-use crate::agent::{crashlog, debuglog, EventSink, SessionManager, SubagentSessionManager};
+use crate::agent::{
+    crashlog, debuglog, EventSink, SessionManagerBuilder, SubagentSessionManager,
+    TranscriptPersister,
+};
 use crate::storage::Db;
 
 /// The production `WorkerFactory` (the `current_exe()` Worker — the
 /// `--worker` mode of this same binary; the `WorkerHandle`'s spawn
 /// passes the flag). Tests inject the `fake_worker` fixture instead
 /// (the `setup_dirs_with_factory` seam).
-struct ProductionWorkerFactory;
+pub struct ProductionWorkerFactory;
 
 impl WorkerFactory for ProductionWorkerFactory {
     fn spawn(&self) -> Result<WorkerHandle, crate::agent::worker::client::WorkerError> {
@@ -64,25 +67,12 @@ pub fn setup_dirs_with_factory<R: tauri::Runtime>(
     app_data_dir: PathBuf,
     worker_factory: Option<Arc<dyn WorkerFactory>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // The session manager is settings-driven (the config dir is the
-    // `settings.json` home — the desktop is native-only: there is no agent
-    // registry and no pi config seeding).
-    let mut manager = SessionManager::new(config_dir.clone());
     // The persistence database lives in the app data directory.
     let db = Arc::new(
         Db::open(&app_data_dir.join("archimedes.db"))
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?,
     );
-    manager.attach_db(db.clone());
-    // The subagent manager (the ADR 0025 Task 5 re-plumb — the
-    // in-process subagent machinery is GONE: the dispatch runs in a
-    // WORKER via the `WorkerManager`'s `dispatch_subagent` flow — the
-    // `WorkerManager` is forwarded by `attach_worker_manager` (the
-    // `set_worker_manager` + the child-cwd registrar); the manager is NO
-    // LONGER managed Tauri state (the `respond_*` commands route through
-    // the `SessionManager`'s `WorkerManager` `handle_for` — a subagent
-    // session's handle is in the `drives` map)).
-    manager.set_subagent_manager(Arc::new(SubagentSessionManager::new()));
+
     // The event sink (TauriSink) is managed state so commands — and the
     // headless IPC test — can obtain it without an `AppHandle` parameter.
     //
@@ -95,58 +85,28 @@ pub fn setup_dirs_with_factory<R: tauri::Runtime>(
     // is unsized, so the coercion is spelled as an annotated binding.)
     let sink: Arc<dyn EventSink> = Arc::new(commands::sessions::TauriSink(app.handle().clone()));
     app.manage(sink.clone());
-    // The router's `SinkFrame` re-emit target (the `setup_dirs` late-wire
-    // — set BEFORE the `WorkerManager`'s callbacks can fire).
-    manager.set_sink(sink.clone());
-    // The `WorkerManager` (ADR 0025 — the session's `AgentLoop` runs in
-    // the Worker): the LATE-WIRE (the `SessionManager` ↔ `WorkerManager`
-    // construction cycle — the `WorkerManager`'s `on_event` / `on_crash`
-    // callbacks need the `SessionManager`'s router / crash handler, and
-    // the `SessionManager` needs the `WorkerManager` to send prompts):
-    // the callbacks capture the `Arc<SessionManager>` (the `attach_*`
-    // methods are `&self` — the `OnceLock` `set` needs no exclusive
-    // access), then `attach_worker_manager` hands the `WorkerManager`
-    // to the `SessionManager` after both are built.
-    let manager = Arc::new(manager);
-    // The crash-log directory (the `StalledInfo`'s `crash_log` lookup). The
-    // value production already computes for the panic hook — `app_data_dir`
-    // is `dirs::data_dir().join("archimedes")` (`setup`, the same join the
-    // router used to make itself) — so wiring it here changes nothing in
-    // production and keeps `dirs` out of the router, where no temp-dir test
-    // could reach a self-resolved path. `&self`, so it is legal on the `Arc`
-    // (the `attach_app_handle` shape, not `set_sink`'s `&mut self`).
-    manager.set_crash_log_dir(app_data_dir.clone());
-    let wm = {
-        let m = manager.clone();
-        let m2 = manager.clone();
-        let sink_for = sink.clone();
-        Arc::new(
-            WorkerManager::new(
-                worker_factory.unwrap_or_else(|| Arc::new(ProductionWorkerFactory)),
-                Arc::new(move |session_id, code, pid| m.handle_crash(&session_id, code, pid)),
-                Arc::new(move |session_id, is_subagent, evt| {
-                    m2.route_event(&session_id, is_subagent, evt)
-                }),
-                // The parent-scope sink lookup (the subagent UI lifecycle
-                // events — the single shared `TauriSink`).
-                Arc::new(move |_| Some(sink_for.clone())),
-            )
-            // The ADR 0055 **Dead bound** (the `settings.json`
-            // `subagentDeadBoundSecs` key): SECONDS of unexplained silence before a
-            // **Subagent session** is reaped as Dead. Applied at the ONE production
-            // construction site (a builder, not a 5th `WorkerManager::new`
-            // parameter — the other 12 call sites keep the default).
+
+    let persister = Arc::new(TranscriptPersister::new(db.clone()));
+
+    let mut builder =
+        SessionManagerBuilder::new(config_dir.clone(), db.clone(), sink.clone(), persister)
+            .with_crash_log_dir(app_data_dir.clone())
+            .with_subagent_manager(Arc::new(SubagentSessionManager::new()))
             .with_dead_bound_secs(
                 crate::config::load_settings(&config_dir).subagent_dead_bound_secs,
-            ),
-        )
-    };
-    manager.attach_worker_manager(wm.clone());
-    // The AppHandle for Supervisor-side webview rendering (Task 7).
+            );
+
+    if let Some(wf) = worker_factory {
+        builder = builder.with_worker_factory(wf);
+    }
+
     let handle_any = Box::new(app.handle().clone()) as Box<dyn std::any::Any>;
     if let Ok(handle) = handle_any.downcast::<tauri::AppHandle<tauri::Wry>>() {
-        manager.attach_app_handle(*handle);
+        builder = builder.with_app_handle(*handle);
     }
+
+    let (manager, wm) = builder.build();
+
     // The `WorkerManager` is managed state (the `set_space_trusted`
     // command's running-Workers `Config` push + the `test_support`
     // registry accessor).

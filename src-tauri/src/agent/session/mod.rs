@@ -47,7 +47,10 @@ use crate::agent::permission::{self};
 use crate::agent::persist::TranscriptPersister;
 use crate::agent::tools::ImageRef;
 use crate::agent::types::mint_session_id;
-use crate::agent::worker::manager::WorkerManager;
+use crate::agent::worker::client::WorkerInboundEvent;
+use crate::agent::worker::manager::{
+    WorkerFactory, WorkerHooks, WorkerManager, DEFAULT_SUBAGENT_DEAD_BOUND,
+};
 use crate::agent::worker::protocol::{StartEnv, StartMode};
 use crate::config::{load_settings, write_settings};
 use crate::storage::Db;
@@ -720,6 +723,185 @@ impl SessionManager {
         let _ = self.subagent_manager.set(m);
     }
 
+    /// Provide a UI sink lookup for subagents running under this manager.
+    pub fn sink_for_subagent(&self, _parent_session_id: &str) -> Option<Arc<dyn EventSink>> {
+        self.sink.get().cloned()
+    }
+
+    /// Register a child subagent's cwd in the transcript persister.
+    pub fn register_child_cwd(&self, session_id: &str, cwd: &str) {
+        if let Some(p) = self.persister.get() {
+            p.set_cwd(session_id, cwd);
+        }
+    }
+
+    /// Dispatch a worker event into the router (alias for `route_event`).
+    pub fn on_worker_event(&self, session_id: &str, is_subagent: bool, evt: WorkerInboundEvent) {
+        self.route_event(session_id, is_subagent, evt);
+    }
+
+    /// Dispatch a worker crash into the crash handler (alias for `handle_crash`).
+    pub fn on_worker_crash(&self, session_id: &str, code: Option<i32>, pid: Option<u32>) {
+        self.handle_crash(session_id, code, pid);
+    }
+}
+
+/// `WorkerHooks` implementation bridging `WorkerManager` callbacks
+/// to `SessionManager` via a `Weak<SessionManager>` reference.
+struct SessionWorkerHooks {
+    manager: std::sync::Weak<SessionManager>,
+}
+
+impl WorkerHooks for SessionWorkerHooks {
+    fn on_event(&self, session_id: &str, is_subagent: bool, evt: WorkerInboundEvent) {
+        if let Some(sm) = self.manager.upgrade() {
+            sm.on_worker_event(session_id, is_subagent, evt);
+        } else {
+            crate::agent::debuglog::log("SessionWorkerHooks::on_event: SessionManager dropped");
+        }
+    }
+
+    fn on_crash(&self, session_id: &str, code: Option<i32>, pid: Option<u32>) {
+        if let Some(sm) = self.manager.upgrade() {
+            sm.on_worker_crash(session_id, code, pid);
+        } else {
+            crate::agent::debuglog::log("SessionWorkerHooks::on_crash: SessionManager dropped");
+        }
+    }
+
+    fn sink_for(&self, parent_session_id: &str) -> Option<Arc<dyn EventSink>> {
+        let sm = self.manager.upgrade()?;
+        sm.sink_for_subagent(parent_session_id)
+    }
+
+    fn register_child_cwd(&self, session_id: &str, cwd: &str) {
+        if let Some(sm) = self.manager.upgrade() {
+            sm.register_child_cwd(session_id, cwd);
+        }
+    }
+}
+
+/// A builder for constructing [`SessionManager`] and [`WorkerManager`] pairs
+/// via [`Arc::new_cyclic`] to break strong reference cycles.
+pub struct SessionManagerBuilder {
+    config_dir: PathBuf,
+    db: Arc<Db>,
+    catalog: ModelCatalog,
+    sink: Arc<dyn EventSink>,
+    crash_log_dir: Option<PathBuf>,
+    subagent_manager: Option<Arc<crate::agent::subagent::SubagentSessionManager>>,
+    app_handle: Option<tauri::AppHandle>,
+    worker_factory: Option<Arc<dyn WorkerFactory>>,
+    dead_bound: std::time::Duration,
+    persister: Arc<TranscriptPersister>,
+}
+
+impl SessionManagerBuilder {
+    pub fn new(
+        config_dir: PathBuf,
+        db: Arc<Db>,
+        sink: Arc<dyn EventSink>,
+        persister: Arc<TranscriptPersister>,
+    ) -> Self {
+        Self {
+            config_dir,
+            db,
+            catalog: ModelCatalog::default(),
+            sink,
+            crash_log_dir: None,
+            subagent_manager: None,
+            app_handle: None,
+            worker_factory: None,
+            dead_bound: DEFAULT_SUBAGENT_DEAD_BOUND,
+            persister,
+        }
+    }
+
+    pub fn with_catalog(mut self, catalog: ModelCatalog) -> Self {
+        self.catalog = catalog;
+        self
+    }
+
+    pub fn with_crash_log_dir(mut self, dir: PathBuf) -> Self {
+        self.crash_log_dir = Some(dir);
+        self
+    }
+
+    pub fn with_subagent_manager(
+        mut self,
+        subagent: Arc<crate::agent::subagent::SubagentSessionManager>,
+    ) -> Self {
+        self.subagent_manager = Some(subagent);
+        self
+    }
+
+    pub fn with_app_handle(mut self, app_handle: tauri::AppHandle) -> Self {
+        self.app_handle = Some(app_handle);
+        self
+    }
+
+    pub fn with_worker_factory(mut self, factory: Arc<dyn WorkerFactory>) -> Self {
+        self.worker_factory = Some(factory);
+        self
+    }
+
+    pub fn with_dead_bound(mut self, bound: std::time::Duration) -> Self {
+        self.dead_bound = bound;
+        self
+    }
+
+    pub fn with_dead_bound_secs(mut self, secs: u64) -> Self {
+        self.dead_bound = std::time::Duration::from_secs(secs);
+        self
+    }
+
+    pub fn build(self) -> (Arc<SessionManager>, Arc<WorkerManager>) {
+        let factory = self
+            .worker_factory
+            .unwrap_or_else(|| Arc::new(crate::ProductionWorkerFactory));
+
+        let mut wm_holder = None;
+
+        let manager = Arc::new_cyclic(|weak_sm| {
+            let hooks = Arc::new(SessionWorkerHooks {
+                manager: weak_sm.clone(),
+            });
+
+            let wm = Arc::new(
+                WorkerManager::with_hooks(factory, hooks).with_dead_bound(self.dead_bound),
+            );
+
+            let mut sm = SessionManager::new(self.config_dir);
+            sm.attach_db(self.db);
+            sm.set_catalog(self.catalog);
+            sm.set_sink(self.sink);
+
+            if let Some(subagent) = self.subagent_manager {
+                sm.set_subagent_manager(subagent);
+            }
+            if let Some(app_handle) = self.app_handle {
+                sm.attach_app_handle(app_handle);
+            }
+            if let Some(dir) = self.crash_log_dir {
+                sm.set_crash_log_dir(dir);
+            }
+
+            let _ = sm.persister.set(self.persister);
+            let _ = sm.worker_manager.set(wm.clone());
+            if let Some(m) = sm.subagent_manager.get() {
+                m.set_worker_manager(wm.clone());
+            }
+
+            wm_holder = Some(wm);
+            sm
+        });
+
+        let wm = wm_holder.expect("WorkerManager was constructed inside cyclic closure");
+        (manager, wm)
+    }
+}
+
+impl SessionManager {
     /// Reset the session's open thinking segment at a prompt boundary. The
     /// frontend's `addUserMessage` starts a new thinking block on a user
     /// `persist_update`-era rule: the normalizer never sees user messages
@@ -3326,5 +3508,25 @@ mod session_tests {
             Some(false),
             "an idle compaction does not touch the session's cancel flag"
         );
+    }
+
+    #[test]
+    fn session_manager_builder_cyclic_weak_reference_drops_cleanly() {
+        let dir = temp_config_dir();
+        let db = open_db(&dir);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        let persister = Arc::new(TranscriptPersister::new(db.clone()));
+
+        let (manager, wm) = SessionManagerBuilder::new(dir.clone(), db, sink, persister)
+            .with_worker_factory(Arc::new(FixtureFactory))
+            .build();
+
+        // WorkerManager's hooks hold a Weak<SessionManager>.
+        // Dropping the manager should drop the underlying SessionManager.
+        drop(manager);
+
+        // Weak upgrade must fail cleanly
+        assert!(wm.hooks().sink_for("any").is_none());
     }
 }
