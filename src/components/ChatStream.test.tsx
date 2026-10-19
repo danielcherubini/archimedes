@@ -25,7 +25,15 @@ import { useInteractive } from "../store/interactive";
 import { usePermissions } from "../store/permissions";
 import { useSubagents } from "../store/subagents";
 import { useSettings } from "../store/settings";
-import { generateFrames, getVariantGridSize } from "../lib/braille-loader";
+import {
+  brailleLoaderVariants,
+  generateFrames,
+  getVariantGridSize,
+} from "../lib/braille-loader";
+import {
+  MIN_INDICATOR_WIDTH_CLASS,
+  MIN_INDICATOR_WIDTH_PX,
+} from "./chat/WorkingIndicator";
 import type {
   AgentDefinitionDto,
   AppSettings,
@@ -36,6 +44,16 @@ import type {
 import { setSidePaneCollapsed } from "../lib/sidePaneState";
 import { activeMentionToken, isOutsideSpaceQuery } from "../lib/skills";
 import { MAX_CHAT_ATTACHMENTS } from "../lib/chatAttachments";
+
+/**
+ * The monospace advance as a fraction of font size, used to turn a braille
+ * grid's cell count into the px the `BrailleLoader` actually occupies at
+ * `fontSize={14}`. 0.6em is the conventional mono advance and the one the
+ * indicator's floor is derived from — the constant lives in the test so the
+ * floor is checked against an INDEPENDENT statement of the arithmetic rather
+ * than against the component's own number.
+ */
+const MONO_ADVANCE_EM = 0.6;
 
 /** A full settings fixture (the spinner-style tests seed the store with it). */
 const SETTINGS_FIXTURE: AppSettings = {
@@ -606,10 +624,17 @@ describe("ChatStream", () => {
     // The row is a fixed-height flex line, and a quip can be ~60 characters
     // (see `lib/spin-quips.ts`). In a flex row an unshrinkable text child
     // GROWS the line and squeezes the buttons, so the text must be the thing
-    // that gives: `min-w-0` on the flex item (a flex child's automatic minimum
-    // is its content width, which is what makes `truncate` a no-op without it)
-    // plus `truncate` on the text, and `shrink-0` on the button wrapper so a
-    // long quip cannot squeeze two 24–28px hit targets.
+    // that gives: `min-w-0` + `truncate` on the text ITSELF (a flex child's
+    // automatic minimum is its content width, which is what makes `truncate` a
+    // no-op without it), and `shrink-0` on the button wrapper so a long quip
+    // cannot squeeze two 24–28px hit targets.
+    //
+    // The `min-w-0` sits on the `<p>` and NOT on the indicator box, and that is
+    // the fix: on the box it let the whole indicator shrink to nothing, which
+    // is how the `shrink-0` spinner ended up painting over `+` (see the next
+    // two cases). WHAT THIS TEST CAN AND CANNOT SAY is the same limit every
+    // layout assertion here has — jsdom has no layout engine — so these are the
+    // class contract, not a measured layout.
     seedLiveSession();
     useSessions.getState().addUserMessage("s1", "hi");
     useSessions.getState().beginTurn("s1");
@@ -619,8 +644,10 @@ describe("ChatStream", () => {
     ) as HTMLElement;
     const text = indicator.querySelector("p") as HTMLElement;
     expect(text.className).toContain("truncate");
-    // The item that shrinks is the indicator itself (the `<p>` is inside it).
-    expect(indicator.className).toContain("min-w-0");
+    // The item that shrinks is the TEXT, not the box that also holds the
+    // spinner — so the shrink permission lives on the `<p>`.
+    expect(text.className).toContain("min-w-0");
+    expect(indicator.className).not.toContain("min-w-0");
     // `shrink-0` is on the wrapper, not on the buttons: flex would otherwise
     // squeeze BOTH buttons to fit the quip.
     const attach = container.querySelector(
@@ -628,6 +655,59 @@ describe("ChatStream", () => {
     ) as HTMLElement;
     expect(attach.parentElement!.className).toContain("shrink-0");
     expect(attach.parentElement!.className).toContain("ml-auto");
+  });
+
+  it("floors the indicator's width at the widest spinner (the spinner cannot overlap `+`)", () => {
+    // The narrow-row defect: the box used to carry a bare `min-w-0`, so under
+    // enough pressure it shrank toward zero while its `shrink-0` spinner kept
+    // its intrinsic ~50px and painted OVER the `+` button — with the quip fully
+    // truncated and no way to stop it. The crossover is reachable at the app's
+    // DEFAULT 800px window with the side pane open, so the box now has a floor
+    // instead of a zero minimum.
+    seedLiveSession();
+    useSessions.getState().addUserMessage("s1", "hi");
+    useSessions.getState().beginTurn("s1");
+    const { container } = render(<ChatStream />);
+    const indicator = container.querySelector(
+      '[data-testid="working-indicator"]',
+    ) as HTMLElement;
+    expect(indicator.className).toContain(MIN_INDICATOR_WIDTH_CLASS);
+    // The class is spelled as a LITERAL rather than interpolated from the px
+    // number, because Tailwind scans source text and would never emit a class
+    // built at runtime. So the pair needs pinning: the spacing step (14) times
+    // the 0.25rem base must equal the px the arithmetic below is checked against.
+    expect(MIN_INDICATOR_WIDTH_CLASS).toBe(
+      `min-w-${MIN_INDICATOR_WIDTH_PX / 4}`,
+    );
+    // The floor must clear the WIDEST spinner the settings can pick, not just
+    // the current one: the grid is at most 6 cells at the fixed `fontSize={14}`
+    // in a 0.6em monospace advance, so ~50px — and 56px is above every variant.
+    const widest = Math.max(
+      ...brailleLoaderVariants.map(
+        (v) => getVariantGridSize(v)[0] * 14 * MONO_ADVANCE_EM,
+      ),
+    );
+    expect(MIN_INDICATOR_WIDTH_PX).toBeGreaterThanOrEqual(widest);
+  });
+
+  it("wraps the composer's bottom row so the floor cannot push Send off the edge", () => {
+    // The floor only helps if the row may break: a `flex-1` item with a
+    // `min-w` floor in a NON-wrapping row simply overflows the other end and
+    // pushes Send out of the island. So the fallback is floor + wrap together,
+    // and a regression on either half re-creates an overlap.
+    seedLiveSession();
+    useSessions.getState().addUserMessage("s1", "hi");
+    useSessions.getState().beginTurn("s1");
+    const { container } = render(<ChatStream />);
+    const indicator = container.querySelector(
+      '[data-testid="working-indicator"]',
+    ) as HTMLElement;
+    const row = indicator.parentElement as HTMLElement;
+    expect(row.className).toContain("flex-wrap");
+    // And the indicator keeps `flex-1` — the wrap only happens once the floor
+    // binds, so on a normal-width row the indicator still absorbs the slack and
+    // the buttons stay right-aligned on the SAME line.
+    expect(indicator.className).toContain("flex-1");
   });
 
   it("keeps the quip at full foreground ink (the composer fill is lighter than the chat plane)", () => {
