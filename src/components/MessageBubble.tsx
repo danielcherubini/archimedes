@@ -590,21 +590,26 @@ function AgentText({ text }: { text: string }) {
       >
         <AgentMarkdown text={text} />
       </div>
-      {/* OUTSIDE and BELOW the band, and always visible: the reply's surface is
-          the message, the button is a tool on it — inside the band it would sit
-          on the composer fill and compete with the last line of prose. The
-          distinct accessible name (`Copy code` belongs to a code fence) is what
-          lets a test tell the two buttons apart in one render. */}
+      {/* OUTSIDE and BELOW the band, always visible, and pushed to the END
+          (right) edge: the reply's surface is the message, the button is a tool
+          on it — inside the band it would sit on the composer fill and compete
+          with the last line of prose. Under the band reads as a caption for
+          what it produced, not a control before it. The distinct accessible
+          name (`Copy code` belongs to a code fence) is what lets a test tell
+          the two buttons apart in one render. */}
       <button
         type="button"
         onClick={handleCopy}
         aria-label={copied ? "Copied" : "Copy response"}
         title={copied ? "Copied" : "Copy response"}
         data-testid="copy-response"
-        // `w-fit`: the row wrapper is a `flex-col`, whose children STRETCH, so
-        // without this the 12px icon would sit at the centre of a button as wide
-        // as the column — and its hover target would swallow the whole line.
-        className="w-fit shrink-0 text-foreground-subtle hover:text-foreground"
+        // `self-end`: the row wrapper is a `flex-col` (MessageList), whose
+        // children default to `stretch`, so without this the 12px icon sat at
+        // the START of a button as wide as the column. Aligning to the cross-
+        // axis end both shrinks the hit area to the icon and right-aligns it —
+        // `w-fit` alone would have kept it on the left, and `ml-auto` is a
+        // margin fighting stretch where alignment is the lever.
+        className="self-end shrink-0 text-foreground-subtle hover:text-foreground"
       >
         {copied ? (
           <CheckIcon className="size-3" />

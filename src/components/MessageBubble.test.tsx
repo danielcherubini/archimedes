@@ -313,6 +313,25 @@ describe("MessageBubble", () => {
     ).toBeTruthy();
   });
 
+  it("sits the copy response button at the END (right) edge of the row", () => {
+    const message: Message = {
+      kind: "agent-text",
+      messageId: "m1",
+      text: "the reply",
+      at: 1,
+    };
+    render(<MessageBubble message={message} />);
+    // The row wrapper is a `flex-col` (MessageList), whose children default to
+    // `stretch` — without an explicit cross-axis alignment the icon renders at
+    // the LEFT edge, which reads as a control BEFORE the reply rather than a
+    // caption for it. Pinned as a class assertion: jsdom runs no layout, so
+    // the painted position is not directly assertable (the convention every
+    // other position-pin in this repo follows).
+    const button = screen.getByTestId("copy-response");
+    expect(button.className).toContain("self-end");
+    expect(button.className).not.toContain("self-start");
+  });
+
   it("copies the reply's RAW markdown (not the rendered output) and confirms visibly", async () => {
     const raw = "Use `npm test`:\n\n| a | b |\n| - | - |\n| 1 | 2 |\n";
     const writeText = vi.fn().mockResolvedValue(undefined);
