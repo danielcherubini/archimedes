@@ -1,7 +1,9 @@
 use serde_json::json;
 
 use super::support::*;
-use crate::agent::tools::exec::{execute_tool, protected_refusal_text};
+use crate::agent::tools::exec::execute_tool;
+#[cfg(unix)]
+use crate::agent::tools::exec::protected_refusal_text;
 use crate::agent::tools::types::ToolCtx;
 
 // ── the policy tiers (ADR 0030) ───────────────────────────────────────
