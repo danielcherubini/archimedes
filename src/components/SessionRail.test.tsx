@@ -1,11 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-  within,
-} from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import SessionRail, {
   type SessionRailAction,
   type SessionRailRow,
@@ -126,7 +120,7 @@ describe("SessionRail (the session list as icons, for the collapsed left rail)",
     expect(marks[0]!.getAttribute("aria-label")).toBeNull();
   });
 
-  it("clips instead of scrolling, and keeps the strip clear of the footer toggle", () => {
+  it("clips instead of scrolling, and keeps the marks out of the actions' click path", () => {
     render(
       <SessionRail rows={Array.from({ length: 40 }, (_, i) => row({ key: `s${i}` }))} />,
     );
@@ -148,14 +142,18 @@ describe("SessionRail (the session list as icons, for the collapsed left rail)",
       expect(r.className).toMatch(/min-h-/);
       expect(r.className).toMatch(/max-h-/);
     }
-    // The sidebar's footer toggle is `p-2` + `size-6` = 32px of box, so the
-    // strip must stop above that or the last mark lands under the toggle.
+    // The frame is inset from the bottom by ordinary padding. It used to be
+    // `bottom-9`, because the pane's own collapse toggle sat in the footer's
+    // inner corner and the last mark would have landed under it; the toggle is
+    // in the chrome bar now (`ChromeControls`), so the marks may use the whole
+    // sliver. Asserted as a SMALL offset — a `>= 32` test would have passed
+    // forever after a regression back to the old reservation.
     const bottom = frame.className.match(/\bbottom-(\d+)/);
     expect(bottom, "the rail is not offset from the bottom").toBeTruthy();
-    expect(Number(bottom![1]) * 4).toBeGreaterThanOrEqual(32);
-    // The MARKS are a readout and must not steal the toggle's click; the
-    // ACTIONS are buttons and must not be click-through. One `pointer-events`
-    // rule per block, because they have opposite jobs in the same 40px column.
+    expect(Number(bottom![1]) * 4).toBeLessThanOrEqual(8);
+    // The MARKS are a readout and must not steal a click; the ACTIONS are
+    // buttons and must not be click-through. One `pointer-events` rule per
+    // block, because they have opposite jobs in the same 40px column.
     expect(marks.className).toContain("pointer-events-none");
     // The FRAME carries no such class: it also holds the action buttons, and a
     // `pointer-events-none` inherited from it would make them click-through
@@ -191,33 +189,17 @@ describe("SessionRail (the session list as icons, for the collapsed left rail)",
     expect(screen.queryByTestId("session-rail")).toBeNull();
   });
 
-  // -- The action strip (the collapsed rail's other job: the pane's four
-  // -- commands, so collapsing the sidebar does not cost you the commands) --
+  // -- The action strip (the collapsed rail's other job: the pane's own
+  // -- commands, so collapsing the sidebar does not cost you those commands).
+  // -- `Settings` is NOT one of them any more — the gear lives in the chrome
+  // -- bar's `ChromeControls` in both states, so the rail has one strip, not
+  // -- two. --
 
   const actions: SessionRailAction[] = [
     { id: "open", label: "Open Space", icon: <i />, onClick: vi.fn() },
     { id: "new", label: "New Session", icon: <i />, onClick: vi.fn() },
     { id: "skills", label: "Skills", icon: <i />, onClick: vi.fn() },
   ];
-  const settings: SessionRailAction = {
-    id: "settings",
-    label: "Settings",
-    icon: <i />,
-    onClick: vi.fn(),
-  };
-  // Explicit props, never a spread: a spread of an optional `rows` would let
-  // the component receive `rows={undefined}` and read `.length` off it.
-  const someRows = [row({ key: "s1" }), row({ key: "s2" })];
-  const renderRail = ({
-    rows: r = someRows,
-    actions: a,
-    tailActions,
-  }: {
-    rows?: SessionRailRow[];
-    actions?: SessionRailAction[];
-    tailActions?: SessionRailAction[];
-  }) => render(<SessionRail rows={r} actions={a} tailActions={tailActions} />);
-
   it("renders the actions ABOVE the marks, each clickable by name", () => {
     const onClick = vi.fn();
     render(
@@ -256,7 +238,6 @@ describe("SessionRail (the session list as icons, for the collapsed left rail)",
   it("renders no action strip at all when none are given (the readout-only case)", () => {
     render(<SessionRail rows={[row({ key: "s1" })]} />);
     expect(screen.queryByTestId("session-rail-actions")).toBeNull();
-    expect(screen.queryByTestId("session-rail-tail-actions")).toBeNull();
   });
 
   it("shrinks the marks area to whatever the actions leave, and still clips not scrolls", () => {
@@ -277,81 +258,4 @@ describe("SessionRail (the session list as icons, for the collapsed left rail)",
     expect(marks.className).not.toMatch(/overflow-[a-z]*-(auto|scroll)/);
   });
 
-  // -- The TAIL strip: the command that lives at the BOTTOM of the open pane
-  //    keeps that position when the pane collapses --
-  //
-  // `Settings` is the footer's control in the open sidebar, so it belongs at
-  // the bottom of the rail too — one 4px gap above the pane's own toggle. A
-  // gear that jumped to the TOP of the rail on collapse would read as a
-  // different control in a different place: the eye goes to the bottom for
-  // settings, as it does in the open pane and in every other pane's footer in
-  // this shell (the inspector's gear is bottom-right for the same reason).
-  it("puts the tail action BELOW the marks, clickable", () => {
-    renderRail({ actions, tailActions: [settings] });
-    const kids = [...screen.getByTestId("session-rail").children];
-    const head = screen.getByTestId("session-rail-actions");
-    const marks = screen.getByTestId("session-rail-marks");
-    const tail = screen.getByTestId("session-rail-tail-actions");
-    // DOM order IS visual order (the frame is a `flex-col`), so this reads the
-    // stack the user sees: commands, marks, then the bottom command.
-    expect(kids.indexOf(tail), "tail below the marks").toBeGreaterThan(
-      kids.indexOf(marks),
-    );
-    expect(kids.indexOf(marks), "marks below the head").toBeGreaterThan(
-      kids.indexOf(head),
-    );
-    fireEvent.click(within(tail).getByRole("button", { name: "Settings" }));
-    expect(settings.onClick).toHaveBeenCalledTimes(1);
-  });
-
-  it("ends the tail strip in the 4px gap ABOVE the pane's own toggle", () => {
-    // The footer's toggle is `p-2` + `size-6` = a 32px box sitting 8px off the
-    // bottom, so its top edge is 32px up. The frame ends at `bottom-9` (36px),
-    // which lands the LAST row in the column exactly 4px above that box — the
-    // app's chrome gap, not an invented spacing. `shrink-0` keeps it a real
-    // 24px target when a long session list squeezes everything else.
-    renderRail({ actions, tailActions: [settings] });
-    expect(screen.getByTestId("session-rail").className).toMatch(/\bbottom-9\b/);
-    expect(screen.getByTestId("session-rail-tail-actions").className).toMatch(
-      /\bshrink-0\b/,
-    );
-  });
-
-  it("keeps the marks clickable-through with a tail strip present", () => {
-    // The tail is the block NEAREST the footer toggle: if `pointer-events-none`
-    // leaked from the marks onto it the gear would be dead, and if the marks
-    // grew over it the toggle's click would be eaten.
-    renderRail({ actions, tailActions: [settings] });
-    expect(screen.getByTestId("session-rail-marks").className).toMatch(
-      /\bpointer-events-none\b/,
-    );
-    expect(
-      screen.getByTestId("session-rail-tail-actions").className,
-    ).not.toMatch(/pointer-events-none/);
-  });
-
-
-  it("pushes the tail strip to the bottom with `mt-auto`, NOT with a sibling", () => {
-    // Two ways to anchor the last block of a flex column: give a SIBLING
-    // `flex-1` (so it eats the slack), or give the block itself `margin-top:
-    // auto`. The sibling route looked natural here because the marks area is
-    // already `flex-1` — but it silently breaks the case where that sibling
-    // does not exist, i.e. an EMPTY session list: with no marks block nothing
-    // ate the slack and the gear floated up into the middle of the rail
-    // (rendered it, saw it). `mt-auto` needs no collaborator, so the gear sits
-    // at the bottom whether the space has 24 sessions or none, and the marks
-    // block stays omitted when empty (an empty `role="img"` reading "Sessions
-    // 0" is noise in the a11y tree).
-    renderRail({ rows: [], tailActions: [settings] });
-    expect(screen.queryByTestId("session-rail-marks")).toBeNull();
-    expect(screen.getByTestId("session-rail-tail-actions").className).toMatch(
-      /\bmt-auto\b/,
-    );
-    // And it still works WITH marks — the slack just comes from the list.
-    cleanup();
-    renderRail({ rows: [row({ key: "s1" })], actions, tailActions: [settings] });
-    expect(screen.getByTestId("session-rail-tail-actions").className).toMatch(
-      /\bmt-auto\b/,
-    );
-  });
 });

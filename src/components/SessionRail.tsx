@@ -42,30 +42,26 @@ export interface SessionRailRow {
  * no room for, so it is weight, not a rail-only colour.
  *
  * THE ACTIONS RIDE ALONG, and that is a deliberate reversal of the rail's
- * "readout only" rule. A collapsed sidebar used to cost you the pane's four
+ * "readout only" rule. A collapsed sidebar must not cost you the pane's
  * commands: the buttons are inside the content region (so they are `invisible`
- * here), `Skills` and `Settings` have NO keyboard shortcut, and `Settings` had
- * exactly one other door — the footer gear, which is `!collapsed`, i.e. not
- * rendered while collapsed. So collapsing the sidebar locked you out of
- * Settings until you re-expanded it. The icon strip is the same principle the
- * sliver already follows for the pane's OWN toggle: a collapsed pane keeps its
- * controls, it does not hand them to another surface and make them teleport.
+ * here), and `Skills` has NO keyboard shortcut, so without this strip
+ * collapsing the sidebar would hide the command rather than merely narrow it.
+ * The icon strip is the same principle the sliver already follows: a collapsed
+ * pane keeps its controls, it does not hand them to another surface and make
+ * them teleport.
  *
- * ORDER IS NOT COSMETIC, and the rail splits its commands around the marks by
- * where each command lives when the pane is OPEN: the list's own buttons (Open
- * Space, New Session, Skills) sit ABOVE the marks, at a fixed offset, so the
- * marks keep their positional contract (the Nth mark is the Nth row); the
- * footer's control (Settings) sits at the BOTTOM, in the 4px gap above the
- * pane's own toggle. Collapse therefore moves each command one SURFACE and not
- * one row up or down the screen — the gear stays where the eye already looks
- * for it, as it does in the inspector's bottom-right footer.
+ * THE THREE ARE THE LIST'S OWN BUTTONS (Open Space, New Session, Skills), so
+ * they sit ABOVE the marks at a fixed offset and the marks keep their
+ * positional contract (the Nth mark is the Nth row). `Settings` is NOT one of
+ * them: the gear lives in the chrome bar's `ChromeControls` in both states, so
+ * the rail used to carry a second copy of it at its bottom, and that tail strip
+ * is gone.
  *
  * The blocks also have OPPOSITE pointer rules in the same 40px column — the
- * marks are `pointer-events-none` (a readout must not steal the footer
- * toggle's click), the command strips must be clickable — so
- * `pointer-events-none` is set per block, never on the frame. And `flex-1`
- * belongs to the MARKS alone, which is what pushes the tail strip to the
- * bottom while still letting a long list clip.
+ * marks are `pointer-events-none` (a readout must not steal a click), the
+ * command strip must be clickable — so `pointer-events-none` is set per block,
+ * never on the frame. And `flex-1` belongs to the MARKS alone, which is what
+ * lets a long list clip instead of pushing the frame taller.
  *
  * THE GEOMETRY IS THE `TodoRail` GRAMMAR, unchanged: rows are
  * `flex-1 min-h-5 max-h-10` in a top-anchored column (short lists cluster at
@@ -112,64 +108,15 @@ function SessionMark({
   );
 }
 
-/**
- * One column of rail command buttons. Extracted because the rail uses it
- * TWICE — the head strip (Open Space / New Session / Skills) and the tail
- * strip (Settings, which lives in the open pane's footer and so keeps the
- * bottom when collapsed) — and the two must not drift in size or ink.
- */
-function RailActions({
-  testId,
-  items,
-  className = "",
-}: {
-  testId: string;
-  items: SessionRailAction[];
-  className?: string;
-}) {
-  if (items.length === 0) return null;
-  return (
-    <div
-      data-testid={testId}
-      className={`flex shrink-0 flex-col items-center gap-1 ${className}`}
-    >
-      {items.map((a) => (
-        <button
-          key={a.id}
-          type="button"
-          // `aria-label` AND `title`: the rail has no room for a label, so the
-          // hover text is the only thing naming the icon.
-          aria-label={a.label}
-          title={a.label}
-          onClick={a.onClick}
-          // The same `size-6` box as the pane's footer toggle, so the rail is
-          // one grid of controls rather than two sizes.
-          className="flex size-6 shrink-0 items-center justify-center rounded-md text-foreground-subtlest hover:bg-surface-hover hover:text-foreground-subtle"
-        >
-          {a.icon}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 export default function SessionRail({
   rows,
-  actions,
-  tailActions,
+  actions = [],
 }: {
   rows: SessionRailRow[];
   /** Commands at the HEAD of the rail (the pane's top-of-list buttons). */
   actions?: SessionRailAction[];
-  /** Commands at the TAIL (the pane's footer controls, e.g. Settings). */
-  tailActions?: SessionRailAction[];
 }) {
-  if (
-    rows.length === 0 &&
-    (actions?.length ?? 0) === 0 &&
-    (tailActions?.length ?? 0) === 0
-  )
-    return null;
+  if (rows.length === 0 && actions.length === 0) return null;
   const running = rows.filter((r) => r.status === "running").length;
   const waiting = rows.filter((r) => r.status === "waiting").length;
   // The accessible name is the COUNTS — the marks carry no text, and the list
@@ -186,17 +133,43 @@ export default function SessionRail({
     .join(", ");
   return (
     // The FRAME is positioned only — no `pointer-events-none` here, or the
-    // action buttons below would be click-through. `bottom-9`: clear of the
-    // footer's toggle (`p-2` + `size-6` = 32px of box).
+    // action buttons below would be click-through. `bottom-2` is ordinary
+    // padding: the rail used to stop at `bottom-9` to clear the pane's own
+    // collapse toggle in the footer, and that toggle now lives in the chrome
+    // bar, so the sliver's whole height is the rail's again.
     // NO folder/heading mark: the rail starts directly under the active TAB
     // (the tab strip's `pl-1` lines it up with this column), so the space it
     // belongs to is already lit one row above — herdr numbers its rail because
     // its rail IS the workspace list, while here the tabs are that list.
     <div
       data-testid="session-rail"
-      className="absolute inset-x-0 top-2 bottom-9 flex flex-col gap-1 overflow-hidden"
+      className="absolute inset-x-0 top-2 bottom-2 flex flex-col gap-1 overflow-hidden"
     >
-      <RailActions testId="session-rail-actions" items={actions ?? []} />
+      {/* The rail's command strip, at the HEAD (above the marks, so the marks
+          keep their positional contract). One column of icon buttons — the
+          open pane's own buttons at the same `size-6`, since a collapsed pane
+          keeps its commands rather than handing them to another surface. */}
+      {actions.length > 0 && (
+        <div
+          data-testid="session-rail-actions"
+          className="flex shrink-0 flex-col items-center gap-1"
+        >
+          {actions.map((a) => (
+            <button
+              key={a.id}
+              type="button"
+              // `aria-label` AND `title`: the rail has no room for a label, so
+              // the hover text is the only thing naming the icon.
+              aria-label={a.label}
+              title={a.label}
+              onClick={a.onClick}
+              className="flex size-6 shrink-0 items-center justify-center rounded-md text-foreground-subtlest hover:bg-surface-hover hover:text-foreground-subtle"
+            >
+              {a.icon}
+            </button>
+          ))}
+        </div>
+      )}
       {/* The marks, and ONLY when there are sessions: an empty `role="img"`
           reading "Sessions 0" is noise, and the command strip is exactly what
           a user with an empty space needs. `flex-1 min-h-0`: the area takes exactly the height the
@@ -226,20 +199,6 @@ export default function SessionRail({
           ))}
         </div>
       )}
-      {/* The TAIL strip, LAST in the column. `flex-1` is on the MARKS, not
-          here; `mt-auto` (see the prop below) is what anchors this block to the
-          bottom of the frame, landing it in the 4px gap above the pane's toggle
-          (`bottom-9`) — which is where the gear lives when the pane is open, so
-          collapsing moves the gear one surface and not one row up the screen. */}
-      <RailActions
-        testId="session-rail-tail-actions"
-        items={tailActions ?? []}
-        // `mt-auto`, not a `flex-1` sibling: the marks block is omitted when
-        // the list is EMPTY, and an anchoring scheme that depends on that
-        // block would leave the gear floating in the middle of the rail
-        // exactly when the space has nothing else to show.
-        className="mt-auto"
-      />
     </div>
   );
 }

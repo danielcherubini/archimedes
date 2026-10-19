@@ -21,8 +21,10 @@ export default function WindowControls() {
     // this container as NOT attention, because "run finishes → click Minimize →
     // walk away" is that feature's main use case and a self-cancelling alert
     // would be worse than none. The scope is these three buttons ONLY — a click
-    // on the rest of the drag bar, a Space tab, or a pane toggle IS attention.
-    // Any control added here inherits the exemption, so add one deliberately.
+    // on the rest of the drag bar, a Space tab, or one of the app controls in
+    // `ChromeControls` (which sits immediately to the left of this container,
+    // OUTSIDE it on purpose) IS attention. Any control added here inherits the
+    // exemption, so add one deliberately.
     <div className="flex items-center gap-0.5" data-window-control>
       <button
         type="button"

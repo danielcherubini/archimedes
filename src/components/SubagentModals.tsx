@@ -291,10 +291,11 @@ export function SubagentModals({ sheetMounted = true }: { sheetMounted?: boolean
           `pointer-events-none` on the region, `pointer-events-auto` on each
           card: the panel spans up to 480px of the window and a `fixed` box
           would otherwise eat every click inside its rect, including controls it
-          does not contain — the `SidePane` footer toggle behind it, and (when
-          dodging) the LEFT pane's footer/toggle, since `LEFT_PANE_WIDTH` is 260
-          and a panel offset 480px from the right edge of an 800px window covers
-          it. The region is therefore CLICK-TRANSPARENT outside its cards, which
+          does not contain — the chrome bar's pane toggles at the window's
+          top-right (the panel is `bottom-right`-anchored and this is a `fixed`
+          box, so a tall one reaches the bar), and (when dodging) the LEFT
+          pane's content, since `LEFT_PANE_WIDTH` is 260 and a panel offset 480px
+          from the right edge of an 800px window covers it. The region is therefore CLICK-TRANSPARENT outside its cards, which
           is also why the geometry costs stopped being a reason to refuse the
           dodge: an overlap that steals no clicks is a painting question only.
           THE PRICE, named honestly, is everything the frame itself would have

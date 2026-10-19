@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { PanelRightIcon } from "lucide-react";
-import { useHasPendingRequest } from "../hooks/useHasPendingRequest";
 import { useTodoBoards } from "../hooks/useTodoBoards";
 import { basenameOfPath } from "../lib/paths";
 import { useSessions } from "../store/sessions";
@@ -82,16 +80,14 @@ function initialWidth(): number {
  *   a collapse too, but no longer because of this paragraph: the gate host
  *   `SubagentModals` is mounted at the `App` root, so
  *   it was never inside the clipped frame to begin with.)
- *   The pane owns its collapse toggle at the frame's INNER-BOTTOM corner
- *   (bottom LEFT — the side facing the chat) and keeps it in BOTH states: the
- *   sliver is exactly the room that keeps it on screen, so the control never
- *   migrates to the chrome bar (and there is no keyboard shortcut, so it could
- *   not come back any other way). It stays INSET from the left edge so the 4px
- *   resize handle stays grabbable there. The collapsed flag is shared via
- *   `sidePaneState`: the module seeds the flag from `localStorage` at import
- *   (it is the single persistence owner) — `SidePane` READS it via
- *   `useSyncExternalStore` and WRITES it from its own toggle (both directions)
- *   and from the auto-open edge, which can only ever write `false`.
+ *   The pane holds NO collapse control: its toggle lives in the chrome bar's
+ *   `ChromeControls`, beside the window controls, in both states (there is no
+ *   keyboard shortcut for this pane, and none is needed — the button is always
+ *   on screen). The collapsed flag is shared via `sidePaneState`: the module
+ *   seeds the flag from `localStorage` at import (it is the single persistence
+ *   owner) — `SidePane` READS it via `useSyncExternalStore`, and the only
+ *   writers are that chrome-bar toggle and the auto-open edge below, which can
+ *   only ever write `false`.
  * - **Resize:** a 4px drag handle on the frame's left edge (a `w-1`
  *   `cursor-col-resize` div, transparent hit area — a 2px
  *   `bg-foreground-subtlest/50` line shows on hover/while dragging). The
@@ -106,13 +102,11 @@ export default function SidePane() {
   const [width, setWidthState] = useState(initialWidth);
   // The shared collapsed flag (the module seeds it from localStorage at
   // import). This component READS it for the frame's width — the
-  // `SIDE_PANE_RAIL` sliver while collapsed, NOT 0 — and WRITES it, from its
-  // OWN toggle below (both directions) and from the auto-open edge (which can
-  // only ever write `false`). There is NO chrome-bar control: outside the tests,
-  // the only writers of `setSidePaneCollapsed` are those two lines in this
-  // file, so the toggle that stays in the sliver is the ONLY thing that ever
-  // closes the frame (and no keyboard shortcut exists to do it another way) —
-  // pinned by the `KEEPS its toggle while collapsed` case.
+  // `SIDE_PANE_RAIL` sliver while collapsed, NOT 0. It WRITES it in exactly one
+  // place, the auto-open edge below, which can only ever write `false`: closing
+  // the frame is the chrome bar toggle's job alone (ADR 0042 — the pane opens
+  // itself and never closes itself), and that control now sits outside this
+  // component, so nothing in this file renders it.
   const collapsed = useSyncExternalStore(
     subscribeSidePane,
     getSidePaneCollapsed,
@@ -297,8 +291,6 @@ export default function SidePane() {
   // neither is the hydration gap that follows one: the session switched TO has
   // no transcript yet, so its board is not knowable and the re-baseline holds
   // until it is (see `hydrated`).
-  // The `bg-warning` dot on the collapsed toggle (see the toggle below).
-  const hasPendingRequest = useHasPendingRequest();
   const visible = boardCount > 0;
   const prevVisibleRef = useRef(visible);
   // The session `prevVisibleRef` describes. `visible` is PER-SESSION (it reads
@@ -376,8 +368,7 @@ export default function SidePane() {
     // — the content stays MOUNTED and is CLIPPED, which is what keeps the
     // board's scroll position (and everything else that lives in that subtree)
     // across a collapse. The sliver is not merely empty space: it is the room
-    // that keeps the pane's own toggle on screen, and while collapsed the
-    // toggle is joined by the rail's marks (`TodoRail`) — one per todo board,
+    // the collapsed rail's marks (`TodoRail`) draw in — one per todo board,
     // because the clipped board cannot render in 40px.
     <div
       style={{ width: collapsed ? SIDE_PANE_RAIL : width }}
@@ -444,50 +435,17 @@ export default function SidePane() {
         </div>
       </div>
       {/* The session's config lines (Model / Reasoning / Context) — the lines
-          that left the composer's bottom row. Mounted AFTER the scroll area and
-          BEFORE the toggle: inside the scroller the block would scroll away with
-          a growing todo board, and before the scroller it would sit above the
-          title. The Model line and the context bar are NEVER data-gated (unlike
-          the todo section); the Reasoning line renders only when the session's
-          options carry a `thought_level` select. So with no active session the
-          block is the Model stub and an empty 0% track. `collapsed` is
+          that left the composer's bottom row. Mounted AFTER the scroll area:
+          inside the scroller the block would scroll away with a growing todo
+          board, and before the scroller it would sit above the title. The Model
+          line and the context bar are NEVER data-gated (unlike the todo
+          section); the Reasoning line renders only when the session's options
+          carry a `thought_level` select. So with no active session the block is
+          the Model stub and an empty 0% track. `collapsed` is
           passed rather than re-read — the block lives outside the scroller, so
           the scroller's `invisible`-while-collapsed class cannot reach it and it
           needs its own (see `SessionConfigBlock`). */}
       <SessionConfigBlock collapsed={collapsed} />
-      {/* The pane's OWN collapse toggle, at the frame's inner-bottom corner
-          (bottom LEFT for a right-hand pane — it points back at the chat).
-          `left-2` (8px) is not cosmetic: the 4px resize handle spans the
-          frame's full height, and a toggle flush on the edge would make the
-          pane unresizable in that band. Inside `overflow-hidden` but clear of
-          the `rounded-xl` corner arc, so nothing clips it.
-
-          Rendered in BOTH states, and it is the pane's ONLY collapse control:
-          the sliver exists precisely so this button stays on screen when
-          collapsed (the chrome bar holds no pane control, and no shortcut
-          exists), so it never migrates anywhere. The `bg-warning` pending dot
-          rides THIS button too — see just below, where it is gated on
-          `collapsed`, because its meaning is "something needs you behind the
-          hidden pane". */}
-      <button
-        type="button"
-        data-testid="right-pane-toggle"
-        aria-label={collapsed ? "Expand side pane" : "Collapse side pane"}
-        aria-pressed={!collapsed}
-        onClick={() => setSidePaneCollapsed(!collapsed)}
-        className="absolute bottom-2 left-2 z-10 rounded-md size-6 hover:bg-surface-hover"
-      >
-        <PanelRightIcon className="size-4" />
-        {/* The `bg-warning` dot shows ONLY while collapsed: its meaning is
-            "something needs you behind the hidden pane", so it would be noise
-            while the pane is open and its contents are already visible. */}
-        {collapsed && hasPendingRequest && (
-          <span
-            className="absolute top-0.5 right-0.5 size-1.5 rounded-full bg-warning"
-            aria-hidden
-          />
-        )}
-      </button>
       {/* The collapsed rail's board marks: one tick or dot per BOARD (the
           parent's list, then one per running child), because a 40px sliver can
           hold the SHAPE of a board and nothing else. Rendered only while

@@ -25,7 +25,15 @@ import { useInteractive } from "../store/interactive";
 import { usePermissions } from "../store/permissions";
 import { useSubagents } from "../store/subagents";
 import { useSettings } from "../store/settings";
-import { generateFrames, getVariantGridSize } from "../lib/braille-loader";
+import {
+  brailleLoaderVariants,
+  generateFrames,
+  getVariantGridSize,
+} from "../lib/braille-loader";
+import {
+  MIN_INDICATOR_WIDTH_CLASS,
+  MIN_INDICATOR_WIDTH_PX,
+} from "./chat/WorkingIndicator";
 import type {
   AgentDefinitionDto,
   AppSettings,
@@ -36,6 +44,16 @@ import type {
 import { setSidePaneCollapsed } from "../lib/sidePaneState";
 import { activeMentionToken, isOutsideSpaceQuery } from "../lib/skills";
 import { MAX_CHAT_ATTACHMENTS } from "../lib/chatAttachments";
+
+/**
+ * The monospace advance as a fraction of font size, used to turn a braille
+ * grid's cell count into the px the `BrailleLoader` actually occupies at
+ * `fontSize={14}`. 0.6em is the conventional mono advance and the one the
+ * indicator's floor is derived from — the constant lives in the test so the
+ * floor is checked against an INDEPENDENT statement of the arithmetic rather
+ * than against the component's own number.
+ */
+const MONO_ADVANCE_EM = 0.6;
 
 /** A full settings fixture (the spinner-style tests seed the store with it). */
 const SETTINGS_FIXTURE: AppSettings = {
@@ -536,51 +554,202 @@ describe("ChatStream", () => {
     expect(screen.queryByRole("status")).toBeNull();
   });
 
-  it("pins the working indicator above the composer (below the messages, outside the scroll region)", () => {
+  // --- The working indicator lives IN the composer's bottom row ------------
+  //
+  // It used to be a full-width bar parked ABOVE the composer box, pulled down
+  // onto it with `-mb-2` so the two read as one surface. It is now a single
+  // item IN that surface: the bottom row's left end, on the same line as the
+  // `+` and Send buttons. So the two properties that bar needed — the `-mb-2`
+  // hug, and being a row of its own between the transcript and the composer —
+  // are gone, and what replaces them is that the indicator shares a line with
+  // the actions and cannot push them off.
+
+  it("renders the working indicator in the composer's bottom row, on the buttons' line", () => {
     seedLiveSession();
     useSessions.getState().addUserMessage("s1", "hi");
     useSessions.getState().beginTurn("s1");
     const { container } = render(<ChatStream />);
-    const scroll = container.querySelector(".overflow-y-auto");
-    const indicator = container.querySelector(
+    // EXACTLY ONE indicator. The move relocates the row; it does not leave the
+    // old bar above the composer standing there too (a `querySelector` would
+    // happily read whichever copy came first and never notice the twin).
+    const indicators = container.querySelectorAll(
       '[data-testid="working-indicator"]',
     );
-    expect(indicator).toBeTruthy();
-    // Pinned: NOT inside the scroll region…
-    expect(indicator?.closest(".overflow-y-auto")).toBeNull();
-    // No border under the row (the faint separator is gone — the row is
-    // bare against the composer below it), and no dim filler line after
-    // the quip (the row is just the spinner + the quip).
+    expect(indicators).toHaveLength(1);
+    const indicator = indicators[0];
+    // INSIDE the composer box (it used to sit outside it, above).
+    const island = container.querySelector(
+      '[data-testid="composer-island"]',
+    ) as HTMLElement;
+    expect(island.contains(indicator)).toBe(true);
+    // SAME LINE as `+` and Send: the indicator and the button wrapper are
+    // SIBLINGS of one flex row, and the indicator is the row's first item
+    // (the buttons stay right-aligned via the wrapper's `ml-auto`).
+    const attach = island.querySelector('[aria-label="Attach files"]')!;
+    const buttonWrapper = attach.parentElement!;
+    expect(indicator!.parentElement!.className).toContain("items-center");
+    expect(indicator!.parentElement).toBe(buttonWrapper.parentElement);
+    expect(indicator!.nextElementSibling).toBe(buttonWrapper);
+    // It is NOT inside the button wrapper: that wrapper is `ml-auto` and holds
+    // the actions only — putting the quip in there would right-align it too.
+    expect(buttonWrapper.contains(indicator)).toBe(false);
+    // The bar's own chrome is gone with the bar: no bottom-border separator, no
+    // dim filler line after the quip, and no `-mb-2` hug (there is no gap left
+    // to close — it is already inside the box).
     expect(indicator?.className).not.toContain("border-b");
+    expect(indicator?.className).not.toContain("-mb-2");
     expect(indicator?.querySelector(".bg-foreground-subtlest")).toBeNull();
-    // Pulled a few px down toward the composer (the row hugs the input
-    // box — the gap between them is the composer's `m-3` minus the
-    // row's `-mb-2`).
-    expect(indicator?.className).toContain("-mb-2");
-    // …and BELOW it (right above the composer — NOT at the top of the
-    // page): the indicator follows the scroll region in DOM order.
-    expect(
-      scroll!.compareDocumentPosition(indicator!) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+    // Still OUTSIDE the transcript's scroll region, so a long transcript cannot
+    // scroll the working line away.
+    expect(indicator?.closest(".overflow-y-auto")).toBeNull();
   });
 
-  it("pins the 'Waiting for your input…' line above the composer too", () => {
+  it("puts the 'Waiting for your input…' line in the same row", () => {
     seedLiveSession();
     useSessions.getState().addUserMessage("s1", "hi");
     useInteractive.getState().applyState("s1", { state: "blocked" });
     const { container } = render(<ChatStream />);
-    const scroll = container.querySelector(".overflow-y-auto");
+    const island = container.querySelector(
+      '[data-testid="composer-island"]',
+    ) as HTMLElement;
     const indicator = container.querySelector(
       '[data-testid="working-indicator"]',
     );
-    expect(indicator).toBeTruthy();
     expect(indicator?.textContent).toContain("Waiting for your input…");
-    expect(indicator?.closest(".overflow-y-auto")).toBeNull();
-    expect(
-      scroll!.compareDocumentPosition(indicator!) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+    expect(island.contains(indicator)).toBe(true);
+    expect(indicator!.closest(".overflow-y-auto")).toBeNull();
+  });
+
+  it("truncates the quip instead of pushing `+` and Send off the row", () => {
+    // The row is a fixed-height flex line, and a quip can be ~60 characters
+    // (see `lib/spin-quips.ts`). In a flex row an unshrinkable text child
+    // GROWS the line and squeezes the buttons, so the text must be the thing
+    // that gives: `min-w-0` + `truncate` on the text ITSELF (a flex child's
+    // automatic minimum is its content width, which is what makes `truncate` a
+    // no-op without it), and `shrink-0` on the button wrapper so a long quip
+    // cannot squeeze two 24–28px hit targets.
+    //
+    // The `min-w-0` sits on the `<p>` and NOT on the indicator box, and that is
+    // the fix: on the box it let the whole indicator shrink to nothing, which
+    // is how the `shrink-0` spinner ended up painting over `+` (see the next
+    // two cases). WHAT THIS TEST CAN AND CANNOT SAY is the same limit every
+    // layout assertion here has — jsdom has no layout engine — so these are the
+    // class contract, not a measured layout.
+    seedLiveSession();
+    useSessions.getState().addUserMessage("s1", "hi");
+    useSessions.getState().beginTurn("s1");
+    const { container } = render(<ChatStream />);
+    const indicator = container.querySelector(
+      '[data-testid="working-indicator"]',
+    ) as HTMLElement;
+    const text = indicator.querySelector("p") as HTMLElement;
+    expect(text.className).toContain("truncate");
+    // The item that shrinks is the TEXT, not the box that also holds the
+    // spinner — so the shrink permission lives on the `<p>`.
+    expect(text.className).toContain("min-w-0");
+    expect(indicator.className).not.toContain("min-w-0");
+    // `shrink-0` is on the wrapper, not on the buttons: flex would otherwise
+    // squeeze BOTH buttons to fit the quip.
+    const attach = container.querySelector(
+      '[aria-label="Attach files"]',
+    ) as HTMLElement;
+    expect(attach.parentElement!.className).toContain("shrink-0");
+    expect(attach.parentElement!.className).toContain("ml-auto");
+  });
+
+  it("floors the indicator's width at the widest spinner (the spinner cannot overlap `+`)", () => {
+    // The narrow-row defect: the box used to carry a bare `min-w-0`, so under
+    // enough pressure it shrank toward zero while its `shrink-0` spinner kept
+    // its intrinsic ~50px and painted OVER the `+` button — with the quip fully
+    // truncated and no way to stop it. The crossover is reachable at the app's
+    // DEFAULT 800px window with the side pane open, so the box now has a floor
+    // instead of a zero minimum.
+    seedLiveSession();
+    useSessions.getState().addUserMessage("s1", "hi");
+    useSessions.getState().beginTurn("s1");
+    const { container } = render(<ChatStream />);
+    const indicator = container.querySelector(
+      '[data-testid="working-indicator"]',
+    ) as HTMLElement;
+    expect(indicator.className).toContain(MIN_INDICATOR_WIDTH_CLASS);
+    // The class is spelled as a LITERAL rather than interpolated from the px
+    // number, because Tailwind scans source text and would never emit a class
+    // built at runtime. So the pair needs pinning: the spacing step (14) times
+    // the 0.25rem base must equal the px the arithmetic below is checked against.
+    expect(MIN_INDICATOR_WIDTH_CLASS).toBe(
+      `min-w-${MIN_INDICATOR_WIDTH_PX / 4}`,
+    );
+    // The floor must clear the WIDEST spinner the settings can pick, not just
+    // the current one: the grid is at most 6 cells at the fixed `fontSize={14}`
+    // in a 0.6em monospace advance, so ~50px — and 56px is above every variant.
+    const widest = Math.max(
+      ...brailleLoaderVariants.map(
+        (v) => getVariantGridSize(v)[0] * 14 * MONO_ADVANCE_EM,
+      ),
+    );
+    expect(MIN_INDICATOR_WIDTH_PX).toBeGreaterThanOrEqual(widest);
+  });
+
+  it("wraps the composer's bottom row so the floor cannot push Send off the edge", () => {
+    // The floor only helps if the row may break: a `flex-1` item with a
+    // `min-w` floor in a NON-wrapping row simply overflows the other end and
+    // pushes Send out of the island. So the fallback is floor + wrap together,
+    // and a regression on either half re-creates an overlap.
+    seedLiveSession();
+    useSessions.getState().addUserMessage("s1", "hi");
+    useSessions.getState().beginTurn("s1");
+    const { container } = render(<ChatStream />);
+    const indicator = container.querySelector(
+      '[data-testid="working-indicator"]',
+    ) as HTMLElement;
+    const row = indicator.parentElement as HTMLElement;
+    expect(row.className).toContain("flex-wrap");
+    // And the indicator keeps `flex-1` — the wrap only happens once the floor
+    // binds, so on a normal-width row the indicator still absorbs the slack and
+    // the buttons stay right-aligned on the SAME line.
+    expect(indicator.className).toContain("flex-1");
+  });
+
+  it("does NOT wrap inside the indicator (the quip truncates beside the spinner, it does not drop under it)", () => {
+    // The regression the first attempt at the fix shipped with: `flex-wrap` on
+    // BOTH the row and the indicator box. A wrapping flex container breaks on a
+    // flex item's HYPOTHETICAL main size, and the `<p>` has no flex-basis, so it
+    // measures its CONTENT — ~420px for a 60-character quip, which never fits
+    // beside the spinner. So the quip would break onto a second line and the
+    // `truncate` would never run at all: a taller island whose height jumps as
+    // the quips rotate, and no ellipsis anywhere. Worse than the overlap it
+    // replaced. Wrapping is the ROW's job; inside the box the text only shrinks.
+    seedLiveSession();
+    useSessions.getState().addUserMessage("s1", "hi");
+    useSessions.getState().beginTurn("s1");
+    const { container } = render(<ChatStream />);
+    const indicator = container.querySelector(
+      '[data-testid="working-indicator"]',
+    ) as HTMLElement;
+    expect(indicator.className).not.toContain("flex-wrap");
+    // The text still carries both halves of truncation, since nothing else can
+    // make it give now that the box will neither wrap nor clip.
+    const text = indicator.querySelector("p") as HTMLElement;
+    expect(text.className).toContain("min-w-0");
+    expect(text.className).toContain("truncate");
+  });
+
+  it("keeps the quip at full foreground ink (the composer fill is lighter than the chat plane)", () => {
+    // The indicator's BACKGROUND moved with it: `--color-chat` (#232323) became
+    // `--color-input` (#2b2b2b), and `foreground-subtle` on the new fill
+    // measures 4.46:1 against the 4.76:1 it had on the old one — under WCAG's
+    // 4.5:1 floor, on the line the user reads while the agent works. The token
+    // is therefore load-bearing, not taste: a drift back to `-subtle` would be
+    // invisible to every other test here.
+    seedLiveSession();
+    useSessions.getState().addUserMessage("s1", "hi");
+    useSessions.getState().beginTurn("s1");
+    const { container } = render(<ChatStream />);
+    const text = container.querySelector(
+      '[data-testid="working-indicator"] p',
+    ) as HTMLElement;
+    expect(text.className).toContain("text-foreground");
+    expect(text.className).not.toMatch(/text-foreground-subtle/);
   });
 
   it("runs the configured spinner style (the settings store's spinnerStyle)", () => {
@@ -1303,12 +1472,14 @@ describe("ChatStream", () => {
     expect(screen.queryByRole("status")).toBeNull();
   });
 
-  // The composer's bottom row is TWO BUTTONS. The three config lines (context
-  // bar, model, reasoning) left for the side pane's `SessionConfigBlock`, and
-  // these two pins keep them out — a re-landed bar or trigger would put ~600
-  // mounted model `SelectItem`s back into the subtree that re-renders on every
-  // keystroke (`draft` is the composer's state), which is the perf coupling the
-  // move exists to kill.
+  // The composer's bottom row carries the working indicator and the two action
+  // buttons — and NOT the three config lines (context bar, model, reasoning),
+  // which left for the side pane's `SessionConfigBlock`. These pins keep them
+  // out: a re-landed bar or trigger would put ~600 mounted model `SelectItem`s
+  // back into the subtree that re-renders on every keystroke (`draft` is the
+  // composer's state), which is the perf coupling the move exists to kill. The
+  // assertion reads the WHOLE island, so it covers the working indicator's slot
+  // too — giving the row a new item must not become a doorway for them.
   it("the composer island hosts NO config line (they are the side pane's now)", () => {
     // A FULL session: usage known AND both config options present — the state
     // in which a re-landed bar/trigger would definitely render. Anything the
@@ -1374,8 +1545,11 @@ describe("ChatStream", () => {
     // wrapper still exists.
     expect(send.parentElement).toBe(attach.parentElement);
     expect(send.parentElement!.className).toContain("ml-auto");
-    // They are the wrapper's ONLY children: the row is two buttons and nothing
-    // else (the deleted cluster left no container behind).
+    // They are the WRAPPER's only two children, Send last. (The wrapper, not
+    // the row: the row's other item is the working indicator, and it is a
+    // SIBLING of this wrapper — see the placement test above. Nothing may crowd
+    // in beside the two actions, and Send stays the right-most thing in the
+    // composer.)
     expect(send.parentElement!.childElementCount).toBe(2);
     expect(send.parentElement!.lastElementChild).toBe(send);
   });

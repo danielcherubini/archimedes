@@ -20,7 +20,7 @@ export const SPIN_QUIPS: readonly string[] = Object.freeze([
   "Collapsing quantum wavefunctions just by looking at them...",
   "Hunting for rogue gravitons inside the server rack...",
   "Paging memory to disk because we refused to optimize...",
-  "Optimizing the optimizer so it can optimize faster...",
+  "Optimizing the optimizer so it can optimize optimally...",
   "Searching the entire keyboard for the legendary 'Any' key...",
   "Reticulating multi-dimensional splines...",
   "Running gradient ascent until we reach enlightenment...",

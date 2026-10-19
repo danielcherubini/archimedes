@@ -230,7 +230,7 @@ describe("SpaceTabs (the Spaces as browser-style tabs at the top of the chat)", 
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("the tab bar holds NO `...` menu, NO pane toggle and NO warning dot (the menu lives in the sidebar's `Sessions` header; the pane toggles live in their panes in BOTH states — the chrome bar holds none)", () => {
+  it("the tab bar holds NO `...` menu, NO pane toggle and NO warning dot (the menu lives in the sidebar's `Sessions` header; the pane toggles live in the chrome bar's `ChromeControls`, never in the strip)", () => {
     useSessions.setState({
       spaces: [space("/w/alpha")],
       activeSpacePath: "/w/alpha",
@@ -239,11 +239,11 @@ describe("SpaceTabs (the Spaces as browser-style tabs at the top of the chat)", 
     expect(
       screen.queryByRole("button", { name: "Session actions" }),
     ).toBeNull();
-    // The pane toggles live in their panes in BOTH states — a collapsed pane
-    // keeps its sliver exactly so that its toggle stays on screen, so the
-    // chrome bar holds none either (`App.test.tsx` pins that), and the tab
-    // strip never holds one. ALL four names, because the old assertion here
-    // queried a label that had since been renamed and so could never fail.
+    // The pane toggles live in the chrome bar's `ChromeControls` (`App.test.tsx`
+    // pins that), never in the tab strip: the tabs are Spaces, and a strip that
+    // also held window furniture would read as a second titlebar. ALL four
+    // names, because the old assertion here queried a label that had since been
+    // renamed and so could never fail.
     for (const label of [
       "Collapse sidebar",
       "Expand sidebar",

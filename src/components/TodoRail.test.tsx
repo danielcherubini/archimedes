@@ -153,19 +153,23 @@ describe("TodoRail (one mark per todo board, for the collapsed rail)", () => {
     expect(rail.className).not.toContain("justify-center");
   });
 
-  it("stays out of the way: no pointer capture (the toggle under it must stay clickable)", () => {
+  it("stays out of the way: no pointer capture (a readout must not eat clicks)", () => {
     render(<TodoRail mainItems={[]} boards={[board("reviewer", "pending")]} />);
     expect(screen.getByTestId("todo-rail").className).toContain("pointer-events-none");
   });
 
-  it("clears the frame's bottom-left corner, where the pane's own toggle lives", () => {
+  it("sits inside the frame with an ordinary inset (it no longer dodges a toggle)", () => {
     render(<TodoRail mainItems={[]} boards={[board("reviewer", "pending")]} />);
     const cls = screen.getByTestId("todo-rail").className;
-    // Anchored to the top and offset from the bottom by at least the toggle's
-    // box (`bottom-2` + `size-6` = 32px), or the last dot lands under it.
+    // The rail used to stop 32px+ above the bottom, because the pane's own
+    // collapse toggle lived in the frame's bottom-left corner and the last dot
+    // would have landed under it. That toggle is in the chrome bar now
+    // (`ChromeControls`), so the marks may use the whole sliver and the offset
+    // is just the frame's padding — asserted as SMALL, because a regression
+    // back to a large offset would be invisible to a `>= 32` test.
     const bottom = cls.match(/\bbottom-(\d+)/);
     expect(bottom, "the rail is not offset from the bottom").toBeTruthy();
-    expect(Number(bottom![1]) * 4).toBeGreaterThanOrEqual(32);
+    expect(Number(bottom![1]) * 4).toBeLessThanOrEqual(8);
   });
 
   it("names every board, with its own count, in the accessible name", () => {

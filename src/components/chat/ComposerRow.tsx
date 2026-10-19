@@ -5,6 +5,8 @@ import AttachmentStrip from "./AttachmentStrip";
 import ComposerMentions, { type MentionRow } from "./ComposerMentions";
 import { activeMentionToken, isOutsideSpaceQuery, type ComposerPrefix } from "../../lib/skills";
 import type { ChatComposerAttachment } from "../../lib/chatAttachments";
+import type { BrailleLoaderVariant } from "../../lib/braille-loader";
+import { WorkingIndicator } from "./WorkingIndicator";
 
 /**
  * The composer: the outer rounded box (drop target), the four-prefix
@@ -12,11 +14,13 @@ import type { ChatComposerAttachment } from "../../lib/chatAttachments";
  * prefixes — plus `?` File completion, ADR 0033), the
  * staged-attachment strip, the controlled textarea (with the four-prefix
  * token `onChange` / `onKeyDown` logic — `$` skills / `#` MCP servers /
- * `@` agents / `?` paths) and the bottom row, which is TWO BUTTONS and nothing
- * else: the `+` attach button and Send, both right-aligned in one `ml-auto`
- * wrapper. The context-usage bar and the model / thinking selectors used to be
- * this row's middle and they are GONE from it — they are the side pane's three
- * config LINES now (`SessionConfigBlock.tsx`).
+ * `@` agents / `?` paths) and the bottom row, which is ONE LINE: the
+ * **working indicator** at the left (`WorkingIndicator` — spinner + quip, or
+ * the waiting / Compacting line, `null` when the session is idle) and, at the
+ * right, the `+` attach button and Send in one `ml-auto` wrapper. The
+ * context-usage bar and the model / thinking selectors used to be this row's
+ * middle and they are GONE from it — they are the side pane's three config
+ * LINES now (`SessionConfigBlock.tsx`).
  *
  * Props-only by design — ALL state stays in `ChatStream` (the `draft`,
  * `picker` and `attachments` state, the `composerRef` the auto-grow and
@@ -47,6 +51,11 @@ export default function ComposerRow({
   composerLocked,
   imageCapable,
   hasImages,
+  agentState,
+  workingOrInTurn,
+  compacting,
+  spinnerStyle,
+  quip,
 }: {
   composerRef: RefObject<HTMLTextAreaElement | null>;
   draft: string;
@@ -98,6 +107,15 @@ export default function ComposerRow({
   composerLocked: boolean;
   imageCapable: boolean;
   hasImages: boolean;
+  /** The working indicator's inputs (`WorkingIndicator`). Derived in
+   * `ChatStream`, not here: this component renders ALWAYS, so a `useSpinQuip`
+   * call in its body would keep rotating quips (and its timer) while the
+   * session is idle. */
+  agentState: "working" | "idle" | "blocked" | undefined;
+  workingOrInTurn: boolean;
+  compacting?: string;
+  spinnerStyle: BrailleLoaderVariant;
+  quip: string;
 }) {
   return (
     <div
@@ -242,17 +260,38 @@ export default function ComposerRow({
         rows={2}
         className="max-h-32 w-full resize-none overflow-y-auto bg-transparent text-ui-base outline-none placeholder:text-foreground-subtlest"
       />
-      <div className="mt-1 flex items-center gap-2">
-        {/* The composer's bottom row is TWO BUTTONS and nothing else, and both
-            ride the SAME `ml-auto` wrapper, so they sit together at the right
-            edge. What used to sit between them is gone: the context bar and the
-            model / thinking selectors are the side pane's three config LINES now
-            (`SessionConfigBlock.tsx`, pinned under the pane's scroll area), and
-            the `gap-1` cluster that knitted the two triggers into one block died
-            with them — a row of actions has no cluster to separate from.
-            `ml-auto` stays on this wrapper (it is what right-aligns Send) and
-            `gap-2` is now the only gap on the row: `+` to Send. */}
-        <div className="ml-auto flex flex-wrap items-center gap-2">
+      <div className="mt-1 flex flex-wrap items-center gap-2">
+        {/* The composer's bottom row: the working indicator at the LEFT, the
+            two buttons at the RIGHT. What used to sit between the buttons is
+            gone: the context bar and the model / thinking selectors are the
+            side pane's three config LINES now (`SessionConfigBlock.tsx`,
+            pinned under the pane's scroll area), and the `gap-1` cluster that
+            knitted the two triggers into one block died with them — a row of
+            actions has no cluster to separate from.
+            THE ROW'S TWO HALVES HAVE OPPOSITE FLEX JOBS, and that split is
+            what keeps a long quip off the buttons. The indicator is `flex-1`
+            with a `min-w` floor (its `<p>` carries the `min-w-0 truncate`): it
+            absorbs the slack AND is allowed to shrink below its own text, so the
+            quip truncates. This wrapper is `ml-auto` (it right-aligns the pair)
+            AND `shrink-0` — without the latter flex
+            would squeeze two 24–28px hit targets to make room for a
+            60-character quip. They are SIBLINGS, not nested: putting the
+            indicator inside this wrapper would right-align it too.
+            THE SPLIT HAS A FLOOR, and below it the ROW wraps: shrinking the
+            indicator forever stops helping once what is left is the spinner,
+            which cannot shrink. So the text gives FIRST, and only when the text
+            is gone does the line BREAK (the `flex-wrap` above), dropping the
+            indicator to its own line above the buttons. The buttons themselves
+            never move, never squash, and never get overprinted — see
+            `WorkingIndicator` for why the floor is 56px. */}
+        <WorkingIndicator
+          agentState={agentState}
+          workingOrInTurn={workingOrInTurn}
+          compacting={compacting}
+          spinnerStyle={spinnerStyle}
+          quip={quip}
+        />
+        <div className="ml-auto flex shrink-0 flex-wrap items-center gap-2">
           {/* The `+` attach button (the native file picker — the same
               staging path as a paste / drop; disabled while the composer
               is locked or the agent doesn't advertise image support,
