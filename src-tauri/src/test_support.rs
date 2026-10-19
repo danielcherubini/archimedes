@@ -29,6 +29,25 @@ pub fn worker_manager<R: tauri::Runtime>(
         .map(|s| s.inner().clone())
 }
 
+use std::sync::Arc;
+
+use crate::agent::events::EventSink;
+use crate::agent::worker::client::WorkerInboundEvent;
+use crate::agent::worker::manager::WorkerHooks;
+
+/// A no-op [`WorkerHooks`] implementation for tests.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct NullHooks;
+
+impl WorkerHooks for NullHooks {
+    fn on_event(&self, _session_id: &str, _is_subagent: bool, _evt: WorkerInboundEvent) {}
+    fn on_crash(&self, _session_id: &str, _code: Option<i32>, _pid: Option<u32>) {}
+    fn sink_for(&self, _parent_session_id: &str) -> Option<Arc<dyn EventSink>> {
+        None
+    }
+    fn register_child_cwd(&self, _session_id: &str, _cwd: &str) {}
+}
+
 /// The app's managed `Db` (the accessor for the headless IPC test — the
 /// `TranscriptPersister`'s rows are asserted through it). `None` when the
 /// app did not manage one.

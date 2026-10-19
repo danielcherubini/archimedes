@@ -27,7 +27,10 @@ pub mod store;
 pub use client::{WorkerError, WorkerErrorKind, WorkerHandle, WorkerInboundEvent};
 pub use core::{default_build_loop, LoopControl, LoopHandles, WorkerCore};
 pub use dispatch::IpcDispatcher;
-pub use manager::{SubagentCapture, WorkerFactory, WorkerManager, DEFAULT_SUBAGENT_DEAD_BOUND};
+pub use manager::{
+    ClosureHooks, SubagentCapture, WorkerFactory, WorkerHooks, WorkerManager,
+    DEFAULT_SUBAGENT_DEAD_BOUND,
+};
 pub use protocol::{
     decode_inbound, decode_outbound, encode_inbound, encode_outbound, Inbound, Outbound,
     ProtoError, StartEnv, StartMode, StoreFrame, SubagentDispatchWire,

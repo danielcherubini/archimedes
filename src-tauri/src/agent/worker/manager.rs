@@ -430,6 +430,61 @@ struct WorkerEntry {
     reaping: bool,
 }
 
+/// The child-cwd registrar signature (the `TranscriptPersister`'s
+/// `set_cwd` — `(session_id, cwd)`; a type alias to keep the
+/// `OnceLock<Arc<dyn Fn>>` out of the field's type — the clippy
+/// `type_complexity` lint).
+pub type CwdRegistrar = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
+/// Closure hook types for [`ClosureHooks`].
+pub type BoxOnCrash = Box<dyn Fn(&str, Option<i32>, Option<u32>) + Send + Sync>;
+pub type BoxOnEvent = Box<dyn Fn(&str, bool, WorkerInboundEvent) + Send + Sync>;
+pub type BoxSinkFor = Box<dyn Fn(&str) -> Option<Arc<dyn EventSink>> + Send + Sync>;
+
+/// The Supervisor-side lifecycle and routing hooks for Workers.
+pub trait WorkerHooks: Send + Sync {
+    fn on_event(&self, session_id: &str, is_subagent: bool, evt: WorkerInboundEvent);
+    fn on_crash(&self, session_id: &str, code: Option<i32>, pid: Option<u32>);
+    fn sink_for(&self, parent_session_id: &str) -> Option<Arc<dyn EventSink>>;
+    fn register_child_cwd(&self, session_id: &str, cwd: &str);
+    fn attach_cwd_registrar(&self, _registrar: CwdRegistrar) {}
+}
+
+/// A `WorkerHooks` implementation wrapping individual closures with a late-bound
+/// `cwd_registrar`.
+pub struct ClosureHooks {
+    pub on_crash: BoxOnCrash,
+    pub on_event: BoxOnEvent,
+    pub sink_for: BoxSinkFor,
+    pub cwd_registrar: std::sync::OnceLock<CwdRegistrar>,
+}
+
+impl ClosureHooks {
+    pub fn attach_cwd_registrar(&self, registrar: CwdRegistrar) {
+        let _ = self.cwd_registrar.set(registrar);
+    }
+}
+
+impl WorkerHooks for ClosureHooks {
+    fn on_event(&self, session_id: &str, is_subagent: bool, evt: WorkerInboundEvent) {
+        (self.on_event)(session_id, is_subagent, evt);
+    }
+    fn on_crash(&self, session_id: &str, code: Option<i32>, pid: Option<u32>) {
+        (self.on_crash)(session_id, code, pid);
+    }
+    fn sink_for(&self, parent_session_id: &str) -> Option<Arc<dyn EventSink>> {
+        (self.sink_for)(parent_session_id)
+    }
+    fn register_child_cwd(&self, session_id: &str, cwd: &str) {
+        if let Some(registrar) = self.cwd_registrar.get() {
+            registrar(session_id, cwd);
+        }
+    }
+    fn attach_cwd_registrar(&self, registrar: CwdRegistrar) {
+        let _ = self.cwd_registrar.set(registrar);
+    }
+}
+
 /// The `WorkerManager`'s `Arc`-backed state (the pump / drive tasks
 /// own clones of the `Arc` — the `&self` methods delegate to the
 /// `Arc`-backed free functions; the `StdMutex` fields are NOT
@@ -442,46 +497,20 @@ struct ManagerState {
     /// The test seam (production: `current_exe()`; tests: the
     /// `fake_worker` binary).
     factory: Arc<dyn WorkerFactory>,
-    /// The `WorkerManager`'s `on_crash` callback (session_id, exit code,
-    /// the DEAD child's pid — see [`OnCrash`]) — the Task-4 stalled-session
-    /// callback (an UNEXPECTED exit — no `detach` / `reap_all` in flight).
-    on_crash: OnCrash,
-    /// (session_id, is_subagent, evt) — the Task-4 router (UI +
-    /// persistence; the `is_subagent` flag is known per attached
-    /// Worker: main `false`, subagent `true`).
-    on_event: Arc<dyn Fn(String, bool, WorkerInboundEvent) + Send + Sync>,
-    /// The parent-scope sink lookup (session_id → the session's
-    /// `TauriSink` — the `subagent-session-started` /
-    /// `subagent-closed` UI lifecycle events are delivered on the
-    /// PARENT session's sink; `None` = no UI delivery).
-    sink_for: SinkLookup,
+    /// The Supervisor lifecycle and routing hooks (`WorkerHooks`).
+    hooks: Arc<dyn WorkerHooks>,
     /// The in-flight subagent dispatchs (session_id → the drive —
     /// the pump flips the settle watch on `agent_settled`, checks the
     /// `reaping` flag on `Exited`, and the `cancel_subagent` flips
     /// the cancel watch).
     drives: StdMutex<HashMap<String, SubagentDrive>>,
-    /// The child-cwd registrar (the `TranscriptPersister`'s `set_cwd` —
-    /// the `dispatch_subagent` flow registers the child's `cwd` (the
-    /// parent's Space) so the persister's `ensure_session_row` creates
-    /// the ephemeral `sessions` row with the right `cwd` — the
-    /// `StoreFrame` carries no `cwd`). Set once via `set_cwd_registrar`
-    /// (the `lib.rs` late-wire — the persister lives in the
-    /// `SessionManager`, which the `WorkerManager` cannot see at
-    /// construction).
-    cwd_registrar: std::sync::OnceLock<CwdRegistrar>,
 }
-
-/// The child-cwd registrar signature (the `TranscriptPersister`'s
-/// `set_cwd` — `(session_id, cwd)`; a type alias to keep the
-/// `OnceLock<Arc<dyn Fn>>` out of the field's type — the clippy
-/// `type_complexity` lint).
-type CwdRegistrar = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 /// The parent-scope sink lookup (session_id → the session's
 /// `TauriSink` — the `subagent-session-started` /
 /// `subagent-closed` UI lifecycle events are delivered on the
 /// PARENT session's sink; `None` = no UI delivery).
-type SinkLookup = Arc<dyn Fn(&str) -> Option<Arc<dyn EventSink>> + Send + Sync>;
+pub type SinkLookup = Arc<dyn Fn(&str) -> Option<Arc<dyn EventSink>> + Send + Sync>;
 
 /// The Worker-crash callback (session_id, exit code, the DEAD child's pid) —
 /// a type alias to keep the `Arc<dyn Fn>` out of the field's and the ctor
@@ -489,7 +518,7 @@ type SinkLookup = Arc<dyn Fn(&str) -> Option<Arc<dyn EventSink>> + Send + Sync>;
 /// [`SinkLookup`] exists for). The pid is the attribution key: the crash log's
 /// name carries the writing process's pid, so the router selects the log that
 /// belongs to the Worker that actually died instead of the newest one on disk.
-type OnCrash = Arc<dyn Fn(String, Option<i32>, Option<u32>) + Send + Sync>;
+pub type OnCrash = Arc<dyn Fn(String, Option<i32>, Option<u32>) + Send + Sync>;
 
 /// A registry of live Workers (session-keyed) + the Supervisor-side
 /// subagent-dispatch flow. The `dead_bound` is OUTSIDE the `Arc`
@@ -497,6 +526,7 @@ type OnCrash = Arc<dyn Fn(String, Option<i32>, Option<u32>) + Send + Sync>;
 /// the `Arc`-backed state — the `StdMutex` maps are not `Clone`).
 pub struct WorkerManager {
     state: Arc<ManagerState>,
+    hooks: Arc<dyn WorkerHooks>,
     /// The **Dead bound** (default 30 min of unexplained silence; production
     /// reads it from `settings.json`'s `subagentDeadBoundSecs` via
     /// `with_dead_bound_secs`, tests shorten it via `with_dead_bound`).
@@ -510,18 +540,34 @@ impl WorkerManager {
         on_event: Arc<dyn Fn(String, bool, WorkerInboundEvent) + Send + Sync>,
         sink_for: SinkLookup,
     ) -> Self {
+        let hooks = Arc::new(ClosureHooks {
+            on_crash: Box::new(move |session_id, code, pid| {
+                on_crash(session_id.to_string(), code, pid);
+            }),
+            on_event: Box::new(move |session_id, is_subagent, evt| {
+                on_event(session_id.to_string(), is_subagent, evt);
+            }),
+            sink_for: Box::new(move |parent_session_id| sink_for(parent_session_id)),
+            cwd_registrar: std::sync::OnceLock::new(),
+        });
+        Self::with_hooks(factory, hooks)
+    }
+
+    pub fn with_hooks(factory: Arc<dyn WorkerFactory>, hooks: Arc<dyn WorkerHooks>) -> Self {
         Self {
             state: Arc::new(ManagerState {
                 workers: StdMutex::new(HashMap::new()),
                 factory,
-                on_crash,
-                on_event,
-                sink_for,
+                hooks: hooks.clone(),
                 drives: StdMutex::new(HashMap::new()),
-                cwd_registrar: std::sync::OnceLock::new(),
             }),
+            hooks,
             dead_bound: DEFAULT_SUBAGENT_DEAD_BOUND,
         }
+    }
+
+    pub fn hooks(&self) -> &Arc<dyn WorkerHooks> {
+        &self.hooks
     }
 
     /// A test variant with a shortened **Dead bound** (the `__slow__`
@@ -531,6 +577,7 @@ impl WorkerManager {
     pub fn with_dead_bound(self, bound: Duration) -> Self {
         Self {
             state: self.state,
+            hooks: self.hooks,
             dead_bound: bound,
         }
     }
@@ -680,12 +727,15 @@ impl WorkerManager {
         );
     }
 
-    /// Set the child-cwd registrar (set-once — a second call is a
-    /// NO-OP; the `lib.rs` late-wire — the persister lives in the
-    /// `SessionManager`, which the `WorkerManager` cannot see at
-    /// construction).
+    /// Set the child-cwd registrar (the `lib.rs` late-wire — the persister lives
+    /// in the `SessionManager`, which the `WorkerManager` cannot see at construction).
     pub fn set_cwd_registrar(&self, registrar: CwdRegistrar) {
-        let _ = self.state.cwd_registrar.set(registrar);
+        self.hooks.attach_cwd_registrar(registrar);
+    }
+
+    /// Attach the child-cwd registrar (alias for [`Self::set_cwd_registrar`]).
+    pub fn attach_cwd_registrar(&self, registrar: CwdRegistrar) {
+        self.set_cwd_registrar(registrar);
     }
 
     /// Cancel an in-flight subagent dispatch (a parent turn abort —
@@ -878,7 +928,7 @@ fn start_pump(
             } else {
                 session_id.clone()
             };
-            (state.on_event)(delivery_id, is_subagent, evt.clone());
+            state.hooks.on_event(&delivery_id, is_subagent, evt.clone());
             match evt {
                 // The `SubagentCapture` feed (the subagent's
                 // `SinkFrame` `session-update` stream — the final-text
@@ -987,7 +1037,7 @@ fn start_pump(
                         // attribution key (the crash log's name carries the
                         // writing pid, so the banner names THIS Worker's log
                         // rather than the newest one in the dir).
-                        (state.on_crash)(session_id.clone(), code, pid);
+                        state.hooks.on_crash(&session_id, code, pid);
                     }
                     break;
                 }
@@ -1243,9 +1293,7 @@ fn dispatch_subagent(
     let child_id = pre_minted.unwrap_or_else(mint_session_id);
     // The child's `cwd` (the persister's `ensure_session_row` — the
     // ephemeral `sessions` row; the `StoreFrame` carries no `cwd`).
-    if let Some(reg) = &state.cwd_registrar.get() {
-        reg(&child_id, &wire.parent_cwd);
-    }
+    state.hooks.register_child_cwd(&child_id, &wire.parent_cwd);
     let env = StartEnv::from_parts(
         child_id.clone(),
         wire.parent_cwd.clone(),
@@ -1265,7 +1313,7 @@ fn dispatch_subagent(
     // `model` in the COMPOSED `provider/id` form, the
     // `thinkingLevel` the step-2 RESOLVED value, the
     // `enabledTools` the child's resolved set).
-    if let Some(sink) = (state.sink_for)(&parent_session_id) {
+    if let Some(sink) = state.hooks.sink_for(&parent_session_id) {
         sink.emit(
             "subagent-session-started",
             json!({
@@ -1720,7 +1768,7 @@ async fn finish_subagent(
     };
     // The guards are DROPPED before the emissions (a sink emission must never
     // run under the `drives` lock, and the borrow above is the only one).
-    if let Some(sink) = (state.sink_for)(parent_session_id) {
+    if let Some(sink) = state.hooks.sink_for(parent_session_id) {
         for request_id in open_gates {
             // ADR 0055: keyed to the CHILD id — the Client stored the gate under
             // `payload.sessionId` (the child) in App.tsx's `interactive-request`
@@ -1734,7 +1782,7 @@ async fn finish_subagent(
     }
     // The `subagent-closed` UI lifecycle event (the PARENT session's
     // sink — the `subagent.rs:721/743` payload shapes).
-    if let Some(sink) = (state.sink_for)(parent_session_id) {
+    if let Some(sink) = state.hooks.sink_for(parent_session_id) {
         match &outcome {
             SubagentOutcome::Completed { metrics, .. } => {
                 sink.emit(
@@ -3965,6 +4013,54 @@ mod tests {
         assert!(
             !tools.iter().any(|t| t == "list_agents"),
             "the guard excludes `list_agents`: {child_enabled:?}"
+        );
+    }
+
+    #[test]
+    fn worker_manager_with_hooks_invokes_custom_hooks() {
+        use super::WorkerHooks;
+
+        struct CustomHooks {
+            events: Arc<StdMutex<Vec<(String, bool)>>>,
+            crashes: CrashLog,
+            registered_cwds: Arc<StdMutex<Vec<(String, String)>>>,
+        }
+        impl WorkerHooks for CustomHooks {
+            fn on_event(&self, session_id: &str, is_subagent: bool, _evt: WorkerInboundEvent) {
+                self.events
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push((session_id.to_string(), is_subagent));
+            }
+            fn on_crash(&self, session_id: &str, code: Option<i32>, pid: Option<u32>) {
+                self.crashes
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push((session_id.to_string(), code, pid));
+            }
+            fn sink_for(&self, _parent_session_id: &str) -> Option<Arc<dyn EventSink>> {
+                None
+            }
+            fn register_child_cwd(&self, session_id: &str, cwd: &str) {
+                self.registered_cwds
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push((session_id.to_string(), cwd.to_string()));
+            }
+        }
+
+        let hooks = Arc::new(CustomHooks {
+            events: Arc::new(StdMutex::new(Vec::new())),
+            crashes: Arc::new(StdMutex::new(Vec::new())),
+            registered_cwds: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let factory: Arc<dyn WorkerFactory> = Arc::new(FakeWorkerFactory);
+        let manager = WorkerManager::with_hooks(factory, hooks.clone());
+        manager.hooks().register_child_cwd("s1", "/tmp/cwd");
+        assert_eq!(hooks.registered_cwds.lock().unwrap().len(), 1);
+        assert_eq!(
+            hooks.registered_cwds.lock().unwrap()[0],
+            ("s1".to_string(), "/tmp/cwd".to_string())
         );
     }
 }
