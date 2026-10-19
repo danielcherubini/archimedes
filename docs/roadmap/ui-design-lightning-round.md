@@ -113,8 +113,9 @@ Decisions already made: the band reuses the **token** `bg-composer` (never a cop
 **Acceptance criteria:**
 - [ ] `npx vitest run src/components/MessageBubble.test.tsx src/components/chat/MessageList.gap.test.tsx` passes.
 - [ ] `npx vitest run src/components/MessageBubble.codeblock.test.tsx src/components/MessageBubble.markdown.test.tsx` still passes (both render agent text through the changed arm).
+- [ ] **Failing-first:** write the band-shape test and the copy-button test BEFORE step 1, and confirm both are RED (there is no `agent-band` testid and no copy button today — they must fail, not merely not exist).
 - [ ] A new test asserts the band has `bg-composer`, `rounded-xl`, `-mt-2`, `mb-5`.
-- [ ] A new test asserts `data-testid="user-band"` still has **no** `my-*` and `user-message` still has `my-5` (the user case must not regress).
+- [ ] The user case must not regress. This is **already pinned** at `MessageBubble.test.tsx:197,199` (`user-message` has `my-5`, `user-band` has no `my-*`) — do NOT re-add it; confirm those two assertions still pass.
 - [ ] Copy test: stub clipboard with `Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true })`, click, assert `writeText` was called with the raw `message.text` (including markdown characters like `` ` `` and `|`), then assert the button's accessible name becomes `Copied`.
 - [ ] A test asserts the copy button is in the DOM **without** any hover/focus step (it is always visible).
 - [ ] `npx tsc --noEmit` clean; `npx vitest run` green at 94 files.
