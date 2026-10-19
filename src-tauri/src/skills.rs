@@ -83,7 +83,10 @@ pub fn discover_skills(space_path: Option<&Path>) -> Vec<SkillInfo> {
 /// roots. `roots` order defines first-wins dedupe precedence.
 pub fn discover_in_roots(roots: &[(PathBuf, SkillScope)]) -> Vec<SkillInfo> {
     // Shared across ALL roots: a symlink in a later root pointing at an
-    // earlier root's `SKILL.md` collapses by PATH, not just by name.
+    // earlier root's `SKILL.md` collapses by PATH, not just by name. (That is
+    // one of TWO link cases — `find_skill_files` also follows symlinked Skill
+    // DIRECTORIES, deduped per root by canonical dir; this set stays the
+    // canonical-FILE dedupe and must stay shared.)
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut by_name: HashMap<String, SkillInfo> = HashMap::new();
 
@@ -223,32 +226,85 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 /// `node_modules`; skip files whose canonical (symlink-resolved) path
 /// was already seen — `seen` is SHARED across all roots; return in
 /// deterministic (lexicographic) order.
+///
+/// DIRECTORY-NESS IS DECIDED THROUGH LINKS: a symlinked Skill directory is
+/// descended like the real thing, because a symlink farm (`~/.pi/agent/
+/// skills/*` entries that link into `~/.agents/skills`, or a project wiring
+/// its Skills in by link) is how one Skill set gets shared across machines.
+/// A `SKILL.md` that resolves through a link is still ONE skill: `seen`
+/// dedupes it by canonical PATH, and the separate per-root `visited_dirs`
+/// set stops a directory reachable by two links from being re-walked.
 fn find_skill_files(root: &Path, seen: &mut HashSet<PathBuf>) -> Vec<PathBuf> {
     let mut out = Vec::new();
+    // Canonical DIR -> shallowest `dir_depth` it was first walked at. Seeded
+    // with `root` at 0 so a link inside the tree pointing back at the root
+    // cannot re-walk it (which would otherwise hand a root-level `SKILL.md` —
+    // depth 0, not a skill by spec — a depth-1 read).
+    let mut visited_dirs: HashMap<PathBuf, u32> = HashMap::new();
+    if let Ok(canon) = fs::canonicalize(root) {
+        visited_dirs.insert(canon, 0);
+    }
     // `dir_depth` = the depth of the dir itself (root = 0); files
     // directly inside it are at depth `dir_depth` (a `SKILL.md` at the
     // root is depth 0 → NOT a skill; depth 1 = `<root>/<name>/SKILL.md`).
-    walk(root, 0, &mut out, seen);
+    walk(root, 0, &mut out, seen, &mut visited_dirs);
     out.sort();
     out
 }
 
-fn walk(dir: &Path, dir_depth: u32, out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) {
+fn walk(
+    dir: &Path,
+    dir_depth: u32,
+    out: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+    visited_dirs: &mut HashMap<PathBuf, u32>,
+) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        // Pruned on the entry NAME, BEFORE any metadata call: a link NAMED
+        // `node_modules` is pruned exactly like a real one.
+        if entry.file_name() == "node_modules" {
+            continue;
+        }
+        // `entry.file_type()` reports `is_dir() == false` for a link-to-dir —
+        // and so does `entry.metadata()`, which does NOT follow links on unix
+        // (using it here would silently no-op this whole rule). `fs::metadata`
+        // (like `Path::is_dir`) DOES follow it.
+        let is_dir = fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
         if is_dir {
-            if entry.file_name() == "node_modules" {
-                continue;
-            }
             // Subdirs are at `dir_depth + 1` — only worth walking while
             // that stays within the 1..=4 bound (a dir at depth 4 still
             // holds depth-4 files, but its subdirs' files are depth 5).
             if dir_depth < 4 {
-                walk(&path, dir_depth + 1, out, seen);
+                let child_depth = dir_depth + 1;
+                // SEPARATE from `seen` (which holds canonical FILE paths and
+                // is shared across roots by design — see `discover_in_roots`).
+                // Skip only when this dir was already walked at a depth ≤
+                // `child_depth`: walking a dir at its SHALLOWEST depth is
+                // strictly more capable (the 1..=4 file bound is measured from
+                // the walk root), so a deeper second visit is pure duplicate
+                // work. Blindly skipping a dir that was first seen DEEPER would
+                // drop the Skills whose only path to the root was this shallower
+                // link, and make discovery depend on `read_dir` order. So: skip
+                // iff the stored depth is shallower-or-equal, else record the
+                // minimum and descend.
+                //
+                // This prevents RE-WALKING a directory reached by two links
+                // (duplicate work, duplicate rows) — it is NOT a hang guard: a
+                // link cycle already terminated via the `dir_depth < 4` /
+                // file-depth `1..=4` bounds, and still does.
+                let canon_dir = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                if visited_dirs
+                    .get(&canon_dir)
+                    .is_some_and(|seen_at| *seen_at <= child_depth)
+                {
+                    continue;
+                }
+                visited_dirs.insert(canon_dir, child_depth);
+                walk(&path, child_depth, out, seen, visited_dirs);
             }
             continue;
         }
@@ -256,6 +312,17 @@ fn walk(dir: &Path, dir_depth: u32, out: &mut Vec<PathBuf>, seen: &mut HashSet<P
             continue;
         }
         // Symlink-resolved; errors → skip.
+        //
+        // ACCEPTED RISK (pre-existing, ADR 0065): the canonical `SKILL.md`
+        // makes `SkillInfo.dir` — `fs::canonicalize(parent)` — the link's
+        // TARGET, and `exec_read_skill` installs that `dir` as its per-skill
+        // containment boundary, so `read_skill` on a linked Skill can reach
+        // files outside the project. Today's code already does this for a
+        // linked `SKILL.md` file (`root/alpha/SKILL.md -> <victim>/secret.txt`
+        // discovers as `name="victim"`, `dir="<victim>"`); what following
+        // directory links adds is a link to a DIRECTORY that itself holds a
+        // `SKILL.md` at depth 1..=4. Requiring links to resolve inside the
+        // root would kill the symlink-farm feature, so it is not done here.
         if let Ok(canon) = fs::canonicalize(&path) {
             if seen.insert(canon.clone()) {
                 out.push(canon);
@@ -585,7 +652,27 @@ fn parse_value(fm: &[&str], idx: usize, rest: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_mentionable_name, is_tag_safe_name};
+    use super::*;
+
+    /// A fresh scratch directory (one per call, so tests never share state).
+    ///
+    /// Deliberately NOT a copy of `agents.rs::scratch()`: that helper also
+    /// creates an empty `.git/` dir because `discover_agents` runs a context
+    /// walk that stops at a `.git`. `discover_in_roots` takes its roots as
+    /// given and never walks up (the upward search lives in `space_roots`),
+    /// so such a dir would be inert here and its comment a false claim.
+    fn scratch() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("archimedes-skills-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_file(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, content).unwrap();
+    }
 
     #[test]
     fn is_tag_safe_name_rejects_quotes_and_control_chars_only() {
@@ -638,5 +725,220 @@ mod tests {
             assert!(is_mentionable_name(name) && is_tag_safe_name(name));
         }
         assert!(is_tag_safe_name("has space") && !is_mentionable_name("has space"));
+    }
+
+    // ---- symlinked Skill DIRECTORIES ------------------------------------
+    //
+    // Every test here is `#[cfg(unix)]`: creating a DIRECTORY symlink on
+    // Windows needs privileges CI does not grant, so a Windows arm would be
+    // vacuously green. The `walk` change itself is platform-neutral code and
+    // compiles on all three CI OSes. (`read_skill_rejected_symlink_does_not_
+    // disclose_its_target` can be dual-arity because it links a *file*.)
+    //
+    // Assertions are on COUNT / `name` / `scope` — never on a path string:
+    // `std::env::temp_dir()` is itself a symlinked prefix on macOS.
+
+    /// A symlinked Skill directory is a Skill farm (`~/.pi/agent/skills/*`
+    /// entries are commonly links into `~/.agents/skills`), so it must be
+    /// descended, not skipped as "neither a dir nor a `SKILL.md`".
+    #[test]
+    #[cfg(unix)]
+    fn a_symlinked_skill_directory_is_discovered() {
+        let root = scratch();
+        let home = scratch();
+        let real_dir = home.join("real");
+        write_file(
+            &real_dir.join("SKILL.md"),
+            "---\nname: real\ndescription: D.\n---\nB.\n",
+        );
+        std::os::unix::fs::symlink(&real_dir, root.join("linked")).unwrap();
+
+        let out = discover_in_roots(&[(root, SkillScope::Space)]);
+        assert_eq!(out.len(), 1, "the linked Skill must be discovered: {out:?}");
+        assert_eq!(out[0].name, "real");
+        assert_eq!(out[0].scope, SkillScope::Space);
+    }
+
+    /// A link cycle must RETURN (the depth bounds already terminate the walk —
+    /// this is not a hang fix) and must not emit the same Skill twice (the
+    /// visited set prevents RE-WALKING a dir reached by two links).
+    #[test]
+    #[cfg(unix)]
+    fn a_link_cycle_yields_one_entry_and_terminates() {
+        let root = scratch();
+        let loopdir = root.join("loopdir");
+        write_file(
+            &loopdir.join("SKILL.md"),
+            "---\nname: looped\ndescription: D.\n---\nB.\n",
+        );
+        std::os::unix::fs::symlink(&loopdir, loopdir.join("self")).unwrap();
+
+        let out = discover_in_roots(&[(root, SkillScope::Space)]);
+        assert_eq!(
+            out.iter().filter(|s| s.name == "looped").count(),
+            1,
+            "a cycle must not duplicate rows: {out:?}"
+        );
+        assert_eq!(out.len(), 1, "one Skill expected: {out:?}");
+    }
+
+    /// The depth-aware rule: skipping a directory merely because it was seen
+    /// before is wrong — if it was first seen at a DEEPER walk depth, its
+    /// `SKILL.md`s can sit past the `1..=4` file bound on that path and would
+    /// be dropped, making discovery depend on `read_dir` order.
+    ///
+    /// The fixture is shaped so a PLAIN visited-set skip loses `deep_only`
+    /// whenever the deeper link is enumerated first: `nest/linked` reaches the
+    /// target at `dir_depth` 2, which puts the target's own `SKILL.md` at file
+    /// depth 2 and `a/SKILL.md` at 3 — both in bounds — but the `dir_depth < 4`
+    /// descent guard stops before `a/b/c`, so `a/b/c/SKILL.md` (file depth 4
+    /// through the root-level link) is reachable ONLY at the shallow depth.
+    ///
+    /// Order-independence is exactly what is being pinned — and `read_dir`
+    /// order is unspecified, so a fixture cannot simply be *assumed* to visit
+    /// the deep link first. It matters: skipping the DEEPER second visit loses
+    /// nothing (a deeper path can only push files past the bound, never bring
+    /// new ones in), so a plain visited-set skip is WRONG but only shows itself
+    /// when a deep link happens to be enumerated before the shallow one. The
+    /// fixture therefore swamps the ONE shallow link with 64 deep ones — the
+    /// link that reaches the target FIRST decides the outcome, so the losing
+    /// order occurs in 64 of 65 rounds under ANY `read_dir` ordering — and the
+    /// test asserts a such a round really happened, so it can never be
+    /// vacuously green.
+    #[test]
+    #[cfg(unix)]
+    fn a_directory_walked_twice_keeps_the_deeper_skills_reachable() {
+        const DEEP_LINKS: usize = 64;
+        const ROUNDS: usize = 8;
+
+        /// The target holds `SKILL.md` (rel. 0), `a/SKILL.md` (rel. 1) and
+        /// `a/b/c/SKILL.md` (rel. 3). Reached at `dir_depth` 2 (through a `nest`
+        /// dir) the first two land at file depths 2 and 3 — in bounds — but the
+        /// `dir_depth < 4` descent guard stops before `a/b`, so `deep_only`
+        /// (file depth 4) is reachable ONLY through a root-level link at
+        /// `dir_depth` 1.
+        /// `shallow_first` flips the CREATION order of the two link groups:
+        /// `read_dir` order is unspecified (creation-ordered, reverse-ordered or
+        /// hash-ordered depending on the fs), so alternating it across rounds
+        /// guarantees a deep-first round under every scheme — which is what makes
+        /// this test a real pin rather than a vacuous one.
+        fn fixture(shallow_first: bool) -> (PathBuf, bool) {
+            let root = scratch();
+            let home = scratch();
+            let target = home.join("shared");
+            write_file(
+                &target.join("SKILL.md"),
+                "---\nname: shared\ndescription: D.\n---\nB.\n",
+            );
+            write_file(
+                &target.join("a").join("SKILL.md"),
+                "---\nname: mid\ndescription: D.\n---\nB.\n",
+            );
+            write_file(
+                &target.join("a").join("b").join("c").join("SKILL.md"),
+                "---\nname: deep_only\ndescription: D.\n---\nB.\n",
+            );
+            // … and ONE (`shallow`) that reaches it at `dir_depth` 1.
+            let mk_deep = |i: usize| {
+                let nest = format!("nest{i}");
+                fs::create_dir_all(root.join(&nest)).unwrap();
+                std::os::unix::fs::symlink(&target, root.join(&nest).join("link")).unwrap();
+                nest
+            };
+            let mk_shallow = || {
+                std::os::unix::fs::symlink(&target, root.join("shallow")).unwrap();
+            };
+            let mut deeps: Vec<String> = Vec::new();
+            if shallow_first {
+                mk_shallow();
+                for i in 0..DEEP_LINKS {
+                    deeps.push(mk_deep(i));
+                }
+            } else {
+                for i in 0..DEEP_LINKS {
+                    deeps.push(mk_deep(i));
+                }
+                mk_shallow();
+            }
+            // `read_dir` order is stable for a given directory, so probing it
+            // here is the order `walk` will see: whichever top-level entry comes
+            // first decides whether a PLAIN visited-set skip keeps `deep_only`.
+            let order: Vec<String> = fs::read_dir(&root)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            let first_deep = order
+                .iter()
+                .position(|n| deeps.iter().any(|d| d == n))
+                .unwrap();
+            let first_shallow = order.iter().position(|n| n == "shallow").unwrap();
+            (root, first_deep < first_shallow)
+        }
+
+        let mut deep_first_rounds = 0;
+        for round in 0..ROUNDS {
+            let (root, deep_first) = fixture(round % 2 == 0);
+            if deep_first {
+                deep_first_rounds += 1;
+            }
+            let out = discover_in_roots(&[(root, SkillScope::Space)]);
+            for name in ["shared", "mid", "deep_only"] {
+                assert_eq!(
+                    out.iter().filter(|s| s.name == name).count(),
+                    1,
+                    "`{name}` must be found exactly once (round {round}, deep \
+                     link enumerated first = {deep_first}): {out:?}"
+                );
+            }
+            assert_eq!(
+                out.len(),
+                3,
+                "all three Skills expected (round {round}, deep link enumerated \
+                 first = {deep_first}): {out:?}"
+            );
+        }
+        // The round class that can expose a plain visited-set skip must really
+        // have been exercised.
+        assert!(
+            deep_first_rounds > 0,
+            "no round enumerated a deep link first — this test would prove nothing"
+        );
+    }
+
+    /// Depth rules are untouched by link following: plain nesting at depths 1
+    /// and 2 still yields both Skills, nothing more.
+    #[test]
+    fn following_links_does_not_change_plain_nesting() {
+        let root = scratch();
+        write_file(
+            &root.join("alpha").join("SKILL.md"),
+            "---\nname: alpha\ndescription: D.\n---\nB.\n",
+        );
+        write_file(
+            &root.join("group").join("beta").join("SKILL.md"),
+            "---\nname: beta\ndescription: D.\n---\nB.\n",
+        );
+
+        let out = discover_in_roots(&[(root, SkillScope::Space)]);
+        assert_eq!(out.len(), 2, "both nested Skills expected: {out:?}");
+    }
+
+    /// The `node_modules` prune is evaluated on the entry NAME before any
+    /// metadata call, so a link NAMED `node_modules` is still pruned.
+    #[test]
+    #[cfg(unix)]
+    fn a_link_named_node_modules_is_still_pruned() {
+        let root = scratch();
+        let home = scratch();
+        let hidden = home.join("hidden");
+        write_file(
+            &hidden.join("SKILL.md"),
+            "---\nname: hidden\ndescription: D.\n---\nB.\n",
+        );
+        std::os::unix::fs::symlink(&hidden, root.join("node_modules")).unwrap();
+
+        let out = discover_in_roots(&[(root, SkillScope::Space)]);
+        assert_eq!(out.len(), 0, "node_modules stays pruned: {out:?}");
     }
 }
