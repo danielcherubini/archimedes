@@ -6,7 +6,7 @@ use url::Url;
 use crate::agent::web::config::WebConfig;
 use crate::agent::web::net::{safe_fetch, FetchOpts};
 use crate::agent::web::providers::common::{
-    build_browser_headers, clean_snippet, format_http_error, format_provider_error,
+    build_browser_headers, collapse_whitespace, format_http_error, format_provider_error,
     truncate_results, validate_query, DEFAULT_USER_AGENT,
 };
 use crate::agent::web::providers::types::{SearchOpts, SearchProvider, SearchResultItem};
@@ -142,7 +142,7 @@ async fn run_ddgs_fallback(
                 .map(|item| SearchResultItem {
                     title: item.title,
                     url: item.href,
-                    snippet: clean_snippet(&item.body),
+                    snippet: collapse_whitespace(&item.body),
                     published_date: None,
                 })
                 .collect();
@@ -250,7 +250,7 @@ pub fn parse_ddg_document(doc: &dom_query::Document) -> Vec<SearchResultItem> {
         };
 
         let title = a.text().trim().to_string();
-        let snippet = clean_snippet(&snippet_el.text());
+        let snippet = collapse_whitespace(&snippet_el.text());
 
         if !title.is_empty() {
             results.push(SearchResultItem {
@@ -274,7 +274,7 @@ pub fn parse_ddg_document(doc: &dom_query::Document) -> Vec<SearchResultItem> {
 
             let title = link.text().trim().to_string();
             let snippet = if i < snippets.length() {
-                clean_snippet(&snippets.get(i).unwrap().text())
+                collapse_whitespace(&snippets.get(i).unwrap().text())
             } else {
                 String::new()
             };
@@ -753,6 +753,31 @@ mod tests {
         assert!(
             err.contains("bot detection") || err.contains("anomaly"),
             "Expected bot detection challenge error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_ddg_document_preserves_literal_angle_brackets() {
+        let html = r#"
+        <div class="result results_links results_links_deep web-result">
+            <div class="links_main result__body">
+                <h2 class="result__title">
+                    <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Frust">Rust Generics</a>
+                </h2>
+                <div class="result__snippet">
+                    Rust provides Vec&lt;T&gt; and x &lt; 5 is required for validation.
+                </div>
+            </div>
+        </div>
+        "#;
+        let doc = dom_query::Document::fragment(html);
+        let results = parse_ddg_document(&doc);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Rust Generics");
+        assert_eq!(results[0].url, "https://example.com/rust");
+        assert_eq!(
+            results[0].snippet,
+            "Rust provides Vec<T> and x < 5 is required for validation."
         );
     }
 

@@ -1,5 +1,8 @@
 //! Common utilities for web search providers.
 
+use std::sync::LazyLock;
+
+use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, ACCEPT_LANGUAGE, USER_AGENT};
 
 use crate::agent::web::providers::types::SearchResultItem;
@@ -7,30 +10,24 @@ use crate::agent::web::providers::types::SearchResultItem;
 pub const DEFAULT_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36";
 
+static HTML_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)<!--[\s\S]*?-->|</?(?:a|abbr|article|aside|b|bdi|bdo|blockquote|body|br|button|caption|cite|code|dd|del|details|dfn|dialog|div|dl|dt|em|figcaption|figure|footer|form|h[1-6]|head|header|hr|html|i|iframe|img|input|ins|kbd|label|legend|li|link|main|mark|meta|nav|ol|optgroup|option|p|pre|q|s|samp|script|section|select|small|source|span|strong|style|sub|summary|sup|svg|table|tbody|td|template|textarea|tfoot|th|thead|time|title|tr|u|ul|var|video|wbr)(?:\s+[^>]*?)?/?>").unwrap()
+});
+
 /// Collapses consecutive whitespace (spaces, tabs, newlines) into a single space and trims.
 pub fn collapse_whitespace(raw: &str) -> String {
     raw.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Normalizes snippets by stripping basic HTML tags, unescaping common entities,
-/// and collapsing whitespace.
+/// and collapsing whitespace. Non-HTML angle brackets (e.g. `Vec<T>`, `x < 5`) are preserved.
 pub fn clean_snippet(raw: &str) -> String {
     if raw.trim().is_empty() {
         return String::new();
     }
 
-    // Strip HTML tags
-    let mut in_tag = false;
-    let mut stripped = String::with_capacity(raw.len());
-    for ch in raw.chars() {
-        if ch == '<' {
-            in_tag = true;
-        } else if ch == '>' {
-            in_tag = false;
-        } else if !in_tag {
-            stripped.push(ch);
-        }
-    }
+    // Strip HTML tags using regex matching known HTML tags to avoid eating literal angle brackets
+    let stripped = HTML_TAG_RE.replace_all(raw, "");
 
     // Decode common HTML entities
     let decoded = stripped
@@ -147,6 +144,21 @@ mod tests {
 
         assert_eq!(clean_snippet(""), "");
         assert_eq!(clean_snippet("   \n\t  "), "");
+
+        // Literal angle brackets and unclosed comparisons
+        assert_eq!(
+            clean_snippet("Rust has Vec<T> and Option<T> types"),
+            "Rust has Vec<T> and Option<T> types"
+        );
+        assert_eq!(clean_snippet("x < 5 is required"), "x < 5 is required");
+        assert_eq!(
+            clean_snippet("if x < 5 and y > 2 { do_something(); }"),
+            "if x < 5 and y > 2 { do_something(); }"
+        );
+        assert_eq!(
+            clean_snippet("<b>Rust</b> has <code>Vec<T></code> when x < 5 &amp; y &gt; 2"),
+            "Rust has Vec<T> when x < 5 & y > 2"
+        );
     }
 
     #[test]

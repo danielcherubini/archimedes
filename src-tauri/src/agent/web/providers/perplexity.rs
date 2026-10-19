@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::web::config::WebConfig;
 use crate::agent::web::net::{safe_fetch, FetchOpts};
 use crate::agent::web::providers::common::{
-    check_http_status, clean_snippet, format_provider_error, truncate_results, validate_query,
+    check_http_status, format_provider_error, truncate_results, validate_query,
 };
 use crate::agent::web::providers::types::{SearchOpts, SearchProvider, SearchResultItem};
 
@@ -72,7 +72,7 @@ pub fn parse_perplexity(body: &str) -> Result<Vec<SearchResultItem>, String> {
     }
 
     if let Some(first_choice) = parsed.choices.into_iter().next() {
-        let content = clean_snippet(&first_choice.message.content);
+        let content = first_choice.message.content.trim().to_string();
         if !content.is_empty() {
             results.push(SearchResultItem {
                 title: "Perplexity Answer".to_string(),
@@ -276,6 +276,26 @@ mod tests {
         let results =
             parse_perplexity(json_empty_obj).expect("empty object should parse to empty vec");
         assert_eq!(results, vec![]);
+    }
+
+    #[test]
+    fn test_parse_perplexity_preserves_literal_angle_brackets() {
+        let json = r#"{
+            "citations": [],
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Rust provides Vec<T> and requires x < 5 for validation."
+                }
+            }]
+        }"#;
+        let results = parse_perplexity(json).expect("should parse");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Perplexity Answer");
+        assert_eq!(
+            results[0].snippet,
+            "Rust provides Vec<T> and requires x < 5 for validation."
+        );
     }
 
     #[test]

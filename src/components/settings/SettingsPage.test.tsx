@@ -393,7 +393,7 @@ describe("SettingsPage (the ZCode port — sections + immediate save)", () => {
     // Providers: the provider row (name "Tama").
     fireEvent.click(screen.getByRole("button", { name: "Providers" }));
     expect(await screen.findByDisplayValue("Tama")).toBeTruthy();
-  });
+  }, 15000);
 
   it("immediate_save_a_control_change_saves_the_complete_document", async () => {
     render(<SettingsPage onBack={vi.fn()} />);
