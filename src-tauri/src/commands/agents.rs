@@ -91,6 +91,7 @@ mod tests {
             system_prompt: "You are a scout.".to_string(),
             scope: AgentScope::User,
             path: "/home/u/.agents/agents/scout.md".to_string(),
+            shadowed: Vec::new(),
         }
     }
 
