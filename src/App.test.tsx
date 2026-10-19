@@ -452,7 +452,8 @@ describe("App (the gear icon + settings view swap)", () => {
     render(<App />);
     // The workspace is visible (the `SpacesList`'s "Sessions" heading).
     expect(screen.getByText("Sessions")).toBeTruthy();
-    // The gear icon (the left sidebar footer) opens the settings view.
+    // The gear icon (one of the `ChromeControls` at the chrome bar's right end)
+    // opens the settings view.
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     // The settings view is visible (the `SettingsPage`'s section nav —
     // it is the left edge; the `SpacesList` is NOT rendered in the

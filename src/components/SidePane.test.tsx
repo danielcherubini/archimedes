@@ -175,8 +175,9 @@ describe("SidePane (the status panel)", () => {
     // And nothing else: the frame's text is exactly the block's ONE stub label
     // (no todo copy hiding behind them). Read on `container` rather than on the
     // block, so a stray label elsewhere in the frame would show up here — the
-    // toggle button and (with no session, hence no boards) the rail both carry
-    // zero text. The `○` off-level glyph is ABSENT by construction now: the
+    // pane holds no control of its own (both toggles are in `ChromeControls`)
+    // and with no session there are no boards, so the rail contributes no text
+    // either. The `○` off-level glyph is ABSENT by construction now: the
     // thinking stub is never manufactured, so this string is the proof the
     // Reasoning line is gone as a DOM node and not merely empty.
     expect(container.textContent).toBe("Model");
