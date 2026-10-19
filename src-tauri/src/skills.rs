@@ -890,11 +890,45 @@ mod tests {
     /// order occurs in 64 of 65 rounds under ANY `read_dir` ordering — and the
     /// test asserts a such a round really happened, so it can never be
     /// vacuously green.
+    ///
+    /// WHICH ROUND PROBES WHAT. "Enumeration order" is not one property; the
+    /// filesystems under CI derive it three different ways, and a round has to
+    /// beat the one under which the shallow link happens to come out first.
+    /// Varying ONLY creation order over one fixed name does not do that — it
+    /// gives 8 identical draws on BOTH hash-ordered runners. Each round
+    /// therefore varies BOTH shapes:
+    /// - CREATION-ORDERED (or reverse-ordered) filesystems — measured: this
+    ///   machine's tmpfs returns strict reverse creation order — are probed by
+    ///   `shallow_first`, which flips the creation order of the two link groups.
+    /// - NAME-SORTED filesystems (NTFS; and any unix fs that hands back a sorted
+    ///   readdir) ignore creation order entirely, so the shallow link's NAME is
+    ///   what has to move: `aaa_shallow` and `mid_shallow` sort BEFORE `nest0`,
+    ///   `shallow` and `zzz_shallow` sort AFTER it, so two of the four name
+    ///   variants put a deep link first no matter when anything was created.
+    /// - NAME-HASHED filesystems (ext4 with `dir_index` = the `ubuntu-latest`
+    ///   runner, and APFS = `macos-latest`) order by neither creation order nor
+    ///   name but by a per-name directory hash, so every round that reuses a
+    ///   name re-draws the SAME order. A name-only lottery is why the name is
+    ///   load-bearing: with one fixed name all 8 rounds were 8 copies of one
+    ///   ~1-in-65 draw (a fresh checkout could deterministically go
+    ///   non-vacuously-red, unfixable by rerun); across 4 distinct names the
+    ///   chance that every independent draw puts the shallow link first is
+    ///   ~(1/65)^4.
+    ///
+    /// ROUNDS = 4 names × 2 creation orders is the full cross-product, so every
+    /// filesystem property is probed under both creation orders, and the
+    /// non-vacuity assert at the bottom proves the losing order was really hit.
     #[test]
     #[cfg(unix)]
     fn a_directory_walked_twice_keeps_the_deeper_skills_reachable() {
         const DEEP_LINKS: usize = 64;
+        /// 4 shallow-link names × 2 creation orders — see the round-shape table
+        /// on the test above: the name varies because hash-ordered and
+        /// name-sorted filesystems are blind to creation order.
         const ROUNDS: usize = 8;
+        /// Two names sorting before `nest0`, two after it — so name-sorted
+        /// filesystems see a deep-first round regardless of creation order.
+        const SHALLOW_NAMES: [&str; 4] = ["shallow", "aaa_shallow", "zzz_shallow", "mid_shallow"];
 
         /// The target holds `SKILL.md` (rel. 0), `a/SKILL.md` (rel. 1) and
         /// `a/b/c/SKILL.md` (rel. 3). Reached at `dir_depth` 2 (through a `nest`
@@ -902,12 +936,15 @@ mod tests {
         /// `dir_depth < 4` descent guard stops before `a/b`, so `deep_only`
         /// (file depth 4) is reachable ONLY through a root-level link at
         /// `dir_depth` 1.
-        /// `shallow_first` flips the CREATION order of the two link groups:
-        /// `read_dir` order is unspecified (creation-ordered, reverse-ordered or
-        /// hash-ordered depending on the fs), so alternating it across rounds
-        /// guarantees a deep-first round under every scheme — which is what makes
-        /// this test a real pin rather than a vacuous one.
-        fn fixture(shallow_first: bool) -> (PathBuf, bool) {
+        ///
+        /// The round returns whether a deep link was enumerated BEFORE the
+        /// shallow link, which is the order that a plain visited-set skip loses
+        /// `deep_only` in. `shallow_first` flips the CREATION order (probing
+        /// creation-ordered filesystems); `shallow_name` moves the shallow link
+        /// across the `nest*` block (probing name-sorted filesystems and — since
+        /// a hash-ordered fs derives its order from the name — drawing a fresh
+        /// order on those). Both vary because each scheme ignores the other.
+        fn fixture(shallow_name: &str, shallow_first: bool) -> (PathBuf, bool) {
             let root = scratch();
             let home = scratch();
             let target = home.join("shared");
@@ -931,7 +968,7 @@ mod tests {
                 nest
             };
             let mk_shallow = || {
-                std::os::unix::fs::symlink(&target, root.join("shallow")).unwrap();
+                std::os::unix::fs::symlink(&target, root.join(shallow_name)).unwrap();
             };
             let mut deeps: Vec<String> = Vec::new();
             if shallow_first {
@@ -957,13 +994,16 @@ mod tests {
                 .iter()
                 .position(|n| deeps.iter().any(|d| d == n))
                 .unwrap();
-            let first_shallow = order.iter().position(|n| n == "shallow").unwrap();
+            let first_shallow = order.iter().position(|n| n == shallow_name).unwrap();
             (root, first_deep < first_shallow)
         }
 
         let mut deep_first_rounds = 0;
         for round in 0..ROUNDS {
-            let (root, deep_first) = fixture(round % 2 == 0);
+            // Each name variant gets both creation orders (4 × 2 = ROUNDS).
+            let shallow_name = SHALLOW_NAMES[round % SHALLOW_NAMES.len()];
+            let shallow_first = (round / SHALLOW_NAMES.len()).is_multiple_of(2);
+            let (root, deep_first) = fixture(shallow_name, shallow_first);
             if deep_first {
                 deep_first_rounds += 1;
             }
