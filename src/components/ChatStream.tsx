@@ -356,6 +356,10 @@ export default function ChatStream() {
   // above warns about).
   const [attachments, setAttachments] = useState<ChatComposerAttachment[]>([]);
   const attachmentsRef = useRef(attachments);
+  /** Attachments handed to a send that has not settled yet, keyed by session id.
+   * They are OUT of `attachments` (so their thumbnails leave the composer
+   * immediately) but NOT released — a failed send puts them back. */
+  const heldForSendRef = useRef<Map<string, ChatComposerAttachment[]>>(new Map());
   // Re-sync every render: the handlers read the CURRENT list from the ref
   // (a render closure would be stale for fast successive events — e.g.
   // pasting 8 files then a 9th in separate dispatches without a re-render
@@ -390,10 +394,14 @@ export default function ChatStream() {
   );
   // Unmount cleanup: revoke the staged object URLs exactly once, on
   // unmount ONLY — revoking on every state change would leak/break live
-  // previews (a revoked URL can no longer render the `img`).
+  // previews (a revoked URL can no longer render the `img`). The held-for-send
+  // map is walked too: an unmount while a turn is in flight leaves those
+  // attachments in NO state the composer can reach again, so this is their
+  // last chance to be released.
   useEffect(
     () => () => {
       attachmentsRef.current.forEach(releaseAttachment);
+      heldForSendRef.current.forEach((held) => held.forEach(releaseAttachment));
     },
     [],
   );
@@ -431,10 +439,27 @@ export default function ChatStream() {
   const prevSessionIdRef = useRef(activeSessionId);
   useEffect(() => {
     if (prevSessionIdRef.current === activeSessionId) return;
+    // Capture the session being LEFT BEFORE the overwrite below: at the
+    // release point the ref would otherwise hold the session being ENTERED,
+    // so the held-for-send lookup would miss — and the failure path's `delete`
+    // drops that entry without releasing it, making the leak permanent.
+    const left = prevSessionIdRef.current;
     prevSessionIdRef.current = activeSessionId;
     attachmentsRef.current.forEach(releaseAttachment);
     attachmentsRef.current = [];
     setAttachments([]);
+    // A turn still in flight in the session we just left: its held
+    // attachments can never be restored there (this effect already cleared the
+    // composer) and can never be restored here, so release them now. `left`
+    // can be `null` (no session → session), and nothing is ever held under a
+    // `null` key, so the guard is both the type narrowing and the truth.
+    if (left !== null) {
+      const held = heldForSendRef.current.get(left);
+      if (held) {
+        held.forEach(releaseAttachment);
+        heldForSendRef.current.delete(left);
+      }
+    }
   }, [activeSessionId]);
   // Window-level drop backstop: with `dragDropEnabled: false` (tauri.conf.json)
   // the webview receives native file drops — and the webview DEFAULT for a
@@ -1079,6 +1104,21 @@ export default function ChatStream() {
       const imageRefs = images?.map(({ id, ...ref }) => ref); // ImageRef[] | undefined
       setDraft("");
       addUserMessage(targetSessionId, text, imageRefs); // EXPANDED
+      // The staged `File`/object-URL pair has NO remaining job once the
+      // base64 copies are on the user message: hold exactly the sent
+      // attachments OUT of `attachments` so their thumbnails leave the
+      // composer NOW instead of sitting there for the whole turn. They are
+      // held, not released — the `catch` below puts them back on a failed
+      // send, and the success path releases them when the turn settles.
+      // `activeSessionIdRef` guard: a send whose session was switched away
+      // during the read never touches the (now other session's) composer state.
+      if (sentIds.size > 0 && activeSessionIdRef.current === targetSessionId) {
+        const held = attachmentsRef.current.filter((a) => sentIds.has(a.id));
+        heldForSendRef.current.set(targetSessionId, held);
+        const staged = attachmentsRef.current.filter((a) => !sentIds.has(a.id));
+        attachmentsRef.current = staged;
+        setAttachments(staged);
+      }
       beginTurn(targetSessionId);
       // Pass the third arg ONLY when there are images: a text-only send (and
       // an all-images-removed send, normalized above) calls
@@ -1088,17 +1128,17 @@ export default function ChatStream() {
       const stopReason = imageRefs
         ? await sendPrompt(targetSessionId, text, imageRefs) // EXPANDED
         : await sendPrompt(targetSessionId, text); // EXPANDED
-      // Release/clear ONLY the sent attachments, OUTSIDE the state updater
-      // (updaters must be pure — StrictMode runs them twice), and ONLY if this
-      // session is still the active view (otherwise the other session's staged
-      // attachments would be mutated).
-      if (activeSessionIdRef.current === targetSessionId) {
-        const still = attachmentsRef.current.filter((a) => !sentIds.has(a.id));
-        attachmentsRef.current
-          .filter((a) => sentIds.has(a.id))
-          .forEach(releaseAttachment);
-        attachmentsRef.current = still;
-        setAttachments(still);
+      // Success: the turn settled, so the held attachments have no job left —
+      // release them for good and drop the map entry. Released from the HELD
+      // list (they left `attachments` at send), NOT by re-filtering the staged
+      // list by `sentIds`. The state is untouched here: the composer is
+      // already clean, so only the `activeSessionIdRef`-guarded map entry has
+      // to go (the held objects are released either way — a revoked URL is not
+      // session-scoped).
+      const held = heldForSendRef.current.get(targetSessionId);
+      if (held) {
+        held.forEach(releaseAttachment);
+        heldForSendRef.current.delete(targetSessionId);
       }
       turnCompleted(targetSessionId, stopReason);
     } catch (err) {
@@ -1115,9 +1155,29 @@ export default function ChatStream() {
       if (activeSessionIdRef.current === targetSessionId) {
         setError(msg);
       }
-      // Attachments deliberately stay staged (a failed send keeps them — a
-      // re-pasted image is costly, a re-typed draft is not). The draft is
-      // lost on failure (pre-existing behavior, unchanged).
+      // Attachments deliberately survive a failed send (a re-pasted image is
+      // costly, a re-typed draft is not). The thumbnails now leave the
+      // composer AT send (see `heldForSendRef`), so this is where they come
+      // back: the held list is merged in FRONT of whatever is staged now (the
+      // user can stage during a turn), de-duplicated by `id` so a re-staged
+      // item is not doubled. Their object URLs are NOT revoked — that is what
+      // makes the restored thumbnail render again.
+      //
+      // This block MUST stay in the same synchronous block as `setError`
+      // above: the existing test waits on the error line, and it only passes
+      // because both state updates land in one React 19 batch — an `await`
+      // between them lets the test observe the pre-restore DOM (flaky).
+      const held = heldForSendRef.current.get(targetSessionId);
+      if (held && held.length > 0 && activeSessionIdRef.current === targetSessionId) {
+        const live = attachmentsRef.current;
+        const ids = new Set(live.map((a) => a.id));
+        const back = held.filter((a) => !ids.has(a.id));
+        const merged = [...back, ...live];
+        attachmentsRef.current = merged;
+        setAttachments(merged);
+      }
+      heldForSendRef.current.delete(targetSessionId);
+      // The draft is lost on failure (pre-existing behavior, unchanged).
     } finally {
       sendingSessionsRef.current.delete(targetSessionId);
     }

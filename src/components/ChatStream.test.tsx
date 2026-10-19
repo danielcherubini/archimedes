@@ -2162,6 +2162,53 @@ describe("ChatStream", () => {
     );
   });
 
+  it("staged thumbnails leave the composer AT SEND, not when the send resolves", async () => {
+    seedLiveSessionWithImages();
+    const { container } = render(<ChatStream />);
+    // `sendPrompt` stays PENDING for the whole window under test: every
+    // assertion below runs while the turn is still in flight, so a clear that
+    // only happens after the promise resolves CANNOT be what satisfies them.
+    // This is the test that pins the bug (the thumbnails used to sit in the
+    // composer for the entire turn, even though the base64 copies had already
+    // been handed to the user message).
+    const inflight = deferred<StopReason>();
+    vi.mocked(sendPrompt).mockImplementationOnce(() => inflight.promise);
+    pasteToComposer([
+      new File([new Uint8Array([1, 2, 3])], "s.png", { type: "image/png" }),
+    ]);
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "look at this" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    // The wait proves `send()` got PAST `addUserMessage`/`beginTurn` and is now
+    // sitting inside `sendPrompt` — exactly the window the bug leaves a stale
+    // copy on screen.
+    await waitFor(() => expect(sendPrompt).toHaveBeenCalled());
+    const composer = container.querySelector('[data-testid="composer-island"]')!;
+    // Exactly ONE copy of the image is on screen: the transcript's `data:`
+    // render. The composer holds none. (Wrapped in `waitFor` because the
+    // composer-clearing `setAttachments` lands outside `act`; it can never
+    // become true later in this test, so the wait cannot false-green.)
+    await waitFor(() => {
+      const copies = screen.getAllByAltText("s.png");
+      expect(copies).toHaveLength(1);
+      expect(copies[0].getAttribute("src")).toBe("data:image/png;base64,AQID");
+      expect(copies.some((el) => composer.contains(el))).toBe(false);
+    });
+    // NOT released while the turn runs — a failed send has to be able to put
+    // the thumbnail back, and a revoked object URL renders nothing.
+    expect(URL.revokeObjectURL).not.toHaveBeenCalledWith("blob:mock-s.png");
+    // Settling the turn releases it for good (and nothing reappears).
+    await act(async () => {
+      inflight.resolve("end_turn");
+    });
+    await flush();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:mock-s.png");
+    expect(
+      screen.getAllByAltText("s.png").some((el) => composer.contains(el)),
+    ).toBe(false);
+  });
+
   it("a failed send keeps attachments staged", async () => {
     seedLiveSessionWithImages();
     const { container } = render(<ChatStream />);
@@ -2181,6 +2228,96 @@ describe("ChatStream", () => {
     const composer = container.querySelector('[data-testid="composer-island"]')!;
     const matches = screen.getAllByAltText("s.png");
     expect(matches.some((el) => composer.contains(el))).toBe(true);
+  });
+
+  it("a failed send restores the thumbnail WITHOUT releasing its object URL", async () => {
+    seedLiveSessionWithImages();
+    const { container } = render(<ChatStream />);
+    vi.mocked(sendPrompt).mockRejectedValueOnce(new Error("boom"));
+    pasteToComposer([
+      new File([new Uint8Array([1, 2, 3])], "s.png", { type: "image/png" }),
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(screen.getByText("boom")).toBeTruthy());
+    // The restored thumbnail is the SAME object URL, still live.
+    const composer = container.querySelector('[data-testid="composer-island"]')!;
+    const inComposer = screen
+      .getAllByAltText("s.png")
+      .filter((el) => composer.contains(el));
+    expect(inComposer).toHaveLength(1);
+    expect(inComposer[0].getAttribute("src")).toBe("blob:mock-s.png");
+    // And it was NOT revoked — a revoked URL can no longer render an `img`, so
+    // releasing before the restore would have given a broken thumbnail. The
+    // release belongs to the session-switch / unmount / next-successful-send
+    // paths, never to the failure path.
+    expect(URL.revokeObjectURL).not.toHaveBeenCalledWith("blob:mock-s.png");
+  });
+
+  it("unmounting while a send is in flight releases the held attachment", async () => {
+    seedLiveSessionWithImages();
+    const { unmount } = render(<ChatStream />);
+    const inflight = deferred<StopReason>();
+    vi.mocked(sendPrompt).mockImplementationOnce(() => inflight.promise);
+    pasteToComposer([
+      new File([new Uint8Array([1, 2, 3])], "s.png", { type: "image/png" }),
+    ]);
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "look at this" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    // The send is in flight and the attachment has LEFT the composer state —
+    // it lives only in the held-for-send map now, so the unmount cleanup has
+    // to walk that map too or the object URL leaks for the process lifetime.
+    await waitFor(() => expect(sendPrompt).toHaveBeenCalled());
+    unmount();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:mock-s.png");
+    // Unwind the pending IPC so no promise outlives the test.
+    await act(async () => {
+      inflight.resolve("end_turn");
+    });
+  });
+
+  it("switching sessions while a send is in flight releases the LEFT session's held attachment", async () => {
+    seedLiveSessionWithImages();
+    render(<ChatStream />);
+    const inflight = deferred<StopReason>();
+    vi.mocked(sendPrompt).mockImplementationOnce(() => inflight.promise);
+    pasteToComposer([
+      new File([new Uint8Array([1, 2, 3])], "s.png", { type: "image/png" }),
+    ]);
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "look at this" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(sendPrompt).toHaveBeenCalled());
+    // Switch away mid-turn. The release point inside the session-change
+    // effect only knows the session being ENTERED (`s2`), so the cleanup must
+    // read the held list under the id of the session being LEFT (`s1`) —
+    // otherwise the entry is dropped later by the failure path's `delete`
+    // without ever being released (a permanent leak).
+    await act(async () => {
+      useSessions.setState({
+        activeSessionId: "s2",
+        sessions: [
+          {
+            sessionId: "s1",
+            cwd: "/home/u/proj",
+            capabilities: { promptCapabilities: { image: true } },
+            archived: false,
+          },
+          {
+            sessionId: "s2",
+            cwd: "/home/u/proj",
+            capabilities: {},
+            archived: false,
+          },
+        ],
+      });
+    });
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:mock-s.png");
+    await act(async () => {
+      inflight.resolve("end_turn");
+    });
   });
 
   it("a non-Error rejection shows the message, not [object Object]", async () => {
