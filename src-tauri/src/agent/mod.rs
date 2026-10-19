@@ -11,6 +11,7 @@ pub mod events;
 mod fs_backend;
 pub mod harness;
 pub mod hostenv;
+pub mod ids;
 pub mod interactive;
 pub mod mcp;
 mod normalize;
@@ -29,6 +30,7 @@ pub use crate::types::SessionInfo;
 pub use errors::{FilesError, SessionError};
 pub use events::{EventSink, RpcEvent};
 pub use fs_backend::{FsBackend, FsError};
+pub use ids::{GateKey, RequestId, SessionId};
 pub use interactive::{
     interactive_key, CachedPassword, PendingInteractive, PendingSudo, RealSudoRunner, SudoRun,
     SudoRunner,
@@ -38,7 +40,7 @@ pub use permission::{permission_key, PendingPermissions, PermissionOutcome};
 pub use persist::TranscriptPersister;
 pub use session::{
     user_message_payload, ClosedReason, EffectiveCatalog, ImagePayload, ProviderFactory,
-    SessionManager, StalledInfo, StopReason, MAX_IMAGE_BYTES,
+    SessionManager, SessionManagerBuilder, StalledInfo, StopReason, MAX_IMAGE_BYTES,
 };
 pub use subagent::{LaunchConfig, SubagentMetrics, SubagentOutcome, SubagentSessionManager};
 pub use todo::{TodoItem, TodoStatus, TodoStore};
