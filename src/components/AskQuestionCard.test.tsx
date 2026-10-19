@@ -61,6 +61,35 @@ describe("AskQuestionCard", () => {
     ).toBeTruthy();
   });
 
+  it("cancels and clears a request it has no questions to draw, instead of stranding the session on an invisible gate", async () => {
+    // The card renders nothing for an empty list, but the request is still a
+    // GATE in the store (the sidebar `?`, a locked composer) and in the
+    // Worker (the turn blocked). Nothing else can answer it, so the card must.
+    useInteractive.getState().addRequest("s1", {
+      ...singleRequest,
+      params: { questions: [] },
+    });
+    const { container } = render(<AskQuestionCard sessionId="s1" requestId="r1" />);
+    expect(container.firstChild).toBeNull();
+    await waitFor(() =>
+      expect(mockedRespond).toHaveBeenCalledWith("s1", "r1", {
+        cancelled: true,
+        results: [],
+      }),
+    );
+    await waitFor(() =>
+      expect(useInteractive.getState().requests["s1"]).toHaveLength(0),
+    );
+  });
+
+  it("does not auto-cancel a request that has questions", async () => {
+    useInteractive.getState().addRequest("s1", singleRequest);
+    render(<AskQuestionCard sessionId="s1" requestId="r1" />);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(mockedRespond).not.toHaveBeenCalled();
+    expect(useInteractive.getState().requests["s1"]).toHaveLength(1);
+  });
+
   it("renders nothing when no request is pending for the id", () => {
     const { container } = render(
       <AskQuestionCard sessionId="s1" requestId="missing" />,

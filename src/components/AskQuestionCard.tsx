@@ -191,6 +191,27 @@ export default function AskQuestionCard({
     return () => cancelAnimationFrame(rafId);
   }, [layoutKey, hasSelection]);
 
+  // SAFETY NET: a request this card has no questions to draw is still a GATE
+  // — in the store (the sidebar `?`, a locked composer) and in the Worker (the
+  // turn is blocked on it) — and rendering `null` leaves nothing that can
+  // answer it, so the session strands until the user cancels the whole turn.
+  // The harness no longer opens such a gate (`ask_flow` errors first), but this
+  // card is the LAST thing able to close one, so it does: cancel + clear. Once
+  // per instance (`cleared`), because the effect re-runs while the request is
+  // still in the store during the round trip.
+  const cleared = useRef(false);
+  const unrenderable = !!request && questions.length === 0;
+  useEffect(() => {
+    if (!unrenderable || cleared.current) return;
+    cleared.current = true;
+    void respondInteractiveRequest(sessionId, requestId, {
+      cancelled: true,
+      results: [],
+    })
+      .catch(() => {})
+      .finally(() => removeRequest(sessionId, requestId));
+  }, [unrenderable, sessionId, requestId, removeRequest]);
+
   if (!request || questions.length === 0) return null;
 
   const draft = (id: string): QuestionDraft => drafts[id] ?? EMPTY_DRAFT;
