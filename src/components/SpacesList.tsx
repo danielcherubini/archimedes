@@ -7,8 +7,6 @@ import {
   FolderOpenIcon,
   MessageCirclePlusIcon,
   MoreHorizontalIcon,
-  PanelLeftIcon,
-  SettingsIcon,
   SparklesIcon,
   Trash2Icon,
 } from "lucide-react";
@@ -24,7 +22,6 @@ import {
   getLeftPaneCollapsed,
   LEFT_PANE_RAIL,
   LEFT_PANE_WIDTH,
-  setLeftPaneCollapsed,
   subscribeLeftPane,
 } from "../lib/leftPaneState";
 import { openNewSpaceDialog } from "../lib/newSpaceDialogState";
@@ -33,7 +30,6 @@ import {
   spaceViewFor,
   type Message,
 } from "../store/sessions";
-import { useHasPendingRequest } from "../hooks/useHasPendingRequest";
 import { useSessionStatus } from "../hooks/useSessionStatus";
 import { useSessionStatuses } from "../hooks/useSessionStatus";
 import { useSkillCatalog } from "../hooks/useSkillCatalog";
@@ -75,15 +71,11 @@ function spaceNameFor(cwd: string, spaces: { path: string }[]): string {
   return match ? basenameOfPath(match.path) : basenameOfPath(cwd);
 }
 
-export default function SpacesList({
-  onOpenSettings,
-}: {
-  // Optional — the gear icon (the footer's bottom-right entry point into
-  // the settings page) only fires the callback when the parent supplies
-  // one; the button itself always renders. (The collapse button moved to
-  // the chrome bar — the gear stays here.)
-  onOpenSettings?: () => void;
-}) {
+export default function SpacesList() {
+  // No `onOpenSettings` prop any more: the Settings gear moved to the chrome
+  // bar's control cluster (`ChromeControls`), so this pane holds no route to
+  // the settings page. The pane used to own that door — and the collapse toggle
+  // beside it — which is why the prop existed.
   const spaces = useSessions((s) => s.spaces);
   const sessions = useSessions((s) => s.sessions);
   const historySessions = useSessions((s) => s.historySessions);
@@ -209,13 +201,11 @@ export default function SpacesList({
     : "";
 
   // The shared collapsed flag (the module seeds it from localStorage at
-  // import). This component READS it for the frame's width — the
-  // `LEFT_PANE_RAIL` sliver while collapsed, NOT 0 — and WRITES it, from its
-  // OWN toggle in the footer below (both directions). The chrome bar holds no
-  // pane control in either state, so outside the tests that toggle is the only
-  // writer of the flag.
-  // The `bg-warning` dot on the collapsed toggle (see the footer).
-  const hasPendingRequest = useHasPendingRequest();
+  // import). This component only READS it, for the frame's width — the
+  // `LEFT_PANE_RAIL` sliver while collapsed, NOT 0. The WRITE lives in the
+  // chrome bar's `ChromeControls`: the pane's collapse toggle moved to the top
+  // of the window next to the window controls, so this pane no longer owns a
+  // control that changes its own width.
   const collapsed = useSyncExternalStore(
     subscribeLeftPane,
     getLeftPaneCollapsed,
@@ -234,17 +224,18 @@ export default function SpacesList({
     [startSessionInActiveSpace],
   );
 
-  // The collapsed rail's command strips. These are the SAME handlers the open
+  // The collapsed rail's command strip. These are the SAME handlers the open
   // pane's labelled buttons call — one closure each, referenced from both, so
   // the two renderings of a command cannot drift apart. The icons are the open
   // buttons' icons verbatim (the rail is the same control at the same size, not
   // a new control), and the labels are carried as `aria-label` + `title`
   // because a 40px column has no room for text.
   //
-  // `Settings` is a STRIP OF ITS OWN at the rail's bottom, because that is
-  // where the gear lives when the pane is open (the footer, beside the collapse
-  // toggle): collapsing moves it one surface, not one row up the screen. The
-  // other three sit at the head, above the session marks.
+  // Three commands, all at the HEAD, because they are the pane's own buttons.
+  // `Settings` used to ride here as a second strip at the rail's BOTTOM — the
+  // gear lived in the footer while open, so the rail kept it at the same height
+  // on collapse. The gear now lives in the chrome bar for both states, so the
+  // tail strip is gone and with it the rail's `mt-auto` tail block.
   const railActions: SessionRailAction[] = [
     {
       id: "open",
@@ -265,14 +256,6 @@ export default function SpacesList({
       onClick: () => setSkillsOpen(true),
     },
   ];
-  const railTailActions: SessionRailAction[] = [
-    {
-      id: "settings",
-      label: "Settings",
-      icon: <SettingsIcon className="size-4" />,
-      onClick: () => onOpenSettings?.(),
-    },
-  ];
 
   // The ⌘N / ⌘O chord lives in `useAppShortcuts`, mounted at `App` root — NOT
   // here. It sat in this component while, and this pane is inside the
@@ -283,14 +266,11 @@ export default function SpacesList({
   return (
     // Collapse = `LEFT_PANE_RAIL` + `overflow: hidden` (a SLIVER, not 0 — the
     // content stays mounted, clipped; the `fixed` dialogs escape clipping).
-    // The pane owns its collapse toggle in the footer's INNER corner (bottom
-    // right — the side facing the chat) and keeps it in BOTH states: the
-    // sliver is precisely the room that keeps it on screen, so the control
-    // never migrates to the chrome bar and the user's cursor never has to
-    // travel to the top of the window to undo what they just did. The rail is
-    // narrower than the footer's content, so the gear clips away and only the
-    // toggle remains — the toggle's `shrink-0` is what makes it clip rather
-    // than be squeezed.
+    // The sliver exists so the collapsed rail has somewhere to draw: the
+    // session marks and the three command icons (`SessionRail`). The pane's
+    // collapse toggle is NOT here any more — it lives in the chrome bar's
+    // `ChromeControls` beside the window controls, in both states — which is
+    // also why the footer row this pane used to end with is gone.
     <aside
       style={{ width: collapsed ? LEFT_PANE_RAIL : LEFT_PANE_WIDTH }}
       className="relative flex shrink-0 flex-col overflow-hidden bg-frame"
@@ -308,8 +288,7 @@ export default function SpacesList({
           untouched — `hidden` would unlayout it. It is applied to the WRAPPER,
           not the scroller, because the buttons and the header are siblings of
           the scroller and bled just the same. The session marks below are what
-          shows instead; the footer's toggle is OUTSIDE this region, so it stays
-          on screen (that is what the rail exists to keep). */}
+          shows instead. */}
       <div
         className={`flex min-h-0 flex-1 flex-col ${collapsed ? "invisible" : ""}`}
       >
@@ -437,7 +416,6 @@ export default function SpacesList({
             active: id === activeSessionId,
           }))}
           actions={railActions}
-          tailActions={railTailActions}
         />
       )}
       {/* NO Open Space dialog here: the render site is `App` root (the else-branch
@@ -466,57 +444,6 @@ export default function SpacesList({
           onClose={() => setDeleteTarget(null)}
         />
       )}
-      {/* The footer (the ZCode `WorkspaceSidebarFooter` position — bottom
-          right). ORDER matters: the gear first, then the pane's own collapse
-          toggle LAST, so the toggle occupies the inner-most corner (bottom
-          right = the edge facing the chat, pointing at what it closes) and the
-          gear stays in the same right-hand cluster, one slot outboard. */}
-      <div className="flex justify-end gap-1 p-2">
-        {/* The gear is NOT rendered while collapsed — NOT merely clipped: the
-            footer's natural content is 68px against a 40px rail, so
-            `overflow-hidden` would leave a ~4px sliver of the icon poking into
-            the rail, which reads as a rendering glitch. It is also
-            unreachable at that width, and was equally unreachable when the
-            pane collapsed to 0 — so hiding it costs nothing. */}
-        {!collapsed && (
-          <button
-            type="button"
-            aria-label="Settings"
-            onClick={() => onOpenSettings?.()}
-            className="shrink-0 rounded-md size-6 hover:bg-surface-hover"
-          >
-            <SettingsIcon className="size-4" />
-          </button>
-        )}
-        {/* The pane's OWN collapse toggle, and its ONLY one — rendered in BOTH
-            states. The chrome bar holds no pane control in either state
-            (`App.tsx`, pinned by `App.test.tsx`'s `the chrome bar NEVER holds a
-            pane control` and by `SpacesList.test.tsx`'s `KEEPS its toggle while
-            collapsed`), so the pending dot has no other home once the pane is a
-            sliver — carrying it was the old chrome-bar button's job, and that
-            control is gone. Its label and `aria-pressed` flip with the state
-            (pressed = the pane is OPEN) because it performs the opposite action
-            when collapsed; `data-testid` is the stable hook tests query, since
-            the label moves. The `bg-warning` dot shows ONLY while collapsed:
-            its meaning is "something needs you behind the hidden pane", so it
-            would be noise while the pane is open and visible. */}
-        <button
-          type="button"
-          data-testid="left-pane-toggle"
-          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          aria-pressed={!collapsed}
-          onClick={() => setLeftPaneCollapsed(!collapsed)}
-          className="relative shrink-0 rounded-md size-6 hover:bg-surface-hover"
-        >
-          <PanelLeftIcon className="size-4" />
-          {collapsed && hasPendingRequest && (
-            <span
-              className="absolute top-0.5 right-0.5 size-1.5 rounded-full bg-warning"
-              aria-hidden
-            />
-          )}
-        </button>
-      </div>
     </aside>
   );
 }

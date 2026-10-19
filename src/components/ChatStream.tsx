@@ -237,9 +237,9 @@ export default function ChatStream() {
   // Whether the user owes an answer — the ACTIVE session's own prompts/pauses,
   // or ANY child's gate anywhere in the app — and here it drives the "Send a
   // prompt to start" hint's suppression (see `hasPendingRequest` below). It is
-  // the SAME hook the `SidePane` and `SpacesList` toggles read for their
-  // `bg-warning` dots, so the cue in the transcript and the dots cannot drift
-  // (one derivation, many consumers).
+  // the SAME hook the chrome bar's pane toggles read for their `bg-warning`
+  // dots (`ChromeControls`), so the cue in the transcript and the dots cannot
+  // drift (one derivation, many consumers).
   // The subagent half is app-wide ON PURPOSE: every NON-active parent's gates
   // are on screen in the `SubagentModals` overlay, so the cue means "you owe
   // something, somewhere" and never lies. Which Session owes it is the inline
@@ -1259,13 +1259,14 @@ export default function ChatStream() {
           );
 
     // `hasPendingRequest` (computed ABOVE, next to the other unconditional cue
-  // hooks) is what suppresses the hint below. It is the SAME hook the `SidePane`
-  // and `SpacesList` toggles read for their `bg-warning` dots — the cue for the
-  // COLLAPSED-PANE case, where the pane's content is clipped away by the
-  // `SIDE_PANE_RAIL` sliver + `overflow: hidden` and only the toggle's dot is
-  // left to say "something needs you" — so the hint and the dots can only ever
-  // agree; a hand-rolled copy of the hook's terms in THIS file (what this
-  // comment's previous version described) was how they could not.
+  // hooks) is what suppresses the hint below. It is the SAME hook the chrome
+  // bar's pane toggles read for their `bg-warning` dots (`ChromeControls`) —
+  // the cue for the COLLAPSED-PANE case, where a pane's content is clipped
+  // away by the `SIDE_PANE_RAIL` sliver + `overflow: hidden` and only the
+  // toggle's dot is left to say "something needs you" — so the hint and the
+  // dots can only ever agree; a hand-rolled copy of the hook's terms in THIS
+  // file (what this comment's previous version described) was how they could
+  // not.
   // The "Send a prompt to start" hint is hidden when a pending request
   // (permission prompt or interactive `ask`/`confirm`/`password` — the cards
   // render in the stream regardless of the transcript's length) or a

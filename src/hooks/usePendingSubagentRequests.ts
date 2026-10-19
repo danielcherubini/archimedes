@@ -8,9 +8,9 @@ import { usePermissions } from "../store/permissions";
  * How many gates the user owes a `Subagent session` — app-wide: `useInteractive`
  * `ask`/`confirm`/`password` requests + `usePermissions` prompts held by any
  * session that has a `useSubagents` entry. `useHasPendingRequest` turns this
- * number into the boolean behind the collapsed-pane cues — `SidePane`'s and
- * `SpacesList`'s `bg-warning` toggle dots plus `ChatStream`'s hint suppression —
- * so they cannot disagree (moved here for exactly that reason). The "Waiting"
+ * number into the boolean behind the collapsed-pane cues — the chrome bar's two
+ * `bg-warning` pane-toggle dots (`ChromeControls`) plus `ChatStream`'s hint
+ * suppression — so they cannot disagree (moved here for exactly that reason). The "Waiting"
  * pill on a session row is a DIFFERENT surface: `SessionRow` in `SpacesList`
  * reads `useSessionStatus`, which counts the same gates through the same pure
  * core (`childGatesOf`) but is not a consumer of this hook.
@@ -38,7 +38,7 @@ import { usePermissions } from "../store/permissions";
  * sentence there). This one is the hottest of the gate derivations rather than
  * the widest-scoped: `useHasPendingRequest` calls it, and its three callers are
  * `ChatStream` — which re-renders on every streamed token and every composer
- * keystroke — plus the `SidePane` and `SpacesList` toggles. Unmemoised, that was
+ * keystroke — plus the chrome bar's two pane toggles. Unmemoised, that was
  * a `ChildGate` allocation per gate plus a sort per render, for an answer that
  * only moves when one of the three maps is replaced. `useMemo` is a hint React
  * may in principle discard, so nothing reads this number as correctness — it is

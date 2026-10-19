@@ -16,11 +16,11 @@ import { usePendingSubagentRequests } from "./usePendingSubagentRequests";
  * parent's transcript and the parent row's `waiting` status (see
  * `usePendingSubagentRequests`, which owns the reasoning).
  *
- * THIS is the dot's ONE derivation: `ChatStream`, the `SidePane` toggle and the
- * `SpacesList` toggle all call it, and the latter two draw the `bg-warning` dot
- * while collapsed, so the cues cannot disagree. (`ChatStream` used to hand-roll
- * these same four terms — which is precisely the drift this hook
- * exists to prevent, and the reason it now reads this hook instead.)
+ * THIS is the dot's ONE derivation: `ChatStream` and the chrome bar's two pane
+ * toggles (`ChromeControls`) all call it, and those two draw the `bg-warning`
+ * dot while their pane is collapsed, so the cues cannot disagree. (`ChatStream`
+ * used to hand-roll these same four terms — which is precisely the drift this
+ * hook exists to prevent, and the reason it now reads this hook instead.)
  *
  * Like every cue hook here, it is called UNCONDITIONALLY: it reads stores via
  * `useSyncExternalStore`, so a caller that sits behind an early return would

@@ -30,6 +30,7 @@ import SpaceTabs from "./components/SpaceTabs";
 import ChatStream from "./components/ChatStream";
 import SidePane from "./components/SidePane";
 import WindowControls from "./components/WindowControls";
+import ChromeControls from "./components/ChromeControls";
 import SubagentDetailHost from "./components/SubagentDetailHost";
 import { SubagentModals } from "./components/SubagentModals";
 import SettingsPage from "./components/settings/SettingsPage";
@@ -348,14 +349,15 @@ function App() {
           still block it and stay clickable. The left segment's width
           is the sidebar's width (the tabs start where the center column
           begins; it follows the sidebar's collapse state: 260px expanded,
-          0px collapsed — the icon clips away with it). Each pane owns its own
-          collapse toggle in its INNER-bottom corner while it is open (see
-          `SpacesList` / `SidePane`); the bar carries a pane control ONLY while
-          that pane is collapsed, because the collapsed pane clips its own
-          toggle away and no keyboard shortcut exists to bring it back. The
-          gear stays in the sidebar footer. In the settings view (the
-          workspace unmounts) the segment is `flex-1` (full width — the
-          old chrome-bar layout; no tabs, no pane controls). */}
+          0px collapsed — the icon clips away with it). The APP's own controls —
+          the Settings gear and the two pane collapse toggles — sit at the RIGHT
+          end, immediately outboard of the window controls, in BOTH collapse
+          states (`ChromeControls`); the panes themselves carry no control at
+          all, and the collapsed rails reserve no gap for one. In the settings
+          view (the workspace unmounts) the segment is `flex-1` (full width —
+          the old chrome-bar layout; no tabs, and no app controls either, since
+          the panes they drive are unmounted and `SettingsPage` has its own
+          Back). */}
       <div
         data-tauri-drag-region="deep"
         className="flex h-10 shrink-0 items-center bg-frame pr-2"
@@ -383,11 +385,10 @@ function App() {
                 draggable={false}
               />
             </div>
-            {/* Pane controls live at the BOTTOM of their own panes in BOTH states
-                (see `SpacesList` / `SidePane`) — a collapsed pane keeps a sliver of
-                width so its toggle stays under the cursor, so the chrome bar holds no
-                pane control at all. */}
+            {/* Pane controls are NOT here: both toggles and the gear live in
+                `ChromeControls` at the bar's right end (see above). */}
             <SpaceTabs />
+            <ChromeControls onOpenSettings={() => setView("settings")} />
           </>
         )}
         <WindowControls />
@@ -424,7 +425,7 @@ function App() {
             <SettingsPage onBack={() => setView("workspace")} />
           ) : (
             <>
-              <SpacesList onOpenSettings={() => setView("settings")} />
+              <SpacesList />
               {/* The center column: the chat (the Spaces are the chrome
                   bar's TABS — the old top row is gone). */}
               <div className="flex min-w-0 flex-1 flex-col">

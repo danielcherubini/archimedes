@@ -809,102 +809,66 @@ describe("SpacesList (archive, ADR 0016)", () => {
     );
   });
 
-  // -- The collapse toggle + the gear live in the pane's OWN footer row in
-  // -- BOTH states: the chrome bar holds no pane control at all (`App.tsx`,
-  // -- pinned by `App.test.tsx`'s `the chrome bar NEVER holds a pane
-  // -- control`) --
+  // -- The pane holds NO controls at all: the collapse toggle and the Settings
+  // -- gear both live in the chrome bar's `ChromeControls`, beside the window
+  // -- controls (`App.tsx`, pinned by `App.test.tsx`'s `the chrome bar carries
+  // -- the app controls`). What follows asserts the ABSENCE from this pane in
+  // -- both states — the shape the move leaves behind. --
 
-  // -- The pane's OWN collapse toggle (bottom-inner corner = bottom right for
-  // -- the left pane, pointing at the chat), rendered while expanded AND while
-  // -- collapsed: collapsed it sits in the rail and re-expands the pane, so it
-  // -- never hands off — see the `KEEPS its toggle while collapsed` case below
-  // -- and `App.test.tsx`. --
+  for (const state of ["expanded", "collapsed"] as const) {
+    it(`holds NO collapse toggle and NO gear while ${state} (both moved to the chrome bar)`, () => {
+      act(() => {
+        setLeftPaneCollapsed(state === "collapsed");
+      });
+      const { container } = render(<SpacesList />);
+      // Every label the toggle has ever carried, plus the gear's, so a rename
+      // cannot quietly re-add one of these two controls here and leave this
+      // test vacuous. The pane's OWN commands (`Open Space`, `New Session`,
+      // `Skills`) are NOT in this list — they legitimately survive the collapse
+      // as rail icons, which is what the rail's own tests assert.
+      for (const label of [
+        "Collapse sidebar",
+        "Expand sidebar",
+        "Settings",
+      ]) {
+        expect(screen.queryByRole("button", { name: label }), label).toBeNull();
+      }
+      // The STABLE hook, not the label: the label flips with the state, so a
+      // name-only query could pass on one side of the collapse by accident.
+      expect(container.querySelector('[data-testid="left-pane-toggle"]')).toBeNull();
+      // The footer ROW is gone, not merely emptied. The pane's last child is
+      // now the clipped content region (expanded) or the collapsed rail — both
+      // of which DO hold buttons, so the check is which surface ends the pane,
+      // not whether it holds any. A footer control strip would come last.
+      const last = (container.firstChild as HTMLElement).lastElementChild!;
+      const isContentRegion = last.contains(screen.getByText("Sessions"));
+      const isRail = last.getAttribute("data-testid") === "session-rail";
+      expect(
+        isContentRegion || isRail,
+        `the pane ends with a ${last.tagName}, not the content region or the rail`,
+      ).toBe(true);
+    });
+  }
 
-  it("holds its own collapse toggle in the footer's inner corner, with the gear beside it", () => {
+  it("takes its collapse from the shared flag with no control of its own", () => {
+    // The pane is now a pure READER of `leftPaneState` — the writer sits in the
+    // chrome bar — so collapsing from outside still resizes it. This is the
+    // contract between `ChromeControls` (writer) and this pane (reader).
     const { container } = render(<SpacesList />);
-    const footer = (container.firstChild as HTMLElement).lastElementChild!;
-    const collapse = screen.getByRole("button", { name: "Collapse sidebar" });
-    const gear = screen.getByRole("button", { name: "Settings" });
-    // Both live in the footer row (the pane's bottom edge).
-    expect(footer.contains(collapse)).toBe(true);
-    expect(footer.contains(gear)).toBe(true);
-    // The TOGGLE is the inner-most (last/rightmost) child: for the left pane
-    // the inner side is the one facing the chat, so it takes the corner and
-    // the gear sits outboard of it. The gear is NOT pushed out of the
-    // right-hand cluster — it is one slot left, not moved to the far side.
-    expect(footer.lastElementChild).toBe(collapse);
-    const kids = [...footer.children];
-    expect(kids.indexOf(gear)).toBeLessThan(kids.indexOf(collapse));
-    // The cluster is RIGHT-aligned (`justify-end`, never `justify-between`):
-    // the gear stays immediately outboard of the toggle. `justify-between`
-    // keeps both assertions above true while flinging the gear to the pane's
-    // OUTER edge — so the alignment is asserted, not inferred from order.
-    expect(footer.className).toMatch(/\bjustify-end\b/);
-    expect(footer.className).not.toMatch(/\bjustify-between\b/);
-    // Expanded, exactly ONE toggle exists and it carries the label for the
-    // direction it performs now (`Collapse sidebar`, queried above): nothing is
-    // labelled `Expand sidebar` here, because the flip is a LABEL change on the
-    // same button rather than a second control taking over.
-    expect(screen.queryByRole("button", { name: "Expand sidebar" })).toBeNull();
-  });
-
-  it("KEEPS its toggle while collapsed, in the sliver, and it is the control that re-expands (it never moves to the chrome bar)", () => {
+    const frame = container.firstChild as HTMLElement;
+    expect(frame.style.width).toBe("260px");
     act(() => {
       setLeftPaneCollapsed(true);
     });
-    const { container } = render(<SpacesList />);
-    // The STABLE hook, not the label: the label flips with the state, so a
-    // name query would miss on exactly the collapsed side this test checks.
-    const collapse = screen.getByTestId("left-pane-toggle");
-    // The pane is NOT gone: it keeps a rail wide enough to hold the toggle,
-    // so the control the user just used is still under their cursor.
-    expect((container.firstChild as HTMLElement).style.width).toBe(`${LEFT_PANE_RAIL}px`);
-    // One control does both jobs — no second button appeared, and the label
-    // flipped to the direction it now performs.
-    expect(container.querySelectorAll('[data-testid="left-pane-toggle"]').length).toBe(1);
-    expect(collapse.getAttribute("aria-label")).toBe("Expand sidebar");
-    // aria-pressed flips to report the collapsed state.
-    expect(collapse.getAttribute("aria-pressed")).toBe("false");
-    // Settings is STILL reachable while collapsed, through exactly ONE door —
-    // the rail's icon, not the footer's. The footer gear is not rendered:
-    // clipping it with `overflow-hidden` instead would leave a ~4px sliver of
-    // its icon poking into the rail (measured: the footer's natural content is
-    // 68px — 2x24 buttons + 4 gap + 2x8 padding — against a 40px rail, so 28px
-    // of the gear survives), which reads as a rendering glitch.
-    //
-    // This assertion used to read `queryByRole("Settings")).toBeNull()` on the
-    // reasoning that "hiding it costs nothing". That was never true: the gear
-    // was Settings' ONLY door, so collapsing the pane locked the user out of
-    // Settings until they re-expanded it. The rail now carries the command, so
-    // the door moved rather than closed — and it is asserted as exactly ONE,
-    // because two gears (rail + a permanent chrome-bar one) was the alternative.
-    const gears = screen.getAllByRole("button", { name: "Settings" });
-    expect(gears).toHaveLength(1);
-    expect(
-      screen
-        .getByTestId("session-rail-tail-actions")
-        .contains(gears[0] as HTMLElement),
-    ).toBe(true);
-    // The toggle survives, and `shrink-0` is what keeps it a real 24px target:
-    // in a 40px rail, flex would otherwise squeeze BOTH footer buttons to fit
-    // rather than clip one, and a 12px-wide toggle is not a 24px hit area.
-    expect(collapse.className).toMatch(/\bshrink-0\b/);
+    expect(getLeftPaneCollapsed()).toBe(true);
+    expect(frame.style.width).toBe(`${LEFT_PANE_RAIL}px`);
     act(() => {
-      fireEvent.click(collapse);
+      setLeftPaneCollapsed(false);
     });
-    expect(getLeftPaneCollapsed()).toBe(false);
+    expect(frame.style.width).toBe("260px");
   });
 
-  it("the_gear_icon_opens_settings", () => {
-    const onOpenSettings = vi.fn();
-    render(<SpacesList onOpenSettings={onOpenSettings} />);
-    // The footer's gear icon exists and fires the callback.
-    const gear = screen.getByRole("button", { name: "Settings" });
-    fireEvent.click(gear);
-    expect(onOpenSettings).toHaveBeenCalledTimes(1);
-  });
-
-  it("collapses to the sliver (the content stays mounted, clipped — the pane keeps its own toggle)", () => {
+  it("collapses to the sliver (the content stays mounted, clipped, not unmounted)", () => {
     act(() => {
       setLeftPaneCollapsed(true);
     });
@@ -922,12 +886,12 @@ describe("SpacesList (archive, ADR 0016)", () => {
     expect(frame.style.width).toBe("260px");
   });
 
-  it("holds NO bg-warning toggle dot while EXPANDED, even with a pending request (the dot belongs to the collapsed toggle alone)", () => {
-    // The TOGGLE's dot, not "no warning ink anywhere": the row now wears the
-    // `?` in `text-warning` in BOTH sidebar states, so a pane-wide
-    // "no warning anywhere" assertion would be false by design. What stays
-    // collapsed-only is the FILL on the pane's toggle — its meaning is
-    // "something needs you behind the hidden pane".
+  it("carries NO bg-warning FILL in either state, even with a pending request (the dot rides the chrome-bar toggle now)", () => {
+    // The pane's own toggle used to wear a `bg-warning` dot while collapsed.
+    // That button now lives in `ChromeControls`, so the pane keeps only the
+    // ROW's cue — the `?` in `text-warning`, in both sidebar states. Asserted
+    // in both states, because the collapsed rail is exactly where a leftover
+    // dot would have been.
     useSessions.setState({
       sessions: [
         { sessionId: "s1", cwd: "/tmp/alpha", capabilities: {}, archived: false },
@@ -939,12 +903,16 @@ describe("SpacesList (archive, ADR 0016)", () => {
         s1: [{ requestId: "r1", toolTitle: "bash", options: [] }],
       },
     });
-    const { container } = render(<SpacesList />);
-    expect(container.querySelector(".bg-warning")).toBeNull();
-    // And the row DOES carry the cue while expanded — the other half of the
-    // pair, so the two assertions above cannot both be satisfied by a pane
-    // that simply shows nothing.
-    expect(container.querySelector('[data-dot="waiting"]')).toBeTruthy();
+    for (const collapsedNow of [false, true]) {
+      act(() => {
+        setLeftPaneCollapsed(collapsedNow);
+      });
+      const { container: c } = render(<SpacesList />);
+      expect(c.querySelector(".bg-warning"), `collapsed=${collapsedNow}`).toBeNull();
+      // …and the row DOES carry its own cue, so the assertion above cannot be
+      // satisfied by a pane that shows nothing at all.
+      expect(c.querySelector('[data-dot="waiting"]'), `collapsed=${collapsedNow}`).toBeTruthy();
+    }
   });
 
   it("collapses to the sliver: the session marks show, and NO text bleeds in", () => {
@@ -1081,32 +1049,29 @@ describe("SpacesList (archive, ADR 0016)", () => {
 
   // -- The rail's action strip: the pane's commands survive the collapse --
 
-  it("offers all four commands as icons while collapsed, and they WORK", () => {
-    const onOpenSettings = vi.fn();
+  it("offers the pane's three commands as icons while collapsed (not Settings)", () => {
     act(() => {
       setLeftPaneCollapsed(true);
     });
-    render(<SpacesList onOpenSettings={onOpenSettings} />);
-    // The same four the open pane offers — collapsing must not cost you the
-    // pane's commands (see `SessionRail`'s doc: `Skills`/`Settings` have no
-    // shortcut, and the footer gear is `!collapsed`, so a collapsed sidebar
-    // used to lock you out of Settings entirely). Asserted across BOTH strips,
-    // because each sits where its button sits while the pane is open: the
-    // list's three at the head, the footer's gear at the tail.
-    for (const label of ["Open Space", "New Session", "Skills", "Settings"]) {
+    const { container } = render(<SpacesList />);
+    // The list's own three buttons survive the collapse as icons. `Settings` is
+    // deliberately NOT among them: the gear lives in the chrome bar in both
+    // states, so the rail used to carry a second copy and that tail strip is
+    // gone (see `SessionRail`'s doc).
+    for (const label of ["Open Space", "New Session", "Skills"]) {
       expect(
-        screen.getAllByRole("button", { name: label }).length,
+        within(screen.getByTestId("session-rail-actions")).getByRole("button", {
+          name: label,
+        }),
         label,
-      ).toBeGreaterThan(0);
+      ).toBeTruthy();
     }
     expect(
       within(screen.getByTestId("session-rail-actions")).getAllByRole("button"),
     ).toHaveLength(3);
-    expect(
-      within(
-        screen.getByTestId("session-rail-tail-actions"),
-      ).getByRole("button", { name: "Settings" }),
-    ).toBeTruthy();
+    // And nothing here reaches for Settings, in either strip or anywhere else.
+    expect(container.querySelector('[data-testid="session-rail-tail-actions"]')).toBeNull();
+    expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
   });
 
   it("wires each rail icon to the SAME handler the labelled button uses", () => {
@@ -1114,13 +1079,12 @@ describe("SpacesList (archive, ADR 0016)", () => {
     // MODALS, and a modal `aria-hidden`s the rest of the app — so a second
     // query against the rail after one opens fails for the correct reason
     // (testing-library honours it) and would read as a broken rail.
-    const onOpenSettings = vi.fn();
+    // (`Settings` used to be asserted here too, through an `onOpenSettings`
+    // prop — the gear is the chrome bar's now, and the pane has no such prop.)
     act(() => {
       setLeftPaneCollapsed(true);
     });
-    render(<SpacesList onOpenSettings={onOpenSettings} />);
-    fireEvent.click(screen.getByTitle("Settings"));
-    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    render(<SpacesList />);
     fireEvent.click(screen.getByTitle("New Session"));
     expect(mockedStartSession).toHaveBeenCalledWith("/tmp/alpha");
     // The Skills modal renders, and it renders even though the pane's content
@@ -1166,18 +1130,18 @@ describe("SpacesList (archive, ADR 0016)", () => {
     expect(mockedStartSession).not.toHaveBeenCalled();
   });
 
-  it("has EXACTLY ONE Settings door in either state (no gear is ever doubled)", () => {
-    // The whole reason the gear lives in the pane and not the chrome bar: a
-    // chrome-bar gear would be permanent (this repo's shell decision forbids a
-    // control that teleports in when a pane collapses), and the rail already
-    // carries one while collapsed — so the window would show two gears ~60px
-    // apart. One door, which moves between the footer and the rail.
+  it("holds NO Settings door at all — the pane owns none in either state", () => {
+    // The reverse of the old guarantee. This pane used to be Settings' only
+    // door, which is why collapsing it needed a replacement gear in the rail;
+    // the chrome bar now holds the single gear for both states, so this
+    // component must render none — and must not accept an `onOpenSettings`
+    // prop to be wired to. The single-door assertion lives in `App.test.tsx`.
     render(<SpacesList />);
-    expect(screen.getAllByRole("button", { name: "Settings" })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
     act(() => {
       setLeftPaneCollapsed(true);
     });
-    expect(screen.getAllByRole("button", { name: "Settings" })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
   });
 
   it("renders NO action strip while open (the labelled buttons are the controls)", () => {
@@ -1202,13 +1166,14 @@ describe("SpacesList (archive, ADR 0016)", () => {
     ).toBeTruthy();
   });
 
-  it("the left rail is WIDE ENOUGH to show its toggle (the sliver is a guarantee, not a vibe)", () => {
-    // The entire design rests on one number: a collapsed pane keeps a sliver
-    // of width so its bottom toggle stays on screen. jsdom never clips, so NO
-    // DOM assertion here can notice a rail that shrank below the button — the
-    // toggle would silently vanish while every test stayed green and the pane
-    // became unopenable (no keyboard shortcut exists). Hence arithmetic:
-    //   24px button (`size-6`) + 8px inset/padding + 8px clear of the edge.
+  it("the left rail is WIDE ENOUGH for its own controls (the sliver is a guarantee, not a vibe)", () => {
+    // A collapsed pane keeps a sliver of width so the rail's marks and its
+    // three command icons stay visible. jsdom never clips, so NO DOM assertion
+    // here can notice a rail that shrank below the icons — the commands would
+    // silently vanish while every test stayed green. Hence arithmetic:
+    //   24px icon button (`size-6`) + 8px clear of each edge.
+    // (It used to be justified as the room for the pane's OWN collapse toggle;
+    // that button is in the chrome bar now, and the rail's icons still need it.)
     expect(LEFT_PANE_RAIL).toBeGreaterThanOrEqual(24 + 8 + 8);
   });
 });

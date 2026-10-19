@@ -153,16 +153,18 @@ export default function TodoRail({
   // the real board behind them is `invisible` while collapsed — so this string
   // is the ONLY text in the tree while collapsed, and the count is in the tree
   // exactly once, here.
-  // `top-2` / `bottom-9`: the marks span the rail but stop CLEAR of the frame's
-  // bottom-left corner, where the pane's own toggle lives (`bottom-2` +
-  // `size-6` = 32px of box, so 36px clears it with room to aim).
-  // `pointer-events-none`: a readout must not steal the toggle's click.
+  // `top-2` / `bottom-2`: the marks span the rail with the frame's ordinary
+  // inset. It used to be `bottom-9`, because the pane's own collapse toggle
+  // lived in the frame's bottom-left corner and the marks had to stop clear of
+  // it; that toggle is in the chrome bar now (`ChromeControls`), so nothing is
+  // down there to dodge.
+  // `pointer-events-none` stays: a readout must not eat clicks anywhere.
   return (
     <div
       data-testid="todo-rail"
       role="img"
       aria-label={`Todos — ${terms.join(", ")}`}
-      className="pointer-events-none absolute inset-x-0 top-2 bottom-9 flex flex-col justify-start gap-1 overflow-hidden"
+      className="pointer-events-none absolute inset-x-0 top-2 bottom-2 flex flex-col justify-start gap-1 overflow-hidden"
     >
       {states.map((state, i) => (
         <div

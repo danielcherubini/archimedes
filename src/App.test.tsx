@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import App from "./App";
 import {
   externalOpen,
@@ -301,31 +301,78 @@ describe("App (the gear icon + settings view swap)", () => {
     expect(logo.style.width).toBe(`${LEFT_PANE_RAIL}px`);
   });
 
-  it("the chrome bar NEVER holds a pane control — expanded or collapsed (the toggles stay at the bottom of their panes in both states)", () => {
+  it("the chrome bar carries the app controls — gear + both pane toggles — in BOTH collapse states", () => {
     render(<App />);
     const chrome = document.querySelector('[data-testid="chrome-bar"]')!;
-    // Query by a STABLE hook, not the label: the label FLIPS with the state
-    // (`Collapse sidebar` ↔ `Expand sidebar`) for screen-reader correctness,
-    // so a name-based query would silently stop matching on one side of the
-    // collapse — the exact vacuity this file has been bitten by twice.
-    const TOGGLES = ["left-pane-toggle", "right-pane-toggle"];
-    for (const id of TOGGLES) {
-      expect(screen.getByTestId(id), `${id} belongs to the content row`).toBeTruthy();
-      expect(chrome.contains(screen.getByTestId(id)), id).toBe(false);
+    // The controls live at the bar's right end, in one cluster, immediately
+    // left of the window controls: `Settings` + the two pane toggles, and
+    // exactly one of each. Query the toggles by their STABLE hook, not their
+    // labels — the labels FLIP with the state (`Collapse sidebar` ↔ `Expand
+    // sidebar`), so a name-based query would silently stop matching on one
+    // side of a collapse, the exact vacuity this file has been bitten by twice.
+    const cluster = screen.getByTestId("chrome-controls");
+    expect(chrome.contains(cluster)).toBe(true);
+    expect(
+      within(cluster).getAllByRole("button", { name: "Settings" }),
+    ).toHaveLength(1);
+    for (const id of ["left-pane-toggle", "right-pane-toggle"]) {
+      expect(within(cluster).getByTestId(id), id).toBeTruthy();
     }
-    // Collapsed: STILL nothing in the chrome bar. This is the regression this
-    // pins — the collapsed state used to hand the control back to the top.
+    // …and the panes themselves hold NONE of them — the controls belong to the
+    // window, not to the surface they hide, so they never move when a pane
+    // collapses. (The reverse of the old `NEVER holds a pane control` pin.)
+    const content = document.querySelector('[data-testid="content-row"]')!;
+    for (const id of ["left-pane-toggle", "right-pane-toggle"]) {
+      expect(content.querySelectorAll(`[data-testid='${id}']`).length, id).toBe(0);
+    }
+    expect(content.querySelectorAll('[aria-label="Settings"]').length).toBe(0);
+
+    // Collapsed: the cluster is UNCHANGED. This is the property the per-pane
+    // footers could not offer — a control bound to a pane's width clipped away
+    // with it, which is why the collapsed sidebar needed a replacement gear in
+    // its rail.
     act(() => {
       setLeftPaneCollapsed(true);
       setSidePaneCollapsed(true);
     });
-    expect(chrome.querySelectorAll("[data-testid='left-pane-toggle']").length).toBe(0);
-    expect(chrome.querySelectorAll("[data-testid='right-pane-toggle']").length).toBe(0);
-    // …and each pane still exposes its OWN control at the bottom, collapsed,
-    // now labelled for the direction it performs.
+    expect(within(cluster).getByTestId("left-pane-toggle")).toBeTruthy();
+    expect(within(cluster).getByTestId("right-pane-toggle")).toBeTruthy();
+    expect(
+      within(cluster).getAllByRole("button", { name: "Settings" }),
+    ).toHaveLength(1);
+    // The labels flip to name the direction they now perform.
     expect(screen.getByTestId("left-pane-toggle").getAttribute("aria-label")).toBe("Expand sidebar");
     expect(screen.getByTestId("right-pane-toggle").getAttribute("aria-label")).toBe("Expand side pane");
-    expect(chrome.querySelectorAll('[aria-label="Settings"]').length).toBe(0);
+  });
+
+  it("the app-control cluster sits immediately LEFT of the window controls", () => {
+    render(<App />);
+    const chrome = document.querySelector('[data-testid="chrome-bar"]')!;
+    const cluster = screen.getByTestId("chrome-controls");
+    // `WindowControls` has no testid of its own, so identify it by its
+    // `[data-window-control]` container (the attention-alert exemption).
+    const windowControls = chrome.querySelector("[data-window-control]")!;
+    expect(windowControls).toBeTruthy();
+    // Siblings of the bar, in that order — the top-right reads as one group of
+    // window buttons, with the app's own controls outboard of minimize/maximize.
+    expect(cluster.nextElementSibling).toBe(windowControls);
+    // The window controls are the bar's LAST child (nothing may crowd in right
+    // of close/minimize — that corner belongs to the window manager).
+    expect(windowControls.nextElementSibling).toBeNull();
+  });
+
+  it("the app-control cluster is OUTSIDE the window controls' attention-alert exemption", () => {
+    // `data-window-control` exempts a click from counting as user activity
+    // (ADR 0038) — right for "run finishes → click Minimize → walk away", wrong
+    // for opening a pane or the Settings page, which is a person coming back to
+    // work. So the exemption must not stretch over these three buttons.
+    render(<App />);
+    const cluster = screen.getByTestId("chrome-controls");
+    expect(cluster.hasAttribute("data-window-control")).toBe(false);
+    expect(cluster.closest("[data-window-control]")).toBeNull();
+    for (const btn of cluster.querySelectorAll("button")) {
+      expect((btn as HTMLElement).closest("[data-window-control]")).toBeNull();
+    }
   });
 
   it("one toggle does both jobs from the same place, and its aria-label flips with the state", () => {
@@ -360,12 +407,18 @@ describe("App (the gear icon + settings view swap)", () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(screen.queryByTestId("space-tabs")).toBeNull();
-    // EVERY pane-control name, expanded or collapsed: the old version of this
-    // test queried a name that had been renamed, so it passed forever without
-    // checking anything. A rename must be chased into these negatives too.
+    // The app-control cluster is dropped with the workspace, too: the two
+    // toggles drive panes that are UNMOUNTED on this page, so leaving them in
+    // the bar would be two live buttons driving invisible state (the page has
+    // its own `Back`). Settings' gear goes with them — one door, and it is the
+    // one that returns you. Queried by the STABLE testids, not the labels: the
+    // labels flip with the collapse state, so a name query can pass on one side
+    // of it by accident.
+    expect(screen.queryByTestId("chrome-controls")).toBeNull();
     for (const id of ["left-pane-toggle", "right-pane-toggle"]) {
       expect(screen.queryByTestId(id), id).toBeNull();
     }
+    expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
     const logo = screen.getByAltText("Archimedes").parentElement!;
     // No inline width — the segment is `flex-1` (full width, the old
     // chrome-bar behavior), icon only (the word was removed).

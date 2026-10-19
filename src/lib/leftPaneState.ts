@@ -1,8 +1,11 @@
 /**
  * The left pane's (the `SpacesList` sidebar's) collapsed flag — a tiny
  * shared module (no store, no React) mirroring `sidePaneState` (the right
- * pane): the collapse toggle at the sidebar's footer consumes this via
- * `useSyncExternalStore(subscribeLeftPane, getLeftPaneCollapsed)`.
+ * pane): the chrome bar's `ChromeControls` toggle WRITES it and the sidebar
+ * READS it, both through `useSyncExternalStore(subscribeLeftPane,
+ * getLeftPaneCollapsed)`. The pane and its control are separate components on
+ * purpose — the control belongs to the window, not to the surface it hides, so
+ * it never moves when the pane collapses.
  *
  * The module is the SINGLE OWNER of the persistence: `setLeftPaneCollapsed`
  * writes `localStorage["left-pane-collapse"]` itself, so the toggle's
@@ -28,13 +31,12 @@ export const LEFT_PANE_WIDTH = 260;
 /**
  * The width the sidebar keeps while COLLAPSED — a sliver, NOT 0.
  *
- * The collapse toggle lives in the sidebar's own inner-bottom corner and
- * stays there in both states; the sliver is the room that keeps it on screen
- * (24px `size-6` button + the footer's 8px `p-2` + 8px of breathing room).
- * Collapsing to 0 would clip the toggle away with the pane, and there is no
- * keyboard shortcut for this pane — which is why the control used to live in
- * the chrome bar. It does not go back to the top: the pane keeps its control
- * at the bottom, in the place the user just used it.
+ * The sliver is now the room the collapsed rail draws in: the session marks and
+ * the pane's three command icons (`SessionRail`), which need a 24px column plus
+ * breathing room (24px `size-6` + 8px each side). It used to be justified as
+ * the room for the pane's OWN collapse toggle in the inner-bottom corner; that
+ * button lives in the chrome bar now, and the rail still needs the width — so
+ * collapsing to 0 would take the marks and the commands with it.
  */
 export const LEFT_PANE_RAIL = 40;
 

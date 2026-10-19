@@ -329,7 +329,7 @@ describe("SidePane (the status panel)", () => {
   // -- Auto OPEN (the "popup" rule, ADR 0042: the frame expands on the
   // -- 0 → >0 edge of the TODO BOARD count — the parent's own list or a running
   // -- child's — and NEVER collapses itself; edge-triggered, so the user's own
-  // -- toggle always wins) --
+  // -- toggle — the chrome bar's — always wins) --
 
   it("auto-expands the frame when open todos appear (0 → visible)", () => {
     useSessions.setState({ activeSessionId: "main1" });
@@ -799,7 +799,7 @@ describe("SidePane (the status panel)", () => {
       });
     });
     expect(frame.style.width).toBe("320px"); // auto-expanded
-    // The user manually collapses (the header toggle) while work is open.
+    // The user manually collapses (the chrome bar's toggle) while work is open.
     act(() => {
       setSidePaneCollapsed(true);
     });
@@ -818,71 +818,53 @@ describe("SidePane (the status panel)", () => {
     expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
   });
 
-  // -- The footer toggle (the old header's toggle moved to the frame's
-  // -- bottom-right; the collapsed rail keeps it reachable) --
+  // -- The pane holds NO collapse control: the toggle lives in the chrome bar's
+  // -- `ChromeControls`, beside the window controls, in BOTH states (`App.tsx`,
+  // -- pinned by `App.test.tsx`'s `the chrome bar carries the app controls`).
+  // -- What used to be asserted here — the toggle's corner, its inset from the
+  // -- 4px resize handle, the fact that it survived a collapse — is now the
+  // -- chrome bar's business; this file asserts the pane's own controls are
+  // -- exactly the resize handle. --
 
-  // -- The pane's OWN collapse toggle (bottom-inner corner = bottom LEFT for
-  // -- the right pane, pointing back at the chat). It stays HERE in BOTH states:
-  // -- the chrome bar holds NO pane control, open or collapsed — see
-  // -- `App.test.tsx`'s `the chrome bar NEVER holds a pane control`. --
+  for (const state of ["open", "collapsed"] as const) {
+    it(`holds NO collapse toggle while ${state} (it lives in the chrome bar)`, () => {
+      setSidePaneCollapsed(state === "collapsed");
+      const { container } = render(<SidePane />);
+      // Every label this pane's toggle has ever carried, so a rename cannot
+      // quietly re-add the control here and leave the test vacuous.
+      for (const label of ["Collapse side pane", "Expand side pane"]) {
+        expect(screen.queryByRole("button", { name: label }), label).toBeNull();
+      }
+      // The STABLE hook, not the label: the label flips with the state, so a
+      // name-only query could pass on one side of the collapse by accident.
+      expect(container.querySelector('[data-testid="right-pane-toggle"]')).toBeNull();
+    });
+  }
 
-  it("holds its own collapse toggle at the frame's inner-bottom corner", () => {
+  it("takes its collapse from the shared flag with no control of its own", () => {
+    // The pane is a pure READER of `sidePaneState` now (its only writer left in
+    // this file is the auto-open edge, which only ever writes `false`) — so the
+    // chrome bar's toggle driving the flag must still resize the frame.
     const { container } = render(<SidePane />);
     const frame = container.firstChild as HTMLElement;
-    const collapse = screen.getByRole("button", { name: "Collapse side pane" });
-    expect(frame.contains(collapse)).toBe(true);
-    // Anchored to the frame's bottom-left — the INNER side for a right-hand
-    // pane (it points back at the chat). Asserted as classes because jsdom
-    // resolves no layout: `absolute` + both bottom and left, so it cannot
-    // silently migrate to the outer edge.
-    const cls = collapse.className;
-    expect(cls).toMatch(/absolute/);
-    expect(cls).toMatch(/\bbottom-/);
-    expect(cls).toMatch(/\bleft-/);
-    expect(cls).not.toMatch(/\bright-/);
-    expect(cls).not.toMatch(/\btop-/);
-    // Pressed = open, the same meaning the chrome bar's control carries.
-    expect(collapse.getAttribute("aria-pressed")).toBe("true");
-    expect(screen.queryByRole("button", { name: "Expand side pane" })).toBeNull();
-  });
-
-  it("insets the toggle clear of the 4px resize handle (the handle stays grabbable full-height)", () => {
-    render(<SidePane />);
-    const collapse = screen.getByRole("button", { name: "Collapse side pane" });
-    const left = collapse.className.match(/\bleft-\[?([0-9]+)\]?/);
-    expect(left, "the toggle is not offset from the left edge").toBeTruthy();
-    // Tailwind spacing = 4px; the handle is `w-1` = 4px. The toggle must start
-    // at least one unit clear of it, or resizing is impossible in that band.
-    const unit = left![1].includes("[") ? Number(left![1]) : Number(left![1]) * 4;
-    expect(unit, `left offset ${unit}px sits on the 4px handle`).toBeGreaterThanOrEqual(8);
-  });
-
-  it("KEEPS its toggle while collapsed, in the sliver — it never moves to the chrome bar", () => {
-    setSidePaneCollapsed(true);
-    const { container } = render(<SidePane />);
-    const frame = container.firstChild as HTMLElement;
+    expect(frame.style.width).toBe("320px");
+    act(() => {
+      setSidePaneCollapsed(true);
+    });
     expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
-    // The STABLE hook: the label flips with the state, so a name query would
-    // miss on exactly the collapsed side this test checks.
-    const collapse = screen.getByTestId("right-pane-toggle");
-    expect(frame.contains(collapse)).toBe(true);
-    // One control does both jobs (no shortcut exists for this pane), and the
-    // label flips to the direction it now performs.
-    expect(container.querySelectorAll('[data-testid="right-pane-toggle"]').length).toBe(1);
-    expect(collapse.getAttribute("aria-label")).toBe("Expand side pane");
-    expect(collapse.getAttribute("aria-pressed")).toBe("false");
-    fireEvent.click(collapse);
-    expect(getSidePaneCollapsed()).toBe(false);
+    act(() => {
+      setSidePaneCollapsed(false);
+    });
+    expect(frame.style.width).toBe("320px");
   });
 
-  it("hides the resize handle while collapsed (resizing a 40px sliver is moot) but keeps the toggle", () => {
+  it("hides the resize handle while collapsed (resizing a 40px sliver is moot)", () => {
     setSidePaneCollapsed(true);
     const { container } = render(<SidePane />);
     expect(container.querySelector(".cursor-col-resize")).toBeNull();
-    expect(screen.getByTestId("right-pane-toggle")).toBeTruthy();
   });
 
-  it("collapses to the sliver (the content stays mounted, clipped — the pane keeps its own toggle)", () => {
+  it("collapses to the sliver (the content stays mounted, clipped, not unmounted)", () => {
     useSessions.setState({ activeSessionId: "main1" });
     useInteractive.getState().applyTodoUpdate("main1", {
       source: "main",
@@ -1096,13 +1078,14 @@ describe("SidePane (the status panel)", () => {
     expect(frame.style.width).toBe("320px");
   });
 
-  it("the right rail is WIDE ENOUGH to show its toggle (the sliver is a guarantee, not a vibe)", () => {
-    // The entire design rests on one number: a collapsed pane keeps a sliver
-    // of width so its bottom toggle stays on screen. jsdom never clips, so NO
-    // DOM assertion here can notice a rail that shrank below the button — the
-    // toggle would silently vanish while every test stayed green and the pane
-    // became unopenable (no keyboard shortcut exists). Hence arithmetic:
-    //   24px button (`size-6`) + 8px inset/padding + 8px clear of the edge.
+  it("the right rail is WIDE ENOUGH to read as a rail (the sliver is a guarantee, not a vibe)", () => {
+    // A collapsed pane keeps a sliver of width so the todo rail's marks stay
+    // visible. jsdom never clips, so NO DOM assertion here can notice a rail
+    // that shrank below the marks — the overview would silently vanish while
+    // every test stayed green. Hence arithmetic:
+    //   24px (`size-6`, the mark row's floor) + 8px inset + 8px clear.
+    // (It used to be justified as the room for the pane's OWN collapse toggle;
+    // that button is in the chrome bar now, and the rail still needs the width.)
     expect(SIDE_PANE_RAIL).toBeGreaterThanOrEqual(24 + 8 + 8);
   });
 
@@ -1666,23 +1649,30 @@ describe("SidePane (the status panel)", () => {
     expect(block.className).not.toMatch(/\bflex-1\b/);
   });
 
-  it("clears the collapse toggle out of the block's bottom-left corner (the toggle is absolutely positioned over it)", () => {
+  it("keeps ordinary bottom padding (nothing overlays the block's corner any more)", () => {
+    // This padding used to be `pb-10`, because the pane's collapse toggle was
+    // `absolute bottom-2 left-2 z-10 size-6` and sat on top of the Context
+    // line. That toggle is in the chrome bar now (`ChromeControls`), so the
+    // block keeps the pane's own inset. Asserted as a SMALL value on purpose:
+    // a `>= 32` test would have survived the change silently, and a regression
+    // back to a big reservation would pass a bare "has padding" test.
     const { container } = render(<SidePane />);
-    // The toggle is `absolute bottom-2 left-2 z-10 size-6`, so it overlays the
-    // block's bottom-left corner for ~40px of height. Without bottom padding the
-    // Context line would sit under it and be unclickable.
     const block = container.querySelector(
       '[data-testid="session-config-block"]',
     ) as HTMLElement;
     const pb = block.className.match(/(^|\s)pb-(\[[0-9.]+rem\]|[0-9]+)/);
-    expect(pb, "the block carries no bottom padding to clear the toggle").toBeTruthy();
+    expect(pb, "the block carries no bottom padding at all").toBeTruthy();
     const raw = pb![2]!;
     const px = raw.startsWith("[")
       ? Number(raw.replace(/[\[\]rem]/g, "")) * 16
       : Number(raw) * 4;
-    // The toggle is 24px (`size-6`) inset 8px from the bottom → it reaches 32px
-    // up from the frame's bottom edge.
-    expect(px, `pb of ${px}px does not clear a 32px-tall overlay`).toBeGreaterThanOrEqual(32);
+    expect(px, `pb of ${px}px reserves room for an overlay that is gone`).toBeLessThanOrEqual(16);
+    // And the pane renders no such overlay: no absolutely-positioned button is
+    // left inside the frame to reserve anything for.
+    const frame = container.firstChild as HTMLElement;
+    for (const btn of frame.querySelectorAll("button")) {
+      expect((btn as HTMLElement).className, "a button still floats in the frame").not.toMatch(/\babsolute\b/);
+    }
   });
 
   it("hides the config block in the sliver with its own `invisible` (it sits OUTSIDE the scroller, so the scroller's class cannot reach it)", () => {

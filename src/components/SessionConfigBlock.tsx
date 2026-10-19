@@ -121,9 +121,13 @@ export default function SessionConfigBlock({ collapsed }: { collapsed: boolean }
   const countsLabel = countsText ? `Context used: ${countsText}` : undefined;
 
   return (
+    // `pb-3` matches the scroller's own inset. It used to be `pb-10`, because
+    // the pane's collapse toggle floated at `bottom-2 left-2` and would have
+    // sat on top of the Context line; that toggle now lives in the chrome bar
+    // (`ChromeControls`), so the block keeps ordinary padding.
     <div
       data-testid="session-config-block"
-      className={`shrink-0 px-3 pb-10 pt-2 ${collapsed ? "invisible" : ""}`}
+      className={`shrink-0 px-3 pb-3 pt-2 ${collapsed ? "invisible" : ""}`}
     >
       <div className="flex flex-col gap-1.5" data-testid="session-config-controls">
         {/* Model, then Reasoning, then Context: one control per line, each
