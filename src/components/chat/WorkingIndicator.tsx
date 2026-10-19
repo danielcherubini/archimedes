@@ -38,8 +38,24 @@ import type { BrailleLoaderVariant } from "../../lib/braille-loader";
  * So the box now refuses to go below `MIN_INDICATOR_WIDTH_PX`, and the row
  * WRAPS (`ComposerRow.tsx`): below the crossover the indicator drops to a line
  * of its own ABOVE the buttons instead of overprinting them. `flex-wrap` is
- * what turns the floor into a fallback rather than a new overflow, and it
- * matches the button wrapper, which already wrapped.
+ * what turns the floor into a fallback rather than a new overflow.
+ *
+ * WRAPPING BELONGS ON THE ROW AND NOT HERE, and putting it on both halves the
+ * fix. A wrapping flex container breaks a line on each item's HYPOTHETICAL main
+ * size — the quip's content width, ~420px for 60 characters — which never fits
+ * beside the spinner, so the `<p>` would drop to a second line and the `truncate`
+ * above would never run AT ALL. That is strictly worse than the overlap it
+ * replaced: a taller island, height that jumps as quips rotate, and no ellipsis
+ * ever. So this box stays a single non-wrapping line where the text is free to
+ * shrink, and the break happens one level up, between the indicator and the
+ * buttons.
+ *
+ * THE FLOOR IS ALSO WHAT MAKES THE ROW'S WRAP FIRE AT THE RIGHT MOMENT. Line
+ * breaking measures a flex item's HYPOTHETICAL main size, and on `flex-1`
+ * (basis 0%) that is the item's MINIMUM, not its content: with the old bare
+ * `min-w-0` the indicator measured 0px, so the row had room for `0 + buttons`
+ * and would have wrapped never, floor or no floor. At 56px the row wraps exactly
+ * when the spinner stops fitting — the two halves of this fix are one mechanism.
  *
  * `overflow-hidden` on this box was the other candidate and is rejected: it
  * hides the collision by cutting the spinner mid-glyph, which is the exact
@@ -114,7 +130,7 @@ export function WorkingIndicator({
   }
   return (
     <div
-      className={`flex flex-1 flex-wrap items-center gap-2 ${MIN_INDICATOR_WIDTH_CLASS}`}
+      className={`flex flex-1 items-center gap-2 ${MIN_INDICATOR_WIDTH_CLASS}`}
       data-testid="working-indicator"
     >
       {agentState === "blocked" ? (

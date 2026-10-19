@@ -710,6 +710,30 @@ describe("ChatStream", () => {
     expect(indicator.className).toContain("flex-1");
   });
 
+  it("does NOT wrap inside the indicator (the quip truncates beside the spinner, it does not drop under it)", () => {
+    // The regression the first attempt at the fix shipped with: `flex-wrap` on
+    // BOTH the row and the indicator box. A wrapping flex container breaks on a
+    // flex item's HYPOTHETICAL main size, and the `<p>` has no flex-basis, so it
+    // measures its CONTENT — ~420px for a 60-character quip, which never fits
+    // beside the spinner. So the quip would break onto a second line and the
+    // `truncate` would never run at all: a taller island whose height jumps as
+    // the quips rotate, and no ellipsis anywhere. Worse than the overlap it
+    // replaced. Wrapping is the ROW's job; inside the box the text only shrinks.
+    seedLiveSession();
+    useSessions.getState().addUserMessage("s1", "hi");
+    useSessions.getState().beginTurn("s1");
+    const { container } = render(<ChatStream />);
+    const indicator = container.querySelector(
+      '[data-testid="working-indicator"]',
+    ) as HTMLElement;
+    expect(indicator.className).not.toContain("flex-wrap");
+    // The text still carries both halves of truncation, since nothing else can
+    // make it give now that the box will neither wrap nor clip.
+    const text = indicator.querySelector("p") as HTMLElement;
+    expect(text.className).toContain("min-w-0");
+    expect(text.className).toContain("truncate");
+  });
+
   it("keeps the quip at full foreground ink (the composer fill is lighter than the chat plane)", () => {
     // The indicator's BACKGROUND moved with it: `--color-chat` (#232323) became
     // `--color-input` (#2b2b2b), and `foreground-subtle` on the new fill
