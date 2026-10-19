@@ -95,7 +95,14 @@ export function SubagentTranscript({ sessionId }: { sessionId: string }) {
   return (
     <div className="flex flex-col gap-2">
       {messageList.length > 0 ? (
-        <div className="space-y-1">
+        // `flex flex-col gap-3` — the SAME 12px base the main transcript uses,
+        // not the `space-y-1` (4px) this container used to carry. A reply's band
+        // (`AgentText` in `MessageBubble`) closes the gap to its `Thought` with
+        // a NEGATIVE `-mt-2`, and a negative margin against a 4px base produces
+        // −4px: the reply would visibly overlap the row above it. The sheet must
+        // share `MessageList`'s base for the band's 4px / 32px arithmetic to
+        // hold in both places.
+        <div className="flex flex-col gap-3">
           {units.map((unit, i) => {
             if (unit.kind === "changes-group") {
               return <ChangesGroupCard key={i} messages={unit.messages} />;

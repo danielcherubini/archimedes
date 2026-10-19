@@ -1,6 +1,5 @@
 import {
   useEffect,
-  useCallback,
   useMemo,
   useRef,
   useState,
@@ -11,7 +10,6 @@ import {
   readClipboardImage,
   readFileBytes,
   sendPrompt,
-  setSessionConfigOption,
   compactSession,
 } from "../lib/tauri";
 import { basenameOfPath } from "../lib/paths";
@@ -29,8 +27,14 @@ import { groupConsecutiveFileWrites } from "../lib/toolGroups";
 import {
   addImageAttachments,
   agentSupportsImages,
+  draftIsMarkerOnly,
+  imageMarker,
+  insertAtCaret,
+  MAX_CHAT_ATTACHMENTS,
   readAttachmentAsBase64,
   releaseAttachment,
+  renumberImageMarkers,
+  shiftImageMarkers,
   type ChatComposerAttachment,
 } from "../lib/chatAttachments";
 import { inferAttachmentMimeType, shouldPreferSpreadsheetClipboardText } from "../lib/chatAttachmentMetadata";
@@ -222,88 +226,13 @@ export default function ChatStream() {
   // branch would be a conditional hook call and crash React when the
   // state flips).
   const quip = useSpinQuip(workingOrInTurn);
-  // The session's config options (model / thinking-level selectors):
-  // the store's map FIRST (the freshest — the live frames; a session
-  // closed in this app session keeps its last known entry — the close
-  // no longer drops it), falling back to the session row's
-  // `configOptions` (the Rust `list_sessions` shape — synthesized from
-  // the stored `model` / `thinkingLevel`): a STORED session's bottom bar
-  // is POPULATED (the selectors render disabled — a stored session can't
-  // set config; a resume re-emits the fresh values).
-  const configOptions = useSessions((s) => {
-    const id = s.activeSessionId;
-    if (!id) return null;
-    return (
-      s.configOptions[id] ??
-      s.sessions.find((x) => x.sessionId === id)?.configOptions ??
-      s.historySessions.find((x) => x.sessionId === id)?.configOptions ??
-      s.archivedSessions.find((x) => x.sessionId === id)?.configOptions ??
-      null
-    );
-  });
-  // The session's context usage (the context-percentage display — from
-  // the harness's `context_usage_update` frames; the store's map first,
-  // falling back to the session row's `contextUsage` — a STORED
-  // session's last known usage, persisted on every frame): `undefined`
-  // until the first frame, so a fresh session shows no percentage.
-  const contextUsage = useSessions((s) => {
-    const id = s.activeSessionId;
-    if (!id) return undefined;
-    return (
-      s.contextUsage[id] ??
-      s.sessions.find((x) => x.sessionId === id)?.contextUsage ??
-      s.historySessions.find((x) => x.sessionId === id)?.contextUsage ??
-      s.archivedSessions.find((x) => x.sessionId === id)?.contextUsage
-    );
-  });
-  const contextPercent =
-    contextUsage && contextUsage.window > 0
-      ? Math.min(100, Math.round((contextUsage.used / contextUsage.window) * 100))
-      : undefined;
-  // The context bar's color ramp (the traffic-light scheme — the label
-  // follows the fill's color): green at 0–49%, caution at 50–69%, warning
-  // at 70–89%, the destructive red at 90–100%. Context pressure IS a status
-  // ramp, so every band rides a semantic token (no raw hue to stand beside a
-  // Palette's own yellow); `caution` is the band `success` and `warning` have
-  // no room for.
-  const contextRamp =
-    contextPercent === undefined
-      ? { fill: "bg-success", label: "text-success" }
-      : contextPercent < 50
-        ? { fill: "bg-success", label: "text-success" }
-        : contextPercent < 70
-          ? { fill: "bg-caution", label: "text-caution" }
-          : contextPercent < 90
-            ? { fill: "bg-warning", label: "text-warning" }
-            : { fill: "bg-destructive", label: "text-destructive" };
-  const findOption = (category: string, id: string) =>
-    configOptions?.find(
-      (o) =>
-        (o.category === category || o.id === id) &&
-        o.type === "select" &&
-        (o.options?.length ?? 0) > 0,
-    );
-  const modelOption = findOption("model", "model");
-  const thinkingOption = findOption("thought_level", "thought_level");
-  const applyConfigOptions = useSessions((s) => s.applyConfigOptions);
-  // ONE stable callback for both config selects (the consumer-side half of
-  // the SessionConfigSelect memo fix): a per-option closure minted per
-  // render would re-render the ~600 mounted model-catalog SelectItems on
-  // EVERY composer keystroke (~140ms each — see SessionConfigSelect.tsx).
-  // `applyConfigOptions` is a zustand action — a stable reference, so this
-  // callback's identity only changes when the active session changes.
-  const setConfigValue = useCallback(
-    async (optionId: string, value: string) => {
-      if (!activeSessionId) return;
-      const options = await setSessionConfigOption(
-        activeSessionId,
-        optionId,
-        value,
-      );
-      applyConfigOptions(activeSessionId, options);
-    },
-    [activeSessionId, applyConfigOptions],
-  );
+  // The session's config options, its context usage and the derived percentage /
+  // ramp used to be computed HERE and threaded down as props, because the
+  // composer's bottom row hosted the model / thinking selectors and the context
+  // bar. That row is gone: the three lines live at the bottom of the side pane
+  // (`SessionConfigBlock.tsx`), which runs the SHARED derivations
+  // (`lib/sessionConfig.ts`) inside its own selectors. `isLive` below stays — the
+  // composer still needs it for the auto-resume path.
 
   // Whether the user owes an answer — the ACTIVE session's own prompts/pauses,
   // or ANY child's gate anywhere in the app — and here it drives the "Send a
@@ -357,6 +286,10 @@ export default function ChatStream() {
   // above warns about).
   const [attachments, setAttachments] = useState<ChatComposerAttachment[]>([]);
   const attachmentsRef = useRef(attachments);
+  /** Attachments handed to a send that has not settled yet, keyed by session id.
+   * They are OUT of `attachments` (so their thumbnails leave the composer
+   * immediately) but NOT released — a failed send puts them back. */
+  const heldForSendRef = useRef<Map<string, ChatComposerAttachment[]>>(new Map());
   // Re-sync every render: the handlers read the CURRENT list from the ref
   // (a render closure would be stale for fast successive events — e.g.
   // pasting 8 files then a 9th in separate dispatches without a re-render
@@ -391,10 +324,14 @@ export default function ChatStream() {
   );
   // Unmount cleanup: revoke the staged object URLs exactly once, on
   // unmount ONLY — revoking on every state change would leak/break live
-  // previews (a revoked URL can no longer render the `img`).
+  // previews (a revoked URL can no longer render the `img`). The held-for-send
+  // map is walked too: an unmount while a turn is in flight leaves those
+  // attachments in NO state the composer can reach again, so this is their
+  // last chance to be released.
   useEffect(
     () => () => {
       attachmentsRef.current.forEach(releaseAttachment);
+      heldForSendRef.current.forEach((held) => held.forEach(releaseAttachment));
     },
     [],
   );
@@ -432,10 +369,27 @@ export default function ChatStream() {
   const prevSessionIdRef = useRef(activeSessionId);
   useEffect(() => {
     if (prevSessionIdRef.current === activeSessionId) return;
+    // Capture the session being LEFT BEFORE the overwrite below: at the
+    // release point the ref would otherwise hold the session being ENTERED,
+    // so the held-for-send lookup would miss — and the failure path's `delete`
+    // drops that entry without releasing it, making the leak permanent.
+    const left = prevSessionIdRef.current;
     prevSessionIdRef.current = activeSessionId;
     attachmentsRef.current.forEach(releaseAttachment);
     attachmentsRef.current = [];
     setAttachments([]);
+    // A turn still in flight in the session we just left: its held
+    // attachments can never be restored there (this effect already cleared the
+    // composer) and can never be restored here, so release them now. `left`
+    // can be `null` (no session → session), and nothing is ever held under a
+    // `null` key, so the guard is both the type narrowing and the truth.
+    if (left !== null) {
+      const held = heldForSendRef.current.get(left);
+      if (held) {
+        held.forEach(releaseAttachment);
+        heldForSendRef.current.delete(left);
+      }
+    }
   }, [activeSessionId]);
   // Window-level drop backstop: with `dragDropEnabled: false` (tauri.conf.json)
   // the webview receives native file drops — and the webview DEFAULT for a
@@ -941,7 +895,17 @@ export default function ChatStream() {
     const targetSessionId = activeSessionId;
     if (!targetSessionId) return;
     const rawText = draft.trim();
-    if ((!rawText && !hasImages) || composerLocked) return;
+    // A marker is draft TEXT, so "the user pasted a screenshot and typed
+    // nothing" is no longer `rawText === ""` — it reads `[image #1]`. Without
+    // `draftIsMarkerOnly`, an image-only send on a session whose capability has
+    // regressed would ship the SENTENCE "here is [image #1]" to an agent that
+    // receives no image at all, which is worse than the empty prompt this guard
+    // exists to block. Real prose is unaffected (still sent text-only).
+    if (
+      (!hasImages && (rawText === "" || draftIsMarkerOnly(rawText))) ||
+      composerLocked
+    )
+      return;
     if (sendingSessionsRef.current.has(targetSessionId)) return; // guard: see the ref's comment above
     sendingSessionsRef.current.add(targetSessionId);
     try {
@@ -1003,7 +967,14 @@ export default function ChatStream() {
           .sessions.find((x) => x.sessionId === targetSessionId);
         hasImages =
           attachments.length > 0 && agentSupportsImages(fresh?.capabilities);
-        if (!hasImages && rawText === "") return;
+        // A marker is draft TEXT, so `rawText === ""` alone no longer describes
+        // "the user attached a screenshot and typed nothing" — the draft now
+        // reads `[image #1]`. Without this, a staged image plus a fresh agent
+        // that cannot take images would send the sentence "look at [image #1]"
+        // to a model that receives NO image, which is worse than the empty
+        // prompt this guard exists to block. So "nothing but markers" counts as
+        // no prose: the same fail-closed posture, unchanged for real text.
+        if (!hasImages && (rawText === "" || draftIsMarkerOnly(rawText))) return;
       }
       let images:
         | { id: string; name: string; mimeType: string; sizeBytes: number; data: string }[]
@@ -1055,11 +1026,65 @@ export default function ChatStream() {
       // The `#` gate (see the `mcpMentionsEnabled` note above): an EMPTY MCP
       // catalog means a `#` token matches nothing, so the text stays
       // BYTE-IDENTICAL — the existing verbatim path, not a special case.
-      const text = expandMentions(rawText, {
-        skills,
-        agents,
-        mcpServers: mcpMentionsEnabled ? mcpServers : [],
+      //
+      // THE MASK, and why it is not cosmetic: `[image #3]` IS a `#` mention
+      // token — `MCP_MENTION_RE` is `/(^|\s)#([a-z0-9]+(?:-[a-z0-9]+)*)/g`, the
+      // `#` has its leading space and a digit is in the class. It survives today
+      // only because no catalog entry happens to be named `3`, and that is not a
+      // guarantee: the Rust picker predicate `is_mentionable_name` accepts
+      // digits (its own tests use `"0"` as a positive case), so an MCP server
+      // literally named `3` would get an `<mcp name="3">` block appended to a
+      // prompt the user never asked for. So the markers are lifted out BEFORE
+      // the expansion and put back byte-exact AFTER it: `expandMentions` sees no
+      // `#` token from a marker at all, and the marker text is stashed rather
+      // than re-derived, so the round trip is exact.
+      //
+      // THE SENTINEL IS PASTABLE, and that is what the collision guard below is
+      // for. `\uE000` is a Private Use Area codepoint: no keyboard produces it —
+      // TRUE — but a PASTE carries arbitrary codepoints, and pasted logs, data
+      // dumps and mojibake are exactly where PUA characters live. So the mask is
+      // NOT structurally un-obtainable and the round trip is not automatically a
+      // bijection: a draft can arrive at the un-mask holding a sentinel that no
+      // marker put there. What makes the design safe is the guard, not the
+      // choice of codepoint.
+      const marks: string[] = [];
+      const masked = rawText.replace(/\[image #(\d+)\]/g, (marker) => {
+        marks.push(marker);
+        return "\uE000";
       });
+      // A PASTED sentinel sitting in a draft that also has a marker: the un-mask
+      // cannot tell the user's stray byte from one of our placeholders, so the
+      // round trip could hand a marker's text to the wrong position. Such a
+      // draft is pathological (nothing the composer produces writes a PUA
+      // character), and the two ways out are not equal: sending the user's own
+      // text UNEXPANDED costs one send its `<mcp>` / `<skill>` blocks, while
+      // continuing would CORRUPT the prompt the model reads. Degrading is the
+      // safe side, so that is what this does.
+      //
+      // A sentinel in a draft with NO marker needs no guard: nothing was masked,
+      // so nothing can be mis-restored — the bounded replacer below just lets the
+      // user's byte pass through, and expansion runs normally.
+      let text: string;
+      if (marks.length > 0 && rawText.includes("\uE000")) {
+        text = rawText;
+      } else {
+        const expanded = expandMentions(masked, {
+          skills,
+          agents,
+          mcpServers: mcpMentionsEnabled ? mcpServers : [],
+        });
+        let markIndex = 0;
+        // BOUNDED on purpose, and it is not defensive noise: an unbounded
+        // `marks[markIndex++]` returns `undefined` once the stashes run out, and
+        // `String.prototype.replace` STRINGIFIES what a replacer returns — so a
+        // pasted sentinel would ship the literal word "undefined" to the model in
+        // place of the user's character. Returning the sentinel itself keeps the
+        // text byte-identical to what the user had.
+        text = expanded.replace(
+          /\uE000/g,
+          () => (markIndex < marks.length ? marks[markIndex++] : "\uE000"),
+        );
+      }
       // Every staged image was removed during the read (the composer isn't
       // locked until `beginTurn`, so a thumbnail can be removed during the
       // read): with no text there's nothing meaningful left to send; with
@@ -1080,6 +1105,21 @@ export default function ChatStream() {
       const imageRefs = images?.map(({ id, ...ref }) => ref); // ImageRef[] | undefined
       setDraft("");
       addUserMessage(targetSessionId, text, imageRefs); // EXPANDED
+      // The staged `File`/object-URL pair has NO remaining job once the
+      // base64 copies are on the user message: hold exactly the sent
+      // attachments OUT of `attachments` so their thumbnails leave the
+      // composer NOW instead of sitting there for the whole turn. They are
+      // held, not released — the `catch` below puts them back on a failed
+      // send, and the success path releases them when the turn settles.
+      // `activeSessionIdRef` guard: a send whose session was switched away
+      // during the read never touches the (now other session's) composer state.
+      if (sentIds.size > 0 && activeSessionIdRef.current === targetSessionId) {
+        const held = attachmentsRef.current.filter((a) => sentIds.has(a.id));
+        heldForSendRef.current.set(targetSessionId, held);
+        const staged = attachmentsRef.current.filter((a) => !sentIds.has(a.id));
+        attachmentsRef.current = staged;
+        setAttachments(staged);
+      }
       beginTurn(targetSessionId);
       // Pass the third arg ONLY when there are images: a text-only send (and
       // an all-images-removed send, normalized above) calls
@@ -1089,17 +1129,17 @@ export default function ChatStream() {
       const stopReason = imageRefs
         ? await sendPrompt(targetSessionId, text, imageRefs) // EXPANDED
         : await sendPrompt(targetSessionId, text); // EXPANDED
-      // Release/clear ONLY the sent attachments, OUTSIDE the state updater
-      // (updaters must be pure — StrictMode runs them twice), and ONLY if this
-      // session is still the active view (otherwise the other session's staged
-      // attachments would be mutated).
-      if (activeSessionIdRef.current === targetSessionId) {
-        const still = attachmentsRef.current.filter((a) => !sentIds.has(a.id));
-        attachmentsRef.current
-          .filter((a) => sentIds.has(a.id))
-          .forEach(releaseAttachment);
-        attachmentsRef.current = still;
-        setAttachments(still);
+      // Success: the turn settled, so the held attachments have no job left —
+      // release them for good and drop the map entry. Released from the HELD
+      // list (they left `attachments` at send), NOT by re-filtering the staged
+      // list by `sentIds`. The state is untouched here: the composer is
+      // already clean, so only the `activeSessionIdRef`-guarded map entry has
+      // to go (the held objects are released either way — a revoked URL is not
+      // session-scoped).
+      const held = heldForSendRef.current.get(targetSessionId);
+      if (held) {
+        held.forEach(releaseAttachment);
+        heldForSendRef.current.delete(targetSessionId);
       }
       turnCompleted(targetSessionId, stopReason);
     } catch (err) {
@@ -1110,9 +1150,68 @@ export default function ChatStream() {
       if (activeSessionIdRef.current === targetSessionId) {
         setError(msg);
       }
-      // Attachments deliberately stay staged (a failed send keeps them — a
-      // re-pasted image is costly, a re-typed draft is not). The draft is
-      // lost on failure (pre-existing behavior, unchanged).
+      // Attachments deliberately survive a failed send (a re-pasted image is
+      // costly, a re-typed draft is not). The thumbnails now leave the
+      // composer AT send (see `heldForSendRef`), so this is where they come
+      // back: the held list is merged in FRONT of whatever is staged now (the
+      // user can stage during a turn), de-duplicated by `id` so a re-staged
+      // item is not doubled. The RESTORED ones' object URLs are NOT revoked —
+      // that is what makes the restored thumbnail render again (only the
+      // overflow the cap forces out below is released).
+      //
+      // This block MUST stay in the same synchronous block as `setError`
+      // above: the existing test waits on the error line, and it only passes
+      // because both state updates land in one React 19 batch — an `await`
+      // between them lets the test observe the pre-restore DOM (flaky).
+      const held = heldForSendRef.current.get(targetSessionId);
+      if (held && held.length > 0 && activeSessionIdRef.current === targetSessionId) {
+        const live = attachmentsRef.current;
+        const ids = new Set(live.map((a) => a.id));
+        const fitting = held.filter((a) => !ids.has(a.id));
+        // ── The restore respects MAX_CHAT_ATTACHMENTS ──────────────────────
+        // The cap is enforced inside `addImageAttachments`, i.e. only at
+        // STAGING time, and this path writes `attachments` directly — so
+        // without a ceiling here a failed send can rebuild a list the cap
+        // would never have admitted (send 8, paste a 9th during the turn,
+        // fail: 9 staged). Nothing in the UI catches that, and the NEXT send
+        // is then rejected server-side for a state this component built.
+        // Dropping the overflow mirrors `addImageAttachments`'s silent cap
+        // rejection at staging time: the same limit, the same non-error
+        // treatment (the user sees a full strip, not an error line).
+        const room = Math.max(0, MAX_CHAT_ATTACHMENTS - live.length);
+        const back = fitting.slice(0, room);
+        // The overflow's object URL has no owner left once it is dropped — no
+        // state holds it, so no remove / session-switch / unmount path can
+        // ever revoke it. Release it here or it leaks for the process lifetime.
+        fitting.slice(room).forEach(releaseAttachment);
+        const merged = [...back, ...live];
+        attachmentsRef.current = merged;
+        setAttachments(merged);
+        // ── The draft's marker numbers move WITH the pictures ──────────────
+        // The numbers are POSITIONAL (they count THIS message's attachments in
+        // list order), and this restore inserts `back` IN FRONT of everything
+        // staged during the turn. Anything staged mid-turn was numbered against
+        // the SHORTER list — stage A, send (A held, list empty), paste B and
+        // `stageFiles` numbers B `#1` — so after the merge slot 1 is A and the
+        // draft's `#1` names the wrong picture: the next prompt asks about a
+        // screenshot the user never meant. Shifting by the number ACTUALLY
+        // restored (not the number that left the composer — the cap can make
+        // those differ) is what keeps the marker→image mapping the whole
+        // marker feature exists to guarantee.
+        //
+        // The live draft (`draftRef`, not the `send()` closure — the composer
+        // stays editable across the awaits) is the text being rewritten, and
+        // the write lands in this SAME synchronous block for the batching
+        // reason above.
+        if (back.length > 0) {
+          setDraft(shiftImageMarkers(draftRef.current, back.length));
+        }
+      }
+      heldForSendRef.current.delete(targetSessionId);
+      // The text the user had typed when they pressed Send is still lost on
+      // failure (`setDraft("")` ran at send, pre-existing behaviour): what
+      // survives is whatever was typed AFTER that, and the shift above keeps
+      // ITS markers honest about the restored list.
     } finally {
       sendingSessionsRef.current.delete(targetSessionId);
     }
@@ -1179,13 +1278,62 @@ export default function ChatStream() {
     // Read the CURRENT list from the ref — a render closure would be stale
     // for fast successive events (e.g. pasting 8 files then a 9th in
     // separate dispatches without a re-render in between).
+    const stagedBefore = attachmentsRef.current;
     const { attachments: next, rejected } = addImageAttachments(
-      attachmentsRef.current,
+      stagedBefore,
       files,
     );
-    if (next !== attachmentsRef.current) {
+    if (next !== stagedBefore) {
       attachmentsRef.current = next;
       setAttachments(next);
+      // ── The `[image #N]` markers, for EVERY staging path ────────────────
+      // `stageFiles` is the single funnel for all four of them (paste with
+      // file items, the WebKitGTK empty-paste clipboard fallback, drag-and-drop
+      // and the `+` picker), so one insert here covers all four. Doing it in
+      // the callers instead would number a mixed batch `#1, #3` and the number
+      // would stop matching the strip.
+      // `N` counts the attachments of THIS message (1-based, in staging
+      // order) — see `imageMarker` for why a session-wide number would be
+      // unresolvable by the model.
+      // The count comes from the RETURNED list, never from `files.length`:
+      // `addImageAttachments` can reject mid-batch (`continue` on a bad MIME
+      // / an oversize file, `break` on the cap), so looping the input would
+      // emit a marker for a rejected file and the numbers would then name the
+      // wrong picture.
+      // ONE string for the WHOLE batch, inserted ONCE (ascending `#k #k+1 …`):
+      // inserting one at a time at the same caret would emit `#3 #2 #1` and
+      // invert the marker→image mapping on every multi-file paste.
+      const markers = next
+        .slice(stagedBefore.length)
+        .map((_, i) => imageMarker(stagedBefore.length + 1 + i))
+        .join(" ");
+      // CARET ONLY WHEN THE TEXTAREA ACTUALLY HAS FOCUS. `selectionStart` is
+      // `0` for a textarea that has never been focused, and two of these four
+      // paths (a drop, and the `+` picker — the native dialog holds focus)
+      // routinely run that way, so the naive read would drop every marker at
+      // the START of the user's sentence. This is a deliberate divergence from
+      // the `selectionStart ?? draft.length` idiom in `handleDrop`'s backstop
+      // and `selectMention`, which is safe there only because both are
+      // reachable solely after typing (so the field is focused).
+      // `draftRef` — not the render closure — for the same reason
+      // `attachmentsRef` exists: a 9th paste in a fast sequence would
+      // otherwise revert the draft to a stale value and drop the earlier
+      // markers.
+      const el = composerRef.current;
+      const len = draftRef.current.length;
+      const caret =
+        el && document.activeElement === el ? (el.selectionStart ?? len) : len;
+      const inserted = insertAtCaret(draftRef.current, caret, markers);
+      setDraft(inserted.text);
+      // Restore focus + caret after the controlled `setDraft` (which would
+      // otherwise drop both) — the same block `selectMention` uses.
+      const pos = inserted.caret;
+      requestAnimationFrame(() => {
+        const area = composerRef.current;
+        if (!area) return;
+        area.focus();
+        area.setSelectionRange(pos, pos);
+      });
     }
     // A successful stage also CLEARS a stale rejection line (null when
     // nothing was rejected) — otherwise a rejection stays visible after the
@@ -1315,6 +1463,15 @@ export default function ChatStream() {
     // runs them twice; a double revoke is harmless but the wrong pattern).
     const target = attachmentsRef.current.find((a) => a.id === id);
     if (target) releaseAttachment(target);
+    // The 1-based position IN THE LIST BEING SHOWN, computed BEFORE the
+    // filter (after it, the index would be the survivor's). This is the `N`
+    // the draft's marker uses, so removing a thumbnail takes its marker with
+    // it and shifts every marker above it down — the numbers keep naming the
+    // right picture. `draftRef` (not the closure) for the same reason
+    // `attachmentsRef` is read here: the composer is not locked, so a
+    // same-tick draft edit must not be reverted by this rewrite.
+    const position = attachmentsRef.current.findIndex((a) => a.id === id) + 1;
+    setDraft(renumberImageMarkers(draftRef.current, position));
     const next = attachmentsRef.current.filter((a) => a.id !== id);
     attachmentsRef.current = next;
     setAttachments(next);
@@ -1479,13 +1636,6 @@ export default function ChatStream() {
         composerLocked={composerLocked}
         imageCapable={imageCapable}
         hasImages={hasImages}
-        contextPercent={contextPercent}
-        contextRamp={contextRamp}
-        contextUsage={contextUsage}
-        modelOption={modelOption}
-        thinkingOption={thinkingOption}
-        setConfigValue={setConfigValue}
-        isLive={isLive}
       />
       {/* Interactive modals (rendered at the `ChatStream` root — `fixed`
           overlays, NOT inside the scroll region). */}

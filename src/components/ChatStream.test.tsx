@@ -3,7 +3,6 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import ChatStream from "./ChatStream";
 import {
   sendPrompt,
-  setSessionConfigOption,
   resumeSession,
   readClipboardImage,
   readFileBytes,
@@ -36,6 +35,7 @@ import type {
 } from "../lib/tauri";
 import { setSidePaneCollapsed } from "../lib/sidePaneState";
 import { activeMentionToken, isOutsideSpaceQuery } from "../lib/skills";
+import { MAX_CHAT_ATTACHMENTS } from "../lib/chatAttachments";
 
 /** A full settings fixture (the spinner-style tests seed the store with it). */
 const SETTINGS_FIXTURE: AppSettings = {
@@ -363,17 +363,23 @@ async function flush(): Promise<void> {
 }
 
 /**
- * A promise that has NOT settled yet, plus its resolver — the shape an
+ * A promise that has NOT settled yet, plus its resolvers — the shape an
  * in-flight IPC has. `deferred` (rather than a plain pending promise) so a
  * test can settle it on purpose and assert what the NEXT keystroke does, and
  * so a test that means to leave one hanging can still unwind it.
  */
-function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (v: T) => void;
+  reject: (e: unknown) => void;
+} {
   let resolve!: (v: T) => void;
-  const promise = new Promise<T>((r) => {
-    resolve = r;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 /**
@@ -484,7 +490,10 @@ describe("ChatStream", () => {
     
     render(<ChatStream />);
     // Verify the "Thinking" label (scoped to the transcript's gradient text —
-    // the composer's thinking stub shows a "Thinking" placeholder too).
+    // the thinking STUB that used to sit in the composer and show the same
+    // "Thinking" placeholder is now the side pane's config block, and the pane
+    // is not part of this render; the scope stays so the two can never collide
+    // again if the pane is ever mounted under `ChatStream`).
     expect(screen.getByText("Thinking", { selector: ".animated-gradient-text" })).toBeTruthy();
     
     // Complete the turn
@@ -952,33 +961,6 @@ describe("ChatStream", () => {
     ).toBe(true);
   });
 
-  it("renders the composer's bottom row for a closed (history-only) session (the context bar + model/thinking selects — the `isLive` gates are gone)", () => {
-    seedStoredSession();
-    const { container } = render(<ChatStream />);
-    const composer = container.querySelector('[data-testid="composer-island"]')!;
-    // The context bar renders (an empty 0% track — the session's context is
-    // dropped on close and re-emits on resume; the label waits for data).
-    const bar = composer.querySelector(
-      '[data-testid="context-usage-bar"]',
-    ) as HTMLElement;
-    expect(bar).toBeTruthy();
-    const progress = bar.querySelector(
-      '[role="progressbar"][aria-label="Context used"]',
-    ) as HTMLElement;
-    expect(progress.getAttribute("aria-valuenow")).toBe("0");
-    expect(bar.querySelector('[data-testid="context-usage"]')).toBeNull();
-    // The model/thinking selects render as DISABLED stubs (the config
-    // options are dropped on close — no data to show; the identity stays).
-    const model = composer.querySelector('[aria-label="Model"]') as HTMLElement;
-    expect(model).toBeTruthy();
-    expect(model.hasAttribute("disabled")).toBe(true);
-    const thinking = composer.querySelector(
-      '[aria-label="Thinking"]',
-    ) as HTMLElement;
-    expect(thinking).toBeTruthy();
-    expect(thinking.hasAttribute("disabled")).toBe(true);
-  });
-
   it("send in a resumable stored session auto-resumes it, then sends", async () => {
     seedStoredSession({ loadSession: true, promptCapabilities: { image: true } });
     render(<ChatStream />);
@@ -1321,47 +1303,17 @@ describe("ChatStream", () => {
     expect(screen.queryByRole("status")).toBeNull();
   });
 
-  it("a live session WITH a model + thinking config option renders BOTH selects IN THE COMPOSER (ZCode's placement — the header carries no config selects)", async () => {
-    seedLiveSession();
-    useSessions.setState({
-      configOptions: {
-        s1: [
-          {
-            id: "model",
-            name: "Model",
-            type: "select",
-            currentValue: "acme/alpha",
-            options: [
-              { value: "acme/alpha", name: "acme/Alpha" },
-              { value: "acme/beta", name: "acme/Beta" },
-            ],
-          },
-          {
-            id: "thought_level",
-            name: "Thinking",
-            type: "select",
-            currentValue: "medium",
-            options: [
-              { value: "low", name: "Low" },
-              { value: "medium", name: "Medium" },
-            ],
-          },
-        ],
-      },
-    });
-    const { container } = render(<ChatStream />);
-    // ZCode's composer carries the model/thought controls in its toolbar
-    // (left of the send button).
-    const composer = container.querySelector('[data-testid="composer-island"]')!;
-    expect(composer.querySelector('[aria-label="Model"]')).toBeTruthy();
-    expect(composer.querySelector('[aria-label="Thinking"]')).toBeTruthy();
-    // The model trigger shows the BARE id + the provider suffix (the
-    // composed `provider/id` key is the VALUE, not the display text).
-    expect(screen.getByText(/alpha/)).toBeTruthy();
-    expect(screen.getByText("Medium")).toBeTruthy();
-  });
-
-  it("groups the model + thinking triggers in ONE tight cluster (they are one block of session config, not three evenly-spaced controls)", () => {
+  // The composer's bottom row is TWO BUTTONS. The three config lines (context
+  // bar, model, reasoning) left for the side pane's `SessionConfigBlock`, and
+  // these two pins keep them out — a re-landed bar or trigger would put ~600
+  // mounted model `SelectItem`s back into the subtree that re-renders on every
+  // keystroke (`draft` is the composer's state), which is the perf coupling the
+  // move exists to kill.
+  it("the composer island hosts NO config line (they are the side pane's now)", () => {
+    // A FULL session: usage known AND both config options present — the state
+    // in which a re-landed bar/trigger would definitely render. Anything the
+    // composer still renders for these is a regression; the pane is asserted
+    // separately (`SidePane.test.tsx`).
     seedLiveSession();
     useSessions.setState({
       configOptions: {
@@ -1382,293 +1334,50 @@ describe("ChatStream", () => {
           },
         ],
       },
+      contextUsage: { s1: { used: 53760, window: 128000 } },
     });
     const { container } = render(<ChatStream />);
-    // Both triggers sit inside a single wrapper whose inner gap (`gap-1`) is
-    // TIGHTER than the `gap-2` that separates the cluster from Send.
-    const group = container.querySelector(
-      '[data-testid="composer-config-controls"]',
+    const composer = container.querySelector(
+      '[data-testid="composer-island"]',
     ) as HTMLElement;
-    expect(group).toBeTruthy();
-    expect(group.className).toContain("gap-1");
-    expect(group.className).not.toContain("gap-2");
+    expect(composer).toBeTruthy();
+    // Neither the context bar nor its track / label / icon.
     expect(
-      group.querySelector('[aria-label="Model"]') &&
-        group.querySelector('[aria-label="Thinking"]'),
-    ).toBeTruthy();
-    // The cluster is the toolbar's last item before Send (the toolbar's own
-    // `gap-2` is the wider separation).
-    const toolbar = group.parentElement!;
-    expect(toolbar.className).toContain("gap-2");
-    expect(toolbar.lastElementChild?.getAttribute("aria-label")).toBe("Send");
+      composer.querySelector('[data-testid="context-usage-bar"]'),
+    ).toBeNull();
+    // Neither config trigger — the model trigger is a dialog BUTTON and the
+    // thinking trigger a `combobox`, so check both roles and the raw labels.
+    expect(composer.querySelector('[aria-label="Model"]')).toBeNull();
+    expect(composer.querySelector('[aria-label="Thinking"]')).toBeNull();
+    expect(
+      composer.querySelector('[data-testid="session-config-controls"]'),
+    ).toBeNull();
+    // And nothing in the composer's subtree is a progressbar any more.
+    expect(composer.querySelector('[role="progressbar"]')).toBeNull();
   });
 
-  // --- The context bar (the dynamic percentage — a progress bar spanning
-  // from the `+` button to the model selector, the reference UI's
-  // `🧠 [====bar====] 61%` look). ---
-
-  it("renders a dynamic context bar in the composer when the usage is known", () => {
+  it("keeps BOTH action buttons in the composer's bottom row, right-aligned together", () => {
     seedLiveSession();
-    useSessions.setState({
-      contextUsage: { s1: { used: 53760, window: 128000 } },
-    });
     const { container } = render(<ChatStream />);
-    // 53760 / 128000 = 42% — inside the composer (NOT the header).
-    const composer = container.querySelector('[data-testid="composer-island"]')!;
-    const group = composer.querySelector(
-      '[data-testid="context-usage-bar"]',
-    ) as HTMLElement | null;
-    expect(group).toBeTruthy();
-    const bar = group!.querySelector(
-      '[role="progressbar"][aria-label="Context used"]',
-    ) as HTMLElement | null;
-    expect(bar).toBeTruthy();
-    expect(bar!.getAttribute("aria-valuemin")).toBe("0");
-    expect(bar!.getAttribute("aria-valuemax")).toBe("100");
-    expect(bar!.getAttribute("aria-valuenow")).toBe("42");
-    // The fill's width follows the percentage, and 42% (< 50%) is the
-    // green band (the label follows the fill's color).
-    const fill = bar!.firstElementChild as HTMLElement;
-    expect(fill.style.width).toBe("42%");
-    expect(fill.className).toContain("bg-success");
-    expect(fill.className).not.toContain("bg-caution");
-    // The label sits at the bar's right edge (the reference UI's `61%`).
-    const labelEl = group!.querySelector('[data-testid="context-usage"]') as HTMLElement;
-    expect(labelEl.textContent).toBe("42%");
-    expect(labelEl.className).toContain("text-success");
-    // The brain icon cues the bar (the reference UI's `🧠` placement).
-    expect(group!.querySelector('[data-testid="context-bar-icon"]')).toBeTruthy();
-  });
-
-  // The token counts are HOVER-ONLY on the number (the bar row is dense —
-  // `53,760 / 128,000 tokens` inline would push the model selector off the
-  // row, and the native `title` tooltip is unstyled and ~1s slow).
-  it("the context number reveals the token counts on hover, not inline", () => {
-    seedLiveSession();
-    useSessions.setState({
-      contextUsage: { s1: { used: 53760, window: 128000 } },
-    });
-    render(<ChatStream />);
-    const label = screen.getByTestId("context-usage");
-    // The inline text stays the bare percentage.
-    expect(label.textContent).toBe("42%");
-    // No native tooltip (the styled Radix one replaces it).
-    expect(label.getAttribute("title")).toBeNull();
-    // CLOSED until hover — the counts are not in the DOM at rest.
-    expect(document.body.textContent).not.toContain("53,760");
-    // Radix `TooltipTrigger` opens on pointer/focus (see the
-    // `ToolCallCard` failure-tooltip test — `mouseEnter` does not fire it
-    // in this Radix version; `focus` does; `TooltipProvider`'s
-    // `delayDuration = 0` mounts the portal synchronously).
-    fireEvent.focus(label);
-    expect(document.body.textContent).toContain("53,760 / 128,000 tokens");
-  });
-
-  // The counts are keyboard-accessible: the tooltip trigger is a focusable
-  // control (a Tab stop) whose accessible name carries the token counts,
-  // and the progressbar exposes them as its text alternative — so nothing
-  // about the context is hover-only.
-  it("the context counts are reachable by keyboard, not hover alone", () => {
-    seedLiveSession();
-    useSessions.setState({
-      contextUsage: { s1: { used: 53760, window: 128000 } },
-    });
-    render(<ChatStream />);
-    const label = screen.getByTestId("context-usage");
-    // A real control in the tab order (a bare `<span>` was not).
-    expect(label.tagName).toBe("BUTTON");
-    expect(label.getAttribute("tabindex")).not.toBe("-1");
-    // The accessible name carries the counts (a screen reader hears them
-    // without opening the tooltip).
-    expect(label.getAttribute("aria-label")).toBe(
-      "Context used: 53,760 of 128,000 tokens (42%)",
-    );
-    // The progressbar's text alternative carries them too.
-    const bar = screen
-      .getByTestId("context-usage-bar")
-      .querySelector('[role="progressbar"][aria-label="Context used"]') as HTMLElement;
-    expect(bar.getAttribute("aria-valuetext")).toBe(
-      "53,760 of 128,000 tokens (42%)",
-    );
-    // And focus (keyboard) opens the tooltip, as hover does.
-    fireEvent.focus(label);
-    expect(document.body.textContent).toContain("53,760 / 128,000 tokens");
-  });
-
-  it("a caution-band context percentage (50–69%) renders the fill in caution", () => {
-    seedLiveSession();
-    useSessions.setState({
-      contextUsage: { s1: { used: 78080, window: 128000 } },
-    });
-    render(<ChatStream />);
-    const group = screen.getByTestId("context-usage-bar");
-    const bar = group.querySelector(
-      '[role="progressbar"][aria-label="Context used"]',
+    const composer = container.querySelector(
+      '[data-testid="composer-island"]',
     ) as HTMLElement;
-    expect(bar.getAttribute("aria-valuenow")).toBe("61");
-    // 61% is the caution band (50–69%): caution (NOT green, NOT warning),
-    // and the label follows the fill's color.
-    const fill = bar.firstElementChild as HTMLElement;
-    expect(fill.className).toContain("bg-caution");
-    expect(fill.className).not.toContain("bg-success");
-    expect(fill.className).not.toContain("bg-warning");
-    const label = group.querySelector('[data-testid="context-usage"]') as HTMLElement;
-    expect(label.textContent).toBe("61%");
-    expect(label.className).toContain("text-caution");
-  });
-
-  it("a mid context percentage (70–89%) escalates the fill to the warning color", () => {
-    seedLiveSession();
-    useSessions.setState({
-      contextUsage: { s1: { used: 96000, window: 128000 } },
-    });
-    render(<ChatStream />);
-    const group = screen.getByTestId("context-usage-bar");
-    const bar = group.querySelector(
-      '[role="progressbar"][aria-label="Context used"]',
+    const attach = composer.querySelector(
+      '[aria-label="Attach files"]',
     ) as HTMLElement;
-    expect(bar.getAttribute("aria-valuenow")).toBe("75");
-    // 75% is the warning band (70–89%): warning (NOT caution, NOT red),
-    // and the label follows the fill's color.
-    const fill = bar.firstElementChild as HTMLElement;
-    expect(fill.className).toContain("bg-warning");
-    expect(fill.className).not.toContain("bg-caution");
-    expect(fill.className).not.toContain("bg-destructive");
-    const label = group.querySelector('[data-testid="context-usage"]') as HTMLElement;
-    expect(label.textContent).toBe("75%");
-    expect(label.className).toContain("text-warning");
-  });
-
-  it("a high context percentage (>= 90%) escalates the fill to the destructive color", () => {
-    seedLiveSession();
-    useSessions.setState({
-      contextUsage: { s1: { used: 115200, window: 128000 } },
-    });
-    render(<ChatStream />);
-    const group = screen.getByTestId("context-usage-bar");
-    const bar = group.querySelector(
-      '[role="progressbar"][aria-label="Context used"]',
-    ) as HTMLElement;
-    expect(bar.getAttribute("aria-valuenow")).toBe("90");
-    // 90% is the red band (90–100%): the destructive red (the label
-    // follows the fill's color).
-    const fill = bar.firstElementChild as HTMLElement;
-    expect(fill.className).toContain("bg-destructive");
-    expect(fill.className).not.toContain("bg-warning");
-    const label = group.querySelector('[data-testid="context-usage"]') as HTMLElement;
-    expect(label.textContent).toBe("90%");
-    expect(label.className).toContain("text-destructive");
-  });
-
-  it("renders an empty context bar (no label) when the usage is unknown", () => {
-    seedLiveSession();
-    useSessions.setState({ contextUsage: {} });
-    render(<ChatStream />);
-    // The bar renders from the start (layout stability — the fill appears
-    // as the session grows) but the label waits for the first frame.
-    const bar = screen.getByRole("progressbar", { name: "Context used" });
-    expect(bar.getAttribute("aria-valuenow")).toBe("0");
-    const fill = bar.firstElementChild as HTMLElement;
-    expect(fill.style.width).toBe("0%");
-    expect(bar.querySelector('[data-testid="context-usage"]')).toBeNull();
-  });
-
-  it("renders the context bar for a stored session as an empty 0% track (the context is dropped on close and re-emits on resume)", () => {
-    seedStoredSession();
-    render(<ChatStream />);
-    // The bar is ALWAYS rendered (the `isLive` gate is gone): a stored
-    // session's context is dropped on close — the track is the empty 0%
-    // fill (the label waits for the resume to re-emit the usage).
-    const bar = screen.getByRole("progressbar", { name: "Context used" });
-    expect(bar.getAttribute("aria-valuenow")).toBe("0");
-    expect(screen.queryByTestId("context-usage")).toBeNull();
-  });
-
-  it("renders the bottom bar POPULATED for a stored session (config options + context usage from the session row — the selectors are disabled)", () => {
-    // The `list_sessions` shape: the row carries `configOptions` (the
-    // stored `model` / `thinkingLevel` synthesized) + `contextUsage` (the
-    // last known usage — persisted on every `context_usage_update` frame).
-    useSessions.setState({
-      activeSessionId: "s1",
-      sessions: [],
-      spaces: [{ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1, trusted: false }],
-      historySessions: [
-        {
-          sessionId: "s1",
-          cwd: "/home/u/proj",
-          capabilities: { loadSession: true },
-          archived: false,
-          configOptions: [
-            {
-              id: "model",
-              name: "Model",
-              type: "select",
-              currentValue: "tama/m1",
-              options: [{ value: "tama/m1", name: "m1" }],
-            },
-            {
-              id: "thought_level",
-              name: "Thinking",
-              category: "thought_level",
-              type: "select",
-              currentValue: "high",
-              options: [{ value: "high", name: "High" }],
-            },
-          ],
-          contextUsage: { used: 53760, window: 128000 },
-        },
-      ],
-      messages: { s1: [] },
-      inTurn: {},
-      stopReasons: {},
-      closeReasons: {},
-      configOptions: {},
-      contextUsage: {},
-    });
-    render(<ChatStream />);
-    // The context bar is FILLED from the row's usage (53760 / 128000 ≈
-    // 42% — the green band).
-    const bar = screen.getByRole("progressbar", { name: "Context used" });
-    expect(bar.getAttribute("aria-valuenow")).toBe("42");
-    expect(screen.getByTestId("context-usage").textContent).toBe("42%");
-    // The model selector is POPULATED with the stored model's name, but
-    // DISABLED (a stored session can't set config — no agent process to
-    // deliver `set_config_option` to).
-    const model = screen.getByRole("button", { name: "Model" });
-    expect(model.hasAttribute("disabled")).toBe(true);
-    expect(model.textContent).toContain("m1 · tama");
-    // The thinking selector is POPULATED with the stored level + disabled.
-    const thinking = screen.getByRole("combobox");
-    expect(thinking.hasAttribute("disabled")).toBe(true);
-    expect(thinking.textContent).toContain("High");
-  });
-
-  it("a stored session's live config options win over the row's (the store's map is fresher — the last frame before the close)", () => {
-    // The store's map has a FRESHER value (the session was live in this
-    // app session, closed, and the store kept its last known config — the
-    // `handleSessionClosed` no longer drops it); the row's value is the
-    // DB's (persisted on the same frame — same value, but the store's
-    // map is the primary source).
-    seedStoredSession();
-    useSessions.setState({
-      configOptions: {
-        s1: [
-          {
-            id: "model",
-            name: "Model",
-            type: "select",
-            currentValue: "tama/m2",
-            options: [{ value: "tama/m2", name: "m2" }],
-          },
-        ],
-      },
-      contextUsage: { s1: { used: 100000, window: 128000 } },
-    });
-    render(<ChatStream />);
-    const model = screen.getByRole("button", { name: "Model" });
-    expect(model.textContent).toContain("m2 · tama");
-    const bar = screen.getByRole("progressbar", { name: "Context used" });
-    expect(bar.getAttribute("aria-valuenow")).toBe("78"); // 100000/128000 ≈ 78%
+    const send = composer.querySelector('[aria-label="Send"]') as HTMLElement;
+    expect(attach).toBeTruthy();
+    expect(send).toBeTruthy();
+    // Both ride ONE `ml-auto` wrapper — that is what right-aligns them as a
+    // pair. Splitting them (or dropping `ml-auto`) un-aligns the pair, which is
+    // the layout the config lines' departure left behind and the reason the
+    // wrapper still exists.
+    expect(send.parentElement).toBe(attach.parentElement);
+    expect(send.parentElement!.className).toContain("ml-auto");
+    // They are the wrapper's ONLY children: the row is two buttons and nothing
+    // else (the deleted cluster left no container behind).
+    expect(send.parentElement!.childElementCount).toBe(2);
+    expect(send.parentElement!.lastElementChild).toBe(send);
   });
 
   // --- The `+` attach button (the native file picker) ---
@@ -1746,40 +1455,6 @@ describe("ChatStream", () => {
     expect(screen.queryByRole("button", { name: "Remove image attachment" })).toBeNull();
   });
 
-  it("choosing a model item invokes setSessionConfigOption", async () => {
-    seedLiveSession();
-    useSessions.setState({
-      configOptions: {
-        s1: [
-          {
-            id: "model",
-            name: "Model",
-            type: "select",
-            currentValue: "acme/alpha",
-            options: [
-              { value: "acme/alpha", name: "acme/Alpha" },
-              { value: "acme/beta", name: "acme/Beta" },
-            ],
-          },
-        ],
-      },
-    });
-    render(<ChatStream />);
-    // The model picker is a DIALOG (the trigger is a button — the catalog
-    // is too long for a Radix dropdown).
-    fireEvent.click(screen.getByRole("button", { name: "Model" }));
-    // The row name is the BARE id; the sent value is the full composed key.
-    fireEvent.click(screen.getByText("beta"));
-    expect(setSessionConfigOption).toHaveBeenCalledWith("s1", "model", "acme/beta");
-  });
-
-  it("a live session WITHOUT configOptions renders neither selector", () => {
-    seedLiveSession();
-    render(<ChatStream />);
-    expect(screen.queryByRole("combobox", { name: "Model" })).toBeNull();
-    expect(screen.queryByRole("combobox", { name: "Thinking" })).toBeNull();
-  });
-
   it("does NOT leak Reasoning state across sessions (per-session key)", () => {
     useSessions.setState({
       activeSessionId: "s1",
@@ -1818,25 +1493,6 @@ describe("ChatStream", () => {
     });
     expect(screen.queryByText("thought-two")).toBeNull();
     expect(screen.queryByText("thought-one")).toBeNull();
-  });
-
-  it("a STORED session with configOptions renders neither selector", () => {
-    seedStoredSession();
-    useSessions.setState({
-      configOptions: {
-        s1: [
-          {
-            id: "model",
-            name: "Model",
-            type: "select",
-            currentValue: "acme/alpha",
-            options: [{ value: "acme/alpha", name: "acme/Alpha" }],
-          },
-        ],
-      },
-    });
-    render(<ChatStream />);
-    expect(screen.queryByRole("combobox", { name: "Model" })).toBeNull();
   });
 
   // --- Image attachments: paste / drop / thumbnail strip / capability gate. ---
@@ -2162,6 +1818,53 @@ describe("ChatStream", () => {
     );
   });
 
+  it("staged thumbnails leave the composer AT SEND, not when the send resolves", async () => {
+    seedLiveSessionWithImages();
+    const { container } = render(<ChatStream />);
+    // `sendPrompt` stays PENDING for the whole window under test: every
+    // assertion below runs while the turn is still in flight, so a clear that
+    // only happens after the promise resolves CANNOT be what satisfies them.
+    // This is the test that pins the bug (the thumbnails used to sit in the
+    // composer for the entire turn, even though the base64 copies had already
+    // been handed to the user message).
+    const inflight = deferred<StopReason>();
+    vi.mocked(sendPrompt).mockImplementationOnce(() => inflight.promise);
+    pasteToComposer([
+      new File([new Uint8Array([1, 2, 3])], "s.png", { type: "image/png" }),
+    ]);
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "look at this" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    // The wait proves `send()` got PAST `addUserMessage`/`beginTurn` and is now
+    // sitting inside `sendPrompt` — exactly the window the bug leaves a stale
+    // copy on screen.
+    await waitFor(() => expect(sendPrompt).toHaveBeenCalled());
+    const composer = container.querySelector('[data-testid="composer-island"]')!;
+    // Exactly ONE copy of the image is on screen: the transcript's `data:`
+    // render. The composer holds none. (Wrapped in `waitFor` because the
+    // composer-clearing `setAttachments` lands outside `act`; it can never
+    // become true later in this test, so the wait cannot false-green.)
+    await waitFor(() => {
+      const copies = screen.getAllByAltText("s.png");
+      expect(copies).toHaveLength(1);
+      expect(copies[0].getAttribute("src")).toBe("data:image/png;base64,AQID");
+      expect(copies.some((el) => composer.contains(el))).toBe(false);
+    });
+    // NOT released while the turn runs — a failed send has to be able to put
+    // the thumbnail back, and a revoked object URL renders nothing.
+    expect(URL.revokeObjectURL).not.toHaveBeenCalledWith("blob:mock-s.png");
+    // Settling the turn releases it for good (and nothing reappears).
+    await act(async () => {
+      inflight.resolve("end_turn");
+    });
+    await flush();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:mock-s.png");
+    expect(
+      screen.getAllByAltText("s.png").some((el) => composer.contains(el)),
+    ).toBe(false);
+  });
+
   it("a failed send keeps attachments staged", async () => {
     seedLiveSessionWithImages();
     const { container } = render(<ChatStream />);
@@ -2183,6 +1886,96 @@ describe("ChatStream", () => {
     expect(matches.some((el) => composer.contains(el))).toBe(true);
   });
 
+  it("a failed send restores the thumbnail WITHOUT releasing its object URL", async () => {
+    seedLiveSessionWithImages();
+    const { container } = render(<ChatStream />);
+    vi.mocked(sendPrompt).mockRejectedValueOnce(new Error("boom"));
+    pasteToComposer([
+      new File([new Uint8Array([1, 2, 3])], "s.png", { type: "image/png" }),
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(screen.getByText("boom")).toBeTruthy());
+    // The restored thumbnail is the SAME object URL, still live.
+    const composer = container.querySelector('[data-testid="composer-island"]')!;
+    const inComposer = screen
+      .getAllByAltText("s.png")
+      .filter((el) => composer.contains(el));
+    expect(inComposer).toHaveLength(1);
+    expect(inComposer[0].getAttribute("src")).toBe("blob:mock-s.png");
+    // And it was NOT revoked — a revoked URL can no longer render an `img`, so
+    // releasing before the restore would have given a broken thumbnail. The
+    // release belongs to the session-switch / unmount / next-successful-send
+    // paths, never to the failure path.
+    expect(URL.revokeObjectURL).not.toHaveBeenCalledWith("blob:mock-s.png");
+  });
+
+  it("unmounting while a send is in flight releases the held attachment", async () => {
+    seedLiveSessionWithImages();
+    const { unmount } = render(<ChatStream />);
+    const inflight = deferred<StopReason>();
+    vi.mocked(sendPrompt).mockImplementationOnce(() => inflight.promise);
+    pasteToComposer([
+      new File([new Uint8Array([1, 2, 3])], "s.png", { type: "image/png" }),
+    ]);
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "look at this" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    // The send is in flight and the attachment has LEFT the composer state —
+    // it lives only in the held-for-send map now, so the unmount cleanup has
+    // to walk that map too or the object URL leaks for the process lifetime.
+    await waitFor(() => expect(sendPrompt).toHaveBeenCalled());
+    unmount();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:mock-s.png");
+    // Unwind the pending IPC so no promise outlives the test.
+    await act(async () => {
+      inflight.resolve("end_turn");
+    });
+  });
+
+  it("switching sessions while a send is in flight releases the LEFT session's held attachment", async () => {
+    seedLiveSessionWithImages();
+    render(<ChatStream />);
+    const inflight = deferred<StopReason>();
+    vi.mocked(sendPrompt).mockImplementationOnce(() => inflight.promise);
+    pasteToComposer([
+      new File([new Uint8Array([1, 2, 3])], "s.png", { type: "image/png" }),
+    ]);
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "look at this" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(sendPrompt).toHaveBeenCalled());
+    // Switch away mid-turn. The release point inside the session-change
+    // effect only knows the session being ENTERED (`s2`), so the cleanup must
+    // read the held list under the id of the session being LEFT (`s1`) —
+    // otherwise the entry is dropped later by the failure path's `delete`
+    // without ever being released (a permanent leak).
+    await act(async () => {
+      useSessions.setState({
+        activeSessionId: "s2",
+        sessions: [
+          {
+            sessionId: "s1",
+            cwd: "/home/u/proj",
+            capabilities: { promptCapabilities: { image: true } },
+            archived: false,
+          },
+          {
+            sessionId: "s2",
+            cwd: "/home/u/proj",
+            capabilities: {},
+            archived: false,
+          },
+        ],
+      });
+    });
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:mock-s.png");
+    await act(async () => {
+      inflight.resolve("end_turn");
+    });
+  });
+
   it("a non-Error rejection shows the message, not [object Object]", async () => {
     seedLiveSessionWithImages();
     render(<ChatStream />);
@@ -2198,6 +1991,30 @@ describe("ChatStream", () => {
     await waitFor(() => expect(screen.getByText("proto")).toBeTruthy());
   });
 
+  it("an image-only send is blocked when the capability regresses mid-session (a marker is not prose)",
+    async () => {
+      // `hasImages` exists for exactly one case a session switch cannot produce:
+      // a same-session capability regression. With the draft now reading
+      // `[image #1]` instead of `""`, the "image-only send is blocked" rule
+      // needs to see a marker-only draft as no prose — otherwise the sentence
+      // "here is [image #1]" ships to an agent that receives NO image.
+      seedLiveSessionWithImages();
+      render(<ChatStream />);
+      pasteToComposer([
+        new File([new Uint8Array([1, 2, 3])], "s.png", { type: "image/png" }),
+      ]);
+      await act(async () => {
+        useSessions.setState({
+          sessions: [
+            { sessionId: "s1", cwd: "/home/u/proj", capabilities: {}, archived: false },
+          ],
+        });
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await flush();
+      expect(vi.mocked(sendPrompt)).not.toHaveBeenCalled();
+    });
+
   it("image-only send is allowed", async () => {
     seedLiveSessionWithImages();
     render(<ChatStream />);
@@ -2208,8 +2025,13 @@ describe("ChatStream", () => {
     const sendButton = screen.getByRole("button", { name: "Send" });
     expect(sendButton.hasAttribute("disabled")).toBe(false);
     fireEvent.click(sendButton);
+    // The text is now `"[image #1]"`, NOT `""` — and that is the intended
+    // semantics of this task: a bare screenshot paste now TELLS the model which
+    // image it is (the marker names the Nth image of this prompt, which is the
+    // only reading the wire supports), instead of sending an empty prompt with an
+    // anonymous image attached.
     await waitFor(() =>
-      expect(sendPrompt).toHaveBeenCalledWith("s1", "", [
+      expect(sendPrompt).toHaveBeenCalledWith("s1", "[image #1]", [
         { name: "s.png", mimeType: "image/png", sizeBytes: 3, data: "AQID" },
       ]),
     );
@@ -2368,6 +2190,13 @@ describe("ChatStream", () => {
     // `send()` aborted (nothing meaningful left to send): `sendPrompt` was
     // NEVER called. (A bare `waitFor` on the negative would be false green —
     // the fake-timer advance guarantees the read has settled first.)
+    // WHICH guard catches this: removing the thumbnail also removes its
+    // `[image #1]` marker (`removeAttachment` → `renumberImageMarkers`), so the
+    // draft is empty by the time the read lands and the STALE-DRAFT GUARD
+    // (`draftRef.current.trim() !== rawText`) aborts the send — it fires before
+    // the images-empty block below, which no longer sees an empty text to
+    // reject. Don't read the images-empty path as the only thing protecting an
+    // image-only send: with markers in play the draft guard is the first line.
     expect(vi.mocked(sendPrompt)).not.toHaveBeenCalled();
   });
 
@@ -2605,7 +2434,11 @@ describe("ChatStream", () => {
       expect(resumeSession).toHaveBeenCalledWith("s1", "/home/u/proj"),
     );
     // Blocked: no prompt is sent (an empty prompt + unsent images is
-    // meaningless — the same fail-closed posture as `!imageCapable`).
+    // meaningless — the same fail-closed posture as `!imageCapable`). With the
+    // `[image #1]` marker now IN the draft this also pins that the guard sees a
+    // marker-only draft as "no prose" (`draftIsMarkerOnly`) — otherwise the
+    // marker alone would carry the prompt through to an agent that receives no
+    // image at all.
     expect(vi.mocked(sendPrompt)).not.toHaveBeenCalled();
   });
 
@@ -6454,4 +6287,454 @@ describe("ChatStream — the /compact Composer command (ADR 0044)", () => {
     const user = messages.find((m) => m.kind === "user");
     expect(user?.kind === "user" ? user.text : null).toBe(text);
   });
+});
+
+// ── The `[image #N]` staging marker ───────────────────────────────────────
+//
+// Every path that stages an image leaves a marker in the draft, and the marker
+// travels to the model as part of the prompt (so a prompt can name a specific
+// attachment). `N` counts the attachments of THAT message, never the session —
+// the harness pushes the text block first and then the images in send order, so
+// "the Nth image of this prompt" is the only reading a model can resolve.
+//
+// `stageFiles` is the single funnel for all four staging paths, so the "all four
+// paths" claim below is what is really under test: paste-with-file-items, the
+// WebKitGTK empty-paste clipboard fallback, drag-and-drop, and the `+` picker.
+describe("ChatStream — the [image #N] staging marker", () => {
+  /** The composer's current draft text. */
+  function composerValue(): string {
+    return (screen.getByRole("textbox") as HTMLTextAreaElement).value;
+  }
+
+  it("a pasted screenshot leaves [image #1] in the draft", () => {
+    seedLiveSessionWithImages();
+    render(<ChatStream />);
+    pasteToComposer([
+      new File([new Uint8Array([1, 2, 3])], "s.png", { type: "image/png" }),
+    ]);
+    expect(composerValue()).toBe("[image #1]");
+  });
+
+  it("a second paste is #2 — the number counts THIS message's attachments in staging order",
+    () => {
+      seedLiveSessionWithImages();
+      render(<ChatStream />);
+      const one = new File([new Uint8Array([1])], "a.png", { type: "image/png" });
+      pasteToComposer([one]);
+      pasteToComposer([
+        new File([new Uint8Array([2])], "b.png", { type: "image/png" }),
+      ]);
+      expect(composerValue()).toBe("[image #1] [image #2]");
+    });
+
+  it("a batch of three staged in ONE event numbers ascending #1 #2 #3", () => {
+    // Inserting one marker at a time at the same caret would emit `#3 #2 #1`
+    // and invert the marker→image mapping on every multi-file paste.
+    seedLiveSessionWithImages();
+    render(<ChatStream />);
+    pasteToComposer(
+      ["a", "b", "c"].map(
+        (n) => new File([new Uint8Array([1])], `${n}.png`, { type: "image/png" }),
+      ),
+    );
+    expect(composerValue()).toBe("[image #1] [image #2] [image #3]");
+    expect(screen.getAllByRole("img")).toHaveLength(3);
+  });
+
+  it("a rejected file in a mixed batch inserts NO marker (the count comes from the staged list)",
+    () => {
+      // `addImageAttachments` can reject mid-batch, so the marker count must be
+      // derived from the returned list — looping the INPUT would number the
+      // survivor `#2` and the number would name the wrong picture.
+      seedLiveSessionWithImages();
+      render(<ChatStream />);
+      pasteToComposer([
+        new File([new Uint8Array([1])], "ok.png", { type: "image/png" }),
+        new File([new Uint8Array([1])], "bad.txt", { type: "text/plain" }),
+      ]);
+      expect(composerValue()).toBe("[image #1]");
+      expect(screen.getAllByAltText("ok.png")).toHaveLength(1);
+    });
+
+  it("a fully rejected batch inserts nothing at all", () => {
+    seedLiveSessionWithImages();
+    render(<ChatStream />);
+    pasteToComposer([
+      new File([new Uint8Array([1])], "a.svg", { type: "image/svg+xml" }),
+    ]);
+    expect(composerValue()).toBe("");
+  });
+
+  it("the drop path inserts a marker too", () => {
+    seedLiveSessionWithImages();
+    render(<ChatStream />);
+    dropOnComposer([
+      new File([new Uint8Array([1])], "d.png", { type: "image/png" }),
+    ]);
+    expect(composerValue()).toBe("[image #1]");
+  });
+
+  it("the `+` file-picker path inserts a marker too", async () => {
+    seedLiveSessionWithImages();
+    vi.mocked(openFilePicker).mockResolvedValueOnce(["/home/u/pics/shot.png"]);
+    vi.mocked(readFileBytes).mockResolvedValueOnce([
+      0x89, 0x50, 0x4e, 0x47, 1, 2, 3,
+    ]);
+    render(<ChatStream />);
+    fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+    await waitFor(() => expect(vi.mocked(readFileBytes)).toHaveBeenCalled());
+    expect(composerValue()).toBe("[image #1]");
+  });
+
+  it("the WebKitGTK empty-paste clipboard fallback inserts a marker too", async () => {
+    seedLiveSessionWithImages();
+    vi.mocked(readClipboardImage).mockResolvedValueOnce([
+      0x89, 0x50, 0x4e, 0x47,
+    ]);
+    render(<ChatStream />);
+    pasteToComposer([]); // no items, no text — the WebKitGTK shape
+    await flush();
+    expect(composerValue()).toBe("[image #1]");
+  });
+
+  it("a drop onto an UNFOCUSED composer with a non-empty draft appends the marker at the END",
+    () => {
+      // `selectionStart` is 0 for a textarea that has never been focused, and
+      // two of the four staging paths (drag-and-drop, and the `+` picker — the
+      // native dialog holds focus) routinely run that way. Reading the caret
+      // unconditionally would drop every marker at the START of the user's
+      // sentence.
+      seedLiveSessionWithImages();
+      render(<ChatStream />);
+      fireEvent.change(screen.getByRole("textbox"), {
+        target: { value: "explain this" },
+      });
+      expect(document.activeElement).not.toBe(screen.getByRole("textbox"));
+      dropOnComposer([
+        new File([new Uint8Array([1])], "d.png", { type: "image/png" }),
+      ]);
+      expect(composerValue()).toBe("explain this [image #1]");
+    });
+
+  it("a paste while the composer is focused lands at the CARET, not at the end",
+    () => {
+      seedLiveSessionWithImages();
+      render(<ChatStream />);
+      const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+      fireEvent.change(textarea, { target: { value: "explain this" } });
+      textarea.focus();
+      textarea.setSelectionRange(7, 7); // after "explain", before " this"
+      pasteToComposer([
+        new File([new Uint8Array([1])], "s.png", { type: "image/png" }),
+      ]);
+      expect(composerValue()).toBe("explain [image #1] this");
+    });
+
+  it("removing an attachment drops its marker and renumbers the survivors", () => {
+    seedLiveSessionWithImages();
+    render(<ChatStream />);
+    pasteToComposer([
+      new File([new Uint8Array([1, 2, 3])], "a.png", { type: "image/png" }),
+    ]);
+    pasteToComposer([
+      new File([new Uint8Array([4, 5, 6])], "b.png", { type: "image/png" }),
+    ]);
+    expect(composerValue()).toBe("[image #1] [image #2]");
+    // ✕ on the FIRST thumbnail: `[image #1]` goes and `#2` shifts down, so the
+    // remaining number still names the remaining picture.
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Remove image attachment" })[0]!,
+    );
+    expect(composerValue()).toBe("[image #1]");
+  });
+
+  it("the renumbered draft is what gets sent", async () => {
+    seedLiveSessionWithImages();
+    render(<ChatStream />);
+    pasteToComposer([
+      new File([new Uint8Array([1, 2, 3])], "a.png", { type: "image/png" }),
+    ]);
+    pasteToComposer([
+      new File([new Uint8Array([4, 5, 6])], "b.png", { type: "image/png" }),
+    ]);
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Remove image attachment" })[0]!,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(sendPrompt).toHaveBeenCalledWith("s1", "[image #1]", [
+        { name: "b.png", mimeType: "image/png", sizeBytes: 3, data: "BAUG" },
+      ]),
+    );
+  });
+
+  it("the strip badges each thumbnail with the number its marker uses", () => {
+    seedLiveSessionWithImages();
+    render(<ChatStream />);
+    pasteToComposer([
+      new File([new Uint8Array([1])], "a.png", { type: "image/png" }),
+      new File([new Uint8Array([2])], "b.png", { type: "image/png" }),
+    ]);
+    // The number in the text has to be checkable against the picture it names.
+    expect(screen.getByText("#1").textContent).toBe("#1");
+    expect(screen.getByText("#2").textContent).toBe("#2");
+    // Non-interactive chrome: it is decoration beside the thumbnail, so it must
+    // not leak into the strip's accessible names.
+    expect(screen.getByText("#1").getAttribute("aria-hidden")).toBe("true");
+  });
+
+  // ── The `#` collision (the task's one real risk) ─────────────────────────
+  //
+  // `MCP_MENTION_RE` is `/(^|\s)#([a-z0-9]+(?:-[a-z0-9]+)*)/g`, so `[image #3]`
+  // IS a mention token (`3` is in the class, the `#` has its space). It survives
+  // today only because no catalog entry is named `3` — and the Rust picker
+  // predicate `is_mentionable_name` ACCEPTS digits (its own tests use `"0"` as
+  // a positive case). So a server literally named `3` would make `expandMentions`
+  // append an `<mcp name="3">` block to a prompt the user never asked for. The
+  // mask in `send()` makes that structurally impossible.
+
+  it("a marker never expands into an <mcp> block even when the catalog has a server of that number",
+    async () => {
+      seedLiveSessionWithImages();
+      seedMcpMentionsOn();
+      // THE collision case: a server literally named `3`.
+      vi.mocked(listMcpServersEffective).mockResolvedValueOnce([
+        { name: "3", kind: "stdio", summary: "a server named with a digit" },
+      ]);
+      render(<ChatStream />);
+      await waitForCatalog();
+      pasteToComposer(
+        ["a", "b", "c"].map(
+          (n) =>
+            new File([new Uint8Array([1])], `${n}.png`, { type: "image/png" }),
+        ),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(sendPrompt).toHaveBeenCalled());
+      const sent = vi.mocked(sendPrompt).mock.calls[0]![1] as string;
+      // Byte-exact: the markers round-trip through the mask verbatim and NO
+      // block is appended.
+      expect(sent).toBe("[image #1] [image #2] [image #3]");
+      expect(sent).not.toContain("<mcp");
+    });
+
+  it("the mask does NOT disable a real # mention sharing the draft with a marker",
+    async () => {
+      seedLiveSessionWithImages();
+      seedMcpMentionsOn();
+      // The MCP catalog is seeded LOCALLY, on purpose: the shared default mock
+      // is overwritten by a `mockResolvedValue` further down this file (a
+      // persistent implementation, which `clearAllMocks` does not undo), so a
+      // test that relied on the default `postgres` row would pass when run
+      // alone and fail in file order. The summary matches the `postgres` block
+      // text asserted below.
+      vi.mocked(listMcpServersEffective).mockResolvedValueOnce([
+        { name: "postgres", kind: "stdio", summary: "npx -y x-mcp" },
+      ]);
+      render(<ChatStream />);
+      await waitForCatalog();
+      pasteToComposer([
+        new File([new Uint8Array([1])], "s.png", { type: "image/png" }),
+      ]);
+      // The user types around the marker (a `fireEvent.change` is exactly the
+      // keystroke that does — the draft is plain text).
+      fireEvent.change(screen.getByRole("textbox"), {
+        target: { value: "query #postgres [image #1]" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(sendPrompt).toHaveBeenCalled());
+      const sent = vi.mocked(sendPrompt).mock.calls[0]![1] as string;
+      expect(sent).toContain('<mcp name="postgres">');
+      // And the marker survived the round trip, in place, unharmed.
+      expect(sent.startsWith("query #postgres [image #1]")).toBe(true);
+    });
+
+  it("markers-only with no colliding catalog is sent BYTE-IDENTICAL", async () => {
+    seedLiveSessionWithImages();
+    seedMcpMentionsOn(); // the default catalog is `postgres` — no digit name
+    render(<ChatStream />);
+    await waitForCatalog();
+    pasteToComposer([
+      new File([new Uint8Array([1, 2, 3])], "s.png", { type: "image/png" }),
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(sendPrompt).toHaveBeenCalledWith("s1", "[image #1]", [
+        { name: "s.png", mimeType: "image/png", sizeBytes: 3, data: "AQID" },
+      ]),
+    );
+  });
+
+  // ── The mask sentinel is PASTABLE ────────────────────────────────────────
+  //
+  // `\uE000` is a Private Use Area codepoint: no keyboard produces it, but a
+  // PASTE can carry any codepoint, and a log / data dump / mojibake'd file is
+  // full of them. So the sentinel is not un-obtainable, and the un-mask is not
+  // automatically a bijection. The two tests below are the two ways that
+  // bites: an unpaired sentinel must not become the literal word "undefined",
+  // and a draft holding both a marker and a stray sentinel must degrade to
+  // sending the user's text UNEXPANDED rather than to corrupting it.
+
+  it("a pasted mask sentinel in a marker-free prompt is sent BYTE-UNCHANGED",
+    async () => {
+      seedLiveSession(); // no attachments, so NO markers can exist to mask
+      render(<ChatStream />);
+      // A log line that happens to carry a PUA codepoint (the realistic shape:
+      // data pasted in from elsewhere, not something the user typed).
+      const pasted = "decode this: \uE000 and report";
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: pasted } });
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(sendPrompt).toHaveBeenCalled());
+      const sent = vi.mocked(sendPrompt).mock.calls[0]![1] as string;
+      // Byte-for-byte the user's text. An unbounded un-mask replacer returns
+      // `undefined` for an unpaired sentinel and JS stringifies the result, so
+      // the model would read "decode this: undefined and report".
+      expect(sent).toBe(pasted);
+      expect(sent).not.toContain("undefined");
+    });
+
+  it("a marker AND a pasted mask sentinel send UNEXPANDED (no block, no rewrite)",
+    async () => {
+      seedLiveSessionWithImages();
+      seedMcpMentionsOn();
+      // The catalog entry that makes skipping the expansion worthwhile: a
+      // server literally named `3`, so a `#3` token in prose WOULD expand.
+      vi.mocked(listMcpServersEffective).mockResolvedValueOnce([
+        { name: "3", kind: "stdio", summary: "a server named with a digit" },
+      ]);
+      render(<ChatStream />);
+      await waitForCatalog();
+      pasteToComposer([
+        new File([new Uint8Array([1])], "s.png", { type: "image/png" }),
+      ]);
+      const draft = `look [image #1] at #3 and \uE000 tail`;
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: draft } });
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(sendPrompt).toHaveBeenCalled());
+      const sent = vi.mocked(sendPrompt).mock.calls[0]![1] as string;
+      // The pathological draft (a marker to mask AND a stray sentinel to
+      // restore) sends the user's own text UNEXPANDED: no `<mcp>` block for the
+      // `#3` token that pass loses, because corrupting the prompt is worse than
+      // one send without mention expansion.
+      expect(sent).not.toContain("<mcp");
+      expect(sent).toContain("[image #1]");
+      // And the pasted sentinel survives as the byte it was, not as "undefined".
+      expect(sent).toBe(draft);
+    });
+});
+
+describe("ChatStream — the failed-send attachment restore", () => {
+  /** The composer's current draft text. */
+  function composerValue(): string {
+    return (screen.getByRole("textbox") as HTMLTextAreaElement).value;
+  }
+
+  /** The composer strip's thumbnail file names, LEFT TO RIGHT — i.e. the
+   * attachment ORDER the `[image #N]` markers count against. */
+  function composerThumbs(): string[] {
+    const composer = document.querySelector('[data-testid="composer-island"]')!;
+    return Array.from(composer.querySelectorAll("img")).map(
+      (el) => el.getAttribute("alt") ?? "",
+    );
+  }
+
+  const png = (name: string, byte: number): File =>
+    new File([new Uint8Array([byte, byte + 1, byte + 2])], name, {
+      type: "image/png",
+    });
+
+  it("a failed send renumbers the draft when it re-prepends the held attachments",
+    async () => {
+      // The marker numbers are POSITIONAL (they count THIS message's
+      // attachments in list order), and the restore merges the held list IN
+      // FRONT of whatever was staged during the turn. So staging A, sending
+      // (A leaves the list), then pasting B mid-turn numbers B `#1` — and a
+      // restore that puts A back in front without moving the draft's numbers
+      // leaves `[image #1]` naming A while the user means B: the next prompt
+      // names the wrong picture, which is exactly what the marker contract
+      // exists to prevent.
+      seedLiveSessionWithImages();
+      const inflight = deferred<StopReason>();
+      vi.mocked(sendPrompt).mockImplementationOnce(() => inflight.promise);
+      render(<ChatStream />);
+      pasteToComposer([png("a.png", 1)]);
+      expect(composerValue()).toBe("[image #1]");
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      // Wait until the send is genuinely IN FLIGHT: only then has the draft
+      // been cleared and A moved to the held map (pasting earlier would edit
+      // the draft mid-read, and `send()`'s stale-draft guard would abort the
+      // send before `sendPrompt` — a different test entirely).
+      await waitFor(() => expect(sendPrompt).toHaveBeenCalled());
+      await flush();
+      pasteToComposer([png("b.png", 4)]);
+      // B is numbered against the list as it stands NOW (empty — A is held),
+      // so it is `#1`. This is the premise of the bug, not a bug itself.
+      expect(composerValue()).toBe("[image #1]");
+      await act(async () => {
+        inflight.reject(new Error("boom"));
+      });
+      await waitFor(() => expect(screen.getByText("boom")).toBeTruthy());
+      // Both pictures are back, A first (the restore prepends).
+      expect(composerThumbs()).toEqual(["a.png", "b.png"]);
+      // …so B — still the picture the draft names — is position 2.
+      expect(composerValue()).toBe("[image #2]");
+      // And the contract end to end: the NEXT send ships the pictures in list
+      // order with the marker naming the right one.
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(sendPrompt).toHaveBeenCalledTimes(2));
+      expect(sendPrompt).toHaveBeenCalledWith("s1", "[image #2]", [
+        { name: "a.png", mimeType: "image/png", sizeBytes: 3, data: "AQID" },
+        { name: "b.png", mimeType: "image/png", sizeBytes: 3, data: "BAUG" },
+      ]);
+    });
+
+  it("a failed send restores at most MAX_CHAT_ATTACHMENTS and releases the overflow",
+    async () => {
+      // The cap lives inside `addImageAttachments` (staging time), so the
+      // restore path — which writes `attachments` directly — can rebuild a
+      // list the cap would never have allowed: send 8, paste a 9th during the
+      // turn, fail, and the composer holds 9. The next send would then be
+      // rejected server-side for a state the UI itself built.
+      seedLiveSessionWithImages();
+      const inflight = deferred<StopReason>();
+      vi.mocked(sendPrompt).mockImplementationOnce(() => inflight.promise);
+      render(<ChatStream />);
+      // 8 staged in ONE batch (the cap: 8 is allowed, a 9th would not be).
+      pasteToComposer(
+        Array.from({ length: MAX_CHAT_ATTACHMENTS }, (_, i) =>
+          png(`h${i + 1}.png`, i + 1),
+        ),
+      );
+      expect(composerThumbs()).toHaveLength(MAX_CHAT_ATTACHMENTS);
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(sendPrompt).toHaveBeenCalled());
+      await flush();
+      // The 9th, staged while the turn runs (the live list is empty — all 8
+      // are held), so its marker is `#1`.
+      pasteToComposer([png("late.png", 90)]);
+      expect(composerValue()).toBe("[image #1]");
+      await act(async () => {
+        inflight.reject(new Error("boom"));
+      });
+      await waitFor(() => expect(screen.getByText("boom")).toBeTruthy());
+      // The list ends up AT the cap, not above it: the held block keeps only
+      // the room the live list leaves, so the LAST held item is the overflow —
+      // and the drop mirrors `addImageAttachments`'s silent cap rejection at
+      // staging time (the same limit, the same non-error treatment).
+      expect(composerThumbs()).toHaveLength(MAX_CHAT_ATTACHMENTS);
+      // The strip's badges stop at the cap too (each thumbnail carries `#N`, so
+      // a `#9` badge would mean the strip still renders the overflow).
+      expect(
+        document
+          .querySelector('[data-testid="composer-island"]')!
+          .querySelectorAll("img"),
+      ).toHaveLength(MAX_CHAT_ATTACHMENTS);
+      expect(composerThumbs()).toContain("late.png");
+      // The overflow is RELEASED, not silently dropped — a dropped-but-live
+      // object URL is a leak no path can reach again.
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:mock-h8.png");
+      // The draft's number still names the surviving picture: `late.png` is
+      // position 8 of the restored list.
+      expect(composerValue()).toBe("[image #8]");
+    });
 });

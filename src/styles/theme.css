@@ -32,11 +32,6 @@
   --color-background-win-alt: var(--color-neutral-200);
   --color-brand: var(--color-sky-400);
   --color-icon-blue: var(--color-terminal-bright-blue);
-  --color-trajectory-user: #2563eb;
-  --color-trajectory-assistant: #0f766e;
-  --color-trajectory-reasoning: #7c3aed;
-  --color-trajectory-tool-call: #d97706;
-  --color-trajectory-tool-result: #0284c7;
   /* 工作流因果图仪表化渲染：
    * rule 比 --color-border 更弱——刻度与空闲轨道每图重复约 40 次，10% 会积成灰雾。 */
   --color-workflow-rule: color-mix(in oklab, var(--color-neutral-950) 5.5%, transparent);
@@ -127,6 +122,26 @@
   --color-foreground: var(--color-neutral-700);
   --color-foreground-subtle: color-mix(in oklab, var(--color-neutral-700) 60%, transparent);
   --color-foreground-subtlest: color-mix(in oklab, var(--color-neutral-700) 40%, transparent);
+  /* THE ROW TOKEN FAMILY (ADR 0062) — the glyph and the verb of a transcript
+   * row, named for `TRANSCRIPT_ROW` (`src/components/lib/transcriptRow.ts`),
+   * the class constant the tool rows, the `Thought` trigger and the `Changes`
+   * group share. Each splits one ROLE within a row, uniformly across all three
+   * consumers, so the hue encodes nothing about what the row IS: it is
+   * decoration, and decoration is what a Palette re-hues. SIBLING:
+   * `--color-row-verb` is the other half; paint a glyph with this and a verb
+   * with that, never the reverse. Aliased to today's readings here, so no
+   * palette but `.theme-dracula` re-hues a row — but NOT "so every other
+   * palette renders byte-identically": the three glyphs did not already agree
+   * with each other (`Thought`'s brain was `foreground-subtlest` where the
+   * other two icons were `foreground-subtle`), so unifying them lifts that one
+   * glyph a step in EVERY palette. ADR 0062's Correction 1 records that, along
+   * with the `--color-warning` collision the Dracula reading accepts. */
+  --color-row-icon: var(--color-foreground-subtle);
+  /* The verb half of `--color-row-icon`'s family — see that token's comment for
+   * the axis, and ADR 0062 for the `--color-warning` collision the Dracula
+   * reading accepts. A PENDING call keeps `animated-gradient-text` instead:
+   * this is the SETTLED reading. */
+  --color-row-verb: var(--color-foreground-subtlest);
   /* The context bar's TRACK (`ComposerRow`'s progressbar background). Its own
    * token because it is a FILL whose job is to contrast with the bar's band
    * colours, while `--color-foreground-subtlest` is TEXT whose job is to be
@@ -229,11 +244,6 @@
   --color-composer: var(--color-input); /* the composer island — a text input, so it defaults to the control fill */
   --color-background-win-alt: var(--color-neutral-800);
   --color-brand: var(--color-sky-500);
-  --color-trajectory-user: #60a5fa;
-  --color-trajectory-assistant: #2dd4bf;
-  --color-trajectory-reasoning: #a78bfa;
-  --color-trajectory-tool-call: #f59e0b;
-  --color-trajectory-tool-result: #38bdf8;
   --color-workflow-rule: color-mix(in oklab, var(--color-white) 6.5%, transparent);
   --color-workflow-trace: color-mix(in oklab, var(--color-white) 35%, transparent);
   --color-workflow-trace-strong: color-mix(in oklab, var(--color-white) 60%, transparent);
@@ -325,6 +335,14 @@
   --color-foreground: var(--color-neutral-200);
   --color-foreground-subtle: color-mix(in oklab, var(--color-neutral-200) 60%, transparent);
   --color-foreground-subtlest: color-mix(in oklab, var(--color-neutral-200) 30%, transparent);
+  /* Row glyph + row verb (ADR 0062) — see `@theme` for the family, its axis and
+   * the `--color-warning` collision Dracula accepts. `.dark` is what BOTH zai
+   * dark and any `.dark`-only surface read, so the alias is the "renders
+   * unchanged" half of that ADR. SIBLING: `--color-row-verb` below. */
+  --color-row-icon: var(--color-foreground-subtle);
+  /* SIBLING of `--color-row-icon` above; the settled verb, the pending call
+   * keeps `animated-gradient-text`. ADR 0062. */
+  --color-row-verb: var(--color-foreground-subtlest);
   --color-context-track: var(--color-foreground-subtlest); /* see @theme */
   --color-foreground-inverse: var(--color-white);
   --color-success: var(--color-green-500);
@@ -407,11 +425,6 @@
   --color-inspector: var(--color-chat); /* the right-hand pane: one plane with the transcript */
   --color-composer: var(--color-input); /* the composer island — a text input, so it defaults to the control fill */
   --color-brand: #000000;
-  --color-trajectory-user: #2563eb;
-  --color-trajectory-assistant: #0f766e;
-  --color-trajectory-reasoning: #7c3aed;
-  --color-trajectory-tool-call: #d97706;
-  --color-trajectory-tool-result: #0284c7;
   --color-workflow-rule: rgba(13, 13, 13, 0.055);
   --color-workflow-trace: rgba(13, 13, 13, 0.3);
   --color-workflow-trace-strong: rgba(13, 13, 13, 0.55);
@@ -495,6 +508,15 @@
   --color-foreground: var(--color-neutral-800);
   --color-foreground-subtle: color-mix(in oklab, var(--color-neutral-800) 60%, transparent);
   --color-foreground-subtlest: color-mix(in oklab, var(--color-neutral-800) 40%, transparent);
+  /* Row glyph + row verb (ADR 0062), aliased to the readings this palette had
+   * before the tokens existed — see `@theme` for the family and for why the
+   * alias rather than a value. SIBLING: `--color-row-verb` below. Unlike the
+   * ramp tokens, these DO belong in `.theme-zai-light`: `.theme-zai-light`
+   * renders with no `.dark` class, so it must state every token a row paints. */
+  --color-row-icon: var(--color-foreground-subtle);
+  /* SIBLING of `--color-row-icon` above; the settled verb (a pending tool call
+   * keeps `animated-gradient-text`). ADR 0062. */
+  --color-row-verb: var(--color-foreground-subtlest);
   --color-context-track: var(--color-foreground-subtlest); /* see @theme */
   --color-foreground-inverse: #ffffff;
   --color-success: #1e8a3e;
@@ -555,11 +577,6 @@
   --color-inspector: var(--color-chat); /* the right-hand pane: one plane with the transcript */
   --color-composer: var(--color-input); /* the composer island — a text input, so it defaults to the control fill */
   --color-brand: #ffffff;
-  --color-trajectory-user: #60a5fa;
-  --color-trajectory-assistant: #2dd4bf;
-  --color-trajectory-reasoning: #a78bfa;
-  --color-trajectory-tool-call: #f59e0b;
-  --color-trajectory-tool-result: #38bdf8;
   --color-workflow-rule: rgba(255, 255, 255, 0.065);
   --color-workflow-trace: rgba(255, 255, 255, 0.35);
   --color-workflow-trace-strong: rgba(255, 255, 255, 0.6);
@@ -643,6 +660,18 @@
   --color-foreground: var(--color-neutral-300);
   --color-foreground-subtle: color-mix(in oklab, var(--color-neutral-300) 60%, transparent);
   --color-foreground-subtlest: color-mix(in oklab, var(--color-neutral-300) 30%, transparent);
+  /* Row glyph + row verb (ADR 0062) — aliased to this palette's existing
+   * readings; `.theme-dracula` is the one palette that gives them its own hues.
+   * See `@theme` for the family's axis and the accepted `--color-warning`
+   * collision. Note the alias does NOT mean every row renders untouched: the
+   * `Thought` glyph used `foreground-subtlest` while its two siblings in the
+   * other consumers used `foreground-subtle`, so unifying them on the icon
+   * token lifts that one glyph a step. ADR 0062's Correction 1.
+   * SIBLING: `--color-row-verb` below. */
+  --color-row-icon: var(--color-foreground-subtle);
+  /* SIBLING of `--color-row-icon` above; the settled verb — a pending call keeps
+   * `animated-gradient-text`, which is the "this call is working" cue. ADR 0062. */
+  --color-row-verb: var(--color-foreground-subtlest);
   --color-context-track: var(--color-foreground-subtlest); /* see @theme */
   --color-foreground-inverse: #000000;
   --color-success: #46bf72;

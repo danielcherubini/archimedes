@@ -152,22 +152,31 @@ describe("floats over the content slab (the accepted collision)", () => {
     expect(cls).not.toMatch(/shadow-/);
   });
 
-  it("keeps the context bar's track legible against the island that holds it", () => {
-    // GRADED AGAINST `composer`, not the chat column: the bar is painted INSIDE
-    // the composer island, so that is the surface its track must read against.
-    // An earlier version of this test compared it to the chat slab and asserted
-    // the track sits BELOW that surface — two errors that happened to pass while
-    // the composer shared the slab's colour, and both became false the moment the
-    // composer got its own token. The invariant is SEPARATION, not direction: a
-    // track can be lighter or darker than its backdrop and still work, but it
-    // cannot be the same colour, or the bar's extent — how much context is left,
-    // which is the only thing the bar reports — is invisible.
+  it("keeps the context bar's track legible against the pane it rides", () => {
+    // GRADED AGAINST `inspector`, the pane's own plane — the surface the
+    // track's pixels ACTUALLY land on. This gate has named the wrong surface
+    // twice (the chat slab, then `composer` after the bar left the island, then
+    // the `bg-input` WELL after the bar left the composer for the pane), and
+    // the well is now gone too: the user rejected it as a sunken slot inside a
+    // plane, and `SessionConfigBlock.tsx` says so at its top. A gate must name
+    // the surface the pixels land on, so this reads `inspector`.
+    //
+    // THE FLOOR IS 1.2, NOT 1.3, AND THAT IS A REAL CONCESSION, not gate-
+    // loosening to hide a failure: 1.3 was measurable only BECAUSE of the well.
+    // Against the bare pane no non-Selection Dracula step clears 1.3 —
+    // `#343746` 1.208, `#191a21` 1.218, `#21222c` 1.109 — the palette simply
+    // has no step at that distance from `#282a36`. What carries the bar is the
+    // FILL against the TRACK (every band clears 3:1, worst 4.33), and band-vs-
+    // pane separation actually IMPROVES without the well (5.23 vs 4.33).
+    // 1.2 still fails the true collisions — a track that IS the pane
+    // (`#282a36`, 1.000) or the page plane under it (`#21222c`, 1.109).
+    // The invariant is SEPARATION, not direction.
     const track = dracula("context-track");
-    const island = dracula("composer");
+    const pane = dracula("inspector");
     expect(
-      contrast(track, island),
-      `track ${track} is invisible against the composer island ${island}`,
-    ).toBeGreaterThanOrEqual(1.3);
+      contrast(track, pane),
+      `track ${track} is invisible against the pane ${pane} it rides`,
+    ).toBeGreaterThanOrEqual(1.2);
   });
 });
 

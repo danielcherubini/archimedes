@@ -21,7 +21,7 @@ export default function AttachmentStrip({
     <>
       {attachments.length > 0 && (
         <div className="mb-2 flex flex-wrap gap-2">
-          {attachments.map((att) => (
+          {attachments.map((att, index) => (
             <div
               key={att.id}
               className="group relative size-12 overflow-hidden rounded-lg border border-input-border bg-input"
@@ -31,6 +31,18 @@ export default function AttachmentStrip({
                 alt={att.filename}
                 className="size-full object-cover"
               />
+              {/* The `[image #N]` the draft uses for this picture (1-based, in
+                  staging order), so the number in the text is checkable against
+                  the image it names. Decoration beside the thumbnail, so
+                  `aria-hidden`: a screen reader already gets the file name from
+                  the `img`, and a bare `#1` in the accessible name would be
+                  noise. */}
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute bottom-0.5 left-0.5 rounded bg-input/90 px-1 text-ui-xs leading-tight text-foreground-subtle"
+              >
+                {`#${index + 1}`}
+              </span>
               <button
                 type="button"
                 aria-label="Remove image attachment"

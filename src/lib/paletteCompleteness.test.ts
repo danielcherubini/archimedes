@@ -139,13 +139,13 @@ const FILE_DESCRIPTORS = [
 ];
 
 /**
- * The 59 tokens `.theme-zai-dark` declares that `.theme-dracula` deliberately
+ * The 54 tokens `.theme-zai-dark` declares that `.theme-dracula` deliberately
  * does NOT. Each is inherited from `.dark` by design (ADR 0027's "data-identity
  * palettes stay inherited" consequence), NOT by omission:
  *
  * - 11 usage scales (`usage-chart-*`, `usage-heatmap-*`) and 7
  *   `context-breakdown-*` — ordinal data scales whose STEPS are the signal.
- * - 8 `git-*` and 5 `trajectory-*` — git state and transcript-role hues.
+ * - 8 `git-*` — git state hues.
  * - 18 role chips (`file-node*`, `skill-*`, `command-*`, `session-*`,
  *   `plugin-*`, `subagent-node*`) — "what kind of row is this".
  * - `feedback-privacy-hint` — the same warning hue as the ramp, not a palette hue.
@@ -221,11 +221,6 @@ const INHERITED = [
   "color-subagent-node-hover",
   "color-surface",
   "color-surface-hover",
-  "color-trajectory-assistant",
-  "color-trajectory-reasoning",
-  "color-trajectory-tool-call",
-  "color-trajectory-tool-result",
-  "color-trajectory-user",
   "color-usage-chart-1",
   "color-usage-chart-2",
   "color-usage-chart-3",
@@ -392,7 +387,7 @@ const SPEC_HEX = new Set([
 const OFF_SPEC_ALLOW_LIST = FILE_DESCRIPTORS.filter((n) => n !== "color-file-css");
 
 describe("the .theme-dracula palette block (ADR 0027 completeness)", () => {
-  it("inherits exactly the 59 identity/overlay tokens — nothing dropped", () => {
+  it("inherits exactly the 54 identity/overlay tokens — nothing dropped", () => {
     // In .theme-zai-dark but NOT in .theme-dracula: must be exactly INHERITED.
     expect(diff(ZAI_DARK, DRACULA)).toEqual([...INHERITED].sort());
   });
@@ -455,20 +450,34 @@ describe("the .theme-dracula palette block (ADR 0027 completeness)", () => {
     expect(diff(DARK, new Set(INHERITED)).filter((n) => !DRACULA.has(n))).toEqual([]);
   });
 
-  it("is 117 declarations: 86 structural + 25 descriptors + 6 ramp", () => {
-    // The arithmetic that proves nothing was double-counted: 86 structural + 6
-    // ramp = the 92 tokens `.dark` declares once INHERITED is removed, plus the
-    // 25 descriptors `.dark` never declares at all = 117. The REGION RENAME
+  it("is 119 declarations: 88 structural + 25 descriptors + 6 ramp", () => {
+    // The arithmetic that proves nothing was double-counted: 88 structural + 6
+    // ramp = the 94 tokens `.dark` declares once INHERITED is removed, plus the
+    // 25 descriptors `.dark` never declares at all = 119. The REGION RENAME
     // (`sidebar`->`frame`, `background-alt`->`chat`) is count-neutral, and the
     // two NEW tokens `--color-inspector` / `--color-composer` are declared in
     // EVERY layer (aliased in the four non-dracula ones, so zai renders
     // byte-identically), which is why all four counts below moved by two.
-    expect([...DRACULA].length).toBe(117);
-    expect(diff(DARK, new Set(INHERITED)).length).toBe(92);
-    expect(ZAI_DARK.size).toBe(170);
+    //
+    // ADR 0062 then moved all FOUR, and it is worth stating why the two halves
+    // of that change are not a wash: it adds `--color-row-icon` /
+    // `--color-row-verb` to EVERY layer, and deletes the five dead row-KIND
+    // tokens from `@theme`, `.dark`, `.theme-zai-light` and `.theme-zai-dark` —
+    // all four, while `.theme-dracula` declared none of them to begin with. So:
+    // Dracula only ever gains (+2 = 119); `diff(DARK, INHERITED)` is unmoved by
+    // the deletion, because the five deleted `.dark` tokens were all members of
+    // `INHERITED` and so already excluded, and it gains the two new ones (+2 =
+    // 94); `ZAI_DARK` loses five and gains two (−3 = 167); `INHERITED` loses the
+    // five it listed (−5 = 54). That leaves the cross-check below at 48 == 48.
+    // A partial edit — the addition without the deletion, or the reverse —
+    // breaks that line loudly rather than passing quietly, which is exactly what
+    // a completeness gate is for.
+    expect([...DRACULA].length).toBe(119);
+    expect(diff(DARK, new Set(INHERITED)).length).toBe(94);
+    expect(ZAI_DARK.size).toBe(167);
     // And the two directions of the difference add up the same way: zai dark
-    // withholds 59 from Dracula, Dracula adds the 6 ramp tokens zai dark
-    // leaves to `.dark`, so the block sizes differ by 59 − 6.
+    // withholds 54 from Dracula, Dracula adds the 6 ramp tokens zai dark
+    // leaves to `.dark`, so the block sizes differ by 54 − 6.
     expect(ZAI_DARK.size - DRACULA.size).toBe(INHERITED.length - 6);
   });
 
@@ -491,7 +500,7 @@ describe("the .theme-dracula palette block (ADR 0027 completeness)", () => {
     //
     // `.dark`'s slot is the one that used to be unpinned, and it is the load-
     // bearing one: the palette blocks are deliberately PARTIAL diffs over
-    // `.dark` (59 tokens are inherited on purpose — see `INHERITED`), so
+    // `.dark` (54 tokens are inherited on purpose — see `INHERITED`), so
     // `.dark` must lose every tie against them. Move the `.dark` block to the
     // end of the file and it silently out-specifies every `.theme-*` block:
     // Dracula renders Zai's colours, `.theme-zai-light` renders dark-mode
@@ -627,9 +636,9 @@ describe("the .theme-dracula block follows the official Dracula spec", () => {
       ),
     );
     expect(offSpec.length).toBe(24);
-    // And the gate really does look at the block: it sees 117 declarations, not
+    // And the gate really does look at the block: it sees 119 declarations, not
     // zero. (A parser that returned {} would pass the offender scan outright.)
-    expect(Object.keys(DRACULA_VALUES).length).toBe(117);
+    expect(Object.keys(DRACULA_VALUES).length).toBe(119);
   });
 
   it.each([
@@ -643,7 +652,7 @@ describe("the .theme-dracula block follows the official Dracula spec", () => {
     ["color-input", "#191a21"],
     ["color-secondary", "#343746"], // Background Light — with the raised card
     ["color-tag", "#343746"],
-    ["color-context-track", "#343746"], // best visible track against the `#21222c` island (1.34, worst band 4.33)
+    ["color-context-track", "#343746"], // best visible track against the `#191a21` side-pane well (1.47, worst band 4.33)
     // De-emphasis TEXT is no longer Comment: `#6272a4` scored 2.51–3.68 across
     // the surfaces its 88 consumers actually paint. See the token's comment.
     ["color-foreground-subtlest", "color-mix(in oklab, #f8f8f2 55%, transparent)"],
@@ -1249,16 +1258,22 @@ describe("the .theme-dracula block follows the official Dracula spec", () => {
     // The bar's meaning is the band FILL (green → caution → warning → red), and
     // the only thing separating it from the unfilled remainder is the track.
     // Graded against the four fills the component actually emits
-    // (`ChatStream.tsx`: `bg-success` / `bg-caution` / `bg-warning` /
-    // `bg-destructive`), on the surface the track really paints on.
+    // (`lib/sessionConfig.ts`'s ramp, rendered by `SessionConfigBlock.tsx`:
+    // `bg-success` / `bg-caution` / `bg-warning` / `bg-destructive`), on the
+    // surface the track really paints on.
     //
-    // THAT SURFACE MOVED. The bar used to sit in a `bg-input` `#21222c` well; the
-    // island layout moved the composer onto the content slab, so the track now
-    // paints on `--color-chat`. Reading the wrong token here would
-    // grade a real relationship against a surface that no longer exists at that
-    // site — which is exactly the failure the ADR's amendments keep recording —
-    // so it is derived from the token the composer island actually wears.
-    const well = DRACULA_VALUES["color-composer"]!;
+    // THAT SURFACE HAS MOVED THREE TIMES. The bar sat in a `bg-input` well; the
+    // island layout moved the composer onto its own plane (gate re-pointed at
+    // `--color-composer`); the config lines left the composer for the side pane
+    // and got a fresh `bg-input` well (gate re-pointed at `--color-input`); and
+    // the well is now GONE — the user read it as a sunken slot inside a plane
+    // and asked for it removed (`SessionConfigBlock.tsx`'s component note). The
+    // track's pixels land on `--color-inspector`, so this reads `color-inspector`.
+    // Each move left the gates naming a surface nothing paints on, which is
+    // exactly the failure this file's amendments keep recording — and each time
+    // the WRONG token kept the suite green, because a contrast assertion against
+    // a surface that is not there still passes.
+    const surface = DRACULA_VALUES["color-inspector"]!;
     const track = DRACULA_VALUES["color-context-track"]!;
     const lumOf = (hex: string) => {      const n = parseInt(hex.slice(1), 16);
       const f = (v: number) => {
@@ -1287,68 +1302,66 @@ describe("the .theme-dracula block follows the official Dracula spec", () => {
       // 3:1 — a progress band is non-text UI.
       expect(c, `${band} (${hex}) against the track ${track}`).toBeGreaterThanOrEqual(3);
     }
-    // The track must also read against the well it sits in, or the bar's extent
-    // (how much is left) is invisible and the track is doing no work at all.
+    // The track must also read against the pane, or the bar's extent (how much
+    // is left) is invisible and the track is doing no work at all. The floor is
+    // 1.2, and that is the honest number: 1.3 was only measurable because of
+    // the well. Against the bare pane the palette has NO step at 1.3 —
+    // `#343746` measures 1.208, `#191a21` 1.218, `#21222c` 1.109 — so the old
+    // floor would have demanded a Selection hex, which the elevation ladder
+    // fences off absolutely. 1.2 still rejects the real collisions: a track that
+    // IS the pane (`#282a36` at 1.000) or the page plane under it (`#21222c` at
+    // 1.109). See also the `slabFloatSeparation.test.ts` gate, which pins the
+    // same pair from the separation side.
     expect(
-      contrast(track, well),
-      `the track ${track} is invisible against the composer well ${well}`,
-    ).toBeGreaterThanOrEqual(1.3);
-    // WHY `#191a21`, stated as a measurable criterion rather than as taste.
+      contrast(track, surface),
+      `the track ${track} is invisible against the pane ${surface} it rides`,
+    ).toBeGreaterThanOrEqual(1.2);
+    // WHY `#343746` AND NOT THE DARK STEP — stated as a measurable criterion.
     //
-    // The track has TWO jobs, and they pull in opposite directions:
-    //   (a) separate the band fill from the unfilled remainder  → wants the track
-    //       DARK (the darkest value in the block, the terminal's `#191a21`, gives
-    //       the best bands: 12.63 / 15.52 / 10.18 / 6.36), and
-    //   (b) be visible itself, so the bar's EXTENT reads           → wants the
-    //       track FAR FROM THE SURFACE IT SITS ON.
-    // So the criterion is two-stage, and the order matters: FILTER to tracks that
-    // read against the island (>= 1.3), then MAXIMISE THE WORST BAND among them.
-    // Doing it the other way round (maximising the weakest link) degenerates into
-    // "pick whichever is furthest from the surface", because track-vs-island is
-    // usually the binding term — that formulation selects `#44475a`, which is
-    // Selection and banned as a resting surface, and whose bands (3.36) are the
-    // worst of any candidate.
-    //
-    // THE TABLE FLIPPED when the composer island took the slab. Against the old
-    // `#21222c` well the DARK end was invisible and the bright end won on
-    // visibility, so `#343746` was the compromise. Against the `#343746` island
-    // the bright end is now the invisible one (it IS the island) and the dark end
-    // clears the floor outright — so `#191a21` wins BOTH jobs instead of
-    // splitting them. This is the rare case where a layout change made a token
-    // strictly better rather than forcing a trade-off.
-    //
-    //   candidate  vs the island  worst band
-    //   #191a21       1.47           6.36    <- winner
-    //   #21222c       1.34           5.80
-    //   #282a36       1.21           5.23    excluded (invisible)
-    //   #343746       1.00           4.33    excluded (invisible: it IS the slab)
-    //   #424450       1.22           3.54    excluded (invisible)
-    //   #44475a       1.29           3.36    excluded + Selection: not a resting surface
-    const candidates = Object.entries(DRACULA_VALUES).filter(
+    // The two candidates that clear 1.2 are a RAISED step (`#343746`, 1.208
+    // above the pane) and the RECESSED step (`#191a21`, 1.218 below it). Their
+    // separation is a 0.8% difference — noise, not a decision — and the dark one
+    // wins the old "maximise the worst band" ranking outright (6.36 vs 4.33).
+    // That ranking is therefore GONE, because following it here is how the box
+    // came back: a track darker than its surface is a GROOVE, and the groove is
+    // what the user just rejected, twice, as a well. The bar rides the pane, so
+    // the unfilled remainder must read as a rail ON the plane, never a slot
+    // cut into it. So the criterion is directional:
+    const lighter = Object.entries(DRACULA_VALUES).filter(
       ([t, v]) =>
         /^#[0-9a-f]{6}$/i.test(v) &&
-        /^color-(card|panel|background|chat|composer|frame|input|popover-header|terminal-bg|secondary|tag|tooltip|toast|menu|header|card-selected)$/.test(
+        /^color-(card|panel|background|chat|composer|frame|input|popover-header|terminal-bg|secondary|tag|tooltip|toast|menu|header)$/.test(
           t,
-        ),
+        ) &&
+        lumOf(v) > lumOf(surface),
     );
-    const worstBand = (hex: string) =>
-      Math.min(...Object.values(bands).map((f) => contrast(f, hex)));
-    const visible = candidates.filter(([, v]) => contrast(v, well) >= 1.3);
-    const ranked = visible
-      .map(([t, v]) => [t, Math.round(worstBand(v) * 100) / 100] as const)
-      .sort((a, b) => b[1] - a[1]);
-    const best = ranked[0]!;
+    //   (a) the track is LIGHTER than the pane — a rail, not a groove:
     expect(
-      Math.round(worstBand(track) * 100) / 100,
-      `${track} is not the best VISIBLE track; ${best[0]} scores ${best[1]} (table: ${JSON.stringify(ranked)})`,
-    ).toBe(best[1]);
-    // Non-vacuity: the filter really did exclude candidates, or "best visible"
-    // is just "best" and the visibility half of the reasoning is decorative.
-    const excluded = candidates.filter(([, v]) => contrast(v, well) < 1.3);
-    expect(excluded.length).toBeGreaterThanOrEqual(3);
-    expect(ranked.length).toBeGreaterThanOrEqual(3);
+      lumOf(track),
+      `track ${track} sits BELOW the pane ${surface}: that is a groove, and the groove was rejected`,
+    ).toBeGreaterThan(lumOf(surface));
+    //   (b) it is the ONLY lighter non-Selection STEP in the block — one
+    //       distinct hex, the raised plateau (three tokens wear `#343746`:
+    //       `card`, `tag`, `secondary`), and every brighter resting value in
+    //       the palette is Selection (`#424450`), which the ladder asserts
+    //       appears nowhere as a resting surface. Enumerating distinct HEXES
+    //       is the point: if someone adds a lighter resting step, this fails
+    //       and the choice gets re-made on purpose.
+    expect([...new Set(lighter.map(([, v]) => v))]).toEqual([track]);
+    // Non-vacuity: the candidate pool really did contain darker steps that the
+    // directional rule rejected, or (a) is just "not the pane".
+    const darker = Object.entries(DRACULA_VALUES).filter(
+      ([t, v]) =>
+        /^#[0-9a-f]{6}$/i.test(v) &&
+        /^color-(card|panel|background|chat|composer|frame|input|popover-header|terminal-bg|secondary|tag|tooltip|toast|menu|header)$/.test(
+          t,
+        ) &&
+        lumOf(v) < lumOf(surface),
+    ).length;
+    expect(darker).toBeGreaterThanOrEqual(3);
     expect(Object.keys(ratios).length).toBe(4);
   });
+
 });
 
 /**

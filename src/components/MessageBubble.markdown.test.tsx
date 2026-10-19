@@ -46,7 +46,9 @@ function renderAgentText(text: string, cwd?: string | null) {
   );
 }
 
-// The agent-text branch wraps `AgentMarkdown` in one `text-ui-base` div.
+// The agent-text band (`data-testid="agent-band"`) is the bubble's first node
+// and `AgentMarkdown`'s root is its first child, so the path below is exactly
+// what the arm returns — a fragment, with no wrapper element in between.
 function markdownRoot(container: HTMLElement): HTMLElement {
   const wrapper = container.firstElementChild as HTMLElement;
   return wrapper.firstElementChild as HTMLElement;

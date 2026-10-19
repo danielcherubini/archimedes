@@ -416,6 +416,23 @@
   --color-success-foreground: #21222c;
   --color-warning: #ffb86c; /* Orange */
   --color-warning-foreground: #21222c;
+  /* THE ROW TOKEN FAMILY (ADR 0062) — the glyph and the verb of a transcript
+   * row (`TRANSCRIPT_ROW`: the tool rows, the `Thought` trigger, the `Changes`
+   * group). This is the ONE palette that re-hues them; the other four alias
+   * back to the greys. Both hexes are Dracula-spec-published (Orange, Cyan), so
+   * the spec gate in `paletteCompleteness.test.ts` needs no new allow-list
+   * entry. Both are also DELIBERATE collisions, and the ADR says so rather than
+   * leaving them to look like oversights: Orange IS this palette's
+   * `--color-warning`, so a decorative tool glyph now wears the alarm hue; Cyan
+   * is what `--color-interaction-ask-foreground` has carried since before the
+   * family existed. Neither is accidental and neither is reversible by
+   * "cleanup" — `themeTokens.test.ts` pins both hexes per palette by VALUE,
+   * which is the mitigation the ADR asks for. SIBLING: `--color-row-verb`. */
+  --color-row-icon: #ffb86c; /* Orange */
+  /* The verb half of `--color-row-icon`'s family (ADR 0062) — Cyan, shared with
+   * the ask-foreground reading above, and still only the SETTLED verb: a pending
+   * call keeps `animated-gradient-text`. */
+  --color-row-verb: #8be9fd; /* Cyan */
   /* AnsiBrightRed, not Red — departure 1's rule again, and for the SAME reason
    * `diff-removed` already takes it. This token is overwhelmingly TEXT
    * (`text-destructive`: 31 uses against 12 `bg-destructive` in

@@ -18,7 +18,7 @@ const tool = (
 
 describe("ChangesGroupCard", () => {
   it("renders the Changes header with the file count", () => {
-    render(
+    const { container } = render(
       <ChangesGroupCard
         messages={[
           tool("t1", "write", 1, "completed", { path: "/a/b/c.ts" }),
@@ -28,6 +28,14 @@ describe("ChangesGroupCard", () => {
     );
     expect(screen.getByText("Changes")).toBeTruthy();
     expect(screen.getByText("2 files")).toBeTruthy();
+    // The row token family (ADR 0062): this row is one of the three
+    // `TRANSCRIPT_ROW` consumers, so the glyph and the `Changes` verb take the
+    // row utilities. Everything else on the row keeps its own token — the count
+    // below is de-emphasis TEXT, not decoration, and repainting it would make a
+    // file count read as the verb.
+    expect(screen.getByText("Changes").className).toContain("text-row-verb");
+    expect(screen.getByText("2 files").className).toContain("text-foreground-subtlest");
+    expect(container.querySelector(".text-row-icon")).not.toBeNull();
     // Both basenames are present in the DOM — in the header chip list AND
     // the (now auto-open) member cards — so `getAllByText`, never
     // `getByText`. (In jsdom all measurements are 0, so the header chips

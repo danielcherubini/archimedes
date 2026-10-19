@@ -520,6 +520,107 @@ function AgentMarkdown({ text }: { text: string }) {
   );
 }
 
+/**
+ * The agent's reply: the text on a BAND, with a copy button below it.
+ *
+ * A NAMED component (not inline JSX in the `switch`) because it holds hooks —
+ * a `useState`/`useRef`/`useEffect` trio cannot live in a `switch` arm of a
+ * component whose other arms return early (`MessageBubble` itself may render a
+ * `user` / `tool-call` / `diff` bubble and skip the call entirely, which would
+ * change the hook count between renders).
+ *
+ * THE BAND mirrors the user band (`case "user"` above) and reuses its TOKEN:
+ * `bg-composer`, never a copied hex. The palette gives `--color-composer` and
+ * `--color-input` the same value today and splits them so a theme can move one
+ * without dragging the other; both bands are "the composer's text coming back",
+ * so they move together and stay apart from a theme's input surface.
+ *
+ * `[overflow-wrap:anywhere]` is deliberately NOT copied from the user band:
+ * that one renders the raw sentence (a pasted URL must break mid-token), while
+ * `AgentMarkdown` renders block elements that prose already wraps.
+ *
+ * RETURNS A FRAGMENT, not a wrapper `<div>`: `MessageList`'s row wrapper is the
+ * flex item here, and `MessageBubble.markdown.test.tsx` reads the markdown root
+ * as `container.firstElementChild.firstElementChild` — one more element on the
+ * path would shift every one of those assertions.
+ */
+function AgentText({ text }: { text: string }) {
+  // Copy → confirm for 1.5s: the `ToolCallCardHeader` / `CodeBlock` pattern
+  // verbatim (a ref holds the pending timer so a second click restarts it, and
+  // the unmount cleanup clears it — no `setState` on an unmounted bubble).
+  const [copied, setCopied] = useState(false);
+  const resetRef = useRef<number | null>(null);
+  const handleCopy = () => {
+    // The PROP, so the clipboard gets the markdown SOURCE — backticks, table
+    // pipes and all. Reading the rendered DOM back would hand over the text
+    // with its markup stripped.
+    void navigator.clipboard?.writeText(text)?.then(() => {
+      setCopied(true);
+      if (resetRef.current !== null) window.clearTimeout(resetRef.current);
+      resetRef.current = window.setTimeout(() => setCopied(false), 1500);
+    });
+  };
+  useEffect(
+    () => () => {
+      if (resetRef.current !== null) window.clearTimeout(resetRef.current);
+    },
+    [],
+  );
+
+  return (
+    <>
+      {/* THE MARGINS, and why one of them is NEGATIVE.
+          `MessageList`'s scroll container is `flex flex-col gap-3` (12px), and a
+          flex item's margins ADD to a gap — they can never subtract from it, so
+          `mt-0` cannot pull this reply closer to the `Thought` above it than
+          12px. `-mt-2` (−8px) is the only way to reach the agreed 4px:
+          12 − 8 = 4. `mb-5` (20px) then measures 12 + 20 = 32px below the reply,
+          which is the gap a user message already produces under its own band
+          (`user-message` carries `my-5`, pinned in `MessageBubble.test.tsx`).
+          DO NOT "clean up" the negative margin: removing it does not break the
+          layout tests, it silently re-separates the `Thought` row from the reply
+          it belongs to — back to 12px, and the pair reads as two rows again.
+          They live on the BAND (not on a unit wrapper as in `case "user"`)
+          because `agent-text` has no siblings; the user case must put `my-5` on
+          its unit precisely because its mention cards and image grid are
+          siblings that a band margin would push away. */}
+      <div
+        data-testid="agent-band"
+        className="-mt-2 mb-5 rounded-xl bg-composer px-3 py-2 text-ui-base text-foreground"
+      >
+        <AgentMarkdown text={text} />
+      </div>
+      {/* OUTSIDE and BELOW the band, always visible, and pushed to the END
+          (right) edge: the reply's surface is the message, the button is a tool
+          on it — inside the band it would sit on the composer fill and compete
+          with the last line of prose. Under the band reads as a caption for
+          what it produced, not a control before it. The distinct accessible
+          name (`Copy code` belongs to a code fence) is what lets a test tell
+          the two buttons apart in one render. */}
+      <button
+        type="button"
+        onClick={handleCopy}
+        aria-label={copied ? "Copied" : "Copy response"}
+        title={copied ? "Copied" : "Copy response"}
+        data-testid="copy-response"
+        // `self-end`: the row wrapper is a `flex-col` (MessageList), whose
+        // children default to `stretch`, so without this the 12px icon sat at
+        // the START of a button as wide as the column. Aligning to the cross-
+        // axis end both shrinks the hit area to the icon and right-aligns it —
+        // `w-fit` alone would have kept it on the left, and `ml-auto` is a
+        // margin fighting stretch where alignment is the lever.
+        className="self-end shrink-0 text-foreground-subtle hover:text-foreground"
+      >
+        {copied ? (
+          <CheckIcon className="size-3" />
+        ) : (
+          <CopyIcon className="size-3" />
+        )}
+      </button>
+    </>
+  );
+}
+
 // Memoized: during a live turn EVERY thought/text chunk replaces only the
 // trailing message object in the reducer — every other bubble receives the
 // SAME reference. Without this, each chunk re-rendered the whole transcript
@@ -656,11 +757,7 @@ export default memo(
       }
 
       case "agent-text":
-        return (
-          <div className="text-ui-base">
-            <AgentMarkdown text={message.text} />
-          </div>
-        );
+        return <AgentText text={message.text} />;
 
       case "agent-thought":
         return (

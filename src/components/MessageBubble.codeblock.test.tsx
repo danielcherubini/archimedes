@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, it, expect, beforeAll, afterEach, vi } from "vitest";
 import MessageBubble, { shikiThemeFor } from "./MessageBubble";
 import { Message } from "../store/sessions";
@@ -439,8 +439,15 @@ describe("CodeBlock copy button: the 1.5s reset and the unmount cleanup", () => 
     });
   }
 
+  // SCOPED on purpose: an `agent-text` bubble now carries TWO buttons — the
+  // fence's `Copy code` and the reply's `Copy response` — so an unscoped
+  // `getByRole("button")` throws `Found multiple elements with the role
+  // "button"`. The fence's button lives in the code-block header, which is the
+  // scope this reads.
   const copyLabel = () =>
-    screen.getByRole("button").getAttribute("aria-label");
+    within(screen.getByTestId("code-block-header"))
+      .getByRole("button")
+      .getAttribute("aria-label");
 
   it("resets from Copied back to Copy code after 1.5s", async () => {
     stubClipboard();
@@ -486,7 +493,12 @@ describe("CodeBlock copy button: the 1.5s reset and the unmount cleanup", () => 
     // Still confirming 500ms in; the icon swapped, so re-query the same node.
     expect(copyLabel()).toBe("Copied");
     await act(async () => {
-      await clickCopy(screen.getByRole("button"));
+      // Re-queried inside the header: the accessible name is now `Copied`, so
+      // a name-based lookup would miss it — and an unscoped `getByRole("button")`
+      // would find the reply's `Copy response` button too.
+      await clickCopy(
+        within(screen.getByTestId("code-block-header")).getByRole("button"),
+      );
     });
     expect(vi.getTimerCount(), "a second click must replace the pending reset, not add one").toBe(1);
     await act(async () => {
@@ -532,5 +544,75 @@ describe("CodeBlock copy button: the 1.5s reset and the unmount cleanup", () => 
       .flat()
       .filter((a) => typeof a === "string" && /unmounted|setState|memory leak/i.test(a));
     expect(unmountWarnings).toEqual([]);
+  });
+});
+
+/**
+ * THE TWO BUTTONS OF ONE REPLY.
+ *
+ * An `agent-text` bubble now renders a fence's `Copy code` AND the reply's
+ * `Copy response`, and every query in the group above used to assume there was
+ * exactly one button in the render — which is how `getByRole("button")` started
+ * throwing `Found multiple elements with the role "button"` and took the whole
+ * group down. The pins below are what makes that scoping load-bearing: the two
+ * buttons must carry DISTINCT accessible names (the scoping depends on it) and
+ * must not share confirmation state.
+ */
+describe("the fence button and the response button are separate controls", () => {
+  /** Click and let the `writeText().then(...)` continuation run (the same
+   * helper the group above uses — re-declared because that one is scoped to
+   * its own `describe`). */
+  async function clickCopy(button: HTMLElement) {
+    fireEvent.click(button);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  it("renders both in one agent-text render, with distinct names", async () => {
+    renderAgentText("```ts\nconst x = 1;\n```");
+    await screen.findByTestId("code-block-header");
+    // Both are reachable BY NAME, which is what every scoped query here relies on.
+    expect(screen.getByRole("button", { name: "Copy code" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Copy response" })).toBeTruthy();
+    // The fence's lives in the header, the reply's OUTSIDE the band — an
+    // unscoped `getByRole("button")` would throw, hence `within(...)`.
+    expect(
+      within(screen.getByTestId("code-block-header")).getByRole("button"),
+    ).toBe(screen.getByRole("button", { name: "Copy code" }));
+    expect(screen.getAllByRole("button")).toHaveLength(2);
+  });
+
+  it("clicking the fence button leaves the response button's label alone", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    renderAgentText("```ts\nconst x = 1;\n```");
+    const fence = await screen.findByRole("button", { name: "Copy code" });
+    await clickCopy(fence);
+    expect(fence.getAttribute("aria-label")).toBe("Copied");
+    expect(
+      screen.getByRole("button", { name: "Copy response" }),
+    ).toBeTruthy();
+  });
+
+  it("clicking the response button leaves the fence button's label alone", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    renderAgentText("```ts\nconst x = 1;\n```");
+    await screen.findByTestId("code-block-header");
+    const fence = screen.getByRole("button", { name: "Copy code" });
+    await clickCopy(screen.getByRole("button", { name: "Copy response" }));
+    // The reply's raw markdown, not the fence's source — and the fence never
+    // swapped its icon.
+    expect(writeText).toHaveBeenCalledWith("```ts\nconst x = 1;\n```");
+    expect(screen.getByRole("button", { name: "Copied" })).toBeTruthy();
+    expect(fence.getAttribute("aria-label")).toBe("Copy code");
   });
 });
