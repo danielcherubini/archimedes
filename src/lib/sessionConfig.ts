@@ -135,8 +135,9 @@ export function contextRampFor(
  * The MODEL / THINKING option out of the session's config list: matched by
  * `category` OR by `id` (the ACP spec puts `category` on newer agents' frames
  * and older ones carry only the id), and only a `select` WITH options counts —
- * an empty select is a control with nothing in it, and the call site then
- * renders the disabled stub instead.
+ * an empty select is no option at all, so the call site then has nothing to
+ * render: the Model line shows its disabled stub, the Reasoning line is gated
+ * away by `SessionConfigBlock` (see the guard there).
  *
  * Takes `null` (the "no config options" value `sessionConfigOptionsOf`
  * returns) so the call site does not need its own guard.

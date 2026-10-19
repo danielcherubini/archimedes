@@ -18,10 +18,14 @@ import {
 } from "../lib/sessionConfig";
 
 /**
- * The session's three config LINES — Model, Reasoning, Context — stacked at the
- * BOTTOM of the side pane. They used to be the composer's bottom row; they moved
- * because a 40px-wide composer row cannot hold a bar, two triggers and two
- * buttons, and because the move kills a perf coupling: the composer re-renders
+ * The session's config LINES — Model, Reasoning, Context — stacked at the
+ * BOTTOM of the side pane. Reasoning is the only GATED one: it exists solely
+ * when the session's options carry a `thought_level` select, so a model with no
+ * thinking levels (and a session whose config we never learned) shows TWO lines
+ * — Model, then Context — and never a thinking control that cannot open. They
+ * used to be the composer's bottom row; they moved because a 40px-wide composer
+ * row cannot hold a bar, two triggers and two buttons, and because the move
+ * kills a perf coupling: the composer re-renders
  * on every keystroke (`draft` is its state), and the selectors sat in that
  * subtree (see the memo note in `SessionConfigSelect.tsx` — a per-option closure
  * re-rendered ~600 mounted model `SelectItem`s at ~140ms per keystroke). The
@@ -123,10 +127,12 @@ export default function SessionConfigBlock({ collapsed }: { collapsed: boolean }
     >
       <div className="flex flex-col gap-1.5" data-testid="session-config-controls">
         {/* Model, then Reasoning, then Context: one control per line, each
-            full line-width (`fullWidth` — see `SessionConfigSelect`). The
-            composer's tight `gap-1` cluster is gone: it existed to knit two
-            side-by-side triggers into one block of session config, and on a
-            stacked line there is nothing to knit. */}
+            full line-width (`fullWidth` — see `SessionConfigSelect`). REASONING
+            IS THE EXCEPTION: it renders only when the session's options carry a
+            `thought_level` select, so the line order is Model → [Reasoning] →
+            Context. The composer's tight `gap-1` cluster is gone: it existed to
+            knit two side-by-side triggers into one block of session config, and
+            on a stacked line there is nothing to knit. */}
         <div className="min-w-0">
           <SessionConfigSelect
             kind="model"
@@ -136,15 +142,30 @@ export default function SessionConfigBlock({ collapsed }: { collapsed: boolean }
             fullWidth
           />
         </div>
-        <div className="min-w-0">
-          <SessionConfigSelect
-            kind="thinking"
-            option={thinkingOption ?? null}
-            onSet={onSet}
-            disabled={!isLive}
-            fullWidth
-          />
-        </div>
+        {/* Reasoning is the ONE gated line: it renders only when the session's
+            options carry a `thought_level` select, so a model advertising no
+            thinking levels shows no thinking control at all (the user asked for
+            exactly that — a dropdown that can never open is a lie about the
+            model). The asymmetry against the Model line above is deliberate: a
+            model selector is meaningful for ANY session (the user can always
+            switch to a model that has levels), a thinking selector is not for a
+            model that has none. The Rust harness already omits the option in
+            that case (`synthesize_catalog_config_options`), and this guard is
+            the frontend honouring it rather than manufacturing a stub back.
+            `findConfigOption` returns `undefined` for every no-level state
+            (option absent / empty options / no config options at all), so the
+            same rule covers "we do not know the config" — one rule, no stub. */}
+        {thinkingOption && (
+          <div className="min-w-0">
+            <SessionConfigSelect
+              kind="thinking"
+              option={thinkingOption}
+              onSet={onSet}
+              disabled={!isLive}
+              fullWidth
+            />
+          </div>
+        )}
         {/* The context bar (the dynamic percentage — the reference UI's
             `🧠 [====] 61%` look), ALWAYS rendered: a live session's fill appears
             as the session grows, the label waits for the first frame, and a

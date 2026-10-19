@@ -443,13 +443,14 @@ export default function SidePane() {
           <TodoBoardPanel sessionId={activeSessionId} />
         </div>
       </div>
-      {/* The session's config lines (Model / Reasoning / Context) — the three
+      {/* The session's config lines (Model / Reasoning / Context) — the lines
           that left the composer's bottom row. Mounted AFTER the scroll area and
           BEFORE the toggle: inside the scroller the block would scroll away with
           a growing todo board, and before the scroller it would sit above the
-          title. NOT data-gated (unlike the todo section): with no active session
-          it renders the two disabled stubs and an empty 0% track, because the
-          control's identity does not depend on having data. `collapsed` is
+          title. The Model line and the context bar are NEVER data-gated (unlike
+          the todo section); the Reasoning line renders only when the session's
+          options carry a `thought_level` select. So with no active session the
+          block is the Model stub and an empty 0% track. `collapsed` is
           passed rather than re-read — the block lives outside the scroller, so
           the scroller's `invisible`-while-collapsed class cannot reach it and it
           needs its own (see `SessionConfigBlock`). */}

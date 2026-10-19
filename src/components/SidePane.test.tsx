@@ -151,30 +151,35 @@ describe("SidePane (the status panel)", () => {
     // The todo section is data-gated (the ZCode `canRender*` treatment): an
     // empty board is no section at all — no "No todos yet" placeholder.
     expect(screen.queryByText("Todos")).toBeNull();
-    // What the frame DOES hold, always: the config block (Model / Reasoning /
-    // Context). It is not data-gated, so with no active session it renders the
-    // two DISABLED stubs and an empty 0% track — the same treatment a closed
-    // session gets (the pane cannot know a config it does not have, but the
-    // control's identity stays). The pane's frame is therefore never empty
-    // text-wise; only its TODO content is.
+    // What the frame DOES hold, always: the config block; its Model line and
+    // context bar are not data-gated, so with no active session it renders the
+    // Model stub DISABLED and an empty 0% track — the same treatment a closed
+    // session gets (the pane cannot know a config it does not have, but a model
+    // selector is meaningful for any session). The REASONING line is the
+    // exception: it renders only when the session's options carry a
+    // `thought_level` select, so with no session there is NO thinking control
+    // of any role and no `○` off-level glyph. The pane's frame is therefore
+    // never empty text-wise; only its TODO content is.
     const block = container.querySelector(
       '[data-testid="session-config-block"]',
     ) as HTMLElement;
     expect(block).toBeTruthy();
     expect((screen.getByRole("button", { name: "Model" }) as HTMLButtonElement).hasAttribute("disabled")).toBe(true);
-    expect((screen.getByRole("button", { name: "Thinking" }) as HTMLButtonElement).hasAttribute("disabled")).toBe(true);
+    expect(screen.queryByRole("button", { name: "Thinking" })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Thinking" })).toBeNull();
     const bar = block.querySelector(
       '[role="progressbar"][aria-label="Context used"]',
     ) as HTMLElement;
     expect(bar.getAttribute("aria-valuenow")).toBe("0");
     expect(block.querySelector('[data-testid="context-usage"]')).toBeNull();
-    // And nothing else: the frame's text is exactly the block's two stub labels
-    // (no todo copy hiding behind them). The `○` is the thinking stub's
-    // off-level glyph, which precedes its label inside the trigger. Read on
-    // `container` rather than on the block, so a stray label elsewhere in the
-    // frame would show up here — the toggle button and (with no session, hence
-    // no boards) the rail both carry zero text.
-    expect(container.textContent).toBe("Model○Thinking");
+    // And nothing else: the frame's text is exactly the block's ONE stub label
+    // (no todo copy hiding behind them). Read on `container` rather than on the
+    // block, so a stray label elsewhere in the frame would show up here — the
+    // toggle button and (with no session, hence no boards) the rail both carry
+    // zero text. The `○` off-level glyph is ABSENT by construction now: the
+    // thinking stub is never manufactured, so this string is the proof the
+    // Reasoning line is gone as a DOM node and not merely empty.
+    expect(container.textContent).toBe("Model");
   });
 
   it("shows the session title (the first user message, truncated to 80 chars) at the top of the pane", () => {
@@ -1102,8 +1107,10 @@ describe("SidePane (the status panel)", () => {
   });
 
   // ===========================================================================
-  // THE CONFIG BLOCK (Model / Reasoning / Context) — the three lines that left
-  // the composer's bottom row and now sit pinned at the bottom of this pane.
+  // THE CONFIG BLOCK (Model / Reasoning / Context) — the Model / Reasoning /
+  // Context lines that left the composer's bottom row and now sit pinned at the
+  // bottom of this pane. Reasoning is the one the block GATES: it renders only
+  // when the model has levels (see `SessionConfigBlock`).
   //
   // These cases were ported from `ChatStream.test.tsx` when the surface moved;
   // only the render target and the container they query changed. Read them as
@@ -1119,7 +1126,7 @@ describe("SidePane (the status panel)", () => {
   //     destructive from 90).
   // ===========================================================================
 
-  it("renders the config block for a closed (history-only) session (the stubs + the empty track — there is no `isLive` gate on rendering)", () => {
+  it("renders the config block for a closed (history-only) session (the Model stub + the empty track — there is no `isLive` gate on rendering)", () => {
     seedStoredSession();
     const { container } = render(<SidePane />);
     const block = container.querySelector(
@@ -1137,16 +1144,15 @@ describe("SidePane (the status panel)", () => {
     ) as HTMLElement;
     expect(progress.getAttribute("aria-valuenow")).toBe("0");
     expect(bar.querySelector('[data-testid="context-usage"]')).toBeNull();
-    // The model/thinking selects render as DISABLED stubs (the config
-    // options are dropped on close — no data to show; the identity stays).
+    // The model select renders as a DISABLED stub (the config options are
+    // dropped on close — no data to show; the identity stays). Thinking has no
+    // stub at all: with nothing to select there is no line (see
+    // `SessionConfigBlock`), so a closed session shows the Model line and the
+    // empty track only.
     const model = block.querySelector('[aria-label="Model"]') as HTMLElement;
     expect(model).toBeTruthy();
     expect(model.hasAttribute("disabled")).toBe(true);
-    const thinking = block.querySelector(
-      '[aria-label="Thinking"]',
-    ) as HTMLElement;
-    expect(thinking).toBeTruthy();
-    expect(thinking.hasAttribute("disabled")).toBe(true);
+    expect(block.querySelector('[aria-label="Thinking"]')).toBeNull();
   });
 
   it("a live session WITH a model + thinking config option renders BOTH selects IN THE PANE (the composer carries neither)", async () => {
@@ -1570,16 +1576,56 @@ describe("SidePane (the status panel)", () => {
     );
   });
 
-  it("a live session WITHOUT configOptions renders neither selector (the stubs are the whole block)", () => {
+  it("a live session WITHOUT configOptions renders neither selector (the Model stub and the empty track are the whole block)", () => {
     seedLiveSession();
     render(<SidePane />);
-    // A live session with no `configOptions` is the STUB case: the block
-    // renders two disabled stubs and no real control. (Moved here with the
-    // controls — in the composer this assertion had gone vacuous, since
+    // A live session with no `configOptions` is the STUB case for MODEL only:
+    // the block renders the disabled Model stub, the empty track and no real
+    // control. The thinking line is gated away (an unknown config carries no
+    // `thought_level` select, so there is nothing to render). (Moved here with
+    // the controls — in the composer this assertion had gone vacuous, since
     // nothing in the composer can be a combobox any more.)
     expect(screen.queryByRole("combobox", { name: "Model" })).toBeNull();
     expect(screen.queryByRole("combobox", { name: "Thinking" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Thinking" })).toBeNull();
     expect(screen.getByRole("button", { name: "Model" })).toBeTruthy();
+  });
+
+  it("a live session whose model advertises NO thinking levels renders NO Reasoning line (two lines: Model, then Context)", () => {
+    seedLiveSession();
+    useSessions.setState({
+      // Exactly the frame the Rust harness emits for a model with no thinking
+      // levels: `synthesize_catalog_config_options` OMITS `thought_level` from
+      // the config list rather than sending an empty select, so the option
+      // lookup is empty and the frontend must not manufacture a control.
+      configOptions: {
+        s1: [
+          {
+            id: "model",
+            name: "Model",
+            type: "select",
+            currentValue: "acme/alpha",
+            options: [{ value: "acme/alpha", name: "acme/Alpha" }],
+          },
+        ],
+      },
+      contextUsage: { s1: { used: 53760, window: 128000 } },
+    });
+    const { container } = render(<SidePane />);
+    const block = container.querySelector(
+      '[data-testid="session-config-block"]',
+    ) as HTMLElement;
+    const lines = Array.from(
+      container.querySelectorAll('[data-testid="session-config-controls"] > div'),
+    ) as HTMLElement[];
+    // The ORDER contract survives the missing line: a hidden Reasoning line
+    // leaves Model first and the bar last — it never leaves a gap, and it never
+    // promotes the bar into the middle.
+    expect(lines).toHaveLength(2);
+    expect(lines[0]!.querySelector('[aria-label="Model"]')).toBeTruthy();
+    expect(lines[0]!.querySelector('[aria-label="Thinking"]')).toBeNull();
+    expect(block.querySelector('[aria-label="Thinking"]')).toBeNull();
+    expect(lines[1]!.getAttribute("data-testid")).toBe("context-usage-bar");
   });
 
   it("a STORED session with configOptions still renders no SELECTOR control (it is populated but read-only)", () => {
