@@ -1262,19 +1262,18 @@ describe("the .theme-dracula block follows the official Dracula spec", () => {
     // `bg-success` / `bg-caution` / `bg-warning` / `bg-destructive`), on the
     // surface the track really paints on.
     //
-    // THAT SURFACE HAS MOVED TWICE. The bar used to sit in a `bg-input` well; the
-    // island layout moved the composer onto its own plane, so the gate was
-    // re-pointed at `--color-composer`; the config lines have now left the
-    // composer for the bottom of the side pane, and the bar sits in a `bg-input`
-    // WELL again there (`SessionConfigBlock.tsx`) — so this reads `color-input`.
-    // Reading the wrong token here grades a real relationship against a surface
-    // that no longer exists at that site, which is exactly the failure the ADR's
-    // amendments keep recording (and the reason this file derives the well rather
-    // than trusting the prose above it). It is NOT a hypothetical: dropped onto
-    // the pane with no well the bar would paint on `--color-inspector`
-    // (`#282a36`) at 1.208 — under the 1.3 floor below — and neither contrast gate
-    // would notice, because both named the `composer` token, which kept its value.
-    const well = DRACULA_VALUES["color-input"]!;
+    // THAT SURFACE HAS MOVED THREE TIMES. The bar sat in a `bg-input` well; the
+    // island layout moved the composer onto its own plane (gate re-pointed at
+    // `--color-composer`); the config lines left the composer for the side pane
+    // and got a fresh `bg-input` well (gate re-pointed at `--color-input`); and
+    // the well is now GONE — the user read it as a sunken slot inside a plane
+    // and asked for it removed (`SessionConfigBlock.tsx`'s component note). The
+    // track's pixels land on `--color-inspector`, so this reads `color-inspector`.
+    // Each move left the gates naming a surface nothing paints on, which is
+    // exactly the failure this file's amendments keep recording — and each time
+    // the WRONG token kept the suite green, because a contrast assertion against
+    // a surface that is not there still passes.
+    const surface = DRACULA_VALUES["color-inspector"]!;
     const track = DRACULA_VALUES["color-context-track"]!;
     const lumOf = (hex: string) => {      const n = parseInt(hex.slice(1), 16);
       const f = (v: number) => {
@@ -1303,69 +1302,66 @@ describe("the .theme-dracula block follows the official Dracula spec", () => {
       // 3:1 — a progress band is non-text UI.
       expect(c, `${band} (${hex}) against the track ${track}`).toBeGreaterThanOrEqual(3);
     }
-    // The track must also read against the well it sits in, or the bar's extent
-    // (how much is left) is invisible and the track is doing no work at all.
+    // The track must also read against the pane, or the bar's extent (how much
+    // is left) is invisible and the track is doing no work at all. The floor is
+    // 1.2, and that is the honest number: 1.3 was only measurable because of
+    // the well. Against the bare pane the palette has NO step at 1.3 —
+    // `#343746` measures 1.208, `#191a21` 1.218, `#21222c` 1.109 — so the old
+    // floor would have demanded a Selection hex, which the elevation ladder
+    // fences off absolutely. 1.2 still rejects the real collisions: a track that
+    // IS the pane (`#282a36` at 1.000) or the page plane under it (`#21222c` at
+    // 1.109). See also the `slabFloatSeparation.test.ts` gate, which pins the
+    // same pair from the separation side.
     expect(
-      contrast(track, well),
-      `the track ${track} is invisible against the side pane's ${well} well`,
-    ).toBeGreaterThanOrEqual(1.3);
-    // WHY `#343746`, stated as a measurable criterion rather than as taste.
+      contrast(track, surface),
+      `the track ${track} is invisible against the pane ${surface} it rides`,
+    ).toBeGreaterThanOrEqual(1.2);
+    // WHY `#343746` AND NOT THE DARK STEP — stated as a measurable criterion.
     //
-    // The track has TWO jobs, and they pull in opposite directions:
-    //   (a) separate the band fill from the unfilled remainder  → wants the track
-    //       DARK (the darkest value in the block, the terminal's `#191a21`, gives
-    //       the best bands: 12.63 / 15.52 / 10.18 / 6.36), and
-    //   (b) be visible itself, so the bar's EXTENT reads           → wants the
-    //       track FAR FROM THE SURFACE IT SITS ON.
-    // So the criterion is two-stage, and the order matters: FILTER to tracks that
-    // read against the well (>= 1.3), then MAXIMISE THE WORST BAND among them.
-    // Doing it the other way round (maximising the weakest link) degenerates into
-    // "pick whichever is furthest from the surface", because track-vs-well is
-    // usually the binding term — that formulation selects `#44475a`, which is
-    // Selection and banned as a resting surface, and whose bands (3.36) are the
-    // worst of any candidate.
-    //
-    // Against the `#191a21` WELL the dark end is invisible (it IS the well) and
-    // `#282a36` — the pane's own plane, what the well exists to avoid — lands at
-    // 1.22 and is excluded too. The `#343746` plateau is the brightest thing still
-    // legible as a band separator, so `#343746` wins on both jobs and the token
-    // needs no re-valuing: the well, not the hex, is what makes the pair work.
-    // (Re-valuing the track instead was tried and rejected — `#424450` is
-    // `color-card-selected`, which the elevation ladder asserts appears nowhere
-    // else at all, and it reddens four gates in this file.)
-    //
-    //   candidate  vs the well   worst band
-    //   #191a21       1.00           6.36    excluded (invisible: it IS the well)
-    //   #21222c       1.10           5.80    excluded (invisible)
-    //   #282a36       1.22           5.23    excluded (invisible — the bare pane)
-    //   #343746       1.47           4.33    <- winner
-    //   #424450       1.80           3.54
-    //   #44475a       1.89           3.36    not a candidate + Selection: not a resting surface
-    const candidates = Object.entries(DRACULA_VALUES).filter(
+    // The two candidates that clear 1.2 are a RAISED step (`#343746`, 1.208
+    // above the pane) and the RECESSED step (`#191a21`, 1.218 below it). Their
+    // separation is a 0.8% difference — noise, not a decision — and the dark one
+    // wins the old "maximise the worst band" ranking outright (6.36 vs 4.33).
+    // That ranking is therefore GONE, because following it here is how the box
+    // came back: a track darker than its surface is a GROOVE, and the groove is
+    // what the user just rejected, twice, as a well. The bar rides the pane, so
+    // the unfilled remainder must read as a rail ON the plane, never a slot
+    // cut into it. So the criterion is directional:
+    const lighter = Object.entries(DRACULA_VALUES).filter(
       ([t, v]) =>
         /^#[0-9a-f]{6}$/i.test(v) &&
-        /^color-(card|panel|background|chat|composer|frame|input|popover-header|terminal-bg|secondary|tag|tooltip|toast|menu|header|card-selected)$/.test(
+        /^color-(card|panel|background|chat|composer|frame|input|popover-header|terminal-bg|secondary|tag|tooltip|toast|menu|header)$/.test(
           t,
-        ),
+        ) &&
+        lumOf(v) > lumOf(surface),
     );
-    const worstBand = (hex: string) =>
-      Math.min(...Object.values(bands).map((f) => contrast(f, hex)));
-    const visible = candidates.filter(([, v]) => contrast(v, well) >= 1.3);
-    const ranked = visible
-      .map(([t, v]) => [t, Math.round(worstBand(v) * 100) / 100] as const)
-      .sort((a, b) => b[1] - a[1]);
-    const best = ranked[0]!;
+    //   (a) the track is LIGHTER than the pane — a rail, not a groove:
     expect(
-      Math.round(worstBand(track) * 100) / 100,
-      `${track} is not the best VISIBLE track; ${best[0]} scores ${best[1]} (table: ${JSON.stringify(ranked)})`,
-    ).toBe(best[1]);
-    // Non-vacuity: the filter really did exclude candidates, or "best visible"
-    // is just "best" and the visibility half of the reasoning is decorative.
-    const excluded = candidates.filter(([, v]) => contrast(v, well) < 1.3);
-    expect(excluded.length).toBeGreaterThanOrEqual(3);
-    expect(ranked.length).toBeGreaterThanOrEqual(3);
+      lumOf(track),
+      `track ${track} sits BELOW the pane ${surface}: that is a groove, and the groove was rejected`,
+    ).toBeGreaterThan(lumOf(surface));
+    //   (b) it is the ONLY lighter non-Selection STEP in the block — one
+    //       distinct hex, the raised plateau (three tokens wear `#343746`:
+    //       `card`, `tag`, `secondary`), and every brighter resting value in
+    //       the palette is Selection (`#424450`), which the ladder asserts
+    //       appears nowhere as a resting surface. Enumerating distinct HEXES
+    //       is the point: if someone adds a lighter resting step, this fails
+    //       and the choice gets re-made on purpose.
+    expect([...new Set(lighter.map(([, v]) => v))]).toEqual([track]);
+    // Non-vacuity: the candidate pool really did contain darker steps that the
+    // directional rule rejected, or (a) is just "not the pane".
+    const darker = Object.entries(DRACULA_VALUES).filter(
+      ([t, v]) =>
+        /^#[0-9a-f]{6}$/i.test(v) &&
+        /^color-(card|panel|background|chat|composer|frame|input|popover-header|terminal-bg|secondary|tag|tooltip|toast|menu|header)$/.test(
+          t,
+        ) &&
+        lumOf(v) < lumOf(surface),
+    ).length;
+    expect(darker).toBeGreaterThanOrEqual(3);
     expect(Object.keys(ratios).length).toBe(4);
   });
+
 });
 
 /**

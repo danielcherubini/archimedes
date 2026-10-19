@@ -1283,27 +1283,25 @@ describe("SidePane (the status panel)", () => {
     expect(group!.querySelector('[data-testid="context-bar-icon"]')).toBeTruthy();
   });
 
-  it("the Context line's track sits in a `bg-input` well (the bar left the composer's own surface, so it needs its own)", () => {
+  it("the Context line rides the pane's own plane — no well, no box", () => {
     seedLiveSession();
     useSessions.setState({
       contextUsage: { s1: { used: 53760, window: 128000 } },
     });
     const { container } = render(<SidePane />);
-    // The bar used to paint on `--color-composer` (`#21222c`), where the
-    // `#343746` track measured 1.339. On the pane's `--color-inspector`
-    // (`#282a36`) it measures 1.208 — under the 1.3 floor, so the bar's EXTENT
-    // (the only thing it reports) is unreadable. The fix is a WELL, not a new
-    // hex: the row wrapping the track carries `bg-input` (`#191a21`), which
-    // puts track-vs-well back to 1.471. Pinned as a class assertion because
-    // jsdom runs no layout and the ratio lives in the CSS gates — and queried
-    // through the block, so it also proves the well lives in the PANE.
+    // The bar briefly lived in a `bg-input` WELL (it read as a sunken slot
+    // inside the pane and the user asked for it gone — see the component
+    // note). What must survive: the track's own token class on the fill, and
+    // NO surface class on the row. Pinned as class assertions because jsdom
+    // runs no layout; the contrast ratios live in the CSS gates, which now
+    // grade against `--color-inspector` — the surface these pixels land on.
     const block = container.querySelector(
       '[data-testid="session-config-block"]',
     ) as HTMLElement;
     const row = block.querySelector(
       '[data-testid="context-usage-bar"]',
     ) as HTMLElement;
-    expect(row.className).toContain("bg-input");
+    expect(row.className).not.toContain("bg-");
     const bar = row.querySelector(
       '[role="progressbar"][aria-label="Context used"]',
     ) as HTMLElement;

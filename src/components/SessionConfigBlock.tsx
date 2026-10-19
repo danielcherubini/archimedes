@@ -47,13 +47,16 @@ import {
  *   there is deliberately NO access to model / reasoning / context: the user
  *   expands the pane to change them.
  *
- * The Context line gets its own `bg-input` WELL. That is not decoration: the
- * bar used to paint on `--color-composer` (`#21222c`), where the `#343746` track
- * measured 1.339 against it. On the pane's `--color-inspector` (`#282a36`) the
- * same track measures 1.208 — under the 1.3 floor both contrast gates enforce,
- * so the bar's EXTENT (the only thing it reports) would be unreadable. `bg-input`
- * (`#191a21`) puts the pair back to 1.471 with no token re-valued, and it is
- * where the bar originally lived before the island layout moved it out.
+ * The Context line has NO well of its own, deliberately. It used to sit in a
+ * `bg-input` box, and it read as a sunken slot inside a pane that is already a
+ * plane — the user asked for it gone. The honest cost: the `#343746` track now
+ * paints on `--color-inspector` (`#282a36`) at 1.208, and NO non-Selection
+ * Dracula surface clears 1.3 against the pane (`#191a21` 1.218, `#21222c` 1.109)
+ * — the 1.3 the gates used was a property of the well, not of the pane. What
+ * actually carries the bar is the FILL-vs-TRACK contrast (every band clears 3:1
+ * with room to spare: worst 4.33), and band separation against the bare pane
+ * IMPROVES (5.23 vs 4.33 with the well). The gates are graded against
+ * `--color-inspector` at a 1.2 floor that states this explicitly.
  */
 export default function SessionConfigBlock({ collapsed }: { collapsed: boolean }) {
   // The derivations are the SHARED ones (`lib/sessionConfig`), run INSIDE the
@@ -146,10 +149,10 @@ export default function SessionConfigBlock({ collapsed }: { collapsed: boolean }
             `🧠 [====] 61%` look), ALWAYS rendered: a live session's fill appears
             as the session grows, the label waits for the first frame, and a
             closed session (the context is dropped on close — re-emitted on
-            resume) shows the empty 0% track. It is its own `bg-input` well (see
-            the component note). */}
+            resume) shows the empty 0% track. No well, no rounded box — the bar
+            rides the pane's own plane (see the component note for why). */}
         <div
-          className="flex min-w-0 items-center gap-2 rounded-md bg-input px-2 py-1"
+          className="flex min-w-0 items-center gap-2"
           data-testid="context-usage-bar"
         >
           <Brain
@@ -170,7 +173,7 @@ export default function SessionConfigBlock({ collapsed }: { collapsed: boolean }
               band was almost invisible on the bar it was drawn on. Every palette
               but Dracula aliases the new token straight back to
               `foreground-subtlest`, so zai renders EXACTLY as it always has. The
-              per-palette ratios (track vs the `bg-input` well, and each band vs
+              per-palette ratios (track vs the pane it rides, and each band vs
               the track) are pinned in the context-bar gate in
               `paletteCompleteness.test.ts`. */}
           <div
