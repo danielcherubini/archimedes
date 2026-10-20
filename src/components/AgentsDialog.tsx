@@ -3,6 +3,7 @@ import { TrashIcon } from "lucide-react";
 import type {
   AgentConfigDto,
   AgentOverride,
+  AgentOverrideFields,
   AgentOverrides,
   AppSettings,
   ModelDto,
@@ -50,9 +51,16 @@ import {
  * - the **override** column and every control read `settings.agentOverrides`,
  *   i.e. the live document. A write lands in the store immediately, so the
  *   controls never misrepresent the saved state; the resolver's columns lag until
- *   the catalog refetches (the next Space switch), which is why they are labelled
- *   `runs` — "what the last fetch saw the dispatch launch with" — and never
- *   restated as a promise about the edit you just made.
+ *   the catalog refetches (a Space switch, or the next pane mount after a save —
+ *   `SpacesList` evicts the catalog on a successful write), which is why they are
+ *   labelled `runs` — "what the last fetch saw the dispatch launch with" — and
+ *   never restated as a promise about the edit you just made.
+ *
+ * The fetch-time `row.override` column is NOT bound to the controls — but it is
+ * READ, for the one case where it and the store-side lookup disagree (see
+ * `storedPinDiff`). Two selectors over one map can pick different entries, and a
+ * row that silently shows one pin while the dispatch resolves the other is the
+ * exact misrepresentation the rest of this component is written against.
  */
 
 /** A field's label for the layer that supplied it (ADR 0068's label space).
@@ -105,6 +113,12 @@ function shadowHeading(winnerScope: "space" | "user", count: number): string {
   } agent with the same name`;
 }
 
+/** The `edited` set's key for one row-field (see `patch`). Folded, because a row
+ *  and the map key it matched can differ in case, and both write the same field. */
+function editedKey(name: string, field: keyof AgentOverride): string {
+  return `${foldAscii(name)}\u0000${field}`;
+}
+
 interface AgentsDialogProps {
   rows: AgentConfigDto[];
   /**
@@ -113,6 +127,11 @@ interface AgentsDialogProps {
    * user-level set, exactly what the deleted Settings section offered. (In the
    * old per-Space plan this flag disabled every control, because there was no
    * layer to write to without a Space. There is always one now.)
+   *
+   * It gates ONE thing that is not copy: the orphan block. The rows it lists come
+   * from a catalog discovery that was only allowed to read the user roots, so an
+   * entry can be "undiscovered" here and live in every project that defines that
+   * name — which is why no remove button is offered in that state. See `orphans`.
    */
   noSpaceOpen: boolean;
   settings: AppSettings | null;
@@ -163,16 +182,41 @@ export default function AgentsDialog({
   // rather than flashed as stale with a LIVE remove button. It is the same gate
   // the deleted section had (`agentDefs !== null`), expressed in the only signal
   // this prop list carries.
+  //
+  // THE SECOND GATE, `noSpaceOpen`, is the same argument one level up and it is
+  // the stronger one. With no Space open the rows are the USER-level set, so a key
+  // for a definition some PROJECT defines reads as "undiscovered" here while being
+  // perfectly live in every project that defines it. The modal has no signal that
+  // distinguishes "stale everywhere" from "defined in a project I was not allowed to
+  // read" — `noSpaceOpen` IS that signal, and the honest consequence is to render no
+  // orphan block at all rather than one whose trash button is armed against data the
+  // modal cannot prove stale (a reworded-but-still-clickable button would still be
+  // the ADR's only cleanup path firing on live data).
+  //
+  // The trade-off, stated so it cannot be mistaken for a loss: while NO Space is
+  // open, a GENUINELY user-level orphan gets no cleanup row here either. It is not
+  // orphaned away — the map is global, and a name no root contributes stays
+  // undiscovered in EVERY Space's catalog, so the same key surfaces (with its remove
+  // button) as soon as any Space is open. ADR 0023's cleanup duty is therefore
+  // reachable, just not from the one state in which the modal can only see half the
+  // roots; what the no-Space state loses is only the stale claim it cannot support.
   const orphans =
-    settings === null || rows.length === 0
+    settings === null || rows.length === 0 || noSpaceOpen
       ? []
       : orphanedOverrides(settings.agentOverrides, rows);
 
   /** One write, always through the shared editor: `withOverride` owns the
    * case-fold-twin drop and the delete-the-empty-entry rule, which are the two
-   * things a hand-assembled spread in this component would get wrong. */
+   * things a hand-assembled spread in this component would get wrong.
+   *
+   * The `edited` bookkeeping exists for the stored-pin cue and nowhere else: a
+   * field the user has written in this mount has an EXPLAINED difference between
+   * the store map and the fetch-time `row.override` column, so the cue must not
+   * claim the backend is reading something stale that the backend was just told. */
+  const [edited, setEdited] = useState<Set<string>>(() => new Set());
   const patch = (name: string, field: keyof AgentOverride, value: string | string[] | undefined) => {
     if (settings === null) return;
+    setEdited((prev) => new Set(prev).add(editedKey(name, field)));
     onPatch(withOverride(settings.agentOverrides, name, field, value));
   };
 
@@ -248,17 +292,19 @@ export default function AgentsDialog({
                   providers={settings.providers}
                   thinkingLevelUnion={thinkingLevelUnion}
                   tools={tools}
+                  edited={edited}
                   onPatch={patch}
                 />
               ))}
             </div>
           )}
           {/* Orphaned overrides — muted rows with a remove button, the shape the
-              deleted Settings section used (ADR 0023's only cleanup path). Note
-              that with `noSpaceOpen` the LIST above is user-level only, so an
-              override for a project-only definition reads as undiscovered here;
-              the banner above says the list is scoped, which is the honest cue
-              available without inventing a second copy. */}
+              deleted Settings section used (ADR 0023's only cleanup path). The
+              `noSpaceOpen` case renders NOTHING here: see `orphans` above — with no
+              Space the list is user-level only, so an override for a project-only
+              definition would be labelled stale and armed with this ADR's only
+              cleanup button, and the modal has no signal to tell that apart from a
+              genuinely dead key. */}
           {orphans.length > 0 && (
             <div className="flex min-w-0 flex-col gap-0.5 border-t border-border pt-2">
               {orphans.map((name) => (
@@ -292,6 +338,62 @@ export default function AgentsDialog({
 }
 
 /**
+ * The row's stored-pin DISAGREEMENT line (`row.override` vs the store-side map).
+ *
+ * `row.override` is the stored entry as the BACKEND's selector read it — the
+ * supervisor's `override_layer` scan, which takes the first key the `HashMap` hands
+ * back. The picker is bound to the live settings document, looked up by this
+ * dialog's own ASCII-fold scan, which takes the first key in DOCUMENT order. Two
+ * selectors over one map, so they agree everywhere except in the case they both
+ * exist to handle: hand-edited case-fold twins (`"Scout"` beside `scout` — Rust
+ * picks one by HashMap luck, the picker the other by insertion order) and a
+ * `settings.json` the desktop has not re-read since something else wrote it. The
+ * user then sees one pin while the dispatch launches with the other, and nothing on
+ * the row says so. This is also where the ADR 0023 soft-degrade story gets a
+ * visible home: what you pinned and what runs are different columns, and now a
+ * stored pin can differ from the one the picker edits.
+ *
+ * Returns one clause per disagreeing field (an EMPTY list = nothing to say, which
+ * is the ordinary case). A `null` on the wire means "the backend found no stored
+ * value for this field", which is not a disagreement with a field the picker also
+ * shows as unset — hence the `!== null` guard on every arm. The tool list compares
+ * as the string the row prints, because that is what the user is reading.
+ *
+ * `edited` names the fields THIS dialog has written since it mounted, and they are
+ * skipped. `row.override` is a FETCH-time value — the same lag the `runs` columns
+ * carry — so the moment the user picks a different model the wire column differs
+ * from the store-side map on purpose, and the backend already has the newer value.
+ * Calling a difference the user just caused "the pin the backend reads differs"
+ * would be the reverse of the honesty this line exists for. What is worth naming is
+ * a disagreement the modal did NOT cause: two selectors reading one map differently,
+ * or a file something else wrote.
+ */
+function storedPinDiff(
+  rowName: string,
+  wire: AgentOverrideFields,
+  stored: AgentOverride | undefined,
+  edited: ReadonlySet<string>,
+): string[] {
+  const parts: string[] = [];
+  const says = (field: keyof AgentOverride, text: string) => {
+    if (!edited.has(editedKey(rowName, field))) parts.push(text);
+  };
+  if (wire.model !== null && wire.model !== stored?.model) {
+    says("model", `model ${wire.model}`);
+  }
+  if (wire.thinking !== null && wire.thinking !== stored?.thinking) {
+    says("thinking", `thinking ${wire.thinking}`);
+  }
+  if (
+    wire.tools !== null &&
+    wire.tools.join(", ") !== (stored?.tools ?? []).join(", ")
+  ) {
+    says("tools", `tools ${wire.tools.join(", ") || "—"}`);
+  }
+  return parts;
+}
+
+/**
  * One field's SOURCE LABEL (ADR 0068: every field prints the layer that supplied
  * it). A component rather than an interpolated sentence so the label is its own
  * findable node — a test (and a screen reader) can point at it — and so no column
@@ -322,6 +424,7 @@ function AgentRow({
   providers,
   thinkingLevelUnion,
   tools,
+  edited,
   onPatch,
 }: {
   row: AgentConfigDto;
@@ -334,6 +437,9 @@ function AgentRow({
   providers: { id: string; name: string }[];
   thinkingLevelUnion: string[];
   tools: string[];
+  /** Which `<name, field>` pairs this dialog has already written — the stored-pin
+   *  cue skips those (their difference is explained by the edit). */
+  edited: ReadonlySet<string>;
   onPatch: (name: string, field: keyof AgentOverride, value: string | string[] | undefined) => void;
 }) {
   // The stale-override rule for the MODEL (the `storedLevelOutsideUnion`
@@ -347,13 +453,22 @@ function AgentRow({
       : null;
   // The same rule applied per ROW to the thinking level (the analogue of
   // `SettingsPage`'s `storedLevelOutsideUnion`, which is app-wide): a stored
-  // level no model still advertises must render as its own option.
+  // level no model still advertises must render as its own option — keyed on
+  // `stored.thinking`, because the picker's job is to show what the user PINNED,
+  // not what runs (`row.effective.thinking` is the other column, and the resolver
+  // demotes a pin the winning model lacks, so the two differ routinely). Offered
+  // DISABLED for the same reason the model above is.
   const staleLevel =
     stored?.thinking !== undefined &&
     stored.thinking !== "" &&
     !thinkingLevelUnion.includes(stored.thinking)
       ? stored.thinking
       : null;
+  // The stored-pin disagreement for THIS row (see `storedPinDiff`): the fields
+  // where the fetch-time `row.override` column and the entry the pickers are bound
+  // to disagree for a reason this modal did not cause. An empty list renders
+  // nothing, which is the ordinary case.
+  const pinDiff = storedPinDiff(row.name, row.override, stored, edited);
 
   return (
     <div className="flex min-w-0 flex-col gap-1 rounded-lg border border-border px-2.5 py-2">
@@ -375,6 +490,18 @@ function AgentRow({
           title={row.description}
         >
           {row.description}
+        </span>
+      )}
+
+      {/* The stored-pin disagreement (see `storedPinDiff`): one muted line naming
+          each field whose STORED value the backend's selector read differently from
+          the entry the pickers below are bound to. PLAIN TEXT like the shadowing
+          disclosure at the bottom of the row — there is no honest control here (the
+          fix is to set the field again from the picker), and a button would promise
+          a repair this component cannot perform. */}
+      {pinDiff.length > 0 && (
+        <span className="min-w-0 truncate text-ui-xs text-foreground-subtlest">
+          stored pin the backend reads differs — {pinDiff.join(", ")}
         </span>
       )}
 
@@ -451,7 +578,13 @@ function AgentRow({
               </SelectItem>
             ))}
             {staleLevel !== null && (
-              <SelectItem value={staleLevel}>{staleLevel}</SelectItem>
+              // DISABLED, symmetric with the stale MODEL item: the control already
+              // holds this value, so clicking it re-fires `onValueChange` with the
+              // same string and rewrites the same level — a control that looks like
+              // it does something and only costs a save.
+              <SelectItem value={staleLevel} disabled>
+                {staleLevel}
+              </SelectItem>
             )}
           </SelectContent>
         </Select>

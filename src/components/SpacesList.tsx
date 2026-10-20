@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   ArchiveIcon,
   ArchiveXIcon,
@@ -43,7 +50,10 @@ import {
 import { useSessionStatus } from "../hooks/useSessionStatus";
 import { useSessionStatuses } from "../hooks/useSessionStatus";
 import { useSkillCatalog } from "../hooks/useSkillCatalog";
-import { useAgentCatalog } from "../hooks/useAgentCatalog";
+import {
+  clearAgentCatalogCache,
+  useAgentCatalog,
+} from "../hooks/useAgentCatalog";
 import { useSettings } from "../store/settings";
 import SkillsDialog from "./SkillsDialog";
 import AgentsDialog from "./AgentsDialog";
@@ -82,6 +92,38 @@ function relativeTimeFor(
 function spaceNameFor(cwd: string, spaces: { path: string }[]): string {
   const match = spaces.find((s) => s.path === cwd);
   return match ? basenameOfPath(match.path) : basenameOfPath(cwd);
+}
+
+/**
+ * ONE link of the `agentOverrides` write chain (see `patchAgentOverrides` in the
+ * component): read the document, replace the map, write it back.
+ *
+ * It SWALLOWS its own failure — log, then RE-FETCH into the store — and that is
+ * load-bearing for the chain: a rejection would leave the held promise rejected,
+ * and every write chained after it would resolve to that same stale rejection
+ * without ever reaching the file. The chain stays alive because this does not
+ * throw.
+ *
+ * The re-fetch on failure is also what rolls back the optimistic publish: the
+ * store ends up holding the FILE's map, not the one that never landed.
+ */
+async function writeAgentOverrides(next: AgentOverrides): Promise<void> {
+  try {
+    const fresh = await getSettings();
+    const freshDocument: AppSettings = { ...fresh, agentOverrides: next };
+    await saveSettings(freshDocument);
+    useSettings.getState().setSettings(freshDocument);
+    // (F6 of the review round) The catalog this modal's `runs` columns came from
+    // was resolved against the map that was just REPLACED, so drop it: the next
+    // fetch goes back to Rust instead of serving the settled promise the edit
+    // invalidated. Clearing the WHOLE cache (not just this Space's key) is the
+    // honest scope — the override map is global, so an edit changes the answer for
+    // every Space's rows, not just the one on screen.
+    clearAgentCatalogCache();
+  } catch (err) {
+    console.error("Failed to save agent overrides:", err);
+    void useSettings.getState().loadSettings();
+  }
 }
 
 export default function SpacesList() {
@@ -231,13 +273,15 @@ export default function SpacesList() {
    * boot and by the Settings page, but the Rust side writes `settings.json` on
    * its own — `agent/session/mod.rs:1678` persists a remembered thinking level
    * through `load_settings` + mutate + `write_settings` — so a modal opened at an
-   * arbitrary moment can be holding a stale document, and composing from the
-   * store would silently clobber a concurrent change. EVERY Rust writer does
+   * arbitrary moment can be holding a stale document, and composing from the store
+   * would silently clobber a concurrent change. EVERY Rust writer does
    * load-mutate-write; this has to match or the desktop becomes the one writer
    * that can lose someone else's field.
    *
    * On failure, log and RE-FETCH into the store: a save that did not land means
-   * the file and the UI disagree, and the file is right.
+   * the file and the UI disagree, and the file is right (and the optimistic
+   * publish below is rolled back — the store ends up holding the FILE's map, not
+   * the one that was never written).
    *
    * Note what is replaced and what is preserved: the OTHER fields come from the
    * re-read document, and `agentOverrides` is the map the dialog handed over
@@ -245,17 +289,46 @@ export default function SpacesList() {
    * exactly one reason — this modal is the ONLY writer of the map in the app, so
    * no concurrent Rust write can be sitting inside it. If a second writer ever
    * appears for this field, this line becomes a merge, not a replace.
+   *
+   * …and the modal is now a SECOND writer of its own field, which is why the two
+   * halves below exist. A rapid pair of edits (pick a model, then pick a thinking
+   * level — one ~300ms gesture) issues two `onPatch` calls, and the second one is
+   * built from the map the dialog was RENDERED with: the store only caught up
+   * after `getSettings` → `saveSettings` resolved, so the second map has never
+   * seen the first edit's field, and handing over a whole map means the second
+   * write deletes the first pick from `settings.json` with no feedback. Neither
+   * half of the fix alone closes that:
+   *
+   * - PUBLISH the incoming map into the store immediately (the store's own
+   *   `setSettings` is documented as the settings UI's optimistic write, and the
+   *   success path writes this same map anyway). The dialog re-renders off it, so
+   *   the next edit is composed on the pending map instead of on a snapshot that
+   *   predates it — the maps stay cumulative.
+   * - SERIALIZE the saves on a promise held in a ref, so "the last write wins"
+   *   means the LAST map the user produced and not whichever `saveSettings`
+   *   happened to resolve first.
+   *
+   * The chain never carries a rejection: `writeAgentOverrides` swallows its own
+   * error (log + re-seed), so a failed link cannot strand every write after it.
+   *
+   * What is deliberately NOT done here is a field-level merge of the incoming map
+   * with the re-read one. The map carries no intent: an absent field is BOTH "the
+   * user just cleared it" and "nobody ever set it", so merging would resurrect a
+   * field the user just unticked (ADR 0067 — absence is the only meaning of
+   * "does not speak").
    */
-  const patchAgentOverrides = useCallback(async (next: AgentOverrides) => {
-    try {
-      const fresh = await getSettings();
-      const freshDocument: AppSettings = { ...fresh, agentOverrides: next };
-      await saveSettings(freshDocument);
-      useSettings.getState().setSettings(freshDocument);
-    } catch (err) {
-      console.error("Failed to save agent overrides:", err);
-      void useSettings.getState().loadSettings();
+  const writeChainRef = useRef<Promise<void>>(Promise.resolve());
+  const patchAgentOverrides = useCallback((next: AgentOverrides) => {
+    const current = useSettings.getState().settings;
+    // Publish first (before the awaits), so the dialog's next render — and thus
+    // its next edit — sees this one.
+    if (current !== null) {
+      useSettings.getState().setSettings({ ...current, agentOverrides: next });
     }
+    writeChainRef.current = writeChainRef.current.then(() =>
+      writeAgentOverrides(next),
+    );
+    return writeChainRef.current;
   }, []);
 
   // The session awaiting delete confirmation (the ONLY destructive

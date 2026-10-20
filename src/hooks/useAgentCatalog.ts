@@ -21,6 +21,18 @@ import { listAgentConfig, type AgentConfigDto } from "../lib/tauri";
  * 4. A FAILED fetch is not left cached — but it is deleted only if THIS promise
  *    is still the cached entry, so a fresh entry planted meanwhile survives.
  *
+ * Rule 3 keeps this a DELIBERATE SHALLOW CACHE, and it still holds: the eviction
+ * below happens on a SPACE SWITCH and on a WRITE, never on a plain remount, so two
+ * consumers opening the modal in one pane mount still share one (network-bound)
+ * discovery. What was added is invalidation-on-write — `SpacesList`'s
+ * `writeAgentOverrides` calls `clearAgentCatalogCache()` after a successful save,
+ * because `effective.thinking` / `.model` / `.tools` are the resolver's answer for
+ * the map that was just replaced. That is exactly what rule 3 assumed someone would
+ * add if a writer ever appeared: without it, the modal reopens showing the
+ * PRE-EDIT `runs` columns, which is a stale statement about a file the user just
+ * changed. It clears the WHOLE cache, not one key: the override map is GLOBAL, so an
+ * edit changes the resolution behind every Space's rows.
+ *
  * **This fetch is NOT a local disk walk.** `useSkillCatalog`'s doc-comment says
  * discovery is local and therefore needs no loading state, and copying that
  * sentence here would be false: `list_agent_config` calls `effective_catalog`,
@@ -80,7 +92,15 @@ export function useAgentCatalog(spacePath: string | null): AgentConfigDto[] {
   return state.key === key ? state.rows : [];
 }
 
-/** Test-only: clear the module-level catalog cache (call in `beforeEach`). */
+/**
+ * Evict the whole module-level catalog cache.
+ *
+ * TWO callers, deliberately: `SpacesList`'s `writeAgentOverrides` after a
+ * SUCCESSFUL `agentOverrides` save (invalidation-on-write — see rule 3 above), and
+ * every test file that mounts the hook, in `beforeEach`. Clearing everything rather
+ * than one key is right for both: the override map is global, so a save changes the
+ * resolution behind EVERY Space's rows, and a test wants a cold start.
+ */
 export function clearAgentCatalogCache(): void {
   cache.clear();
 }

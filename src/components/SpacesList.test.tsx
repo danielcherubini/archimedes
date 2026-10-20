@@ -4,6 +4,7 @@ import * as React from "react";
 import {
   deleteSession,
   getSettings,
+  listAgentConfig,
   listSkills,
   saveSettings,
   setSessionArchived,
@@ -173,6 +174,7 @@ const mockedListSkills = vi.mocked(listSkills);
 const mockedDeleteSession = vi.mocked(deleteSession);
 const mockedGetSettings = vi.mocked(getSettings);
 const mockedSaveSettings = vi.mocked(saveSettings);
+const mockedListAgentConfig = vi.mocked(listAgentConfig);
 
 /**
  * The MOUNT PROBE for the render-site pin (see
@@ -303,6 +305,14 @@ beforeEach(clearAgentCatalogCache);
 // writes localStorage itself).
 beforeEach(() => {
   setLeftPaneCollapsed(false);
+});
+// jsdom has no layout, so Radix's `Select` throws on the focus-first-option
+// scroll (`candidate?.scrollIntoView is not a function`). The repo-wide
+// convention for this in every file that mounts a `Select`
+// (`SettingsPage.test.tsx`, `SessionConfigSelect.test.tsx`, …) — this file
+// needed it the moment a test opened the Agents modal's Thinking select.
+beforeEach(() => {
+  Element.prototype.scrollIntoView = vi.fn();
 });
 // The Open-Space-dialog flag is module-scoped too, and THIS file can raise
 // it (the `Open Space` button, the rail icon, `⌘O`, the `…` menu). A leaked
@@ -861,6 +871,224 @@ describe("SpacesList", () => {
       ...fresh,
       agentOverrides: { scout: { model: "tama/Qwen3.8" } },
     });
+  });
+
+  it("two rapid edits both land in the file (the writes are serialized)", async () => {
+    // The dialog builds the map it hands over from the RENDER-TIME store
+    // snapshot, and the store only catches up once `getSettings` → `saveSettings`
+    // resolve. So a second edit issued inside that window carries a map that has
+    // never seen the first edit's field, and the write replaces the map
+    // WHOLESALE — the first pick vanishes from `settings.json` with no feedback.
+    // A model-pick then a thinking-pick is one natural ~300ms gesture, so this is
+    // the ordinary case, not a corner.
+    //
+    // The save is held open here to make that window deterministic instead of
+    // timing-dependent: the second edit is issued while the first save is
+    // provably still in flight. What is asserted is the END STATE of the file —
+    // the LAST document written carries both fields, whether that comes from one
+    // coalesced save or from two serialized ones.
+    let releaseFirstSave!: () => void;
+    mockedSaveSettings.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseFirstSave = resolve;
+        }),
+    );
+    render(<SpacesList />);
+    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
+    const dialog = await screen.findByRole("dialog");
+    // Edit 1: the model.
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Model for scout" }),
+    );
+    fireEvent.click(await screen.findByText("Qwen3.8"));
+    // Edit 2: the thinking level, WITHOUT awaiting the first save.
+    fireEvent.click(
+      within(dialog).getByRole("combobox", { name: "Thinking for scout" }),
+    );
+    fireEvent.click(await screen.findByRole("option", { name: "high" }));
+    act(() => releaseFirstSave());
+    // The second write still flows after the first lands (the chain is not
+    // abandoned when a link resolves slowly — or when one fails).
+    await waitFor(() =>
+      expect(mockedSaveSettings.mock.calls.length).toBeGreaterThanOrEqual(1),
+    );
+    const lastSaved =
+      mockedSaveSettings.mock.calls[mockedSaveSettings.mock.calls.length - 1][0];
+    expect(lastSaved.agentOverrides).toEqual({
+      scout: { model: "tama/Qwen3.8", thinking: "high" },
+    });
+    // …and the store agrees with the file the user just wrote.
+    await waitFor(() =>
+      expect(useSettings.getState().settings?.agentOverrides.scout).toEqual({
+        model: "tama/Qwen3.8",
+        thinking: "high",
+      }),
+    );
+  });
+
+  it("a slow first save cannot land after the second edit's save (out-of-order writes)", async () => {
+    // The other half of the same gesture, and the half the store's optimistic
+    // publish CANNOT fix: two `saveSettings` calls are two independent IPC round
+    // trips, so the FIRST one can resolve LAST and write the older map over the
+    // newer file. The chain in `patchAgentOverrides` is what makes "last edit
+    // wins" mean the last map the user produced rather than whichever round trip
+    // finished second.
+    //
+    // Deterministic instead of racy: call 1's save is held open, call 2's resolves
+    // at once (the factory's default). Unserialized, call 2 writes both fields
+    // first and call 1 then writes the model-only map on top of it; serialized,
+    // call 2 does not even start until call 1 has landed.
+    let releaseFirstSave!: () => void;
+    mockedSaveSettings.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseFirstSave = resolve;
+        }),
+    );
+    render(<SpacesList />);
+    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Model for scout" }),
+    );
+    fireEvent.click(await screen.findByText("Qwen3.8"));
+    fireEvent.click(
+      within(dialog).getByRole("combobox", { name: "Thinking for scout" }),
+    );
+    fireEvent.click(await screen.findByRole("option", { name: "high" }));
+    // Let whatever is queued settle, THEN land the first save. Anything that
+    // writes after this point is the last word the file gets.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => releaseFirstSave());
+    // A REAL settle (not a bare `waitFor`, which would pass on the store's state
+    // from BEFORE the late save landed — the exact state the bug leaves behind):
+    // each successful save publishes its own document, so the store now reports
+    // what the LAST-RESOLVING write wrote, i.e. what the file ends up holding.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(useSettings.getState().settings?.agentOverrides.scout).toEqual({
+      model: "tama/Qwen3.8",
+      thinking: "high",
+    });
+    const lastSaved =
+      mockedSaveSettings.mock.calls[mockedSaveSettings.mock.calls.length - 1][0];
+    expect(lastSaved.agentOverrides).toEqual({
+      scout: { model: "tama/Qwen3.8", thinking: "high" },
+    });
+  });
+
+  it("a failed save does not strand the edit after it (the chain stays alive)", async () => {
+    // The chain is a promise held in a ref, so a rejection would be POISON: every
+    // later link would resolve to that same stale rejection and no subsequent edit
+    // would ever reach the file. The write helper swallows its own error (log +
+    // re-seed) precisely so the chain survives a failed link.
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockedSaveSettings.mockRejectedValueOnce(new Error("boom"));
+    render(<SpacesList />);
+    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
+    const dialog = await screen.findByRole("dialog");
+    // Edit 1 fails.
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Model for scout" }),
+    );
+    fireEvent.click(await screen.findByText("Qwen3.8"));
+    await waitFor(() =>
+      expect(consoleError).toHaveBeenCalledWith(
+        "Failed to save agent overrides:",
+        expect.anything(),
+      ),
+    );
+    // Edit 2 still reaches the file.
+    fireEvent.click(
+      within(dialog).getByRole("combobox", { name: "Thinking for scout" }),
+    );
+    fireEvent.click(await screen.findByRole("option", { name: "high" }));
+    await waitFor(() =>
+      expect(mockedSaveSettings.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
+    // …and the map that landed carries the second edit.
+    const lastSaved =
+      mockedSaveSettings.mock.calls[mockedSaveSettings.mock.calls.length - 1][0];
+    expect(lastSaved.agentOverrides.scout?.thinking).toBe("high");
+    consoleError.mockRestore();
+  });
+
+  it("logs a console error when saving Agent overrides fails (the store re-seeds from the file)", async () => {
+    // The failure arm of the one write path, in this file's established shape for
+    // that class (`logs a console error when Archive fails`, Unfail, Delete): the
+    // rejection is LOGGED (no unhandled rejection in the webview) and the state
+    // ends up agreeing with the FILE.
+    //
+    // The second half matters more here than it does for the archive move, because
+    // the write path publishes the edited map into the store OPTIMISTICALLY before
+    // the save resolves. A save that did not land therefore leaves the store
+    // claiming an override the file has never seen — and the NEXT edit would be
+    // composed on top of it. The re-fetch has to roll that back, so the fixture's
+    // re-read carries a map that is NOT what the user picked.
+    const fresh: AppSettings = {
+      ...SETTINGS_FIXTURE,
+      agentOverrides: { plan: { thinking: "high" } },
+    };
+    mockedGetSettings.mockResolvedValue(fresh);
+    mockedSaveSettings.mockRejectedValueOnce(new Error("boom"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(<SpacesList />);
+    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Model for scout" }),
+    );
+    fireEvent.click(await screen.findByText("Qwen3.8"));
+    // ...the rejection is logged...
+    await waitFor(() =>
+      expect(consoleError).toHaveBeenCalledWith(
+        "Failed to save agent overrides:",
+        expect.anything(),
+      ),
+    );
+    // ...and the store ends up holding the RE-FETCHED document: the optimistic map
+    // is gone, the file's map is back. (A store left holding `scout` would be the
+    // lie — the picker would show a pin nothing saved.)
+    await waitFor(() => expect(useSettings.getState().settings).toEqual(fresh));
+    expect(useSettings.getState().settings?.agentOverrides.scout).toBeUndefined();
+    consoleError.mockRestore();
+  });
+
+  it("a successful save evicts the Agent catalog (no stale runs after an edit)", async () => {
+    // `useAgentCatalog` caches the in-flight promise per Space on purpose (rule 3
+    // of the hook's four rules): an UNCHANGED key never evicts, so a remount reuses
+    // the settled entry instead of re-running a NETWORK-BOUND discovery. That is
+    // right for a remount that changes nothing, and wrong after a WRITE — `runs` is
+    // "what the last fetch saw the dispatch launch with", and the map that fetch
+    // resolved against has just been replaced. Invalidation-on-write is what rule
+    // 3 assumed someone would add if a writer ever appeared; this is that writer.
+    //
+    // The assertion is about the next MOUNT of the hook, because that is what the
+    // eviction can affect: the catalog is fetched by the PANE (the dialog is
+    // prop-driven), so re-opening the modal inside one pane mount cannot re-run the
+    // effect — the rows it renders were fetched at mount. Unmounting the pane (the
+    // Settings view does exactly that) and mounting it again with the SAME key is
+    // the case the cache would otherwise serve a pre-edit answer for.
+    const first = render(<SpacesList />);
+    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Model for scout" }),
+    );
+    fireEvent.click(await screen.findByText("Qwen3.8"));
+    await waitFor(() => expect(mockedSaveSettings).toHaveBeenCalledTimes(1));
+    // One fetch so far — the mount's.
+    expect(mockedListAgentConfig).toHaveBeenCalledTimes(1);
+    // …the pane unmounts (Settings view) and mounts again, same Space key…
+    first.unmount();
+    render(<SpacesList />);
+    // …and the catalog is re-fetched rather than served from the entry the write
+    // invalidated.
+    await waitFor(() => expect(mockedListAgentConfig).toHaveBeenCalledTimes(2));
   });
 });
 

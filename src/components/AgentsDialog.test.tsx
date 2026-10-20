@@ -400,17 +400,28 @@ describe("AgentsDialog", () => {
     ]);
   });
 
-  it("a_rows_effective_thinking_outside_the_union_renders_as_its_own_option", async () => {
+  it("a_stored_thinking_level_outside_the_union_renders_as_its_own_disabled_option", async () => {
     // The per-row analogue of `SettingsPage`'s `storedLevelOutsideUnion`: a
-    // stored level no model still advertises must render, or Radix shows the
-    // placeholder and the row lies about the saved state.
+    // STORED level no model still advertises must render, or Radix shows the
+    // placeholder and the row lies about the saved state. (The control keys on the
+    // STORED value — the picker shows what was PINNED, which is not necessarily
+    // what runs; the `runs` column carries the other half.)
+    //
+    // DISABLED, symmetric with the stale MODEL item: clicking an item whose value
+    // the control already holds re-fires `onValueChange` with the same value and
+    // rewrites the same level — a control that looks like it does something and
+    // does a pointless save.
+    //
+    // The fixture is a state the resolver CAN produce: an override level the
+    // winning model does not advertise is DEMOTED, and this one is advertised by
+    // NO model at all, so nothing runs it and the source falls to the parent rung.
     openDialog({
       agentOverrides: { scout: { thinking: "max" } },
       rows: [
         row({
           override: { model: null, thinking: "max", tools: null },
-          effective: { model: null, thinking: "max", tools: null },
-          source: { model: "parent", thinking: "override", tools: "parent" },
+          effective: { model: null, thinking: null, tools: null },
+          source: { model: "parent", thinking: "parent", tools: "parent" },
         }),
       ],
     });
@@ -419,7 +430,48 @@ describe("AgentsDialog", () => {
     });
     expect(trigger.textContent).toContain("max");
     fireEvent.click(trigger);
-    expect(await screen.findByRole("option", { name: "max" })).toBeTruthy();
+    const stale = await screen.findByRole("option", { name: "max" });
+    expect(stale.getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("a_demoted_thinking_level_still_shows_the_pin_and_the_runs_column_shows_the_demotion", async () => {
+    // The state the resolver produces when a stored level is not one the winning
+    // model advertises: the pin is NOT dropped and NOT reported as effective —
+    // `effective.thinking` is `null` and `source.thinking` names the parent rung
+    // (`commands::agents::tests::an_override_thinking_the_winning_model_lacks_is_
+    // demoted` is the Rust half of this pair). The row therefore has to say BOTH
+    // things at once: the picker still shows the pinned level (it shows what the
+    // user saved), and the `runs` column says nothing runs it.
+    //
+    // `high` IS in the union here on purpose: this is not the "level outside the
+    // union" case, it is a level a DIFFERENT model advertises and the winning one
+    // does not — so no extra option is needed, and the assertion is about the two
+    // columns disagreeing honestly.
+    openDialog({
+      agentOverrides: { scout: { model: "openai/GPT-5", thinking: "max" } },
+      rows: [
+        row({
+          override: { model: "openai/GPT-5", thinking: "max", tools: null },
+          effective: { model: "openai/GPT-5", thinking: null, tools: null },
+          source: { model: "override", thinking: "parent", tools: "parent" },
+        }),
+      ],
+    });
+    const trigger = await screen.findByRole("combobox", {
+      name: "Thinking for scout",
+    });
+    // The pin is still visible (not silently dropped, not the placeholder)…
+    expect(trigger.textContent).toContain("max");
+    expect(trigger.textContent).not.toContain("Inherits");
+    // …and it is not offered as a live choice the click could re-commit.
+    fireEvent.click(trigger);
+    expect(
+      await screen.findByRole("option", { name: "max" }),
+    ).toBeTruthy();
+    // The runs column tells the other half: nothing runs the pinned level.
+    const thinkingLine = screen.getByText("Thinking").closest("div")!;
+    expect(thinkingLine.textContent).toContain("runs —");
+    expect(within(thinkingLine as HTMLElement).getByText("Inherits parent")).toBeTruthy();
   });
 
   it("the_search_filters_rows_by_case_insensitive_name_substring", async () => {
@@ -558,10 +610,137 @@ describe("AgentsDialog", () => {
     ).toBeTruthy();
   });
 
+  it("noSpaceOpen offers NO remove button for an undiscovered key (the modal cannot prove it stale)", async () => {
+    // The false-positive this pins. With no Space open the LIST above is the
+    // user-level set only, so an override for a definition some PROJECT defines is
+    // "undiscovered" here while being live in every project that defines it — and
+    // this modal is ADR 0023's ONLY cleanup path, so a working trash button on that
+    // row invites deleting data that is not stale. The modal cannot know whether a
+    // name is discovered in SOME project, so it does not offer the removal at all.
+    const { onPatch } = openDialog({
+      noSpaceOpen: true,
+      rows: [row({ scope: "user", path: "/u/.agents/agents/scout.md" })],
+      agentOverrides: { ghost: { model: "p/m1" } },
+    });
+    // The stored map still drives the discovered row (nothing about editing broke).
+    expect(await screen.findByText("scout")).toBeTruthy();
+    // The orphan row is not offered: no "stale override" claim, and crucially no
+    // destructive control aimed at a key the modal cannot prove stale.
+    expect(
+      screen.queryByText("No longer discovered (stale override)"),
+    ).toBeNull();
+    expect(screen.queryByText("ghost")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Remove ghost override" }),
+    ).toBeNull();
+    // …and nothing can be written from the block that would have removed it.
+    expect(onPatch).not.toHaveBeenCalled();
+  });
+
+  it("a Space open still offers the remove button for an orphan", async () => {
+    // The other half of the trade-off: with a Space the discovery is the real
+    // catalog for that `cwd`, so "not discovered" means what the label says and the
+    // removal stays available. Pinning this keeps the fix above from being widened
+    // into deleting ADR 0023's cleanup path.
+    const { onPatch } = openDialog({
+      noSpaceOpen: false,
+      agentOverrides: { ghost: { model: "p/m1" } },
+    });
+    expect(
+      await screen.findByRole("button", { name: "Remove ghost override" }),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Remove ghost override" }));
+    expect(onPatch.mock.calls[0][0]).toEqual({});
+  });
+
+  // -------------------------------------------------------------------------
+  // The stored-pin disagreement cue (`row.override` vs the store-side map).
+  // -------------------------------------------------------------------------
+
+  it("a row whose stored pin differs from the picker says so and names the wire value", async () => {
+    // `row.override` is the stored entry as the BACKEND's selector read it; the
+    // picker is bound to the live settings document, which the dialog looks up
+    // through its own fold scan. The two selectors can land on different entries —
+    // the hand-edited case-fold twin is the shipped case (Rust picks between
+    // `"Scout"` and `scout` by HashMap order, the picker takes the first key in
+    // document order) — and a Rust-side write can also beat the store's last read.
+    // The row then shows one pin while the dispatch resolves the other, so the
+    // difference gets a line of plain text naming what the backend sees.
+    openDialog({
+      agentOverrides: { scout: { model: "tama/Qwen3.8" } },
+      rows: [
+        row({
+          override: { model: "openai/GPT-5", thinking: null, tools: null },
+          effective: { model: "openai/GPT-5", thinking: null, tools: null },
+          source: { model: "override", thinking: "parent", tools: "parent" },
+        }),
+      ],
+    });
+    const cue = await screen.findByText(/stored pin the backend reads differs/);
+    // It NAMES the value, or it would be a warning the user cannot act on.
+    expect(cue.textContent).toContain("openai/GPT-5");
+    // And it names WHICH field, because three fields can disagree independently.
+    expect(cue.textContent).toContain("model");
+    // Plain text, not a control (the shadowing report's rule — nothing here is
+    // clickable, and the user resolves it by editing the picker).
+    expect(cue.closest('[role="button"]')).toBeNull();
+  });
+
+  it("a row whose stored pin matches the picker shows no disagreement cue", async () => {
+    // The ordinary case, pinned so the cue cannot degrade into a line every row
+    // carries: the wire column and the store-side entry agree, so there is nothing
+    // to warn about.
+    openDialog({
+      agentOverrides: { scout: { model: "tama/Qwen3.8", thinking: "high" } },
+      rows: [
+        row({
+          override: { model: "tama/Qwen3.8", thinking: "high", tools: null },
+          effective: { model: "tama/Qwen3.8", thinking: "high", tools: null },
+          source: { model: "override", thinking: "override", tools: "parent" },
+        }),
+      ],
+    });
+    await screen.findByText("scout");
+    expect(screen.queryByText(/differs/)).toBeNull();
+  });
+
+  it("a pin the user just changed in this modal raises no disagreement cue", async () => {
+    // The cue's one false positive, pinned away. `row.override` is a FETCH-time
+    // value (the same lag the `runs` columns carry), so the moment the user picks a
+    // different model the wire column differs from the store-side map ON PURPOSE.
+    // Calling that "the backend reads a different pin" would be a lie — the save is
+    // in flight, and the backend already has the new value. The disagreement worth
+    // naming is the one this dialog did not cause: two selectors reading one map
+    // differently (the case-fold twin), or a file something else wrote.
+    //
+    // Rendered through `renderControlled`, because the false positive needs the
+    // write to land in the document the dialog is handed while the rows stay the
+    // ones the mount fetched — exactly the live shape.
+    renderControlled({
+      rows: [
+        row({
+          override: { model: "openai/GPT-5", thinking: null, tools: null },
+          effective: { model: "openai/GPT-5", thinking: null, tools: null },
+          source: { model: "override", thinking: "parent", tools: "parent" },
+        }),
+      ],
+      agentOverrides: { scout: { model: "openai/GPT-5" } },
+    });
+    // Before the edit the two agree, so there is no cue to begin with…
+    expect(screen.queryByText(/differs/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Model for scout" }));
+    fireEvent.click(within(innerDialog()).getByText("Qwen3.8"));
+    // The picker now shows the new pin (the write landed in the harness's copy).
+    expect(
+      screen.getByRole("button", { name: "Model for scout" }).textContent,
+    ).toContain("Qwen3.8");
+    // …and the edit does not manufacture one.
+    expect(screen.queryByText(/differs/)).toBeNull();
+  });
+
   // -------------------------------------------------------------------------
   // The shadowing report (ADR 0065 — disclosed, never listed).
   // -------------------------------------------------------------------------
-
   it("a_shadowed_row_reports_the_loser_as_text_and_never_as_a_control", async () => {
     openDialog({ rows: [row({ shadowed: [shadow()] })] });
     const path = await screen.findByText("/u/.pi/agent/agents/scout.md");
