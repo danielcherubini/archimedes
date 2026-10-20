@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import * as React from "react";
 import {
@@ -330,6 +330,24 @@ function seed(): void {
 beforeEach(() => {
   seed();
   vi.clearAllMocks();
+  // `clearAllMocks` clears CALL RECORDS and nothing else: an UNCONSUMED `…Once`
+  // arm survives it and fires in the NEXT test (measured — a `mockRejectedValueOnce`
+  // left over from a test whose assertion threw before consuming it rejects the
+  // next test's `saveSettings`), and so does a bare `mockResolvedValue` override.
+  // The mocks this file re-arms are therefore reset and handed their factory
+  // default again, so "which test ran before me" cannot decide what my IPC layer
+  // answers. (`listSkills` is deliberately NOT in this list: the empty-skills test
+  // below documents that it relies on the preserved implementation.)
+  mockedSaveSettings.mockReset().mockResolvedValue(undefined);
+  // Each re-arm restates that mock's FACTORY default (`getSettings`'s differs from
+  // `SETTINGS_FIXTURE` by `defaultModel: null` alone — verified deep-equal), so
+  // re-arming here changes no behavior; it only makes the default unconditional.
+  mockedGetSettings
+    .mockReset()
+    .mockResolvedValue({ ...SETTINGS_FIXTURE, defaultModel: null });
+  mockedListAgentConfig.mockReset().mockResolvedValue([agentRow()]);
+  vi.mocked(setSessionArchived).mockReset().mockResolvedValue(true);
+  mockedDeleteSession.mockReset().mockResolvedValue(undefined);
 });
 // Seed the SETTINGS STORE. `SpacesList.tsx` did not read `useSettings` before the
 // Agents modal mounted (only `main.tsx`'s boot path ever populated it), and this
@@ -378,6 +396,16 @@ beforeEach(() => {
 // not leak it into the tests after it.
 beforeEach(() => {
   probeOn = false;
+});
+// FILE-SCOPE spy restore. Several tests below install a `console.error` spy to
+// swallow (or observe) a failure log and restore it on the last line — with no
+// `try/finally`. An assertion that throws mid-test therefore never reaches that
+// restore, and a SILENCED `console.error` walks into every later test in the
+// file: exactly the leak that makes the first red hard to read, because the
+// tests after it stop printing the errors they were supposed to print. Restoring
+// here costs the tests nothing and holds whatever the throw skipped.
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe("SpacesList", () => {
@@ -873,6 +901,39 @@ describe("SpacesList", () => {
     expect(pane.contains(dialog)).toBe(false);
   });
 
+  it("the dialog opens cleanly when the catalog answers with no definitions", async () => {
+    // The empty path, which no test here used to take: every other open goes
+    // through `openAgentsModal`, which WAITS FOR A ROW, so `[]` was only ever
+    // reachable as the transient pre-fetch paint that helper is written to avoid.
+    // The state is real — `list_agent_config` can answer `[]`, and the hook
+    // degrades a FAILED fetch to `[]` — and the dialog's orphan scan, its
+    // thinking-level union and the per-row `stored` lookup all read those rows.
+    //
+    // Which arm this reaches, stated honestly: `useAgentCatalog` starts at
+    // `rows: []`, so `rows.length === 0` is ALSO what a still-pending fetch
+    // paints (measured — handing the mock a promise that never settles renders the
+    // same line). And the dialog's only `Loading…` arm is gated on
+    // `settings === null`, which the mount's `settings &&` guard already excludes,
+    // so that arm is unreachable from this render site. So the copy pinned below
+    // is the empty/unknown-rows arm, `Loading…` is asserted absent, and this test
+    // proves "an empty answer renders instead of throwing" — not "a hung IPC is
+    // distinguishable from an empty answer", which the component cannot express.
+    mockedListAgentConfig.mockResolvedValue([]);
+    render(<SpacesList />);
+    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      await within(dialog).findByText("No Agent definitions found."),
+    ).toBeTruthy();
+    expect(within(dialog).queryByText("Loading…")).toBeNull();
+    // …and the modal is still a working dialog, not a crashed shell: the search
+    // field survived, and the dialog found by the empty copy is the open one.
+    expect(within(dialog).getByPlaceholderText("Search agents…")).toBeTruthy();
+    expect(screen.getByRole("dialog")).toBe(dialog);
+    // One fetch for the mount (no retry storm against the empty answer).
+    expect(mockedListAgentConfig).toHaveBeenCalledTimes(1);
+  });
+
   it("picking_a_model_saves_agentOverrides_through_a_read_modify_write", async () => {
     // The one new write path in the feature. The save must be composed from a
     // FRESH `get_settings` read, never from the store's copy: Rust writes
@@ -961,8 +1022,15 @@ describe("SpacesList", () => {
     act(() => releaseFirstSave());
     // The second write still flows after the first lands (the chain is not
     // abandoned when a link resolves slowly — or when one fails).
+    //
+    // The pass-condition must be as strong as the read: a weaker condition makes
+    // correctness depend on RTL internals. `>= 1` here is satisfied while only
+    // edit 1's link has been issued, and passing anyway would then be a property
+    // of RTL's `asyncWrapper` draining the macrotask queue before the assertion
+    // below runs — not a property of the write chain. Both edits were demanded,
+    // so the LAST call is the one the file ends up holding.
     await waitFor(() =>
-      expect(mockedSaveSettings.mock.calls.length).toBeGreaterThanOrEqual(1),
+      expect(mockedSaveSettings.mock.calls.length).toBeGreaterThanOrEqual(2),
     );
     const lastSaved =
       mockedSaveSettings.mock.calls[mockedSaveSettings.mock.calls.length - 1][0];
@@ -1038,7 +1106,13 @@ describe("SpacesList", () => {
       const afterB = trace.seen().slice(trace.seen().indexOf(BOTH) + 1);
       expect(afterB).not.toContain(MODEL_ONLY);
       // End states, in the shape `two rapid edits both land` asserts them: the last
-      // write is the file's answer and the store agrees with it.
+      // write is the file's answer and the store agrees with it. The count is
+      // awaited FIRST — reading `calls[length-1]` before demanding both links were
+      // issued makes the pass depend on the settle above having drained the queue,
+      // i.e. on RTL internals rather than on the write chain.
+      await waitFor(() =>
+        expect(mockedSaveSettings.mock.calls.length).toBeGreaterThanOrEqual(2),
+      );
       const lastSaved =
         mockedSaveSettings.mock.calls[
           mockedSaveSettings.mock.calls.length - 1
@@ -1174,6 +1248,12 @@ describe("SpacesList", () => {
       model: "tama/Qwen3.8",
       thinking: "high",
     });
+    // The settle above is what makes the SECOND save exist, but it is a fact about
+    // macrotask ordering; the read below takes the last call, so the count is what
+    // has to be demanded.
+    await waitFor(() =>
+      expect(mockedSaveSettings.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
     const lastSaved =
       mockedSaveSettings.mock.calls[mockedSaveSettings.mock.calls.length - 1][0];
     expect(lastSaved.agentOverrides).toEqual({
@@ -1213,7 +1293,6 @@ describe("SpacesList", () => {
     const lastSaved =
       mockedSaveSettings.mock.calls[mockedSaveSettings.mock.calls.length - 1][0];
     expect(lastSaved.agentOverrides.scout?.thinking).toBe("high");
-    consoleError.mockRestore();
   });
 
   it("a throwing failure logger does not poison the chain (the swallow is structural)", async () => {
@@ -1255,7 +1334,6 @@ describe("SpacesList", () => {
     const lastSaved =
       mockedSaveSettings.mock.calls[mockedSaveSettings.mock.calls.length - 1][0];
     expect(lastSaved.agentOverrides.scout?.thinking).toBe("high");
-    consoleError.mockRestore();
   });
 
   it("a landed save still evicts the catalog when the store publish throws (and is not logged as a save failure)", async () => {
@@ -1354,7 +1432,6 @@ describe("SpacesList", () => {
     // lie — the picker would show a pin nothing saved.)
     await waitFor(() => expect(useSettings.getState().settings).toEqual(fresh));
     expect(useSettings.getState().settings?.agentOverrides.scout).toBeUndefined();
-    consoleError.mockRestore();
   });
 
   it("a failed save re-arms the stored-pin cue the failed edit explained nothing about", async () => {
@@ -1421,7 +1498,6 @@ describe("SpacesList", () => {
     // disagreement is unexplained again and the row has to say it.
     const cue = await screen.findByText(/stored pin the last fetch saw differs/);
     expect(cue.textContent).toContain("thinking max");
-    consoleError.mockRestore();
   });
 
   it("a successful save evicts the Agent catalog (no stale runs after an edit)", async () => {
@@ -1624,7 +1700,6 @@ describe("SpacesList (archive, ADR 0016)", () => {
     const { archivedSessions, historySessions } = useSessions.getState();
     expect(archivedSessions.some((s) => s.sessionId === "h1")).toBe(false);
     expect(historySessions.some((s) => s.sessionId === "h1")).toBe(true);
-    consoleError.mockRestore();
   });
 
   it("logs a console error when Unarchive fails (the row is NOT moved)", async () => {
@@ -1644,7 +1719,6 @@ describe("SpacesList (archive, ADR 0016)", () => {
     const { archivedSessions, historySessions } = useSessions.getState();
     expect(archivedSessions.some((s) => s.sessionId === "a1")).toBe(true);
     expect(historySessions.some((s) => s.sessionId === "a1")).toBe(false);
-    consoleError.mockRestore();
   });
 
   it("closes the delete dialog and logs a console error when Delete fails (the row remains)", async () => {
@@ -1673,7 +1747,6 @@ describe("SpacesList (archive, ADR 0016)", () => {
     expect(
       useSessions.getState().archivedSessions.some((s) => s.sessionId === "a1"),
     ).toBe(true);
-    consoleError.mockRestore();
   });
 
   // -- The `...` menu (moved from the tab bar to the `Sessions` header,
