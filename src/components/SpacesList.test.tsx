@@ -197,14 +197,44 @@ const mockedListAgentConfig = vi.mocked(listAgentConfig);
  */
 let probeOn = false;
 
+/**
+ * A RENDER-TIME RECORD of the `rolledBackWrites` value the mount handed the dialog,
+ * consecutive duplicates collapsed (the shape `traceAgentOverrides` uses).
+ *
+ * Why the renders and not the DOM: this counter is the FACT the modal's stored-pin
+ * suppression is stamped against (see `AgentsDialog`'s `edits`), and a test whose
+ * rows carry all-`null` `override` columns has no column disagreement for the cue to
+ * name — the cue is then unobservable in the DOM, while the spurious increment that
+ * would have armed it is still a lie the mount told. The counter is that cue's
+ * upstream, and it is readable on every render.
+ *
+ * Recorded in the mock wrapper below (the seam the mount probe already uses), because
+ * the prop belongs to the dialog and the mount is its only writer. Pushed at render
+ * time, so a value that appeared for one render and was overwritten next render is
+ * still in the record. Readers reset it first — this is module scope, shared across
+ * every test in the file.
+ */
+let rollsSeen: (number | undefined)[] = [];
+
+/** Discard the record so it describes ONE test's renders. */
+function resetRolledBackWritesRecord(): void {
+  rollsSeen = [];
+}
+
 vi.mock("./AgentsDialog", async () => {
   const actual = await vi.importActual<typeof import("./AgentsDialog")>(
     "./AgentsDialog",
   );
   const Real = actual.default;
   return {
-    default: (props: Parameters<typeof Real>[0]) =>
-      React.createElement(
+    default: (props: Parameters<typeof Real>[0]) => {
+      // Both reads happen at RENDER time (the factory is hoisted above this file's
+      // `let`s, so the factory BODY could not touch them at all — only this closure
+      // body, which runs per render, can).
+      if (rollsSeen[rollsSeen.length - 1] !== props.rolledBackWrites) {
+        rollsSeen.push(props.rolledBackWrites);
+      }
+      return React.createElement(
         React.Fragment,
         null,
         // Read at RENDER time (the factory is hoisted above this file's `let`).
@@ -214,7 +244,8 @@ vi.mock("./AgentsDialog", async () => {
             })
           : null,
         React.createElement(Real, props),
-      ),
+      );
+    },
   };
 });
 
@@ -1506,6 +1537,9 @@ describe("SpacesList", () => {
     // Edit A's save fails; edit B's lands.
     mockedSaveSettings.mockRejectedValueOnce(new Error("boom"));
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    // Start the roll-counter record before this mount exists, so what it holds is
+    // exactly what THIS mount handed the dialog (see `rollsSeen`).
+    resetRolledBackWritesRecord();
     render(<SpacesList />);
     const dialog = await openAgentsModal();
     // Edit A: the model — and its save is rejected, so the failure arm runs.
@@ -1541,6 +1575,12 @@ describe("SpacesList", () => {
         mockedSaveSettings.mock.calls.length - 1
       ][0];
     expect(savedByB.agentOverrides).toEqual(bDocument.agentOverrides);
+    // The roll counter BEFORE the re-seed is allowed to answer: A's save failed, but
+    // nothing has been rolled back YET — the rollback IS the re-seed's publish, and
+    // that read is still held. So the mount has nothing to have told the dialog, and
+    // the counter it hands down is still the zero it mounted at (B, a SUCCEEDING
+    // link, never touches it either).
+    expect(rollsSeen).toEqual([0]);
     // NOW the held re-seed resolves — after B's publish, which is the race.
     act(() => releaseReseed());
     await act(async () => {
@@ -1554,6 +1594,16 @@ describe("SpacesList", () => {
     // …and stated positively: the released re-seed leaves the store where B left it,
     // i.e. still agreeing with the file B just wrote.
     expect(useSettings.getState().settings).toEqual(bDocument);
+    // THE OTHER HALF OF THE DISCARD: nothing was reported either. `onRolledBack`
+    // moved next to the publish precisely because a discarded re-seed rolled NOTHING
+    // back — the file already holds B's write, and A's field is being carried by B's
+    // composed map, so there is no unexplained difference for the modal to re-arm.
+    // An increment here would be the mount claiming a rollback that never happened,
+    // and the dialog's stamp would drop the `edited` suppression for a write the user
+    // did make: the stored-pin cue then re-appears to blame the last fetch for a
+    // difference this modal caused. Read as the whole record (not the last value), so
+    // a roll that moved and moved back cannot slip past.
+    expect(rollsSeen).toEqual([0]);
   });
 
   it("a failed save re-arms the stored-pin cue the failed edit explained nothing about", async () => {
