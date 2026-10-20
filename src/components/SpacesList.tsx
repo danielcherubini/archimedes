@@ -113,6 +113,15 @@ function spaceNameFor(cwd: string, spaces: { path: string }[]): string {
  * so a link finishing after a newer edit was published would hand the store back
  * the OLDER map; `isStale()` is when to leave the store to the newer answer.
  *
+ * BOTH arms ask `isStale()` at COMMIT — immediately before the `setSettings` that
+ * publishes — and not merely at the top of the arm. That distinction is the whole
+ * point for the failure arm: its publish is a `getSettings` ROUND TRIP, so a
+ * start-time check says nothing about who owns the store when the read answers. A
+ * re-seed that lands after a later edit has published must be thrown away, not
+ * trusted: writing the file's older map into a store the newer edit owns leaves the
+ * store permanently behind the file (no later link republishes over it), and the
+ * next `patch` composes from that mirror and deletes fields the file still holds.
+ *
  * The re-fetch on failure is also what rolls back the optimistic publish: the
  * store ends up holding the FILE's map, not the one that never landed. That
  * rollback is TRANSIENT once a queue exists — a later queued link whose composed
@@ -120,8 +129,9 @@ function spaceNameFor(cwd: string, spaces: { path: string }[]): string {
  * the accepted semantics, not a hole: the map IS the user's last composed intent,
  * and dropping the field from it would be the drop-a-write class of bug.
  *
- * `onRolledBack` reports that the rollback actually RAN (it is skipped for a stale
- * link, whose store mirror a newer publish owns). The modal needs the fact because
+ * `onRolledBack` reports that the rollback actually RAN — at COMMIT, beside the
+ * publish that constitutes it (it is skipped for a stale link, whose store mirror a
+ * newer publish owns). The modal needs the fact because
  * its stored-pin cue suppresses fields the user has edited on the theory that the
  * backend has the newer value — a theory a rolled-back write takes back.
  */
@@ -144,13 +154,40 @@ async function writeAgentOverrides(
     // below it on purpose: a `setSettings` that throws while sitting in this try
     // would be logged as "Failed to save" for a save that LANDED.
     console.error("Failed to save agent overrides:", err);
-    // Roll the optimistic publish back — unless a newer edit has since published,
-    // in which case the store is holding that instead and the file re-read would
-    // erase it. (The chain still runs the link: only the store mirror is skipped.)
-    if (!isStale()) {
-      onRolledBack();
-      void useSettings.getState().loadSettings();
-    }
+    // Roll the optimistic publish back — but decide THAT at COMMIT, not here.
+    // The rollback IS a publish, and its own `getSettings` round trip is the part
+    // that can outlive a start-time check: a newer edit may publish while this read
+    // is in flight. So the read runs unconditionally and `isStale()` is asked again
+    // when the answer arrives. A still-fresh link's re-seed IS the rollback; a
+    // stale link's re-seed is DISCARDED entirely, because newer optimistic state
+    // owns the store now — publishing the file's OLDER map into it would leave the
+    // store permanently behind the file (nothing later republishes over it), and the
+    // next `patch` composes from that stale mirror and DELETES fields the file still
+    // holds: the drop-a-write class this chain exists to prevent.
+    //
+    // `loadSettings()` is not used here because it publishes inside itself — the
+    // same fetch with no commit-time check available to the caller. The store's own
+    // `loadSettings` is unchanged for its other callers.
+    //
+    // DETACHED (`void`ed, never awaited by the link): the chain must keep moving
+    // while a hung `get_settings` is outstanding — a failure arm that awaits would
+    // strand every later write, which is the very poisoning the swallow exists to
+    // prevent. The inner `catch` keeps this detached promise settled for the same
+    // reason (an error handler that can throw is how the poisoning came back).
+    void (async () => {
+      try {
+        const reseeded = await getSettings();
+        if (isStale()) return;
+        // Reported at COMMIT, next to the publish it describes: for a stale link
+        // NOTHING was rolled back — the newer link's own write is what the file
+        // holds — so the modal's suppression must survive.
+        onRolledBack();
+        useSettings.getState().setSettings(reseeded);
+      } catch {
+        // The re-seed itself failed: the store keeps the last optimistic value, and
+        // no second log — the failure above is the save's, and stays the honest one.
+      }
+    })();
     return;
   }
   // The save LANDED, so the catalog the modal's `runs` columns came from is
@@ -324,7 +361,9 @@ export default function SpacesList() {
    * On failure, log and RE-FETCH into the store: a save that did not land means
    * the file and the UI disagree, and the file is right (and the optimistic
    * publish below is rolled back — the store ends up holding the FILE's map, not
-   * the one that was never written). That rollback is TRANSIENT once the queue
+   * the one that was never written, PROVIDED the re-fetch is still the newest
+   * answer when it lands; see the commit-time epoch check in `writeAgentOverrides`).
+   * That rollback is TRANSIENT once the queue
    * below holds a link whose composed map still carries the failed field: when
    * that link completes it re-applies the field. Accepted semantics, not a hole —
    * the map IS the user's last composed intent, and dropping the field out of it
@@ -373,10 +412,16 @@ export default function SpacesList() {
    * published hands the store the {A}-only map — B's pick visibly flickers back to
    * "Inherits", and an edit C composed inside that window builds on {A} and drops
    * B from the file. Hence the PUBLISH EPOCH: `epochRef` counts optimistic
-   * publishes, each link captures the count at its own publish, and a link only
-   * mirrors the store (`setSettings` on success, `loadSettings` on failure) while
-   * nothing newer has published since. The file writes needed no guard — the queue
-   * already orders them — this is only the store catching up with an old answer.
+   * publishes, each link captures the count at its own publish, and a link mirrors
+   * the store only while nothing newer has published since — checked at COMMIT, in
+   * BOTH arms, right before the `setSettings` that publishes (`writeAgentOverrides`
+   * holds the success map in hand, so its check is naturally adjacent to the
+   * publish; the FAILURE arm's publish is a `getSettings` round trip, so it has to
+   * ask again after the read answers — a check taken before that read would let a
+   * late re-seed repaint the store with the file's older map after the last link
+   * had already run, which is the store-behind-the-file state the next `patch` then
+   * composes from). The file writes needed no guard — the queue already orders them
+   * — this is only the store catching up with an old answer.
    *
    * The chain never carries a rejection: `writeAgentOverrides` logs its own error
    * (log + re-seed) AND the link is `.catch`-swallowed here, so a failed link — or

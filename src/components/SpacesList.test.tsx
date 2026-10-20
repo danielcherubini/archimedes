@@ -1050,7 +1050,8 @@ describe("SpacesList", () => {
     // The half of the serialized chain the FILE writes do not cover. Every link
     // writes its map in the right ORDER, but each link also PUBLISHES its own
     // snapshot on completion: success → `setSettings(freshDocument)` with THIS
-    // link's map, failure → `loadSettings()` re-seed. So with edit A in flight and
+    // link's map, failure → a re-fetched FILE document published under a commit-time
+    // staleness check. So with edit A in flight and
     // edit B published optimistically on top of it, link A landing hands the store
     // the {A}-only map — B's pick visibly reverts for a frame, and an edit C
     // composed in that window builds on {A} and silently drops B from the file.
@@ -1432,6 +1433,104 @@ describe("SpacesList", () => {
     // lie — the picker would show a pin nothing saved.)
     await waitFor(() => expect(useSettings.getState().settings).toEqual(fresh));
     expect(useSettings.getState().settings?.agentOverrides.scout).toBeUndefined();
+  });
+
+  it("a failure re-seed that lands after a newer edit was published is discarded at commit", async () => {
+    // The epoch guard's OTHER arm — the one the dispatch-time check did not cover.
+    // Every link re-checks `isStale()` BEFORE it starts its work; the failure arm's
+    // work is a whole `get_settings` round trip, and that round trip was never
+    // re-checked at COMMIT. A re-seed that resolves after every later optimistic
+    // publish therefore lands LAST and writes the FILE's older map into a store the
+    // newer edit owns. Nothing publishes over it afterwards — the queue is drained —
+    // so the store is left PERMANENTLY behind the file, and the next `patch`
+    // composes from it: the wholesale map replace then DELETES from `settings.json`
+    // a field the file still holds. That is the drop-a-write class this chain exists
+    // to prevent, arriving through the rollback instead of through the publish.
+    //
+    // MECHANICS. The re-seed's read is held by the mock, so "still in flight" is a
+    // state this test looks at rather than races:
+    // - read #1 is edit A's in-`try` read (the read-modify-write);
+    // - read #2 is THE RE-SEED's read — issued before the failure arm returns, so it
+    //   is the second read under either spelling (`getSettings()` in the arm, or
+    //   `loadSettings()` fetching internally), which is what makes this repro about
+    //   the commit-time check and not about the mock's shape;
+    // - read #3 is edit B's link read, and it resolves normally so B can complete.
+    // Order of operations: A's save REJECTS → B is issued and its link SUCCEEDS and
+    // publishes → only then is the held re-seed released.
+    const fileDoc: AppSettings = {
+      ...SETTINGS_FIXTURE,
+      // A map the user never picked and never cleared: the FILE's answer, and the
+      // document a clobbered store would be holding.
+      agentOverrides: { plan: { thinking: "high" } },
+    };
+    const bDocument: AppSettings = {
+      ...fileDoc,
+      // B composes on A's OPTIMISTICALLY published map, so the map the user is
+      // looking at — and the one the file ends up holding — carries both fields.
+      agentOverrides: { scout: { model: "tama/Qwen3.8", thinking: "high" } },
+    };
+    let releaseReseed!: () => void;
+    let reads = 0;
+    mockedGetSettings.mockImplementation(() => {
+      reads += 1;
+      if (reads === 2) {
+        return new Promise<AppSettings>((resolve) => {
+          releaseReseed = () => resolve(fileDoc);
+        });
+      }
+      return Promise.resolve(fileDoc);
+    });
+    // Edit A's save fails; edit B's lands.
+    mockedSaveSettings.mockRejectedValueOnce(new Error("boom"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(<SpacesList />);
+    const dialog = await openAgentsModal();
+    // Edit A: the model — and its save is rejected, so the failure arm runs.
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Model for scout" }),
+    );
+    fireEvent.click(await screen.findByText("Qwen3.8"));
+    await waitFor(() =>
+      expect(consoleError).toHaveBeenCalledWith(
+        "Failed to save agent overrides:",
+        expect.anything(),
+      ),
+    );
+    // Edit B: issued while A's re-seed read is provably still held (nothing has
+    // released it yet), so B publishes on top of a store whose rollback is pending.
+    fireEvent.click(
+      within(dialog).getByRole("combobox", { name: "Thinking for scout" }),
+    );
+    fireEvent.click(await screen.findByRole("option", { name: "high" }));
+    // B's link ran to completion: demanded by the COUNT before the last call is read
+    // (the discipline the earlier tests in this file had to learn the hard way).
+    await waitFor(() =>
+      expect(mockedSaveSettings.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
+    await waitFor(() =>
+      expect(useSettings.getState().settings?.agentOverrides.scout).toEqual({
+        model: "tama/Qwen3.8",
+        thinking: "high",
+      }),
+    );
+    const savedByB =
+      mockedSaveSettings.mock.calls[
+        mockedSaveSettings.mock.calls.length - 1
+      ][0];
+    expect(savedByB.agentOverrides).toEqual(bDocument.agentOverrides);
+    // NOW the held re-seed resolves — after B's publish, which is the race.
+    act(() => releaseReseed());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // THE CLOBBER: a re-seed that arrives this late carries the file's map from
+    // BEFORE B, and B is gone from the store mirror. The store mirror is what the
+    // next edit composes from, so this is not a flicker — it is the poisoned
+    // composition, with no later link left to republish over it.
+    expect(useSettings.getState().settings).not.toEqual(fileDoc);
+    // …and stated positively: the released re-seed leaves the store where B left it,
+    // i.e. still agreeing with the file B just wrote.
+    expect(useSettings.getState().settings).toEqual(bDocument);
   });
 
   it("a failed save re-arms the stored-pin cue the failed edit explained nothing about", async () => {
