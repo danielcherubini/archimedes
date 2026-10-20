@@ -181,23 +181,28 @@ if (wasLive) {
   Session stays live and archived, which is exactly what that test asserts
   (`sessions` still contains `s1`). Re-reading liveness after the `set` would close a
   Session the user never clicked Archive on. Leave the capture where it is.
-- **A double-click archives once, and the second close is a silent no-op.** Both invocations
-  see `wasLive === true`, both commit the flag (the existing `set` dedupe keeps
-  `archivedSessions` correct), and the second `close_session` SUCCEEDS having done nothing:
-  its guard is the Rust `live` map, and `live.remove` happens only in the router's
-  expected-exit teardown (`on_session_exited_expected`), which the Worker's `Exited`
-  frame drives: it lands as soon as the Worker exits — the normal case, a Worker that
-  honours `close`, publishes `Exited` in milliseconds / a few ticks — so a real
-  double-click still finds the `live` entry, misses on `detach` (the Worker is already
-  detached), and returns `Ok(())`. That is `close_session`'s documented "idempotent close".
-  So there is NO rejection and NO log line for a double-click; the `.catch` above stays quiet.
-  A rejection appears when the second close arrives after that teardown has run and
-  the `live` entry is gone → `UnknownSession` → logged. (The 2 s in `reap_worker`
-  is the TIMEOUT ceiling for a Worker that ignores `close` and has to be `kill`ed — the
-  worst case — not a fixed delay the teardown waits behind.) Neither outcome is a
-  defect to fix with new de-duplication state. The existing `"archiveSession is idempotent
-  under concurrent invocation"` test seeds a STORED row, so `wasLive` is false there and the
-  test never reaches the close at all — it stays green unchanged.
+- **A double-click archives once, and the second close is harmless either way.** A human's
+  second click lands 100–400 ms after the first — the same order as the teardown window
+  below — so which shape this takes is a race, and every shape is fine. If `session-closed`
+  has already landed, the id sits in `archivedSessions` alone, so the second call finds no
+  `entry` (it reads `historySessions`, then `sessions`) and returns at its guard: no close
+  is sent at all. Otherwise both invocations see `wasLive === true`, both commit the flag
+  (the existing `set` dedupe keeps `archivedSessions` correct), and the second
+  `close_session` lands on ONE OF TWO outcomes, decided by whether the router's
+  expected-exit teardown (`on_session_exited_expected`) has removed the Rust `live` entry
+  yet: NOT yet → it misses on `detach` (the Worker is already detached) and returns
+  `Ok(())` — the "idempotent close" the Rust records, and the `.catch` above stays quiet;
+  ALREADY run → `UnknownSession`, caught and logged by that same `.catch`. That teardown is
+  driven by the Worker's `Exited` frame, so it lands as soon as the Worker exits — the
+  normal case, a Worker that honours `close`, publishes `Exited` in milliseconds / a few
+  ticks, which is exactly why a sub-second double-click can fall on either side of it.
+  (The 2 s in `reap_worker` is the TIMEOUT ceiling for a Worker that ignores `close` and has
+  to be `kill`ed — the worst case — not a fixed delay the teardown waits behind.) The DB
+  flag is Archive's only durable job and the close is best-effort, so neither the quiet
+  `Ok(())` nor a logged `UnknownSession` is a defect, and neither calls for new
+  de-duplication state. The existing `"archiveSession is idempotent under concurrent
+  invocation"` test seeds a STORED row, so `wasLive` is false there and the test never
+  reaches the close at all — it stays green unchanged.
 
 **c) `stopSession` — a new action.** Declare it on `SessionsState` immediately after
 `unarchiveSession` (line 278; `archiveSession`'s declaration sits just above it at 276), with a doc comment that names both effects, the click-time

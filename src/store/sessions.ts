@@ -887,13 +887,14 @@ export const useSessions = create<SessionsState>((set, get) => ({
       // `sessions` — a resume landed mid-await and removed the id from
       // `historySessions`): the DB flag is now `true`, so a live id must
       // land in `archivedSessions` (the sticky semantics) — not no-op. The row
-      // appended for a live id is the LIVE `SessionInfo`, whose `.archived`
-      // reflects whatever that Worker was STARTED with — `false` on a fresh
-      // start, the STORED flag on a resume (the Rust `ResumeCtx` carries it) —
-      // so it is in general NOT a trustworthy copy of what this action just
-      // committed: these lists are read by MEMBERSHIP, which is the source of
-      // truth, and the `.archived` field on a moved row must not be read off
-      // them.
+      // appended is `entry` — a snapshot taken at CLICK time, from whichever
+      // list held the id then (the LIVE `SessionInfo`, or the click-time STORED
+      // copy) — so its `.archived` is only how that row last came to be:
+      // `false` on a fresh start, the STORED flag on a resume (the Rust
+      // `ResumeCtx` carries it), the boot-time read on a stored row. It is in
+      // general NOT a trustworthy copy of what this action just committed:
+      // these lists are read by MEMBERSHIP, which is the source of truth, and
+      // the `.archived` field on a moved row must not be read off them.
       const inHistory = state.historySessions.some(
         (s) => s.sessionId === sessionId,
       );
