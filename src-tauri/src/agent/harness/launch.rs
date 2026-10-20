@@ -41,29 +41,20 @@ pub(crate) struct OverrideLayer<'a> {
 /// each field (ADR 0068 — the Agents modal prints the source beside the value,
 /// so a user can ask "why is scout running that model").
 ///
-/// **The `allow(dead_code)` on the three `*_source` fields is a TASK-2 hand-off
-/// marker, not a permanent allowance.** They have exactly one reader — Task 2's
-/// `list_agent_config` command (ADR 0068's "one resolver, two callers") — plus
-/// this task's own tests, which run under `cfg(test)`. The non-test `lib` target
-/// therefore sees them written but never read, and CI's
-/// `clippy --all-targets -- -D warnings` turns that into a build failure. Task 2
-/// reads them and DELETES the attribute in the same commit that adds its reader;
-/// leaving it in place after that hides a genuinely unread field from the same
-/// gate. It sits on the THREE FIELDS and not on the struct, so `launch` — which
-/// `resolve_launch` reads today — keeps its dead-code protection.
+/// The three `*_source` fields have TWO readers, and that sharing is the point:
+/// `commands::agents::agent_config` (the modal) and `resolve_launch` (the
+/// dispatch) both go through `resolve_agent_launch`, so a layer added to one
+/// and forgotten in the other is the drift this struct exists to prevent.
 pub(crate) struct ResolvedLaunch {
     pub launch: LaunchConfig,
     /// Which layer supplied `model`; `Parent` when none did.
-    #[allow(dead_code)] // ← remove in Task 2 (see the struct doc above)
     pub model_source: OverrideSource,
     /// Which layer supplied `thinking`; `Parent` when none did. A demoted
     /// override level (one the resolved model does not advertise) is NEITHER
     /// written NOR reported, so this never reads `Override` for a level the
     /// child will not use.
-    #[allow(dead_code)] // ← remove in Task 2 (see the struct doc above)
     pub thinking_source: OverrideSource,
     /// Which layer supplied `tools`; `Parent` when none did.
-    #[allow(dead_code)] // ← remove in Task 2 (see the struct doc above)
     pub tools_source: OverrideSource,
 }
 
