@@ -1,0 +1,23 @@
+---
+status: accepted
+date: 2026-10-19
+superseded-by:
+---
+
+# An Agent override never SPEAKS by being empty: `tools: []` contributes nothing and falls through the chain, so no override layer can give a **Subagent session** zero tools — a capability the explicit `subagent` tool param keeps exclusively
+
+An **Agent override** sets `model` / `thinking` / `tools` for an **Agent definition** (ADR 0066's store). The question that had no obvious answer: does an override selecting NO tools mean "no tools" or "inherit"? Today the two layers disagree, and both readings have a live precedent. `launch.tools = Some(vec![])` reaches the child **verbatim as no tools** (`src-tauri/src/agent/worker/manager/subagent_flow.rs:565-587`, whose comment states "empties out yields NO tools — NOT re-expanded"), while a **frontmatter** `tools:` list that filters down to empty is treated as **ABSENT** and inherits (`launch.rs:104-118`: "the child is never zeroed out by a stale file"). We decided: **overrides follow the frontmatter rule.** An override list is applied only if at least one name survives the existing filter (unknown names dropped, `subagent` / `list_agents` stripped); an empty or fully-filtered list is indistinguishable from "this layer does not speak" and falls through. So the chain is `explicit param > override > frontmatter > parent defaults`, each layer supplying each field independently, and **zero tools is reachable only from the explicit `subagent` tool param.**
+
+**Why:** field absence is already the one meaning the resolver has for "this layer has no opinion" (`Option`, `skip_serializing_if = "Option::is_none"`), and keeping `[]` inside that same meaning means the UI's "clear this override" and the resolver's "skip this layer" are literally the same fact — no third state to reconcile in either direction. It also keeps ADR 0020's stale-file guarantee whole: a pinned tool name that stops existing cannot zero out a child by accident, which is the property that rule exists to hold. The cost is accepted knowingly and is stated here because it is the opposite of what a reader would assume: **a user cannot give an agent no tools from the settings surface at all.**
+
+## Considered Options
+
+- **Distinguish explicitly-empty from filtered-empty (rejected).** A stored three-state on `tools` (`inherit` / list / `none`) makes "this agent gets NO tools" expressible while keeping stale protection, and it was the recommendation on the table. Rejected because it adds a state that exists for exactly one field, and because the resulting guarantee is harder to say out loud than the one chosen: "an override can narrow what a child may use, never empty it" is a rule, where the alternative needs the reader to know which empties are intentional.
+- **Overrides verbatim, no filtering (rejected).** Maximum user sovereignty, and it re-opens the recursion route the `subagent` / `list_agents` strip exists to close — a child that can dispatch a child. It also makes a typo'd tool name mean "no such tool" instead of degrading.
+- **Drop the `tools` override from v1 entirely (rejected).** Avoids the question, but leaves the override surface unable to express the most useful thing an override can say ("scout may only read"), which is the reason the modal's row carries a tools control at all.
+
+## Consequences
+
+- **The tools control's empty state must be labelled, not silent.** With nothing ticked the row reads **"Inherits parent tools"**, because writing no key is what unticking everything does. An empty picker that implies "no tools" would be a lie users act on — the same class of honesty bug ADR 0036 exists for.
+- **The `subagent` tool param stays the only verbatim layer,** and stays the only layer whose unknown model is a hard failure rather than a soft degrade. Both are ADR 0020/0023 properties this decision preserves rather than establishes; recorded here because the asymmetry is now three layers deep and easy to collapse by accident.
+- **`subagent` / `list_agents` are stripped at every override layer**, not just the frontmatter's, so no layer grants a child a delegation route.
