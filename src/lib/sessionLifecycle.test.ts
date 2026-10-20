@@ -51,4 +51,18 @@ describe("onSessionClosed", () => {
     handleSessionClosedSpy.mockRestore();
     discardSessionMessagesSpy.mockRestore();
   });
+
+  it("preserves todos in useInteractive when closing a session", () => {
+    const sessionId = "test-session-todos";
+    const initialTodos = [
+      { content: "Task A", status: "pending" as const },
+      { content: "Task B", status: "completed" as const },
+    ];
+    useInteractive.getState().applyTodoUpdate(sessionId, { todos: initialTodos });
+    expect(useInteractive.getState().todos[sessionId]).toEqual(initialTodos);
+
+    onSessionClosed(sessionId, "user");
+
+    expect(useInteractive.getState().todos[sessionId]).toEqual(initialTodos);
+  });
 });

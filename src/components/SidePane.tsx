@@ -69,7 +69,7 @@ function initialWidth(): number {
  *   landed on did not appear in front of them, and the flag is app-global while
  *   `visible` is per-session. The HYDRATION GAP that follows a switch is not an
  *   edge either: `openSession` flips the id before `loadHistory` lands the
- *   transcript, and a stored session's board is seeded from that transcript, so
+ *   history, and a stored session's board is seeded on that history load, so
  *   the re-baseline holds until the session's messages exist (a live session's
  *   are already `[]`) — otherwise the frame popped open a tick after the switch.
  * - **Collapse mechanism: the frame's `SIDE_PANE_RAIL` (a sliver, NOT 0) +
@@ -314,20 +314,17 @@ export default function SidePane() {
   // transcript exists; a live session's array is already `[]` (`addSession`
   // writes it, and `selectSpace`/`setSpaces`/`resumeSession` all go through
   // `openSession`/the history reload), so only un-hydrated sessions extend this.
-  // Not academic: `useInteractive.todos` is never persisted, so a stored
-  // session's parent board exists ONLY through the `rawInput` seed — without
-  // this, landing on a stored session popped the frame one tick later, when its
-  // transcript arrived.
+  // Not academic: `useInteractive.todos` is seeded when the session hydrates,
+  // so landing on a stored session must not pop the frame when its history arrives.
   const hydrated = activeSessionId !== null && activeMessages !== undefined;
   // Whether the pass being COMPARED was hydrated too, not just this one. The
   // transcript and the board it seeds land in the SAME RENDER PASS: the write is
-  // ONE (`loadHistory` sets `messages[sessionId]`), and the board is not a second
-  // write at all but a `useMemo` DERIVATION over that one slice
-  // (`useMainTodoItems`' `rawInput` seed) — so `hydrated` and `visible` flip in
-  // ONE commit: comparing that pass against the pre-hydration baseline reads
-  // as a `false → true` arrival and is the exact pop this re-baseline exists to
-  // prevent. So the gap closes on the pass AFTER the transcript lands — and a
-  // board that appears after that is a genuine edge again.
+  // ONE (`loadHistory` sets `messages[sessionId]` and seeds `todos`), so
+  // `hydrated` and `visible` flip in ONE commit: comparing that pass against
+  // the pre-hydration baseline reads as a `false → true` arrival and is the
+  // exact pop this re-baseline exists to prevent. So the gap closes on the pass
+  // AFTER the transcript lands — and a board that appears after that is a
+  // genuine edge again.
   // NOTE on the guard below: the `!hydrated` term is ONE NO TEST CAN REACH ON
   // ITS OWN. An active session's `messages` are never removed while it stays
   // active (hydration is monotone per session), so an un-hydrated pass always

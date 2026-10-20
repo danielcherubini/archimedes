@@ -95,7 +95,8 @@ interface InteractiveState {
   /**
    * One session's OWN `manage_todo_list` list, keyed by that session's id
    * (main OR Subagent); one Session runs one Agent harness, so exactly one
-   * board (ADR 0041).
+   * board (ADR 0041). Boards are persistent session state seeded on
+   * open/resume; a clear leaves the board empty until the next `todos_update`.
    */
   todos: Record<string, TodoItem[]>;
   /** The agent state machine (`working`/`idle`/`blocked`) — wired, not rendered in v1. */
@@ -119,33 +120,8 @@ interface InteractiveState {
    * `source` is not consulted — a clear names a SESSION, never a label
    * (ADR 0041).
    *
-   * The key is DELETED, never written `[]`, and that choice has TWO halves —
-   * both pinned (`interactive.test.ts` for the key itself, and
-   * `TodoBoardPanel.test.tsx` end-to-end for what renders):
-   *
-   * - A SUBAGENT session — the only real caller today, `App.tsx`'s
-   *   `subagent-closed` handler — has NOTHING to unmask, because that SAME
-   *   handler calls `discardSessionMessages`: the transcript the seed would be
-   *   read from goes with the board, so there is no list left to show. That is
-   *   true but NOT the operative reason: a CHILD's board never consults the seed
-   *   at all (`todoBoardsOf`'s rule 7 — the `rawInput` fallback walks the
-   *   transcript of the session it was called for, which would be the PARENT's),
-   *   so the transcript could not have resurfaced a child's list even if it had
-   *   stayed. Do not chase a leak here.
-   * - A MAIN session gets its `rawInput` seed BACK: `useMainTodoItems` reads
-   *   `board ?? rawTodos ?? []`, so an absent slice re-exposes the
-   *   transcript's `manage_todo_list` `rawInput`, where an empty-array write
-   *   kept it suppressed. Deliberate. The alternative — writing a "cleared"
-   *   marker in place of the board — is per-session state that nothing ever
-   *   removes: `dismissSession` runs on `session-closed`, and no
-   *   `session-closed` is emitted for a Subagent session at all
-   *   (`useChildGates` documents why), so a marker would reinstate exactly the
-   *   leak this branch fixed. And a re-appeared seed is not a lie — it is what
-   *   the transcript actually shows.
-   *
-   * The MAIN half is reachable only from a `todos_clear` frame, and
-   * `src-tauri/src/` emits none: the path is inert today (the Client's
-   * listener and the payload type stay for the day one exists).
+   * The key is DELETED, leaving the session's board empty until the next
+   * `todos_update`.
    */
   applyTodoClear: (sessionId: string) => void;
   /** A `state` push (`{ state }`) — store, don't render in v1. */
@@ -198,10 +174,8 @@ export const useInteractive = create<InteractiveState>((set) => ({
   applyTodoClear: (sessionId) =>
     set((state) => {
       if (!(sessionId in state.todos)) return state;
-      // The key goes, not an empty array — see the interface doc for both
-      // halves: a child's transcript is discarded in the same handler (so
-      // nothing is unmasked), while a main session's `rawInput` seed comes back
-      // on purpose (ADR 0041).
+      // The key goes, leaving the session's board empty until the next
+      // `todos_update`.
       const todos = { ...state.todos };
       delete todos[sessionId];
       return { todos };

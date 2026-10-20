@@ -44,7 +44,7 @@ import { useInteractive } from "../store/interactive";
 import { useSettings } from "../store/settings";
 import { useHasPendingRequest } from "../hooks/useHasPendingRequest";
 import { useActiveSpaceCwd } from "../hooks/useActiveSpaceCwd";
-import { useChildGates, isInlineChildGate } from "../hooks/useChildGates";
+import { useChildGates } from "../hooks/useChildGates";
 import { useSpinQuip } from "../hooks/useSpinQuip";
 import { useMentionCatalogs, useCompletionDir } from "../hooks/useMentionCatalogs";
 import { normalizeVariant } from "../lib/braille-loader";
@@ -265,18 +265,10 @@ export default function ChatStream() {
   // `useSyncExternalStore`, so a hook count that depends on the active session
   // crashing React when one appears. `null` → `[]` (no session, no transcript).
   const childGates = useChildGates(activeSessionId);
-  // The gates of that list that actually draw a row IN THIS TRANSCRIPT (the
-  // same predicate `MessageList` filters its rows with — one definition, so the
-  // count and the render cannot drift). `confirm`/`password` are overlay
-  // `Dialog`s, so they are NOT rows here: the auto-scroll dep below counts THIS,
-  // never `childGates.length`, or a child's sudo prompt would yank the
-  // transcript to the bottom for a row that never appeared.
-  const inlineChildGates = childGates.filter(isInlineChildGate);
 
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [resuming, setResuming] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   // Image attachments staged in the composer (CONTEXT.md: Attachment).
   // ALL of the attachment hooks live HERE, before the `!activeSessionId`
@@ -851,24 +843,11 @@ export default function ChatStream() {
   // kept — it just can't be SENT while `composerEnabled` is false).
   const composerEnabled = isLive || canResume;
 
-  // The session's `SpaceView` moved to `SpaceTabs` (the top tab bar — the old
-  // header row is gone: the session title lives in the side pane now, and the
-  // `Live` conversation selector is replaced by the tabs); the `New Session in
-  // this Space` action went to the sidebar's `Sessions` header, not the tab
-  // bar. Auto-scroll to the bottom as new content streams in.
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [
-    messages,
-    prompts.length,
-    stackedAskRequests.length,
-    // A child's inline gate is at the BOTTOM of this transcript, so an
-    // un-scrolled view would hide the very card the user must answer (the same
-    // reason the two counts above are deps). The INLINE count, not the full gate
-    // list — see `inlineChildGates` above.
-    inlineChildGates.length,
-  ]);
+  const history = useSessions((s) => activeSessionId ? s.history[activeSessionId] : undefined);
+  const loadOlder = useSessions((s) => s.loadOlderHistory);
+  const hasMore = history?.hasMore ?? false;
+  const loadingMore = history?.loadingMore ?? false;
+  const generation = history?.generation ?? 0;
 
   if (!activeSessionId) {
     return (
@@ -1584,7 +1563,6 @@ export default function ChatStream() {
           the (removed) header. `null` when the session is not stalled. */}
       {activeSessionId && <SessionStalledBanner sessionId={activeSessionId} />}
       <MessageList
-        scrollRef={scrollRef}
         units={units}
         messageCount={messages.length}
         activeSessionId={activeSessionId}
@@ -1598,6 +1576,12 @@ export default function ChatStream() {
         agentState={agentState}
         turnDiffs={turnDiffs}
         stopReason={stopReason}
+        hasMore={hasMore}
+        loadingMore={loadingMore}
+        generation={generation}
+        onStartReached={() => {
+          if (activeSessionId) void loadOlder(activeSessionId);
+        }}
       />
 
       {error && (

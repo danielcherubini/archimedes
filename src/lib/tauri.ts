@@ -805,9 +805,22 @@ export async function listSessions(
   return invoke<SessionInfo[]>("list_sessions", { includeArchived });
 }
 
-/** A stored session's transcript, in insertion order. */
-export async function loadHistory(sessionId: string): Promise<MessageRow[]> {
-  return invoke<MessageRow[]>("load_history", { sessionId });
+export interface HistoryPage {
+  rows: MessageRow[];
+  hasMore: boolean;
+  todos?: unknown[] | null;
+}
+
+/** A stored session's transcript page (ADR 0066). */
+export async function loadHistory(
+  sessionId: string,
+  opts?: { limit?: number; beforeId?: number },
+): Promise<HistoryPage> {
+  return invoke<HistoryPage>("load_history", {
+    sessionId,
+    limit: opts?.limit ?? null,
+    beforeId: opts?.beforeId ?? null,
+  });
 }
 
 /** Delete a stored session (its messages cascade). */

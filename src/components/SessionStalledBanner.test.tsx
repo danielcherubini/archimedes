@@ -16,7 +16,7 @@ vi.mock("../lib/tauri", async () => {
       capabilities: {},
       archived: false,
     }),
-    loadHistory: vi.fn().mockResolvedValue([]),
+    loadHistory: vi.fn().mockResolvedValue({ rows: [], hasMore: false, todos: null }),
     // The External-open seam (ADR 0051) behind the crash-log line. Mocked
     // rather than left as the real spread export because the real wrapper
     // never rejects (it swallows a refusal into `console.warn`), so the click

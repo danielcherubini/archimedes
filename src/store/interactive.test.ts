@@ -175,13 +175,10 @@ describe("todos", () => {
   /**
    * The key DELETED, not an empty array written. `toBeUndefined()` above
    * cannot tell the two apart (`({} as …)["s1"]` is `undefined` too), and the
-   * difference is the documented consequence: `useMainTodoItems` reads
-   * `board ?? rawTodos ?? []`, so ONLY an absent slice re-exposes the
-   * transcript-derived `rawInput` seed — an empty array is a board, and a
-   * board that renders nothing. `src/components/TodoBoardPanel.test.tsx`
-   * pins the render half of that claim.
+   * difference is the documented consequence: `applyTodoClear` leaves the
+   * session's board empty until the next `todos_update`.
    */
-  it("applyTodoClear DELETES the key rather than writing `[]` (so the `rawInput` seed is unmasked)", () => {
+  it("applyTodoClear DELETES the key rather than writing `[]`", () => {
     useInteractive.getState().applyTodoUpdate(S1, {
       source: "native",
       todos: [{ content: "a", status: "pending" }],

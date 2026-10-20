@@ -59,7 +59,7 @@ vi.mock("../lib/tauri", async () => {
     }),
     respondPermission: vi.fn(),
     respondInteractiveRequest: vi.fn(),
-    loadHistory: vi.fn().mockResolvedValue([]),
+    loadHistory: vi.fn().mockResolvedValue({ rows: [], hasMore: false, todos: null }),
     setSpaceTrusted: vi.fn().mockResolvedValue(undefined),
     deleteSpace: vi.fn().mockResolvedValue(undefined),
     listSkills: vi.fn().mockResolvedValue([

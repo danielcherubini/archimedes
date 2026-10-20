@@ -58,7 +58,7 @@ pub struct SessionRow {
 }
 
 /// A row from the `messages` table.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageRow {
     pub id: i64,
@@ -225,6 +225,22 @@ impl Db {
                 [],
             )?;
         }
+        // One-time migration for pre-existing databases: add `todos_json`
+        // to `sessions` (fresh databases already have it from SCHEMA) and
+        // backfill each non-subagent session's newest `manage_todo_list` write
+        // (ADR 0066). The ALTER and the backfill run in ONE transaction, so a
+        // crash rolls both back and retries on next open.
+        let has_todos_json: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'todos_json'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_todos_json == 0 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute("ALTER TABLE sessions ADD COLUMN todos_json TEXT", [])?;
+            backfill_session_todos(&tx)?;
+            tx.commit()?;
+        }
         // One-time migration for pre-existing databases: give
         // `native_messages` its `ON DELETE CASCADE` foreign key (a
         // pre-existing table cannot GAIN an FK in place — recreate it,
@@ -357,6 +373,29 @@ impl Db {
             params![id.to_string(), payload],
         )?;
         Ok(())
+    }
+
+    /// Update a session's persisted todos JSON (ADR 0066).
+    ///
+    /// A missing session row is a no-op; returns `Ok(())`.
+    pub fn record_session_todos(&self, id: &str, todos_json: Option<&str>) -> Result<(), DbError> {
+        self.conn.lock().expect("db mutex poisoned").execute(
+            "UPDATE sessions SET todos_json = ?2 WHERE id = ?1",
+            params![id, todos_json],
+        )?;
+        Ok(())
+    }
+
+    /// Read a session's persisted todos JSON (`None` when missing or NULL).
+    pub fn session_todos(&self, id: &str) -> Result<Option<String>, DbError> {
+        let guard = self.conn.lock().expect("db mutex poisoned");
+        let mut stmt = guard.prepare("SELECT todos_json FROM sessions WHERE id = ?1")?;
+        let found = match stmt.query_row(params![id], |row| row.get::<_, Option<String>>(0)) {
+            Ok(val) => val,
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(e.into()),
+        };
+        Ok(found)
     }
 
     /// Insert or update a message.
@@ -526,6 +565,69 @@ impl Db {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// A page of a session's messages, newest-first by id up to `limit`
+    /// rows, returned in ascending transcript order, with `has_more`
+    /// indicating whether older messages exist (ADR 0066).
+    ///
+    /// When `limit` is `None`, all messages (prior to `before_id`, if specified)
+    /// are returned in insertion order and `has_more` is `false`.
+    pub fn messages_page(
+        &self,
+        session_id: &str,
+        before_id: Option<i64>,
+        limit: Option<u32>,
+    ) -> Result<(Vec<MessageRow>, bool), DbError> {
+        let guard = self.conn.lock().expect("db mutex poisoned");
+        if let Some(n) = limit {
+            let limit_probe = (n as i64) + 1;
+            let mut stmt = guard.prepare(
+                "SELECT id, session_id, kind, message_key, payload_json, created_at
+                 FROM messages
+                 WHERE session_id = ?1 AND id < COALESCE(?2, 9223372036854775807)
+                 ORDER BY id DESC
+                 LIMIT ?3",
+            )?;
+            let mut rows = stmt
+                .query_map(params![session_id, before_id, limit_probe], |row| {
+                    Ok(MessageRow {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        kind: row.get(2)?,
+                        message_key: row.get(3)?,
+                        payload_json: row.get(4)?,
+                        created_at: row.get(5)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            let has_more = rows.len() > n as usize;
+            if has_more {
+                rows.truncate(n as usize);
+            }
+            rows.reverse();
+            Ok((rows, has_more))
+        } else {
+            let mut stmt = guard.prepare(
+                "SELECT id, session_id, kind, message_key, payload_json, created_at
+                 FROM messages
+                 WHERE session_id = ?1 AND id < COALESCE(?2, 9223372036854775807)
+                 ORDER BY id",
+            )?;
+            let rows = stmt
+                .query_map(params![session_id, before_id], |row| {
+                    Ok(MessageRow {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        kind: row.get(2)?,
+                        message_key: row.get(3)?,
+                        payload_json: row.get(4)?,
+                        created_at: row.get(5)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((rows, false))
+        }
     }
 
     /// Insert or refresh one native transcript message (the native
@@ -745,6 +847,102 @@ fn space_key(path: impl AsRef<std::path::Path>) -> Option<String> {
         .map(|c| c.display().to_string())
 }
 
+/// One-time backfill of `sessions.todos_json` from the newest non-read
+/// `manage_todo_list` write in `messages` (ADR 0066).
+fn backfill_session_todos(conn: &Connection) -> Result<(), DbError> {
+    let mut session_stmt = conn.prepare("SELECT id FROM sessions WHERE is_subagent = 0")?;
+    let session_ids = session_stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(session_stmt);
+
+    for session_id in session_ids {
+        let matching_todos = {
+            let mut msg_stmt = conn.prepare(
+                "SELECT payload_json FROM messages \
+                 WHERE session_id = ?1 AND kind = 'tool-call' AND payload_json LIKE '%manage_todo_list%' \
+                 ORDER BY id DESC",
+            )?;
+            let rows = msg_stmt.query_map(params![session_id], |row| row.get::<_, String>(0))?;
+            let mut matched = None;
+
+            for payload_res in rows {
+                let payload_str = payload_res?;
+                let Ok(val) = serde_json::from_str::<serde_json::Value>(&payload_str) else {
+                    continue;
+                };
+                if val.get("title").and_then(serde_json::Value::as_str) != Some("manage_todo_list")
+                {
+                    continue;
+                }
+                let Some(raw_input) = val.get("rawInput") else {
+                    continue;
+                };
+                if raw_input
+                    .get("operation")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("read")
+                {
+                    continue;
+                }
+                let Some(todo_list) = raw_input
+                    .get("todoList")
+                    .and_then(serde_json::Value::as_array)
+                else {
+                    continue;
+                };
+
+                let mut filtered = Vec::new();
+                for item in todo_list {
+                    let Some(content) = item.get("content").and_then(serde_json::Value::as_str)
+                    else {
+                        continue;
+                    };
+                    let Some(status) = item.get("status").and_then(serde_json::Value::as_str)
+                    else {
+                        continue;
+                    };
+                    // Drop items with empty content or status (slightly stricter than the old frontend filter).
+                    if content.is_empty() || status.is_empty() {
+                        continue;
+                    }
+                    let mut clean_item = serde_json::Map::new();
+                    clean_item.insert(
+                        "content".into(),
+                        serde_json::Value::String(content.to_string()),
+                    );
+                    clean_item.insert(
+                        "status".into(),
+                        serde_json::Value::String(status.to_string()),
+                    );
+                    if let Some(desc) = item.get("description").and_then(serde_json::Value::as_str)
+                    {
+                        clean_item.insert(
+                            "description".into(),
+                            serde_json::Value::String(desc.to_string()),
+                        );
+                    }
+                    filtered.push(serde_json::Value::Object(clean_item));
+                }
+
+                if !filtered.is_empty() {
+                    matched = Some(serde_json::to_string(&filtered)?);
+                    break;
+                }
+            }
+            matched
+        };
+
+        if let Some(serialized) = matching_todos {
+            conn.execute(
+                "UPDATE sessions SET todos_json = ?2 WHERE id = ?1",
+                params![session_id, serialized],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
@@ -754,7 +952,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     capabilities_json TEXT NOT NULL,
     archived INTEGER NOT NULL DEFAULT 0,
     context_usage_json TEXT,
-    is_subagent INTEGER NOT NULL DEFAULT 0
+    is_subagent INTEGER NOT NULL DEFAULT 0,
+    todos_json TEXT
 );
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY,
@@ -1765,6 +1964,274 @@ mod tests {
             usage["used"], 53_760,
             "a re-record never clobbers the context usage"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `messages_page` pages newest-first by id, returns ascending order,
+    /// and reports `has_more` correctly across boundaries and exact fits.
+    #[test]
+    fn messages_page_paginates_and_reports_has_more() {
+        let dir = std::env::temp_dir().join(format!("db-page-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let db = Db::open(&path).expect("db should open");
+        let mk = |id: &str| SessionInfo {
+            session_id: id.to_string(),
+            cwd: std::path::PathBuf::from("/tmp/proj"),
+            capabilities: serde_json::json!({
+                "piSessionId": id,
+                "loadSession": true,
+            }),
+            config_options: None,
+            archived: false,
+            title: None,
+            context_usage: None,
+            is_subagent: false,
+        };
+        db.record_session(&mk("sess-1"))
+            .expect("record_session should succeed");
+        db.record_session(&mk("sess-2"))
+            .expect("record_session should succeed");
+
+        for i in 0..7 {
+            db.record_message("sess-1", "agent-text", Some(&format!("k{i}")), "{}")
+                .expect("record_message should succeed");
+        }
+        for i in 0..2 {
+            db.record_message("sess-2", "agent-text", Some(&format!("k2_{i}")), "{}")
+                .expect("record_message should succeed");
+        }
+
+        // messages_page(s, None, Some(3)) returns the LAST 3 in ascending order with has_more == true
+        let (p1, has_more) = db
+            .messages_page("sess-1", None, Some(3))
+            .expect("messages_page should succeed");
+        assert_eq!(p1.len(), 3);
+        assert!(has_more);
+        assert_eq!(p1[0].message_key.as_deref(), Some("k4"));
+        assert_eq!(p1[1].message_key.as_deref(), Some("k5"));
+        assert_eq!(p1[2].message_key.as_deref(), Some("k6"));
+        assert!(p1.iter().all(|r| r.session_id == "sess-1"));
+
+        // messages_page(s, Some(<oldest returned id>), Some(3)) returns the previous 3 ascending, has_more == true
+        let oldest_id = p1[0].id;
+        let (p2, has_more) = db
+            .messages_page("sess-1", Some(oldest_id), Some(3))
+            .expect("messages_page should succeed");
+        assert_eq!(p2.len(), 3);
+        assert!(has_more);
+        assert_eq!(p2[0].message_key.as_deref(), Some("k1"));
+        assert_eq!(p2[1].message_key.as_deref(), Some("k2"));
+        assert_eq!(p2[2].message_key.as_deref(), Some("k3"));
+        assert!(p2.iter().all(|r| r.session_id == "sess-1"));
+
+        // the next page returns 1 row with has_more == false
+        let oldest_id_p2 = p2[0].id;
+        let (p3, has_more) = db
+            .messages_page("sess-1", Some(oldest_id_p2), Some(3))
+            .expect("messages_page should succeed");
+        assert_eq!(p3.len(), 1);
+        assert!(!has_more);
+        assert_eq!(p3[0].message_key.as_deref(), Some("k0"));
+        assert!(p3.iter().all(|r| r.session_id == "sess-1"));
+
+        // messages_page(s, None, Some(7)) returns 7 with has_more == false (exact fit)
+        let (p_all, has_more) = db
+            .messages_page("sess-1", None, Some(7))
+            .expect("messages_page should succeed");
+        assert_eq!(p_all.len(), 7);
+        assert!(!has_more);
+        assert_eq!(p_all[0].message_key.as_deref(), Some("k0"));
+        assert_eq!(p_all[6].message_key.as_deref(), Some("k6"));
+        assert!(p_all.iter().all(|r| r.session_id == "sess-1"));
+
+        // messages_page(s, None, None) equals messages_for(s) with has_more == false
+        let (p_none, has_more) = db
+            .messages_page("sess-1", None, None)
+            .expect("messages_page should succeed");
+        let for_all = db
+            .messages_for("sess-1")
+            .expect("messages_for should succeed");
+        assert_eq!(p_none, for_all);
+        assert!(!has_more);
+
+        // the other session's rows never appear
+        assert!(p_all.iter().all(|r| r.session_id == "sess-1"));
+        let (p_sess2, has_more2) = db
+            .messages_page("sess-2", None, None)
+            .expect("messages_page should succeed");
+        assert_eq!(p_sess2.len(), 2);
+        assert!(!has_more2);
+        assert!(p_sess2.iter().all(|r| r.session_id == "sess-2"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn record_session_todos_roundtrips_and_clears() {
+        let dir = std::env::temp_dir().join(format!("db-todos-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let db = Db::open(&path).expect("db should open");
+        let info = SessionInfo {
+            session_id: "s1".to_string(),
+            cwd: std::path::PathBuf::from("/tmp/proj"),
+            capabilities: serde_json::json!({}),
+            config_options: None,
+            archived: false,
+            title: None,
+            context_usage: None,
+            is_subagent: false,
+        };
+        db.record_session(&info).unwrap();
+
+        // Initially None
+        assert_eq!(db.session_todos("s1").unwrap(), None);
+
+        // Roundtrips Some
+        let todos = r#"[{"content":"task1","status":"pending"}]"#;
+        db.record_session_todos("s1", Some(todos)).unwrap();
+        assert_eq!(db.session_todos("s1").unwrap(), Some(todos.to_string()));
+
+        // None clears to None
+        db.record_session_todos("s1", None).unwrap();
+        assert_eq!(db.session_todos("s1").unwrap(), None);
+
+        // Missing session id is a no-op returning Ok(()) and session_todos returns None
+        db.record_session_todos("nonexistent", Some(todos)).unwrap();
+        assert_eq!(db.session_todos("nonexistent").unwrap(), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_db_migration_backfills_newest_non_read_todos_once() {
+        let dir = std::env::temp_dir().join(format!("db-todos-backfill-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+
+        // Pre-migration DB: WITHOUT todos_json
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                cwd TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                title TEXT,
+                capabilities_json TEXT NOT NULL,
+                archived INTEGER NOT NULL DEFAULT 0,
+                context_usage_json TEXT,
+                is_subagent INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                message_key TEXT,
+                payload_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE(session_id, kind, message_key)
+            );
+            CREATE TABLE native_messages (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                seq INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE(session_id, seq)
+            );
+            CREATE TABLE spaces (
+                path TEXT PRIMARY KEY,
+                created_at INTEGER NOT NULL,
+                last_opened_at INTEGER NOT NULL,
+                trusted INTEGER NOT NULL DEFAULT 0
+            );",
+        )
+        .unwrap();
+
+        // Main session s1, subagent session s_child, empty session s_empty
+        conn.execute(
+            "INSERT INTO sessions (id, cwd, created_at, capabilities_json, is_subagent) VALUES ('s1', '/tmp', 1, '{}', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, cwd, created_at, capabilities_json, is_subagent) VALUES ('s_child', '/tmp', 1, '{}', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, cwd, created_at, capabilities_json, is_subagent) VALUES ('s_empty', '/tmp', 1, '{}', 0)",
+            [],
+        )
+        .unwrap();
+
+        // For s1:
+        // (1) oldest write with task1
+        conn.execute(
+            "INSERT INTO messages (id, session_id, kind, message_key, payload_json, created_at) VALUES (1, 's1', 'tool-call', 'tc1', '{\"title\":\"manage_todo_list\",\"rawInput\":{\"operation\":\"write\",\"todoList\":[{\"content\":\"task1\",\"status\":\"pending\"}]}}', 1)",
+            [],
+        )
+        .unwrap();
+        // (2) newer with operation: 'read'
+        conn.execute(
+            "INSERT INTO messages (id, session_id, kind, message_key, payload_json, created_at) VALUES (2, 's1', 'tool-call', 'tc2', '{\"title\":\"manage_todo_list\",\"rawInput\":{\"operation\":\"read\",\"todoList\":[]}}', 2)",
+            [],
+        )
+        .unwrap();
+        // (3) newest write with task2
+        conn.execute(
+            "INSERT INTO messages (id, session_id, kind, message_key, payload_json, created_at) VALUES (3, 's1', 'tool-call', 'tc3', '{\"title\":\"manage_todo_list\",\"rawInput\":{\"operation\":\"write\",\"todoList\":[{\"content\":\"task2\",\"status\":\"in_progress\",\"description\":\"d2\"}]}}', 3)",
+            [],
+        )
+        .unwrap();
+        // (4) malformed payload_json row
+        conn.execute(
+            "INSERT INTO messages (id, session_id, kind, message_key, payload_json, created_at) VALUES (4, 's1', 'tool-call', 'tc4', 'not valid json at all { manage_todo_list', 4)",
+            [],
+        )
+        .unwrap();
+
+        // For s_child: write row
+        conn.execute(
+            "INSERT INTO messages (id, session_id, kind, message_key, payload_json, created_at) VALUES (5, 's_child', 'tool-call', 'tc_c', '{\"title\":\"manage_todo_list\",\"rawInput\":{\"operation\":\"write\",\"todoList\":[{\"content\":\"child_task\",\"status\":\"pending\"}]}}', 5)",
+            [],
+        )
+        .unwrap();
+
+        drop(conn);
+
+        // Open via Db::open: Db::open succeeds despite the malformed row
+        let db = Db::open(&path).expect("Db::open should succeed");
+
+        // s1 holds task2 (the newest non-read write)
+        let s1_todos = db
+            .session_todos("s1")
+            .expect("session_todos should succeed");
+        assert!(s1_todos.is_some(), "s1 should have backfilled todos");
+        let val: serde_json::Value = serde_json::from_str(&s1_todos.unwrap()).unwrap();
+        assert_eq!(
+            val,
+            serde_json::json!([{"content":"task2","status":"in_progress","description":"d2"}])
+        );
+
+        // s_child's session_todos is None (subagents never backfilled)
+        assert_eq!(db.session_todos("s_child").unwrap(), None);
+
+        // s_empty ends with todos_json == None
+        assert_eq!(db.session_todos("s_empty").unwrap(), None);
+
+        // Mutate s1's todos_json with a sentinel
+        db.record_session_todos("s1", Some("sentinel")).unwrap();
+        drop(db);
+
+        // Re-open Db::open(&path): assert the sentinel survived (proves backfill does NOT re-run)
+        let db2 = Db::open(&path).expect("re-open should succeed");
+        assert_eq!(
+            db2.session_todos("s1").unwrap(),
+            Some("sentinel".to_string())
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { render } from "@testing-library/react";
-import { createElement, type RefObject } from "react";
+import { createElement } from "react";
 import MessageList from "./MessageList";
 import type { RenderUnit } from "../../lib/toolGroups";
 import type { Message } from "../../store/sessions";
@@ -49,7 +49,6 @@ function renderMessageList(
 ): HTMLElement {
   const { container } = render(
     createElement(MessageList, {
-      scrollRef: { current: null } as RefObject<HTMLDivElement | null>,
       units,
       messageCount: units.length,
       activeSessionId: "s1",
@@ -68,6 +67,10 @@ function renderMessageList(
       agentState: "idle",
       turnDiffs: [],
       stopReason: undefined,
+      hasMore: false,
+      loadingMore: false,
+      generation: 0,
+      onStartReached: () => {},
     }),
   );
   const scroll = container.querySelector('[data-testid="transcript-scroll"]');
@@ -76,7 +79,8 @@ function renderMessageList(
 }
 
 function rows(units: RenderUnit[]): HTMLElement[] {
-  return [...renderMessageList(units).children] as HTMLElement[];
+  const scroll = renderMessageList(units);
+  return [...scroll.querySelectorAll('[data-testid="message-row"]')] as HTMLElement[];
 }
 
 /**
@@ -105,7 +109,10 @@ function rowsWithGate(units: RenderUnit[] = [single(text("a"))]): HTMLElement[] 
     params: {},
     childStartedAt: 1,
   };
-  return [...renderMessageList(units, [gate]).children] as HTMLElement[];
+  const scroll = renderMessageList(units, [gate]);
+  const messageRows = [...scroll.querySelectorAll('[data-testid="message-row"]')] as HTMLElement[];
+  const gateRows = [...scroll.querySelectorAll('[data-testid="gate-row"]')] as HTMLElement[];
+  return [...messageRows, ...gateRows];
 }
 
 afterEach(() => {
@@ -113,14 +120,12 @@ afterEach(() => {
 });
 
 const extra = (el: HTMLElement) =>
-  el.className.split(/\s+/).filter((c) => /^(mt|my)-/.test(c));
+  el.className.split(/\s+/).filter((c) => /^pt-/.test(c));
 
 describe("the transcript's vertical rhythm", () => {
-  it("the container owns the base gap (a true `gap`, not `space-y` on a block box)", () => {
+  it("the scroll container is constrained to prevent horizontal blowout", () => {
     const scroll = renderMessageList([single(text("a"))]);
     const tokens = scroll.className.split(/\s+/);
-    expect(tokens).toContain("gap-3");
-    expect(tokens).not.toContain("space-y-3");
     expect(tokens).toContain("overflow-x-hidden");
     expect(tokens).toContain("min-w-0");
     expect(tokens).toContain("max-w-full");
@@ -129,12 +134,12 @@ describe("the transcript's vertical rhythm", () => {
   it("prose → tool: the tool row gets the breathing gap", () => {
     const [prose, toolRow] = rows([single(text("a")), single(tool("t1"))]);
     expect(extra(prose!)).toEqual([]);
-    expect(extra(toolRow!)).toEqual(["mt-4"]);
+    expect(extra(toolRow!)).toEqual(["pt-7"]);
   });
 
   it("tool → prose: the breathing gap is symmetric (it is the PAIR that is airy, not the tool row)", () => {
     const [, prose] = rows([single(tool("t1")), single(text("a"))]);
-    expect(extra(prose!)).toEqual(["mt-4"]);
+    expect(extra(prose!)).toEqual(["pt-7"]);
   });
 
   it("thinking → chat keeps the tight base gap (unchanged)", () => {
@@ -143,7 +148,7 @@ describe("the transcript's vertical rhythm", () => {
       single(text("a")),
     ]);
     expect(extra(thoughtRow!)).toEqual([]);
-    expect(extra(prose!)).toEqual([]);
+    expect(extra(prose!)).toEqual(["pt-3"]);
     // The wrapper carries NO margin on purpose — the breathing `mt-4` is a
     // property of a pair that touches a TOOL row, and a `Thought` is not one.
     // The tight 4px between the `Thought` and its reply therefore lives INSIDE
@@ -160,12 +165,12 @@ describe("the transcript's vertical rhythm", () => {
 
   it("chat → thinking also stays tight", () => {
     const [, thoughtRow] = rows([single(text("a")), single(thought("th"))]);
-    expect(extra(thoughtRow!)).toEqual([]);
+    expect(extra(thoughtRow!)).toEqual(["pt-3"]);
   });
 
   it("tool → tool keeps ONE breathing gap (a run of tool calls is a steady 28px, not alternating)", () => {
     const [, second] = rows([single(tool("t1")), single(tool("t2"))]);
-    expect(extra(second!)).toEqual(["mt-4"]);
+    expect(extra(second!)).toEqual(["pt-7"]);
   });
 
   it("a folded `Changes` group counts as a tool row", () => {
@@ -174,7 +179,7 @@ describe("the transcript's vertical rhythm", () => {
       messages: [tool("t1", "edit"), tool("t2", "write")] as never,
     };
     const [, prose] = rows([group, single(text("a"))]);
-    expect(extra(prose!)).toEqual(["mt-4"]);
+    expect(extra(prose!)).toEqual(["pt-7"]);
   });
 
   it("the FIRST row gets no breathing gap (the container's own padding is its air)", () => {
@@ -185,7 +190,7 @@ describe("the transcript's vertical rhythm", () => {
   it("every row is wrapped in a flex column so the row keeps its exact height (a block wrapper re-adds the line box's descender space)", () => {
     const [row] = rows([single(thought("th"))]);
     expect(row!.className.split(/\s+/)).toEqual(
-      expect.arrayContaining(["flex", "flex-col", "min-w-0", "max-w-full"]),
+      expect.arrayContaining(["flex", "flex-col", "min-w-0", "max-w-full", "px-4"]),
     );
   });
 

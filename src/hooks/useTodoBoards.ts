@@ -85,15 +85,9 @@ Object.freeze(NO_BOARDS);
  *    keeps a lone visible `researcher` bare when its sibling belongs to another
  *    Session or already finished — a suffix that indexes a block the user cannot
  *    see would be noise dressed as precision.
- * 7. A CHILD's board NEVER gets the `rawInput` seed. `useMainTodoItems` falls
- *    back to the latest `manage_todo_list` `rawInput` when the interactive
- *    channel delivered no board, and that fallback walks the transcript of the
- *    session it was called for — the PARENT's. A child's transcript is a
- *    different session's messages (`SubagentTranscript`), so joining
- *    `useSessions.messages[parent]` onto a child board would show the parent's
- *    draft items under a child's heading. A child with no `todos_update` board
- *    therefore has no board here, full stop. This asymmetry with the parent's
- *    list is deliberate, not a missing fallback.
+ * 7. A child with no `todos_update` board has no board here, full stop.
+ *    Boards come from session state (`useInteractive.todos[entry.sessionId]`),
+ *    never from transcript scans.
  */
 export function todoBoardsOf(
   entries: Record<string, SubagentEntry>,

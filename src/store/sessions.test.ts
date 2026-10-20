@@ -4,17 +4,20 @@ import {
   autoSelectActive,
   discardSessionMessages,
   finalizeSessionMessages,
+  INITIAL_HISTORY_PAGE,
   liveSessionsInSpace,
   mostRecentLiveInSpace,
+  OLDER_HISTORY_PAGE,
   rowToMessages,
   spaceViewFor,
   useSessions,
   type AcpSessionUpdate,
   type Message,
 } from "./sessions";
+import { useInteractive } from "./interactive";
 import { useSubagents } from "./subagents";
 import { expandMentions } from "../lib/skills";
-import type { AgentDefinitionDto, McpServerInfo } from "../lib/tauri";
+import type { AgentDefinitionDto, HistoryPage, McpServerInfo } from "../lib/tauri";
 import {
   loadHistory,
   setSessionArchived,
@@ -45,7 +48,7 @@ vi.mock("../lib/tauri", async () => {
       archived: false,
       configOptions: [{ id: "model", name: "Model", type: "select", currentValue: "gpt-4" }],
     }),
-    loadHistory: vi.fn().mockResolvedValue([]),
+    loadHistory: vi.fn().mockResolvedValue({ rows: [], hasMore: false, todos: null }),
     // The store's `archiveSession` / `unarchiveSession` / `deleteSession` call
     // these: mock them (the REAL wrappers would `invoke` and reject in
     // jsdom — no global Tauri mock exists).
@@ -311,7 +314,7 @@ describe("applySessionUpdate — tool calls", () => {
     expect(messages[0]).toMatchObject({ title: "edit (done)" });
   });
 
-  it("keeps rawInput on the tool-call message (the todo board's rawInput fallback reads it)", () => {
+  it("keeps rawInput on the tool-call message", () => {
     const messages = applySessionUpdate(
       [],
       {
@@ -1757,6 +1760,7 @@ describe("resumeSession (history reload race)", () => {
       historySessions: [],
       activeSessionId: null,
       messages: {},
+      history: {},
       configOptions: {},
     });
   });
@@ -1784,7 +1788,10 @@ describe("resumeSession (history reload race)", () => {
     // merge exists for.
     let resolveRows: (rows: MessageRow[]) => void = () => {};
     vi.mocked(loadHistory).mockImplementationOnce(
-      () => new Promise<MessageRow[]>((r) => (resolveRows = r)),
+      () =>
+        new Promise<HistoryPage>((r) => {
+          resolveRows = (rows) => r({ rows, hasMore: false, todos: null });
+        }),
     );
     // `resumeSession` resolves once the resume IPC settles — the reload is
     // fire-and-forget (NOT awaited), so it is still in flight.
@@ -1841,7 +1848,10 @@ describe("resumeSession (history reload race)", () => {
     // still in flight when `send()` adds the user message.
     let resolveRows: (rows: MessageRow[]) => void = () => {};
     vi.mocked(loadHistory).mockImplementationOnce(
-      () => new Promise<MessageRow[]>((r) => (resolveRows = r)),
+      () =>
+        new Promise<HistoryPage>((r) => {
+          resolveRows = (rows) => r({ rows, hasMore: false, todos: null });
+        }),
     );
     await useSessions.getState().resumeSession("s1");
     // `send()` adds the user message while the reload is in flight, then
@@ -1910,7 +1920,10 @@ describe("resumeSession (history reload race)", () => {
     // still in flight when the user re-sends the SAME prompt.
     let resolveRows: (rows: MessageRow[]) => void = () => {};
     vi.mocked(loadHistory).mockImplementationOnce(
-      () => new Promise<MessageRow[]>((r) => (resolveRows = r)),
+      () =>
+        new Promise<HistoryPage>((r) => {
+          resolveRows = (rows) => r({ rows, hasMore: false, todos: null });
+        }),
     );
     await useSessions.getState().resumeSession("s1");
     // The user re-sent the identical prompt while the reload is in flight:
@@ -1989,7 +2002,10 @@ describe("resumeSession (history reload race)", () => {
       });
       let resolveRows: (rows: MessageRow[]) => void = () => {};
       vi.mocked(loadHistory).mockImplementationOnce(
-        () => new Promise<MessageRow[]>((r) => (resolveRows = r)),
+        () =>
+          new Promise<HistoryPage>((r) => {
+            resolveRows = (rows) => r({ rows, hasMore: false, todos: null });
+          }),
       );
       await useSessions.getState().resumeSession("s1");
       // The live row the send appended (the EXPANDED text — `send()` calls
@@ -2068,7 +2084,10 @@ describe("resumeSession (history reload race)", () => {
       });
       let resolveRows: (rows: MessageRow[]) => void = () => {};
       vi.mocked(loadHistory).mockImplementationOnce(
-        () => new Promise<MessageRow[]>((r) => (resolveRows = r)),
+        () =>
+          new Promise<HistoryPage>((r) => {
+            resolveRows = (rows) => r({ rows, hasMore: false, todos: null });
+          }),
       );
       await useSessions.getState().resumeSession("s1");
       useSessions.getState().addUserMessage("s1", expanded);
@@ -2118,7 +2137,10 @@ describe("resumeSession (history reload race)", () => {
     // still in flight while the Retraction AND the new prompt land.
     let resolveRows: (rows: MessageRow[]) => void = () => {};
     vi.mocked(loadHistory).mockImplementationOnce(
-      () => new Promise<MessageRow[]>((r) => (resolveRows = r)),
+      () =>
+        new Promise<HistoryPage>((r) => {
+          resolveRows = (rows) => r({ rows, hasMore: false, todos: null });
+        }),
     );
     await useSessions.getState().resumeSession("s1");
     // The abandoned attempt is retracted (ADR 0048): the transcript SHRINKS
@@ -2173,7 +2195,10 @@ describe("resumeSession (history reload race)", () => {
     });
     let resolveRows: (rows: MessageRow[]) => void = () => {};
     vi.mocked(loadHistory).mockImplementationOnce(
-      () => new Promise<MessageRow[]>((r) => (resolveRows = r)),
+      () =>
+        new Promise<HistoryPage>((r) => {
+          resolveRows = (rows) => r({ rows, hasMore: false, todos: null });
+        }),
     );
     await useSessions.getState().resumeSession("s1");
     // A SECOND `again` with the SAME content AND the same `at` — pushed
@@ -2256,7 +2281,10 @@ describe("resumeSession (history reload race)", () => {
     });
     let resolveRows: (rows: MessageRow[]) => void = () => {};
     vi.mocked(loadHistory).mockImplementationOnce(
-      () => new Promise<MessageRow[]>((r) => (resolveRows = r)),
+      () =>
+        new Promise<HistoryPage>((r) => {
+          resolveRows = (rows) => r({ rows, hasMore: false, todos: null });
+        }),
     );
     await useSessions.getState().resumeSession("s1");
     const snapshot = useSessions.getState().messages.s1;
@@ -2352,7 +2380,10 @@ describe("resumeSession (history reload race)", () => {
     });
     let resolveRows: (rows: MessageRow[]) => void = () => {};
     vi.mocked(loadHistory).mockImplementationOnce(
-      () => new Promise<MessageRow[]>((r) => (resolveRows = r)),
+      () =>
+        new Promise<HistoryPage>((r) => {
+          resolveRows = (rows) => r({ rows, hasMore: false, todos: null });
+        }),
     );
     await useSessions.getState().resumeSession("s1");
     // Pause/Close INSIDE the window: the pending card becomes a failed one.
@@ -2421,7 +2452,10 @@ describe("resumeSession (history reload race)", () => {
     });
     let resolveRows: (rows: MessageRow[]) => void = () => {};
     vi.mocked(loadHistory).mockImplementationOnce(
-      () => new Promise<MessageRow[]>((r) => (resolveRows = r)),
+      () =>
+        new Promise<HistoryPage>((r) => {
+          resolveRows = (rows) => r({ rows, hasMore: false, todos: null });
+        }),
     );
     await useSessions.getState().resumeSession("s1");
     useSessions.getState().applySessionUpdate("s1", {
@@ -2461,6 +2495,7 @@ describe("archivedSessions (sticky, ADR 0016)", () => {
       activeSessionId: null,
       closeReasons: {},
       messages: {},
+      history: {},
       configOptions: {},
     });
   });
@@ -2832,6 +2867,7 @@ describe("closeSpace (closing a Space TAB — the tab bar's ×)", () => {
       spaces: [row("/a", 2000), row("/b", 1000)],
       closeReasons: {},
       messages: {},
+      history: {},
     });
     vi.clearAllMocks();
   });
@@ -2865,7 +2901,7 @@ describe("closeSpace (closing a Space TAB — the tab bar's ×)", () => {
     // NOT merely the path: the user is looking at the neighbour's conversation,
     // exactly as if they had clicked its tab.
     expect(s.activeSessionId).toBe("live-b");
-    expect(loadHistory).toHaveBeenCalledWith("live-b");
+    expect(loadHistory).toHaveBeenCalledWith("live-b", { limit: 500 });
   });
 
   it("closing a tab you are NOT looking at leaves the view alone", async () => {
@@ -3269,6 +3305,7 @@ describe("useSessions.startSessionInActiveSpace", () => {
       spaces: [],
       closeReasons: {},
       messages: {},
+      history: {},
       configOptions: {},
       newSessionError: null,
     });
@@ -3348,5 +3385,537 @@ describe("useSessions.startSessionInActiveSpace", () => {
 
     await useSessions.getState().startSessionInActiveSpace();
     expect(useSessions.getState().newSessionError).toBeNull();
+  });
+});
+
+describe("history window and pagination (ADR 0066)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useSessions.setState({
+      sessions: [],
+      historySessions: [],
+      archivedSessions: [],
+      activeSessionId: null,
+      activeSpacePath: null,
+      spaces: [],
+      closeReasons: {},
+      messages: {},
+      history: {},
+      configOptions: {},
+      newSessionError: null,
+    });
+    useInteractive.setState({
+      requests: {},
+      todos: {},
+      agentState: {},
+      cost: {},
+      session: {},
+    });
+  });
+
+  it("openSession calls loadHistory with { limit: 500 }, populates history, bumps generation", async () => {
+    const rows: MessageRow[] = [
+      msgRow({ id: 10, kind: "user", payloadJson: JSON.stringify({ text: "first" }) }),
+      msgRow({ id: 11, kind: "user", payloadJson: JSON.stringify({ text: "second" }) }),
+    ];
+    vi.mocked(loadHistory).mockResolvedValueOnce({
+      rows,
+      hasMore: true,
+      todos: null,
+    });
+    useSessions.setState({
+      activeSessionId: null,
+      historySessions: [info("s1", "/x")],
+    });
+    useSessions.getState().openSession("s1");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(loadHistory).toHaveBeenCalledWith("s1", { limit: INITIAL_HISTORY_PAGE });
+    const hist = useSessions.getState().history["s1"];
+    expect(hist).toEqual({
+      oldestRowId: 10,
+      hasMore: true,
+      loadingMore: false,
+      generation: 1,
+      epoch: 0,
+    });
+    expect(useSessions.getState().messages["s1"]).toHaveLength(2);
+  });
+
+  it("loadOlderHistory calls loadHistory with { limit: 200, beforeId }, prepends older rows, updates oldestRowId / hasMore", async () => {
+    useSessions.setState({
+      activeSessionId: "s1",
+      history: {
+        s1: {
+          oldestRowId: 10,
+          hasMore: true,
+          loadingMore: false,
+          generation: 1,
+          epoch: 0,
+        },
+      },
+      messages: {
+        s1: [{ kind: "user", text: "current", at: 100 }],
+      },
+    });
+    const olderRows: MessageRow[] = [
+      msgRow({ id: 5, kind: "user", payloadJson: JSON.stringify({ text: "older" }) }),
+    ];
+    vi.mocked(loadHistory).mockResolvedValueOnce({
+      rows: olderRows,
+      hasMore: false,
+      todos: null,
+    });
+
+    await useSessions.getState().loadOlderHistory("s1");
+
+    expect(loadHistory).toHaveBeenCalledWith("s1", {
+      limit: OLDER_HISTORY_PAGE,
+      beforeId: 10,
+    });
+    const hist = useSessions.getState().history["s1"];
+    expect(hist).toEqual({
+      oldestRowId: 5,
+      hasMore: false,
+      loadingMore: false,
+      generation: 1,
+      epoch: 0,
+    });
+    const msgs = useSessions.getState().messages["s1"];
+    expect(msgs).toHaveLength(2);
+    expect(msgs[0]).toMatchObject({ kind: "user", text: "older" });
+    expect(msgs[1]).toMatchObject({ kind: "user", text: "current" });
+  });
+
+  it("loadOlderHistory is a no-op if hasMore is false, loadingMore is true, or oldestRowId is null", async () => {
+    useSessions.setState({
+      history: {
+        s1: { oldestRowId: 10, hasMore: false, loadingMore: false, generation: 1, epoch: 0 },
+        s2: { oldestRowId: 10, hasMore: true, loadingMore: true, generation: 1, epoch: 0 },
+        s3: { oldestRowId: null, hasMore: true, loadingMore: false, generation: 1, epoch: 0 },
+      },
+    });
+    await useSessions.getState().loadOlderHistory("s1");
+    await useSessions.getState().loadOlderHistory("s2");
+    await useSessions.getState().loadOlderHistory("s3");
+    expect(loadHistory).not.toHaveBeenCalled();
+  });
+
+  it("loadOlderHistory discards response if generation changed while fetch was in flight", async () => {
+    let resolvePage: (page: HistoryPage) => void = () => {};
+    vi.mocked(loadHistory).mockImplementationOnce(
+      () => new Promise<HistoryPage>((r) => (resolvePage = r)),
+    );
+    useSessions.setState({
+      activeSessionId: "s1",
+      history: {
+        s1: {
+          oldestRowId: 10,
+          hasMore: true,
+          loadingMore: false,
+          generation: 1,
+          epoch: 0,
+        },
+      },
+      messages: {
+        s1: [{ kind: "user", text: "original", at: 100 }],
+      },
+    });
+
+    const p = useSessions.getState().loadOlderHistory("s1");
+    expect(useSessions.getState().history["s1"]?.loadingMore).toBe(true);
+
+    // Generation bumps (e.g. from resume or reopen)
+    useSessions.setState((st) => ({
+      history: {
+        ...st.history,
+        s1: { ...st.history["s1"]!, generation: 2, loadingMore: false },
+      },
+    }));
+
+    resolvePage({
+      rows: [msgRow({ id: 2, kind: "user", payloadJson: JSON.stringify({ text: "stale" }) })],
+      hasMore: false,
+      todos: null,
+    });
+    await p;
+
+    expect(useSessions.getState().messages["s1"]).toEqual([
+      { kind: "user", text: "original", at: 100 },
+    ]);
+  });
+
+  it("loadOlderHistory discards response if session was deleted while fetch was in flight", async () => {
+    let resolvePage: (page: HistoryPage) => void = () => {};
+    vi.mocked(loadHistory).mockImplementationOnce(
+      () => new Promise<HistoryPage>((r) => (resolvePage = r)),
+    );
+    useSessions.setState({
+      activeSessionId: "s1",
+      history: {
+        s1: {
+          oldestRowId: 10,
+          hasMore: true,
+          loadingMore: false,
+          generation: 1,
+          epoch: 0,
+        },
+      },
+      messages: {
+        s1: [{ kind: "user", text: "original", at: 100 }],
+      },
+    });
+
+    const p = useSessions.getState().loadOlderHistory("s1");
+
+    useSessions.setState((st) => {
+      const { s1: _h, ...restH } = st.history;
+      const { s1: _m, ...restM } = st.messages;
+      return { history: restH, messages: restM };
+    });
+
+    resolvePage({
+      rows: [msgRow({ id: 2, kind: "user", payloadJson: JSON.stringify({ text: "stale" }) })],
+      hasMore: false,
+      todos: null,
+    });
+    await p;
+
+    expect(useSessions.getState().history["s1"]).toBeUndefined();
+    expect(useSessions.getState().messages["s1"]).toBeUndefined();
+  });
+
+  it("loadOlderHistory resets loadingMore to false on error while preserving generation and hasMore", async () => {
+    vi.mocked(loadHistory).mockRejectedValueOnce(new Error("network error"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    useSessions.setState({
+      activeSessionId: "s1",
+      history: {
+        s1: {
+          oldestRowId: 10,
+          hasMore: true,
+          loadingMore: false,
+          generation: 1,
+          epoch: 0,
+        },
+      },
+      messages: {
+        s1: [{ kind: "user", text: "original", at: 100 }],
+      },
+    });
+
+    await useSessions.getState().loadOlderHistory("s1");
+
+    const hist = useSessions.getState().history["s1"];
+    expect(hist?.loadingMore).toBe(false);
+    expect(hist?.hasMore).toBe(true);
+    expect(hist?.generation).toBe(1);
+    expect(consoleError).toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
+  it("openSession seeds useInteractive.todos if page.todos is present and session not already in todos", async () => {
+    const todos = [{ content: "Task 1", status: "pending" as const }];
+    vi.mocked(loadHistory).mockResolvedValueOnce({
+      rows: [],
+      hasMore: false,
+      todos,
+    });
+    useSessions.setState({
+      activeSessionId: null,
+      historySessions: [info("s-todo", "/x")],
+    });
+
+    useSessions.getState().openSession("s-todo");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(useInteractive.getState().todos["s-todo"]).toEqual(todos);
+  });
+
+  it("openSession does NOT overwrite useInteractive.todos if session is already in todos", async () => {
+    const existing = [{ content: "Existing Task", status: "completed" as const }];
+    const fromPage = [{ content: "Stale Task", status: "pending" as const }];
+    vi.mocked(loadHistory).mockResolvedValueOnce({
+      rows: [],
+      hasMore: false,
+      todos: fromPage,
+    });
+    useInteractive.setState({ todos: { "s-todo": existing } });
+    useSessions.setState({
+      activeSessionId: null,
+      historySessions: [info("s-todo", "/x")],
+    });
+
+    useSessions.getState().openSession("s-todo");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(useInteractive.getState().todos["s-todo"]).toEqual(existing);
+  });
+
+  it("deleteSession cleans up history and clears todos", async () => {
+    useSessions.setState({
+      sessions: [info("s1", "/x")],
+      messages: { s1: [{ kind: "user", text: "hi", at: 1 }] },
+      history: {
+        s1: { oldestRowId: 1, hasMore: false, loadingMore: false, generation: 1, epoch: 0 },
+      },
+    });
+    useInteractive.setState({
+      todos: { s1: [{ content: "do it", status: "pending" }] },
+    });
+
+    await useSessions.getState().deleteSession("s1");
+
+    expect(useSessions.getState().history["s1"]).toBeUndefined();
+    expect(useSessions.getState().messages["s1"]).toBeUndefined();
+    expect(useInteractive.getState().todos["s1"]).toBeUndefined();
+  });
+
+  it("resumeSession resets window to tail, bumps generation, and seeds todos", async () => {
+    const todos = [{ content: "Resume Task", status: "in_progress" as const }];
+    const rows: MessageRow[] = [
+      msgRow({ id: 50, kind: "user", payloadJson: JSON.stringify({ text: "tail" }) }),
+    ];
+    vi.mocked(loadHistory).mockResolvedValueOnce({
+      rows,
+      hasMore: true,
+      todos,
+    });
+    useSessions.setState({
+      activeSessionId: "s1",
+      historySessions: [info("s1", "/x")],
+      history: {
+        s1: { oldestRowId: 10, hasMore: false, loadingMore: false, generation: 1, epoch: 0 },
+      },
+      messages: {
+        s1: [
+          { kind: "user", text: "prepended-old", at: 1 },
+          { kind: "user", text: "tail", at: 50 },
+        ],
+      },
+    });
+
+    await useSessions.getState().resumeSession("s1");
+    await new Promise((r) => setTimeout(r, 0));
+
+    const hist = useSessions.getState().history["s1"];
+    expect(hist).toEqual({
+      oldestRowId: 50,
+      hasMore: true,
+      loadingMore: false,
+      generation: 2,
+      epoch: 1,
+    });
+    expect(useInteractive.getState().todos["s1"]).toEqual(todos);
+    // Transcript reset to reloaded rows (deduped)
+    expect(useSessions.getState().messages["s1"]).toEqual([
+      { kind: "user", text: "tail", at: 1000 },
+    ]);
+  });
+
+  it("resumeSession invalidates in-flight loadOlderHistory pages", async () => {
+    let resolveOlderPage: (page: HistoryPage) => void = () => {};
+    let resolveResumePage: (page: HistoryPage) => void = () => {};
+
+    vi.mocked(loadHistory)
+      .mockImplementationOnce(
+        () => new Promise<HistoryPage>((r) => (resolveOlderPage = r)),
+      )
+      .mockImplementationOnce(
+        () => new Promise<HistoryPage>((r) => (resolveResumePage = r)),
+      );
+
+    useSessions.setState({
+      activeSessionId: "s1",
+      historySessions: [info("s1", "/x")],
+      history: {
+        s1: {
+          oldestRowId: 10,
+          hasMore: true,
+          loadingMore: false,
+          generation: 1,
+          epoch: 0,
+        },
+      },
+      messages: {
+        s1: [{ kind: "user", text: "initial", at: 100 }],
+      },
+    });
+
+    const olderPromise = useSessions.getState().loadOlderHistory("s1");
+    expect(useSessions.getState().history["s1"]?.loadingMore).toBe(true);
+
+    const resumePromise = useSessions.getState().resumeSession("s1");
+    await resumePromise;
+
+    resolveOlderPage({
+      rows: [
+        msgRow({ id: 5, kind: "user", payloadJson: JSON.stringify({ text: "older-row" }) }),
+      ],
+      hasMore: false,
+      todos: null,
+    });
+    await olderPromise;
+
+    resolveResumePage({
+      rows: [
+        msgRow({ id: 20, kind: "user", payloadJson: JSON.stringify({ text: "tail-row" }) }),
+      ],
+      hasMore: false,
+      todos: null,
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const msgs = useSessions.getState().messages["s1"] ?? [];
+    const texts = msgs.map((m) => (m.kind === "user" ? m.text : ""));
+    expect(texts).not.toContain("older-row");
+    expect(texts).toContain("tail-row");
+    expect(useSessions.getState().history["s1"]?.loadingMore).toBe(false);
+  });
+
+  it("while resumeSession reload is pending, loadOlderHistory is a no-op", async () => {
+    let resolveResumePage: (page: HistoryPage) => void = () => {};
+    let resolveOlderPage: (page: HistoryPage) => void = () => {};
+
+    vi.mocked(loadHistory)
+      .mockImplementationOnce(
+        () => new Promise<HistoryPage>((r) => (resolveResumePage = r)),
+      )
+      .mockImplementationOnce(
+        () => new Promise<HistoryPage>((r) => (resolveOlderPage = r)),
+      );
+
+    useSessions.setState({
+      activeSessionId: "s1",
+      historySessions: [info("s1", "/x")],
+      history: {
+        s1: {
+          oldestRowId: 10,
+          hasMore: true,
+          loadingMore: false,
+          generation: 1,
+          epoch: 0,
+        },
+      },
+      messages: {
+        s1: [{ kind: "user", text: "initial", at: 100 }],
+      },
+    });
+
+    const resumePromise = useSessions.getState().resumeSession("s1");
+    await resumePromise; // resume IPC returns; history reload is now pending
+
+    // loadingMore must be true during the resume reload
+    expect(useSessions.getState().history["s1"]?.loadingMore).toBe(true);
+
+    // loadOlderHistory called while reload is pending should no-op
+    await useSessions.getState().loadOlderHistory("s1");
+    expect(vi.mocked(loadHistory)).toHaveBeenCalledTimes(1);
+    expect(useSessions.getState().messages["s1"]).toEqual([
+      { kind: "user", text: "initial", at: 100 },
+    ]);
+
+    // Now resolve the resume reload
+    resolveResumePage({
+      rows: [
+        msgRow({ id: 20, kind: "user", payloadJson: JSON.stringify({ text: "tail-row" }) }),
+      ],
+      hasMore: true,
+      todos: null,
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(useSessions.getState().history["s1"]?.loadingMore).toBe(false);
+    expect(useSessions.getState().messages["s1"]).toEqual([
+      { kind: "user", text: "tail-row", at: 1000 },
+    ]);
+
+    // loadOlderHistory works again
+    const olderPromise = useSessions.getState().loadOlderHistory("s1");
+    expect(vi.mocked(loadHistory)).toHaveBeenCalledTimes(2);
+    expect(useSessions.getState().history["s1"]?.loadingMore).toBe(true);
+
+    resolveOlderPage({
+      rows: [
+        msgRow({ id: 5, kind: "user", payloadJson: JSON.stringify({ text: "older-row" }) }),
+      ],
+      hasMore: false,
+      todos: null,
+    });
+    await olderPromise;
+
+    expect(useSessions.getState().history["s1"]?.loadingMore).toBe(false);
+    const texts = (useSessions.getState().messages["s1"] ?? []).map((m) =>
+      m.kind === "user" ? m.text : "",
+    );
+    expect(texts).toEqual(["older-row", "tail-row"]);
+  });
+
+  it("resumeSession creates history entry when session has no history entry yet", async () => {
+    vi.mocked(loadHistory).mockResolvedValueOnce({
+      rows: [
+        msgRow({ id: 1, kind: "user", payloadJson: JSON.stringify({ text: "hello" }) }),
+      ],
+      hasMore: false,
+      todos: null,
+    });
+
+    useSessions.setState({
+      activeSessionId: "s1",
+      historySessions: [info("s1", "/x")],
+      history: {},
+      messages: {},
+    });
+
+    await useSessions.getState().resumeSession("s1");
+    await new Promise((r) => setTimeout(r, 0));
+
+    const hist = useSessions.getState().history["s1"];
+    expect(hist).toEqual({
+      oldestRowId: 1,
+      hasMore: false,
+      loadingMore: false,
+      generation: 1,
+      epoch: 1,
+    });
+  });
+
+  it("resumeSession handles loadHistory rejection gracefully", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(loadHistory).mockRejectedValueOnce(new Error("network error"));
+
+    useSessions.setState({
+      activeSessionId: "s1",
+      historySessions: [info("s1", "/x")],
+      history: {
+        s1: {
+          oldestRowId: 42,
+          hasMore: true,
+          loadingMore: false,
+          generation: 1,
+          epoch: 5,
+        },
+      },
+      messages: {
+        s1: [{ kind: "user", text: "keep-me", at: 100 }],
+      },
+    });
+
+    await useSessions.getState().resumeSession("s1");
+    await new Promise((r) => setTimeout(r, 0));
+
+    const hist = useSessions.getState().history["s1"];
+    expect(hist).toEqual({
+      oldestRowId: 42,
+      hasMore: true,
+      loadingMore: false,
+      generation: 1,
+      epoch: 6,
+    });
+    expect(useSessions.getState().messages["s1"]).toEqual([
+      { kind: "user", text: "keep-me", at: 100 },
+    ]);
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });
