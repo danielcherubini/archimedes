@@ -954,12 +954,23 @@ function SessionRow({
 }
 
 /**
- * The flat, cross-space Archived section (ZCode's
- * `WorkspaceArchivedTasksFlatSection` model adapted to Archimedes' row
- * style): rendered AFTER the Space groups, scrolling with the list.
- * COLLAPSED by default; the header (icon + "Archived" + count + chevron)
- * toggles it. The sticky live ids are view-filtered out — a resumed
- * archived session renders in its Space group (live), not here.
+ * The **active Space's** Archived section: the archived rows whose `cwd` is the
+ * selected Space, rendered AFTER that Space's groups and scrolling with the
+ * list. COLLAPSED by default; the header (icon + "Archived" + count + chevron)
+ * toggles it. The count is the SAME predicate the rows are filtered by, so it is
+ * the Space's count and never the app-wide total.
+ *
+ * Two filters, both load-bearing:
+ * - the sticky live ids are view-filtered out — a resumed archived session
+ *   renders in its Space group (live), not here (CONTEXT.md "Archived session");
+ * - rows of another Space are excluded — the section is the SELECTED Space's, so
+ *   a sibling tab's archived rows appear when that tab is selected, never while
+ *   this one is. A row whose Space has no open tab at all is **Detached** and is
+ *   listed in Settings → Detached sessions; there is no fallback listing here.
+ *
+ * With no Space selected (`activeSpacePath === null`) `cwd === null` matches
+ * nothing, so the "No archived sessions." empty state renders while archived rows
+ * exist. That is honest: none of them belong to a Space the sidebar is showing.
  */
 function ArchivedSection({
   activeSessionId,
@@ -973,8 +984,11 @@ function ArchivedSection({
   const [open, setOpen] = useState(false);
   const archived = useSessions((s) => s.archivedSessions);
   const sessions = useSessions((s) => s.sessions);
+  const activeSpacePath = useSessions((s) => s.activeSpacePath);
   const visible = archived.filter(
-    (s) => !sessions.some((l) => l.sessionId === s.sessionId),
+    (s) =>
+      s.cwd === activeSpacePath &&
+      !sessions.some((l) => l.sessionId === s.sessionId),
   );
   return (
     <div className="px-2.5 py-1">
@@ -1026,12 +1040,12 @@ function ArchivedSection({
 /**
  * One archived-session row (the `SessionRow` visual pattern): 16px
  * leading slot (empty — archived sessions are NEVER live, so no
- * spinner), the title + a subtle `· {spaceName}` suffix ONLY when the title
- * is message-derived OR generated (skipped when the title IS the space name
- * — avoid "alpha · alpha"; a GENERATED title is never the space name, so the
- * cue still shows, which is exactly what this section needs most: it is
- * cross-space, so the Space is the one thing the row cannot omit), and the
- * relative time (empty slot when the transcript was not loaded this boot).
+ * spinner), the title, and the relative time (empty slot when the
+ * transcript was not loaded this boot). NO `· {spaceName}` suffix: the
+ * section is scoped to the active Space, so a row here can never belong to
+ * another Space and the cue would only repeat what the header already says.
+ * (`spaceName` still feeds `titleFor` as the last-resort label when the
+ * session has neither a generated title nor a loaded transcript.)
  * Hover: Unarchive (`ArchiveX`, reversible — no confirm) + Delete (`Trash2`,
  * the only destructive action — confirm dialog). Click opens the transcript
  * (identical to a stored row — the first send resumes it).
@@ -1053,7 +1067,6 @@ function ArchivedSessionRow({
   const spaceName = spaceNameFor(session.cwd, spaces);
   const title = titleFor(messages, spaceName, session.title);
   const time = relativeTimeFor(messages);
-  const showSuffix = title !== spaceName;
   return (
     <div
       role="button"
@@ -1077,9 +1090,6 @@ function ArchivedSessionRow({
         }}
       >
         {title}
-        {showSuffix && (
-          <span className="text-foreground-subtlest"> · {spaceName}</span>
-        )}
       </span>
       <span className="group-hover:hidden">
         {time !== null ? (
