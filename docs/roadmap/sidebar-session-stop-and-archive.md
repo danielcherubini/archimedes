@@ -6,7 +6,7 @@ done-when: Hovering a LIVE session row in the sidebar reveals a Stop button and 
 
 # Sidebar session rows — Stop and Archive on live rows: Plan
 
-**Status note (2026-10-20):** executed on branch `feature/70-sidebar-session-stop-and-archive`; the line citations in this plan were re-verified against the post-feature tree. The ones this branch's own commits invalidated now carry symbol anchors instead; the numbers left inside the task steps name the positions in the tree the plan was written against, and the changes they describe have all landed.
+**Status note (2026-10-20):** executed on branch `feature/70-sidebar-session-stop-and-archive`; the citations in this plan were re-checked against the post-feature tree, and they prefer SYMBOL anchors (`cancel_session`, `compact_session`, `on_session_exited_expected`) over plain line numbers, because line numbers drift with every commit and the ones left inside the task steps name the positions in the tree the plan was written against, not today's file. Read a bare `file.rs:NNNN` as approximate; the symbol is the address. The changes those steps describe have all landed.
 
 **Goal:** Give a **live** session row in the left panel the two hover actions it has never had — **Stop** and **Archive** — where today only a *stored* row offers Archive and a live row offers nothing at all.
 
@@ -64,9 +64,9 @@ flag. Do not add a Rust-side liveness guard; there is nothing to guard.
   which reserves the buttons' width at rest — deliberately out of scope.
 - **Stop reads `inTurn` at CLICK time** (inside the store action), not the row's
   render-time status: paint and click are not the same tick. If the turn ended in between,
-  `send_abort` is a documented no-op (`mod.rs:1504`, "a no-op if there is no in-flight
-  turn") and a second click closes; if it started in between, `close_session` cancels it
-  anyway (fact 1).
+  `send_abort` is a documented no-op (`cancel_session`'s doc comment in
+  `agent/session/mod.rs`, "a no-op if there is no in-flight turn") and a second click
+  closes; if it started in between, `close_session` cancels it anyway (fact 1).
 - **A Session parked on a gate stops by CANCELLING, not by being reaped.** `inTurn` is a
   superset of `running ∪ waiting`: a permission prompt or `ask` is held *inside* a tool
   execution, so the turn is open and the flag is set. That is the gentler and correct act.
@@ -76,7 +76,7 @@ flag. Do not add a Rust-side liveness guard; there is nothing to guard.
 - **`compacting` gets no branch of its own — and the two compaction kinds land on
   different Stop paths, which is fine.** A hand-triggered `/compact` runs on the loop's
   CONTROL channel *while the loop is idle* (`compact_session`'s doc comment,
-  `agent/session/mod.rs:1517`: "the composer is locked during a turn, so a hand-triggered
+  `agent/session/mod.rs`: "the composer is locked during a turn, so a hand-triggered
   compaction is always an idle action"), so `inTurn` is false there and Stop takes the
   **close** path — harsher than the Esc chord, which cancels a compaction too
   (`ChatStream.tsx:347` gates on `compacting` as well as `inTurn`). A `threshold` /
@@ -185,12 +185,16 @@ if (wasLive) {
   see `wasLive === true`, both commit the flag (the existing `set` dedupe keeps
   `archivedSessions` correct), and the second `close_session` SUCCEEDS having done nothing:
   its guard is the Rust `live` map, and `live.remove` happens only in the router's
-  expected-exit teardown — AFTER the reap's 2 s grace + `kill` — so a real double-click,
-  milliseconds later, still finds the `live` entry, misses on `detach` (the Worker is already
+  expected-exit teardown (`on_session_exited_expected`), which the Worker's `Exited`
+  frame drives: it lands as soon as the Worker exits — the normal case, a Worker that
+  honours `close`, publishes `Exited` in milliseconds / a few ticks — so a real
+  double-click still finds the `live` entry, misses on `detach` (the Worker is already
   detached), and returns `Ok(())`. That is `close_session`'s documented "idempotent close".
   So there is NO rejection and NO log line for a double-click; the `.catch` above stays quiet.
-  A rejection appears only when the second close arrives AFTER that teardown (> ~2 s later),
-  when the `live` entry is finally gone → `UnknownSession` → logged. Neither outcome is a
+  A rejection appears when the second close arrives after that teardown has run and
+  the `live` entry is gone → `UnknownSession` → logged. (The 2 s in `reap_worker`
+  is the TIMEOUT ceiling for a Worker that ignores `close` and has to be `kill`ed — the
+  worst case — not a fixed delay the teardown waits behind.) Neither outcome is a
   defect to fix with new de-duplication state. The existing `"archiveSession is idempotent
   under concurrent invocation"` test seeds a STORED row, so `wasLive` is false there and the
   test never reaches the close at all — it stays green unchanged.
@@ -212,10 +216,10 @@ read, and why the race is safe:
    *    drops the row to stored (the transcript survives — a close is a pause).
    * The race is harmless in both directions, which is what makes ONE button
    * honest: a turn that ended in between makes `send_abort` a documented no-op
-   * (`agent/session/mod.rs:1504`) and a second click closes; a turn that started
-   * in between is cancelled by `close_session` regardless (`:1885` sets
-   * `cancel_requested` before the detach). No branch of Stop can leave a turn
-   * running.
+   * (`cancel_session`'s doc comment, `agent/session/mod.rs`) and a second click
+   * closes; a turn that started in between is cancelled by `close_session` regardless
+   * (`:1885` sets `cancel_requested` before the detach). No branch of Stop can leave a
+   * turn running.
    * A no-op for a non-live id. Rejections propagate — the row logs them.
    */
   stopSession: (sessionId: string) => Promise<void>;
