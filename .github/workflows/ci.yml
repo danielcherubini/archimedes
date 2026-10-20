@@ -159,9 +159,11 @@ jobs:
       # check step below needs no OS branch of its own.
       #
       # `cargo fmt` / `cargo clippy` above get no redirect: they compile, they do
-      # not run the app. `pnpm test` / `pnpm build` below are untouched for the
+      # not run the app. `pnpm test` / `pnpm build` below get no redirect for the
       # same reason — and because a job-wide `HOME` override would move pnpm's
-      # cache, which is why the redirect sits on STEP env, not job env.
+      # cache, which is why the redirect sits on STEP env, not job env. ("No
+      # redirect", not "untouched": the test step below does carry its own reporter
+      # args, which are unrelated to this variable.)
       #
       # Gates are `runner.os`, lowercase, matching `Install Linux build
       # dependencies` above (GitHub's string `==` is case-insensitive; the file

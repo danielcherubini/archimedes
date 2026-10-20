@@ -143,8 +143,11 @@ interface AgentsDialogProps {
   tools: string[];
   /**
    * How many of THIS mount's writes have FAILED and rolled the store back to the
-   * file's map. The mount owns the save, and a rollback takes back the one thing the
-   * `edited` set was built on — the explanation that a difference against the fetch
+   * file's map — TRANSIENTLY, once the mount's write queue holds a link whose
+   * composed map still carries the failed field: that link re-applies it when it
+   * completes (see `writeAgentOverrides`). The mount owns the save, and a rollback
+   * takes back the one thing the `edited` set was built on — the explanation that a
+   * difference against the fetch
    * column is a save the backend already has. A write that never landed explains
    * nothing, so the suppression is dropped when this moves (see `edited`).
    *
@@ -232,9 +235,12 @@ export default function AgentsDialog({
    * claim the backend is reading something stale that the backend was just told.
    *
    * The set is stamped with the `rolledBackWrites` value it was recorded against,
-   * and a stamp that no longer matches is treated as EMPTY — the state-adjustment
-   * pattern, so no effect and no extra render is involved. A failed save rolls the
-   * store back to the FILE's map, which takes back the explanation the suppression
+   * and a stamp that no longer matches is treated as EMPTY — DERIVED STATE (a plain
+   * read of state + prop during render), not the state-adjustment pattern: no
+   * `setState`, no effect, no extra render is involved. A failed save rolls the
+   * store back to the FILE's map — TRANSIENTLY, once the mount's queue holds a link
+   * whose composed map still carries the failed field (see `writeAgentOverrides`) —
+   * which takes back the explanation the suppression
    * rests on: the difference is unexplained again, and the row has to say it.
    *
    * The whole set goes, not just the failed field's key, because that is the fact
@@ -251,10 +257,21 @@ export default function AgentsDialog({
     edits.rolls === rolledBackWrites ? edits.keys : NO_KEYS;
   const patch = (name: string, field: keyof AgentOverride, value: string | string[] | undefined) => {
     if (settings === null) return;
-    setEdits({
+    const key = editedKey(name, field);
+    // FUNCTIONAL on purpose: two patches inside one React batch (a click that
+    // triggers a write and a sibling write, or a fast double-pick) each get the
+    // SAME render-time `edited`, so the object form made the second `setEdits`
+    // overwrite the first and LOSE the first key — the suppression then went quiet
+    // for a field the user had demonstrably edited. `prev` is the queue's truth.
+    // (The stamp reads the `rolledBackWrites` PROP, which an updater cannot reach
+    // through `prev`; that half stays render-time, which is correct — a rollback
+    // arriving mid-batch belongs to the next render's derivation.)
+    setEdits((prev) => ({
       rolls: rolledBackWrites,
-      keys: new Set(edited).add(editedKey(name, field)),
-    });
+      keys: new Set(prev.rolls === rolledBackWrites ? prev.keys : NO_KEYS).add(
+        key,
+      ),
+    }));
     onPatch(withOverride(settings.agentOverrides, name, field, value));
   };
 

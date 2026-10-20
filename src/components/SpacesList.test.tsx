@@ -336,8 +336,17 @@ beforeEach(() => {
   // next test's `saveSettings`), and so does a bare `mockResolvedValue` override.
   // The mocks this file re-arms are therefore reset and handed their factory
   // default again, so "which test ran before me" cannot decide what my IPC layer
-  // answers. (`listSkills` is deliberately NOT in this list: the empty-skills test
-  // below documents that it relies on the preserved implementation.)
+  // answers.
+  //
+  // (`listSkills` is deliberately NOT in this list, and the reason is mechanical
+  // rather than about any one test: `mockReset()` strips a mock's implementation, so
+  // the bare reset leaves `listSkills()` returning `undefined`, and
+  // `useSkillCatalog.ts:66` calls `listSkills(spacePath).catch(…)` on EVERY mount —
+  // adding this line as-is measured 67 of this file's 69 tests failing on
+  // "Cannot read properties of undefined (reading 'catch')". It would need its
+  // factory default restated to belong here — which is ALSO the fix for the
+  // override the empty-skills test leaves behind (see its comment: declaration
+  // order is what keeps that `mockResolvedValue([])` from leaking further).)
   mockedSaveSettings.mockReset().mockResolvedValue(undefined);
   // Each re-arm restates that mock's FACTORY default (`getSettings`'s differs from
   // `SETTINGS_FIXTURE` by `defaultModel: null` alone — verified deep-equal), so
@@ -409,7 +418,12 @@ afterEach(() => {
 });
 
 describe("SpacesList", () => {
-  it("renders the two action buttons with their labels and kbd hints", () => {
+  it("renders its labelled action buttons with their labels and kbd hints", () => {
+    // The row holds FOUR labelled buttons (Open Space, New Session, Skills,
+    // Agents) since Agents landed — this name used to say "two", which was true only
+    // of the two that carry a chord. The kbd assertions below stay on those two on
+    // purpose: `Skills` and `Agents` render no `Kbd` at all (matching each other), so
+    // a `⌘`-hint assertion for them would pin copy the component never renders.
     render(<SpacesList />);
     expect(screen.getByRole("button", { name: /New Session/ })).toBeTruthy();
     expect(screen.getByText("⌘N")).toBeTruthy();
@@ -1305,11 +1319,20 @@ describe("SpacesList", () => {
     // stale rejection without touching the file. The modal keeps looking like it
     // saves (the optimistic publish is synchronous) forever after.
     //
-    // So the swallow belongs on the CHAIN LINK (`.catch(() => {})` before the
-    // `.then`), not only inside the helper: nothing the failure path does can then
-    // disable the queue. This test is the difference between those two spellings —
-    // with the swallow inside the helper it fails, because the poisoned link eats
-    // edit 2's save entirely (`saveSettings` is never called a second time).
+    // So the swallow belongs on the CHAIN LINK, not only inside the helper: nothing
+    // the failure path does can then disable the queue. This test is the difference
+    // between those spellings — with the swallow inside the helper it fails, because
+    // the poisoned link eats edit 2's save entirely (`saveSettings` is never called a
+    // second time).
+    //
+    // Which half of the link's TWO swallows reddens this test — measured, because the
+    // comment used to credit the wrong one: deleting the TRAILING `.catch` fails the
+    // run (exit 1) with an UNHANDLED REJECTION pointing at this test's `console.error`
+    // spy, because the call site `void`s the link and the mount has nowhere to attach
+    // a handler; deleting the LEADING one stays green, since the trailing half covers
+    // the same rejection AND the promise stored in the ref is the swallowed one. The
+    // leading half is belt-and-braces for link order, and this test pins it not at
+    // all — see the `patchAgentOverrides` comment for the division of labour.
     const consoleError = vi
       .spyOn(console, "error")
       .mockImplementation(() => {

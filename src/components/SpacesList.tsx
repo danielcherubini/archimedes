@@ -447,9 +447,12 @@ export default function SpacesList() {
     (next: AgentOverrides) => {
       const current = useSettings.getState().settings;
       // Publish first (before the awaits), so the dialog's next render — and thus
-      // its next edit — sees this one. The epoch moves WITH the publish: one count
-      // per map the store is handed, which is exactly what a completing link has to
-      // compare against to know whether it is still the newest answer.
+      // its next edit — sees this one. The epoch moves WITH the publish attempt: one
+      // count per patch the user COMMITS, whether or not it reaches the store mirror
+      // (the `current === null` guard below can skip the publish, and it still counts
+      // — the guard makes that unreachable from this render site, but the count is
+      // deliberately not tied to the mirror). That is exactly what a completing link
+      // has to compare against to know whether it is still the newest answer.
       publishEpochRef.current += 1;
       const epoch = publishEpochRef.current;
       if (current !== null) {
