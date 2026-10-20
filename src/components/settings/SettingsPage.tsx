@@ -20,6 +20,7 @@ import {
   saveSettings,
   shellSandboxAvailable,
   type AppSettings,
+  type AgentOverrides,
   type McpServerEntry,
   type ModelDto,
   type ProviderConfig,
@@ -68,6 +69,12 @@ function uniqueSlug(slug: string, taken: Set<string>): string {
  * `"<providerId>/<modelId>"`) from a provider's old id to its new one (a
  * name commit re-identifies the provider — the reference must not orphan).
  * A `null` / non-matching key is untouched.
+ *
+ * The parameter stays `string | null` (NOT `string | null | undefined`): the
+ * `agentOverrides` walk below handles an ABSENT `.model` before calling this,
+ * because absence is ADR 0067's "this override does not speak" — a third state
+ * a model reference cannot hold, and folding it into this signature would let a
+ * `null` reach the store, where `null` is forbidden.
  */
 function remapModelRef(
   key: string | null,
@@ -251,21 +258,20 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
         current.id,
         id,
       );
-      // (ADR 0023) `subagentModels` is `agent name → model key`: the model
-      // refs are the VALUES (the agent names are the KEYS — `remapModelRefs`
-      // remaps map KEYS and would be a no-op here). A non-matching value
-      // stays untouched.
-      //
-      // TEMPORARY: Task 4 re-points this at agentOverrides. It stays alive
-      // meanwhile because `settings.subagentModels` still exists and still
-      // resolves at dispatch time — dropping the remap would orphan every
-      // override on a Provider rename, the exact harm this block exists to
-      // prevent (ADR 0066: one map to walk).
-      const remappedOverrides: Record<string, string> = {};
-      for (const [name, model] of Object.entries(settings.subagentModels)) {
-        remappedOverrides[name] = remapModelRef(model, current.id, id) ?? model;
+      // (ADR 0066) `agentOverrides` is `agent name → override`: the model ref is
+      // the entry's `.model` VALUE (the agent names are the KEYS —
+      // `remapModelRefs` remaps map KEYS and would be a no-op here). A
+      // non-matching ref stays untouched, and an entry whose `.model` is ABSENT
+      // is copied VERBATIM: absence is ADR 0067's only meaning of "this override
+      // does not speak", so the rename must never turn it into `null`.
+      const remappedOverrides: AgentOverrides = {};
+      for (const [name, override] of Object.entries(settings.agentOverrides)) {
+        remappedOverrides[name] = {
+          ...override,
+          model: remapModelRef(override.model ?? "", current.id, id),
+        };
       }
-      nextSettings.subagentModels = remappedOverrides;
+      nextSettings.agentOverrides = remappedOverrides;
     }
     update(nextSettings);
     void listModels(id).then(setModels).catch(() => {});

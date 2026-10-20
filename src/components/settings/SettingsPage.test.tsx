@@ -52,7 +52,7 @@ const baseSettings: AppSettings = {
   },
   font: { sizePx: 14, uiFamily: null, codeFamily: null },
   defaultThinkingLevels: {},
-  subagentModels: {},
+  agentOverrides: {},
   spinnerStyle: null,
   filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
   web: {
@@ -117,7 +117,7 @@ vi.mock("../../lib/tauri", async () => {
       },
       font: { sizePx: 14, uiFamily: null, codeFamily: null },
       defaultThinkingLevels: {},
-      subagentModels: {},
+      agentOverrides: {},
       spinnerStyle: null,
       filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
       web: {
@@ -534,7 +534,7 @@ describe("SettingsPage (the ZCode port — sections + immediate save)", () => {
       ...baseSettings,
       defaultModel: "tama/Qwen3.8",
       defaultThinkingLevels: { "tama/Qwen3.8": "xhigh" },
-      subagentModels: { scout: "tama/m1" },
+      agentOverrides: { scout: { model: "tama/m1" } },
     });
     render(<SettingsPage onBack={vi.fn()} />);
     await loaded();
@@ -553,12 +553,46 @@ describe("SettingsPage (the ZCode port — sections + immediate save)", () => {
     expect(saved.defaultThinkingLevels).toEqual({
       "another-name/Qwen3.8": "xhigh",
     });
-    // (ADR 0023) The per-agent subagent overrides ride along re-mapped by
-    // VALUE (the agent name is the key — the model ref is the value; a
+    // (ADR 0066) The per-agent overrides ride along re-mapped by the entry's
+    // `.model` VALUE (the agent name is the key — the model ref is the value; a
     // non-matching value stays untouched).
-    expect(saved.subagentModels).toEqual({ scout: "another-name/m1" });
+    expect(saved.agentOverrides).toEqual({ scout: { model: "another-name/m1" } });
     // The discovery re-runs under the new id.
     expect(listModels).toHaveBeenCalledWith("another-name");
+  });
+
+  it("a_name_commit_leaves_an_override_without_a_model_verbatim", async () => {
+    // The ADR 0067 half of the re-point: an entry whose `.model` is ABSENT
+    // means "this override does not speak about the model", and the rename must
+    // copy the entry VERBATIM — writing `model: null` would be a third state
+    // the store forbids (`skip_serializing_if = "Option::is_none"`), so a save
+    // that added the key would persist an override the resolver must then
+    // reconcile instead of skip. The `plan` entry's non-matching ref and its
+    // `tools` list are the second half: neither may be touched.
+    vi.mocked(getSettings).mockResolvedValueOnce({
+      ...baseSettings,
+      agentOverrides: {
+        scout: { thinking: "high" },
+        plan: { model: "other/m9", tools: ["read"] },
+      },
+    });
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    await go("Providers");
+    const nameInput = await screen.findByDisplayValue("Tama");
+    fireEvent.change(nameInput, { target: { value: "Another Name" } });
+    fireEvent.blur(nameInput);
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(1));
+    const saved = vi.mocked(saveSettings).mock.calls[0][0] as AppSettings;
+    expect(saved.agentOverrides).toEqual({
+      scout: { thinking: "high" },
+      plan: { model: "other/m9", tools: ["read"] },
+    });
+    // And the ABSENCE is literally preserved (not `undefined`-valued): the
+    // store's `skip_serializing_if` only drops an absent key, and a `model:
+    // undefined` written by a `{ ...override, model: undefined }` spread would
+    // serialize as `"model": null` on the Rust side — so the key must not exist.
+    expect("model" in (saved.agentOverrides.scout ?? {})).toBe(false);
   });
 
   it("a_blank_name_keeps_the_provider_id", async () => {

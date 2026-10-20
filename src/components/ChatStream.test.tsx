@@ -68,7 +68,7 @@ const SETTINGS_FIXTURE: AppSettings = {
   mcpServers: {},
   font: { sizePx: 14, uiFamily: null, codeFamily: null },
   defaultThinkingLevels: {},
-  subagentModels: {},
+  agentOverrides: {},
   spinnerStyle: null,
   filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
   web: {

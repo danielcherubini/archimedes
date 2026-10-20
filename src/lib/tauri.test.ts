@@ -25,8 +25,10 @@ import {
   externalOpen,
   getWindowState,
   listenWindowState,
+  listAgentConfig,
   listCompletionEntries,
   listSpaceFiles,
+  type AgentConfigDto,
   type WindowFrameState,
 } from "./tauri";
 
@@ -346,5 +348,80 @@ describe("getWindowState / listenWindowState (the Linux window tiling IPC bounda
       payload,
     });
     expect(handler).toHaveBeenCalledWith(payload);
+  });
+});
+
+describe("listAgentConfig (the sidebar Agents modal's IPC boundary, ADR 0068)", () => {
+  beforeEach(() => {
+    mockedInvoke.mockReset();
+  });
+
+  it("invokes `list_agent_config` with the `cwd` argument key", async () => {
+    mockedInvoke.mockResolvedValue([]);
+    await listAgentConfig("/p/space");
+    // Same trap as `list_space_files` above: Tauri maps a camelCase arg KEY to
+    // the snake_case Rust parameter, and `listSkills` proves the rule costs a
+    // rename (its Rust `space_path` is sent as `spacePath`). `cwd` is ONE word,
+    // so it must stay `cwd` — `cwdPath`/`spacePath` here is a runtime-only
+    // failure no Rust test can see (the Rust tests call `agent_config`
+    // directly, never over IPC) and no hook test can see (Task 5 mocks THIS
+    // wrapper). `listAgentDefinitionsForSpace` is the neighbouring precedent
+    // for the exact same key on the same-shaped command.
+    expect(mockedInvoke).toHaveBeenCalledWith("list_agent_config", {
+      cwd: "/p/space",
+    });
+  });
+
+  it("sends `cwd: null` for the app-scope call — NEVER an omitted key", async () => {
+    mockedInvoke.mockResolvedValue([]);
+    await listAgentConfig(null);
+    // `cwd` is `Option<String>` on the Rust side, so an ABSENT key would also
+    // deserialize to `None` — which is exactly why the explicit `null` is
+    // asserted as a CONTRACT and not as a necessity: it is what the
+    // neighbouring wrappers do (`{ cwd: spacePath ?? null }`), and a future
+    // `cwd ? { cwd } : {}` would silently change the wire shape.
+    // `toHaveBeenCalledWith` already distinguishes `null` from absent; the `in`
+    // check says it out loud, as the `externalOpen` pin above does.
+    const args = mockedInvoke.mock.calls[0][1] as Record<string, unknown>;
+    expect(mockedInvoke.mock.calls[0][0]).toBe("list_agent_config");
+    expect("cwd" in args).toBe(true);
+    expect(args.cwd).toBeNull();
+    expect(mockedInvoke).toHaveBeenCalledWith("list_agent_config", {
+      cwd: null,
+    });
+  });
+
+  it("returns the rows UNCHANGED (no reshaping of the report)", async () => {
+    // The row shape is pinned here rather than left to the modal's tests,
+    // because every name below crosses IPC: `override_` in Rust (a keyword)
+    // ships as `override`, and the three column structs serialize their
+    // `Option`s ALWAYS PRESENT as `null` (no `skip_serializing_if`) — which is
+    // why the TypeScript fields are `string | null` and not optional. A rename
+    // on either side is invisible to both suites and shows up as a modal that
+    // renders "Inherits parent" for a value the file actually set. The payload
+    // is a REAL serialized row (ADR 0068's `shadowed` included, required and
+    // empty-as-`[]`).
+    const row: AgentConfigDto = {
+      name: "scout",
+      description: "Fast recon.",
+      scope: "space",
+      path: "/p/scout.md",
+      file: { model: "fake/m1", thinking: null, tools: null },
+      override: { model: null, thinking: null, tools: null },
+      effective: { model: "fake/m1", thinking: null, tools: null },
+      source: { model: "file", thinking: "parent", tools: "parent" },
+      shadowed: [{ name: "scout", path: "/u/scout.md", scope: "user" }],
+    };
+    mockedInvoke.mockResolvedValue([row]);
+    await expect(listAgentConfig("/p/space")).resolves.toEqual([row]);
+
+    // And the column is read as `override`, never Rust's `override_` (a
+    // keyword): this compile-time field access IS the pin — a TS type that
+    // declared `override_` would not type-check here, and the modal's editor
+    // would read a column that never arrives.
+    const [out] = await listAgentConfig("/p/space");
+    expect(out.override).toEqual({ model: null, thinking: null, tools: null });
+    expect(out.source.model).toBe("file");
+    expect(out.shadowed).toHaveLength(1);
   });
 });

@@ -58,7 +58,7 @@ function settingsFixture(overrides: Partial<AppSettings> = {}): AppSettings {
     mcpServers: {},
     font: { sizePx: 14, uiFamily: null, codeFamily: null },
     defaultThinkingLevels: {},
-    subagentModels: {},
+    agentOverrides: {},
     spinnerStyle: null,
     filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
     web: {
@@ -155,7 +155,7 @@ describe("loadAndApplySettings", () => {
       mcpServers: {},
       font: { sizePx: 16, uiFamily: "Inter", codeFamily: null },
       defaultThinkingLevels: {},
-      subagentModels: {},
+      agentOverrides: {},
       spinnerStyle: null,
       filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
       web: {
