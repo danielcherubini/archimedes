@@ -914,12 +914,12 @@ function SessionRow({
           was deleted and nothing replaced it, so a running Session had no way to
           be stopped or put away without opening it first. */}
       <span className="group-hover:hidden">{rightSlot}</span>
+      {/* Stop first: it is the action that pertains to a session that is RUNNING, so the
+          row reads left-to-right as "stop what's running, then put it away". The Archived
+          row keeps its destructive control OUTERMOST (Unarchive then Delete); this row
+          deliberately does not copy that — Archive is not destructive (ADR 0016:
+          reversible, and it never destroys a transcript). */}
       {isLive && (
-        // Stop first: it is the action that pertains to a session that is RUNNING,
-        // so the row reads left-to-right as "stop what's running, then put it away".
-        // The Archived row keeps its destructive control OUTERMOST (Unarchive then
-        // Delete); this row deliberately does not copy that — Archive is not
-        // destructive (ADR 0016: reversible, and it never destroys a transcript).
         <button
           type="button"
           title={inTurn ? "Stop this turn" : "Stop this session"}

@@ -6,6 +6,8 @@ done-when: Hovering a LIVE session row in the sidebar reveals a Stop button and 
 
 # Sidebar session rows — Stop and Archive on live rows: Plan
 
+**Status note (2026-10-20):** executed on branch `feature/70-sidebar-session-stop-and-archive`; the line citations in this plan were re-verified against the post-feature tree. The ones this branch's own commits invalidated now carry symbol anchors instead; the numbers left inside the task steps name the positions in the tree the plan was written against, and the changes they describe have all landed.
+
 **Goal:** Give a **live** session row in the left panel the two hover actions it has never had — **Stop** and **Archive** — where today only a *stored* row offers Archive and a live row offers nothing at all.
 
 **Architecture:** Two new/changed **store actions** in `src/store/sessions.ts` (`archiveSession` widened to accept a live id and to close it *after* the flag commits; a new `stopSession` that cancels or closes based on `inTurn`), then one **render change** in `SessionRow` (`src/components/SpacesList.tsx`) that stops branching on `isLive` and renders the existing hover-swap for every row. The final task writes the two docs. **No Rust changes** — `close_session` already cancels an in-flight turn, and `handleSessionClosed` already honours the sticky archived flag.
@@ -27,8 +29,9 @@ Both are already true in the code today; the plan leans on them rather than repl
    the Worker detach, so the race between the router's `agent_settled` arm and the
    `Exited` teardown settles the turn `Cancelled` either way. Consequently **no branch of
    the design can leave a turn running.**
-2. **`handleSessionClosed` already honours the sticky flag.** `src/store/sessions.ts:1486`
-   refuses to append a closing Session to `historySessions` when its id is in
+2. **`handleSessionClosed` already honours the sticky flag.** The `historySessions:` arm of
+   `handleSessionClosed` (`src/store/sessions.ts`) refuses to append a closing Session to
+   `historySessions` when its id is in
    `archivedSessions` (ADR 0016). This is why Archive is **flag-then-close**: the existing
    guard does the landing, and the row surfaces in the Archived section and nowhere else.
    Reversing the two races the async `session-closed` event against the store move and
@@ -36,10 +39,11 @@ Both are already true in the code today; the plan leans on them rather than repl
 
 **One transient is expected — do not try to remove it.** Between the store move and the
 arriving `session-closed`, the row still reads as a live row in its Space group, because
-`ArchivedSection` filters live ids out of the Archived list (`SpacesList.tsx:953`, and the
-existing test `"a live session that is also archived is view-filtered out of the Archived
-section"` pins that filter at `SpacesList.test.tsx:1820`). So the row makes **one** visual
-move — out of the Space group and into Archived, at the moment it stops being live — rather
+`ArchivedSection`'s live-id filter (`SpacesList.tsx`, the `visible` computation) keeps live
+ids out of the Archived list — the existing test `"a live session that is also archived is
+view-filtered out of the Archived section"` in `SpacesList.test.tsx` pins it. So the row
+makes **one** visual move — out of the Space group and into Archived, at the moment it stops
+being live — rather
 than appearing in Archived and then again. Do not "fix" the gap by dropping the live-id
 filter: that filter is what stops a resumed archived Session from rendering twice.
 
@@ -68,7 +72,7 @@ flag. Do not add a Rust-side liveness guard; there is nothing to guard.
   execution, so the turn is open and the flag is set. That is the gentler and correct act.
 - **A failed `closeSession` does not roll the flag back.** Archive's one job is hiding the
   Session from the next boot's list, and the DB flag has already achieved that. Log and
-  carry on, matching `closeSpace`'s existing stance (`sessions.ts:694`).
+  carry on, matching `closeSpace`'s existing stance (`sessions.ts`, the `closeSpace` action).
 - **`compacting` gets no branch of its own — and the two compaction kinds land on
   different Stop paths, which is fine.** A hand-triggered `/compact` runs on the loop's
   CONTROL channel *while the loop is idle* (`compact_session`'s doc comment,
@@ -104,7 +108,7 @@ back deliberately to document proven behaviour.
 
 **Context:**
 A live session row today has no action at all, and even if it did, `archiveSession`
-(`src/store/sessions.ts:811`) would silently no-op: it returns early unless the id is in
+(`src/store/sessions.ts`) would silently no-op: it returns early unless the id is in
 `historySessions`, so a live id never reaches the backend call. This task makes the store
 able to do the two things the row will ask for, and gets the ordering right — flag first,
 close second — so the existing sticky guard in `handleSessionClosed` lands the row in the
@@ -112,7 +116,7 @@ Archived section by itself. Nothing here touches Rust: `set_session_archived` do
 whether the Session is live, and `close_session` already cancels a running turn.
 
 **Files:**
-- Modify: `src/store/sessions.ts` (import block lines 3–18; `SessionsState` interface near line 276; `archiveSession` at line 811; add `stopSession` beside it)
+- Modify: `src/store/sessions.ts` (import block lines 3–18; `SessionsState` interface near line 276; the `archiveSession` action; add `stopSession` beside it)
 - Test: `src/store/sessions.test.ts` (the `vi.mock("../lib/tauri")` factory at lines 40–69; the named `../lib/tauri` import list at 21–28; `describe("archivedSessions (sticky, ADR 0016)")` at line 2489; new `describe("stopSession", …)` beside `describe("closeSpace", …)` at line 2859)
 
 **What to implement:**
@@ -154,11 +158,11 @@ if (wasLive) {
   // Archive means "put this away", and a live Session is not away while its
   // Worker runs. The order is the whole design: the flag is committed and the
   // lists moved FIRST, so when `session-closed` lands, `handleSessionClosed`'s
-  // sticky guard (`:1486` — it refuses to file a closing archived Session under
-  // `historySessions`) is what lands the row in `archivedSessions` alone.
+  // sticky guard (its `historySessions:` arm refuses to file a closing archived Session
+  // under `historySessions`) is what lands the row in `archivedSessions` alone.
   // Close-first would race the async event against the store move and flicker
   // the row through the Space group.
-  // Best-effort like `closeSpace` (`:694`): a mid-await delete makes this
+  // Best-effort like `closeSpace`: a mid-await delete makes this
   // `UnknownSession`, and the DB flag has already done Archive's one durable
   // job — hiding it from the next boot — so a failure is logged, not thrown,
   // and the flag is NOT rolled back.
@@ -177,14 +181,19 @@ if (wasLive) {
   Session stays live and archived, which is exactly what that test asserts
   (`sessions` still contains `s1`). Re-reading liveness after the `set` would close a
   Session the user never clicked Archive on. Leave the capture where it is.
-- **A double-click archives once and logs one harmless error.** Both invocations see
-  `wasLive === true`, both commit the flag (the existing `set` dedupe keeps
-  `archivedSessions` correct), and the second `close_session` hits an id that is already
-  detaching → `UnknownSession` → rejected → caught and logged by the `.catch` above. That
-  log line is the expected outcome of a double-click, not a defect to fix with new
-  de-duplication state. The existing `"archiveSession is idempotent under concurrent
-  invocation"` test seeds a STORED row, so `wasLive` is false there and the test never
-  reaches the close at all — it stays green unchanged.
+- **A double-click archives once, and the second close is a silent no-op.** Both invocations
+  see `wasLive === true`, both commit the flag (the existing `set` dedupe keeps
+  `archivedSessions` correct), and the second `close_session` SUCCEEDS having done nothing:
+  its guard is the Rust `live` map, and `live.remove` happens only in the router's
+  expected-exit teardown — AFTER the reap's 2 s grace + `kill` — so a real double-click,
+  milliseconds later, still finds the `live` entry, misses on `detach` (the Worker is already
+  detached), and returns `Ok(())`. That is `close_session`'s documented "idempotent close".
+  So there is NO rejection and NO log line for a double-click; the `.catch` above stays quiet.
+  A rejection appears only when the second close arrives AFTER that teardown (> ~2 s later),
+  when the `live` entry is finally gone → `UnknownSession` → logged. Neither outcome is a
+  defect to fix with new de-duplication state. The existing `"archiveSession is idempotent
+  under concurrent invocation"` test seeds a STORED row, so `wasLive` is false there and the
+  test never reaches the close at all — it stays green unchanged.
 
 **c) `stopSession` — a new action.** Declare it on `SessionsState` immediately after
 `unarchiveSession` (line 278; `archiveSession`'s declaration sits just above it at 276), with a doc comment that names both effects, the click-time
@@ -538,7 +547,7 @@ ADR is **not** superseded and its front-matter `status: accepted` is unchanged).
 must state:
 
 - Archive on a **live** Session now also **stops** it, and the order is **flag-then-close** —
-  because `handleSessionClosed` (`src/store/sessions.ts:1486`) already refuses to file a
+  because `handleSessionClosed` (`src/store/sessions.ts`, the `historySessions:` arm) already refuses to file a
   closing archived Session under `historySessions`, so committing the flag first is what lets
   that existing guard land the row in the Archived section; close-first races the async
   `session-closed` event and flickers the row through the Space group;

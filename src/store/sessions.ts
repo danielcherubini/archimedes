@@ -310,6 +310,20 @@ interface SessionsState {
    * compaction runs INSIDE a turn, so it takes the cancel arm.) Adding a
    * `compacting` branch here is a decision to make, not a tidy-up to do.
    *
+   * A FOURTH state reaches this action and stops nothing: a STALLED Session (its
+   * Worker crashed) is still a live row. `handle_crash`
+   * (`src-tauri/src/agent/session/router.rs`) marks it stalled and emits
+   * `session-stalled`, but removes no `live` entry and emits no `session-closed` —
+   * only the expected-exit teardown does that, and a crash's `Exited` is terminal,
+   * so it never runs; `markStalled` touches only `stalled` / `compacting`, so the
+   * id stays in `sessions`. Whichever arm Stop takes there is no Worker behind it:
+   * `cancel_session` writes an `Abort` nobody is left to read (the result is
+   * discarded), and `close_session` passes the `live` guard, reaps nothing
+   * and answers `Ok(())` — so Stop RESOLVES HAVING STOPPED NOTHING and the row does
+   * not move. The banner's Resume is the way out of a stalled Session. Repairing
+   * that row's liveness bookkeeping is its own decision, not a tidy-up to fold in
+   * here.
+   *
    * A no-op for a non-live id. Rejections propagate — the row logs them.
    */
   stopSession: (sessionId: string) => Promise<void>;
@@ -910,7 +924,10 @@ export const useSessions = create<SessionsState>((set, get) => ({
       // Best-effort like `closeSpace`: a mid-await delete makes this
       // `UnknownSession`, and the DB flag has already done Archive's one durable
       // job — hiding it from the next boot — so a failure is logged, not thrown,
-      // and the flag is NOT rolled back.
+      // and the flag is NOT rolled back. A STALLED Session's close no-ops the same
+      // way `stopSession`'s does — silently and successfully, no Worker and no
+      // `session-closed` — so the flag lands while the row stays visible in its Space
+      // group until the next boot.
       await closeSessionCommand(sessionId).catch((err) => {
         console.error(`failed to close the archived session ${sessionId}:`, err);
       });
