@@ -1,7 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { deleteSession, listSkills, setSessionArchived, startSession } from "../lib/tauri";
+import * as React from "react";
+import {
+  deleteSession,
+  getSettings,
+  listSkills,
+  saveSettings,
+  setSessionArchived,
+  startSession,
+  type AgentConfigDto,
+  type AppSettings,
+} from "../lib/tauri";
 import { useSessions } from "../store/sessions";
+import { useSettings } from "../store/settings";
 import { usePermissions } from "../store/permissions";
 import { useInteractive } from "../store/interactive";
 import {
@@ -14,7 +25,68 @@ import {
   setNewSpaceDialogOpen,
 } from "../lib/newSpaceDialogState";
 import { clearSkillCatalogCache } from "../hooks/useSkillCatalog";
+import { clearAgentCatalogCache } from "../hooks/useAgentCatalog";
 import SpacesList from "./SpacesList";
+
+/**
+ * The settings document the STORE is seeded with (see the `beforeEach` below).
+ *
+ * TYPED as `AppSettings`, which is deliberate: the `getSettings` mock factory's
+ * literal below is untyped (a hoisted `vi.mock` factory cannot reference an outer
+ * const), so `tsc` cannot check that document for a missing key. This one is
+ * checked, and `AgentsDialog` reads `settings.agentOverrides` off the STORE — so
+ * if this fixture ever lacks the field, the build catches it instead of the modal
+ * throwing for a key that only shows up at runtime.
+ */
+const SETTINGS_FIXTURE: AppSettings = {
+  theme: "dark",
+  palette: null,
+  paneLayout: {},
+  defaultTrustNewSpaces: false,
+  // The value the STORE holds. The read-modify-write test below makes the
+  // RE-READ return a different one, which is what proves the save composes from
+  // the fresh document and not from this copy.
+  defaultModel: "stale/model",
+  defaultThinkingLevel: null,
+  enabledTools: [],
+  providers: [],
+  mcpServers: {},
+  font: { sizePx: 14, uiFamily: null, codeFamily: null },
+  defaultThinkingLevels: {},
+  agentOverrides: {},
+  spinnerStyle: null,
+  filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
+  web: {
+    braveApiKey: "",
+    tavilyApiKey: "",
+    perplexityApiKey: "",
+    searxngUrl: "",
+    defaultProvider: "auto",
+    proxy: "",
+  },
+  mcpMentionsEnabled: false,
+  sessionNamingEnabled: true,
+  sessionNamingModel: null,
+  sessionNamingReasoning: null,
+  attentionAlertsEnabled: true,
+  attentionAlertDelaySecs: 15,
+};
+
+/** One `list_agent_config` row (the Agents modal's data). */
+function agentRow(overrides: Partial<AgentConfigDto> = {}): AgentConfigDto {
+  return {
+    name: "scout",
+    description: "Fast recon",
+    scope: "user",
+    path: "/u/.agents/agents/scout.md",
+    file: { model: null, thinking: null, tools: null },
+    override: { model: null, thinking: null, tools: null },
+    effective: { model: null, thinking: null, tools: null },
+    source: { model: "parent", thinking: "parent", tools: "parent" },
+    shadowed: [],
+    ...overrides,
+  };
+}
 
 // Mock the Tauri IPC layer; everything else (stores) is the real code.
 vi.mock("../lib/tauri", async () => {
@@ -22,9 +94,13 @@ vi.mock("../lib/tauri", async () => {
   return {
     ...actual,
     // `AppSettings` document (a full shape — the `AppSettings` interface
-    // mirrors the Rust `Settings` struct exactly).
+    // mirrors the Rust `Settings` struct exactly). UNtyped, because a hoisted
+    // `vi.mock` factory cannot reference the typed `SETTINGS_FIXTURE` above —
+    // which is exactly why `agentOverrides: {}` had to be added to this literal
+    // BY HAND and why the store seeding below uses the typed one instead.
     getSettings: vi.fn().mockResolvedValue({
       theme: "dark",
+      palette: null,
       paneLayout: {},
       defaultTrustNewSpaces: false,
       defaultModel: null,
@@ -35,6 +111,7 @@ vi.mock("../lib/tauri", async () => {
       font: { sizePx: 14, uiFamily: null, codeFamily: null },
       defaultThinkingLevels: {},
       agentOverrides: {},
+      spinnerStyle: null,
       filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
       web: {
         braveApiKey: "",
@@ -75,12 +152,69 @@ vi.mock("../lib/tauri", async () => {
     ]),
     setSessionArchived: vi.fn().mockResolvedValue(true),
     deleteSession: vi.fn().mockResolvedValue(undefined),
+    // The Agents modal's three catalog sources + its write path.
+    listAgentConfig: vi.fn().mockResolvedValue([agentRow()]),
+    listModels: vi.fn().mockResolvedValue([
+      {
+        id: "Qwen3.8",
+        provider: "tama",
+        contextWindow: 200_000,
+        supportsThinking: true,
+        thinkingLevels: ["high", "medium", "low"],
+      },
+    ]),
+    listTools: vi.fn().mockResolvedValue(["grep", "read_file"]),
+    saveSettings: vi.fn().mockResolvedValue(undefined),
   };
 });
 
 const mockedStartSession = vi.mocked(startSession);
 const mockedListSkills = vi.mocked(listSkills);
 const mockedDeleteSession = vi.mocked(deleteSession);
+const mockedGetSettings = vi.mocked(getSettings);
+const mockedSaveSettings = vi.mocked(saveSettings);
+
+/**
+ * The MOUNT PROBE for the render-site pin (see
+ * `the dialog is mounted OUTSIDE the panes content region`).
+ *
+ * Why a probe and not an ancestor walk on the dialog node: `DialogContent` portals
+ * itself to `document.body` — Radix's `Dialog.Content` renders an internal `Portal`
+ * for a modal dialog, NOT the `DialogPortal` the app's `ui/dialog` merely re-exports
+ * (stubbing that wrapper is INERT; `Dialog.Content` portals regardless, which is how
+ * this test was first written and found vacuous). So in any real mount the dialog
+ * node is a child of `document.body` whether the component was mounted inside the
+ * `visibility: hidden` content region or beside it — `contains()` and any
+ * `painted()`-style ancestor walk pass EVEN WITH THE BUG PRESENT.
+ *
+ * The wrapper below renders an ordinary (unportalled) node next to the real dialog.
+ * Its position in the DOM is EXACTLY where `SpacesList` mounted the component, so it
+ * reports the one fact the collapse depends on. Real `AgentsDialog` is still
+ * rendered, so every other test in this file runs against the real modal; the probe
+ * is a sibling `div` with no role, so it cannot disturb a `getByRole` query.
+ */
+let probeOn = false;
+
+vi.mock("./AgentsDialog", async () => {
+  const actual = await vi.importActual<typeof import("./AgentsDialog")>(
+    "./AgentsDialog",
+  );
+  const Real = actual.default;
+  return {
+    default: (props: Parameters<typeof Real>[0]) =>
+      React.createElement(
+        React.Fragment,
+        null,
+        // Read at RENDER time (the factory is hoisted above this file's `let`).
+        probeOn
+          ? React.createElement("div", {
+              "data-testid": "agents-mount-probe",
+            })
+          : null,
+        React.createElement(Real, props),
+      ),
+  };
+});
 
 /**
  * Whether a node is PAINTED — i.e. neither it nor any ancestor carries
@@ -145,11 +279,25 @@ beforeEach(() => {
   seed();
   vi.clearAllMocks();
 });
+// Seed the SETTINGS STORE. `SpacesList.tsx` did not read `useSettings` before the
+// Agents modal mounted (only `main.tsx`'s boot path ever populated it), and this
+// file never seeded it — so with the mount's `settings &&` guard the dialog would
+// render in NO test here, and every failure would read as "the Agents button is
+// broken" when the real cause is an empty store. The same seeding pattern
+// `ChatStream.test.tsx` uses. Reset to `null` first: the store is module-scoped,
+// so a test that writes settings must not leak them into the next one.
+beforeEach(() => {
+  useSettings.setState({ settings: null, loaded: false });
+  useSettings.getState().setSettings(SETTINGS_FIXTURE);
+});
 // The hook's module-level catalog cache is shared across tests in a
 // file: clear it so each test refetches (without this, test 1's warm
 // cache — keyed by the `seed()` fixture's `cwd` — makes a later test's
 // fresh `listSkills` mock moot).
 beforeEach(clearSkillCatalogCache);
+// …and the same for the Agent catalog's module-level cache (the Agents modal
+// fetches through `useAgentCatalog`, keyed by the `seed()` fixture's Space).
+beforeEach(clearAgentCatalogCache);
 // The left-pane collapsed flag is module-scoped: reset it between tests
 // (the module is the single persistence owner — `setLeftPaneCollapsed`
 // writes localStorage itself).
@@ -165,6 +313,11 @@ beforeEach(() => {
 // FILE scope, not inside one `describe`.
 beforeEach(() => {
   setNewSpaceDialogOpen(false);
+});
+// The mount probe above is a module-level switch: a test that asks for it must
+// not leak it into the tests after it.
+beforeEach(() => {
+  probeOn = false;
 });
 
 describe("SpacesList", () => {
@@ -559,6 +712,156 @@ describe("SpacesList", () => {
     fireEvent.click(screen.getByRole("button", { name: "Skills" }));
     await screen.findByText("No skills found.");
   });
+
+  // -------------------------------------------------------------------------
+  // The Agents modal (ADR 0066 / ADR 0068) — the fourth command in this pane,
+  // mounted beside `Skills` with the same two boundaries: it must survive the
+  // collapse (the rail icon), and it must render OUTSIDE the content region.
+  // -------------------------------------------------------------------------
+
+  it("an_Agents_button_exists_and_opens_the_dialog", async () => {
+    render(<SpacesList />);
+    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
+    // `getByRole("dialog")`, NEVER a text query: the pane now holds BOTH a
+    // button labelled `Agents` AND a `DialogTitle` reading `Agents`, so
+    // `findByText("Agents")` matches two nodes and throws on ambiguity (the same
+    // hazard this file documents for `Skills`).
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Agents")).toBeTruthy();
+    // The row came from `list_agent_config` keyed by the ACTIVE Space.
+    expect(within(dialog).getByText("scout")).toBeTruthy();
+  });
+
+  it("the_collapsed_rails_Agents_icon_opens_the_dialog_too", async () => {
+    act(() => {
+      setLeftPaneCollapsed(true);
+    });
+    render(<SpacesList />);
+    fireEvent.click(screen.getByTitle("Agents"));
+    // The dialog renders while the pane is COLLAPSED — the acceptance criterion,
+    // and the reason the render site sits outside the `invisible` content region.
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("scout")).toBeTruthy();
+  });
+
+  it("the dialog is mounted OUTSIDE the panes content region (structural)", async () => {
+    // The hazard is real and invisible: the content region carries
+    // `visibility: hidden` while the pane is collapsed, and `visibility` INHERITS
+    // into `fixed` descendants — a dialog mounted inside that region opens with
+    // nothing painted. The file's comment at the close of the region says exactly
+    // this about `SkillsDialog`, and the Agents dialog has the same requirement.
+    //
+    // WHY THE ASSERTION IS STRUCTURAL AND NOT A `visibility` TEST OF THE DIALOG.
+    // `DialogContent` portals itself to `document.body` (Radix's `Dialog.Content`
+    // renders an internal `Portal` — not the `DialogPortal` `ui/dialog`
+    // re-exports, so stubbing THAT wrapper is inert; an ancestor walk on the real
+    // dialog passed even with the dialog mounted inside the hidden region).
+    // jsdom therefore CANNOT demonstrate the `visibility` argument behaviourally on
+    // the dialog node: it is never a DOM descendant of the region in ANY
+    // configuration.
+    //
+    // The `agents-mount-probe` (see the mock at the top of this file) is an
+    // ordinary un-portalled node rendered at the same site as the dialog, so its
+    // PARENT reports where the component was actually mounted. The second
+    // assertion reads the same `invisible` class the collapse applies through the
+    // `painted()` helper — the structural statement of the `visibility` argument.
+    // Move the `{agentsOpen && settings && …}` render inside the content-region
+    // `<div>` and BOTH assertions go red (measured; see the commit notes).
+    probeOn = true;
+    act(() => {
+      setLeftPaneCollapsed(true);
+    });
+    const { container } = render(<SpacesList />);
+    const pane = container.firstChild as HTMLElement;
+    expect(pane.tagName).toBe("ASIDE");
+    // THE CONTENT REGION — the div that carries `invisible` while collapsed. The
+    // dialogs sit under the `<aside>` BESIDE this div, so the region (not the pane
+    // frame) is the container whose `visibility` is the hazard.
+    const contentRegion = pane.firstElementChild as HTMLElement;
+    expect(contentRegion.classList.contains("invisible")).toBe(true);
+    fireEvent.click(screen.getByTitle("Agents"));
+    const probe = await screen.findByTestId("agents-mount-probe");
+    // The dialog ITSELF is rendered too (the probe is a sibling, not a
+    // replacement) — so this cannot pass on a component that never mounted.
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    // The mount site is outside the hidden region…
+    expect(contentRegion.contains(probe)).toBe(false);
+    // …and consequently PAINTED while collapsed.
+    expect(painted(probe)).toBe(true);
+  });
+
+  it("the Portal relocates the dialog to document.body (why the test above needs a probe)", async () => {
+    // The fact that makes a plain structural walk vacuous, pinned rather than
+    // assumed: with the Portal live (the default here), the dialog node is a
+    // child of `document.body` — NOT of the pane — whichever render site the
+    // component uses. If Radix ever stops relocating (or the app starts passing a
+    // `container`), the probe above stops being the only discriminator and this
+    // test says so out loud.
+    act(() => {
+      setLeftPaneCollapsed(true);
+    });
+    const { container } = render(<SpacesList />);
+    const pane = container.firstChild as HTMLElement;
+    fireEvent.click(screen.getByTitle("Agents"));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.parentElement).toBe(document.body);
+    // Which is exactly the configuration in which `pane.contains(dialog)` is
+    // `false` for BOTH render sites — the reason it is not the assertion of
+    // record above.
+    expect(pane.contains(dialog)).toBe(false);
+  });
+
+  it("picking_a_model_saves_agentOverrides_through_a_read_modify_write", async () => {
+    // The one new write path in the feature. The save must be composed from a
+    // FRESH `get_settings` read, never from the store's copy: Rust writes
+    // `settings.json` on its own (`agent/session/mod.rs:1678` persists a
+    // remembered thinking level via load-mutate-write), so the store can be
+    // holding a stale document and composing from it would silently clobber a
+    // concurrent change.
+    //
+    // The re-read returns a document whose `defaultModel` DIFFERS from the store
+    // fixture's, so "every other field preserved" can only pass by reading the
+    // fresh document — a save composed from the store would write `stale/model`.
+    // Its `agentOverrides` carries a SECOND agent on purpose: that entry is
+    // expected to be REPLACED away, because the map is the one field the user is
+    // editing and the dialog hands over the whole edited map (see the write
+    // helper's comment in `SpacesList.tsx` — sound precisely because nothing
+    // outside this modal ever writes the map).
+    const fresh: AppSettings = {
+      ...SETTINGS_FIXTURE,
+      defaultModel: "fresh/model",
+      agentOverrides: { plan: { thinking: "high" } },
+    };
+    // The store seed (already set) is `SETTINGS_FIXTURE`; the RE-READ is `fresh`.
+    mockedGetSettings.mockResolvedValue(fresh);
+    render(<SpacesList />);
+    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Model for scout" }),
+    );
+    fireEvent.click(await screen.findByText("Qwen3.8"));
+    await waitFor(() => expect(mockedSaveSettings).toHaveBeenCalledTimes(1));
+    // The re-read happened BEFORE the save (the read-modify-write order).
+    expect(mockedGetSettings.mock.invocationCallOrder[0]).toBeLessThan(
+      mockedSaveSettings.mock.invocationCallOrder[0],
+    );
+    expect(mockedSaveSettings).toHaveBeenCalledWith({
+      ...fresh,
+      agentOverrides: { scout: { model: "tama/Qwen3.8" } },
+    });
+    // Every field OTHER than the edited map is the FRESH document's, byte-identical
+    // — the store's stale `defaultModel` must not appear anywhere in the call.
+    const saved = mockedSaveSettings.mock.calls[0][0];
+    expect(saved.defaultModel).toBe("fresh/model");
+    expect(JSON.stringify(saved)).not.toContain("stale/model");
+    // And the store now agrees with the file (a divergent store is how the next
+    // write gets composed from a document that no longer exists).
+    expect(useSettings.getState().settings).toEqual({
+      ...fresh,
+      agentOverrides: { scout: { model: "tama/Qwen3.8" } },
+    });
+  });
 });
 
 describe("SpacesList (archive, ADR 0016)", () => {
@@ -825,8 +1128,8 @@ describe("SpacesList (archive, ADR 0016)", () => {
       // Every label the toggle has ever carried, plus the gear's, so a rename
       // cannot quietly re-add one of these two controls here and leave this
       // test vacuous. The pane's OWN commands (`Open Space`, `New Session`,
-      // `Skills`) are NOT in this list — they legitimately survive the collapse
-      // as rail icons, which is what the rail's own tests assert.
+      // `Skills`, `Agents`) are NOT in this list — they legitimately survive the
+      // collapse as rail icons, which is what the rail's own tests assert.
       for (const label of [
         "Collapse sidebar",
         "Expand sidebar",
@@ -945,7 +1248,7 @@ describe("SpacesList (archive, ADR 0016)", () => {
     // takes the content AND ITS SCROLLBAR out of the paint while leaving it
     // mounted (`hidden` would unlayout it, and clipping alone is what produced
     // the wrapped text and the stray scrollbar).
-    for (const label of ["Open Space", "New Session", "Skills", "Sessions", "Archived"]) {
+    for (const label of ["Open Space", "New Session", "Skills", "Agents", "Sessions", "Archived"]) {
       const node = screen.queryByText(label);
       if (node) {
         expect(painted(node), `${label} bleeds into the sliver`).toBe(false);
@@ -1050,16 +1353,22 @@ describe("SpacesList (archive, ADR 0016)", () => {
 
   // -- The rail's action strip: the pane's commands survive the collapse --
 
-  it("offers the pane's three commands as icons while collapsed (not Settings)", () => {
+  it("offers the pane's four commands as icons while collapsed (not Settings)", () => {
     act(() => {
       setLeftPaneCollapsed(true);
     });
     const { container } = render(<SpacesList />);
-    // The list's own three buttons survive the collapse as icons. `Settings` is
+    // The list's own four buttons survive the collapse as icons. `Settings` is
     // deliberately NOT among them: the gear lives in the chrome bar in both
     // states, so the rail used to carry a second copy and that tail strip is
     // gone (see `SessionRail`'s doc).
-    for (const label of ["Open Space", "New Session", "Skills"]) {
+    //
+    // FOUR, not three: `Agents` is the fourth, and it is on the rail because the
+    // labelled button sits inside the region the collapse hides — dropping it
+    // here would give the command a vanishing door, which is the exact defect the
+    // `railActions` comment exists to prevent. Widening the count and this name
+    // together is intentional, not a broken pin.
+    for (const label of ["Open Space", "New Session", "Skills", "Agents"]) {
       expect(
         within(screen.getByTestId("session-rail-actions")).getByRole("button", {
           name: label,
@@ -1069,7 +1378,7 @@ describe("SpacesList (archive, ADR 0016)", () => {
     }
     expect(
       within(screen.getByTestId("session-rail-actions")).getAllByRole("button"),
-    ).toHaveLength(3);
+    ).toHaveLength(4);
     // And nothing here reaches for Settings, in either strip or anywhere else.
     expect(container.querySelector('[data-testid="session-rail-tail-actions"]')).toBeNull();
     expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();

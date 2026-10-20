@@ -564,10 +564,16 @@ mod tests {
     // A3 — the `@`-mention picker boundary. A definition whose name can never
     // equal a mention token is UNNAMEABLE from the composer, so the picker
     // must not offer it (a pick would insert a dead token that never
-    // expands) — but DISCOVERY and the Settings page must keep it, because
+    // expands) — but DISCOVERY and the app-scope listing must keep it, because
     // the harness's `agentName` dispatch still honors it (a name with a space
     // is dispatchable by the model passing it verbatim). This test pins BOTH
     // halves so the dispatch path is provably untouched.
+    //
+    // (Worded as "the app-scope listing" because the surface that used to read it
+    // — Settings → Subagents — is deleted: the sidebar **Agents** modal is the
+    // single Agent surface, and it goes through `list_agent_config`, not through
+    // `list_agent_definitions`. The command's contract is unchanged; only the
+    // screen named here was stale. The assertion in part 2 below is untouched.)
     /// `#[allow(clippy::await_holding_lock)]` is INTENTIONAL: the command reads
     /// `HOME` (via `user_roots`), so the guard must stay held ACROSS the
     /// `.await` to serialize against the other HOME-reading tests — dropping
@@ -631,8 +637,12 @@ mod tests {
             .collect();
         assert_eq!(space_names, vec!["scout".to_string()]);
 
-        // 2. The SETTINGS page is UNCHANGED — it is not a mention surface, so
-        //    it still lists them (the page shows what the harness can run).
+        // 2. The APP-SCOPE LISTING is UNCHANGED (`list_agent_definitions`, what
+        //    `discover_agents(None)` returns for this fixture) — it is not a
+        //    mention surface, so it still lists them. The `settings` local keeps
+        //    its name from when the Settings page was its only consumer; the
+        //    command and this assertion are the unchanged half, only the comment
+        //    was stale.
         let settings: Vec<String> = list_agent_definitions()
             .await
             .unwrap()

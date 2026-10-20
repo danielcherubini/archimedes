@@ -1,7 +1,8 @@
-import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
   ArchiveIcon,
   ArchiveXIcon,
+  BotIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   FolderOpenIcon,
@@ -10,7 +11,16 @@ import {
   SparklesIcon,
   Trash2Icon,
 } from "lucide-react";
-import { type SessionInfo } from "../lib/tauri";
+import {
+  type AppSettings,
+  type AgentOverrides,
+  type ModelDto,
+  type SessionInfo,
+  getSettings,
+  listModels,
+  listTools,
+  saveSettings,
+} from "../lib/tauri";
 import { basenameOfPath } from "../lib/paths";
 import {
   activityFromKey,
@@ -33,7 +43,10 @@ import {
 import { useSessionStatus } from "../hooks/useSessionStatus";
 import { useSessionStatuses } from "../hooks/useSessionStatus";
 import { useSkillCatalog } from "../hooks/useSkillCatalog";
+import { useAgentCatalog } from "../hooks/useAgentCatalog";
+import { useSettings } from "../store/settings";
 import SkillsDialog from "./SkillsDialog";
+import AgentsDialog from "./AgentsDialog";
 import DeleteSessionDialog from "./DeleteSessionDialog";
 import SessionRail, { type SessionRailAction } from "./SessionRail";
 import { SessionStatusMark } from "./SessionStatusMark";
@@ -99,6 +112,12 @@ export default function SpacesList() {
   // receives the rows as props — same hook key as the composer → one
   // shared fetch).
   const [skillsOpen, setSkillsOpen] = useState(false);
+  // The Agents modal (ADR 0066 / ADR 0068) — the ONE Agent surface, mounted
+  // beside Skills with the SAME shape: the fetch lives in `useAgentCatalog`, the
+  // dialog takes rows as props. The settings document is read here too, because
+  // the dialog edits `agentOverrides` and the mount is the only place that owns a
+  // write path.
+  const [agentsOpen, setAgentsOpen] = useState(false);
 
   // Keep the `spaces` list order (`lastOpenedAt` desc from `list_spaces`):
   // groups follow the server's recent-first order.
@@ -180,6 +199,64 @@ export default function SpacesList() {
   // `null` when none is selected (the catalog degrades to user-level
   // skills — the hook's `null` handling).
   const skills = useSkillCatalog(activeSpacePath);
+  // The Agent definitions the ACTIVE Space can see (`cwd: null` → the user-level
+  // set). The override map the modal edits is GLOBAL and identical from every
+  // Space — the Space decides only which definitions get LISTED.
+  const agentRows = useAgentCatalog(activeSpacePath);
+  // The settings document, from the app-wide store (`useSettings` is already read
+  // by non-Settings components — `MessageBubble`, `SessionConfigSelect`,
+  // `ChatStream` — so this is not new plumbing, though this pane did not read it
+  // until the Agents modal mounted here).
+  const settings = useSettings((s) => s.settings);
+  // The Agents modal's two catalogs, fetched ONCE on mount into local state —
+  // the `SettingsPage.tsx` pattern, deliberately with no cache of its own (a
+  // second module-level cache for two lists the modal reads on open would be
+  // staleness for free).
+  const [models, setModels] = useState<ModelDto[]>([]);
+  const [toolNames, setToolNames] = useState<string[]>([]);
+  useEffect(() => {
+    listModels()
+      .then(setModels)
+      .catch(() => {});
+    listTools()
+      .then(setToolNames)
+      .catch(() => {});
+  }, []);
+
+  /**
+   * The ONE write path for `agentOverrides` (ADR 0066's store) — a
+   * READ-MODIFY-WRITE, never composed from the store.
+   *
+   * The re-read is load-bearing, not paranoia: the store's copy is seeded at
+   * boot and by the Settings page, but the Rust side writes `settings.json` on
+   * its own — `agent/session/mod.rs:1678` persists a remembered thinking level
+   * through `load_settings` + mutate + `write_settings` — so a modal opened at an
+   * arbitrary moment can be holding a stale document, and composing from the
+   * store would silently clobber a concurrent change. EVERY Rust writer does
+   * load-mutate-write; this has to match or the desktop becomes the one writer
+   * that can lose someone else's field.
+   *
+   * On failure, log and RE-FETCH into the store: a save that did not land means
+   * the file and the UI disagree, and the file is right.
+   *
+   * Note what is replaced and what is preserved: the OTHER fields come from the
+   * re-read document, and `agentOverrides` is the map the dialog handed over
+   * wholesale (it edited that map, so it is the newer answer). That is safe for
+   * exactly one reason — this modal is the ONLY writer of the map in the app, so
+   * no concurrent Rust write can be sitting inside it. If a second writer ever
+   * appears for this field, this line becomes a merge, not a replace.
+   */
+  const patchAgentOverrides = useCallback(async (next: AgentOverrides) => {
+    try {
+      const fresh = await getSettings();
+      const freshDocument: AppSettings = { ...fresh, agentOverrides: next };
+      await saveSettings(freshDocument);
+      useSettings.getState().setSettings(freshDocument);
+    } catch (err) {
+      console.error("Failed to save agent overrides:", err);
+      void useSettings.getState().loadSettings();
+    }
+  }, []);
 
   // The session awaiting delete confirmation (the ONLY destructive
   // action in the sidebar — archive/unarchive are reversible and have
@@ -231,7 +308,7 @@ export default function SpacesList() {
   // a new control), and the labels are carried as `aria-label` + `title`
   // because a 40px column has no room for text.
   //
-  // Three commands, all at the HEAD, because they are the pane's own buttons.
+  // Four commands, all at the HEAD, because they are the pane's own buttons.
   // `Settings` used to ride here as a second strip at the rail's BOTTOM — the
   // gear lived in the footer while open, so the rail kept it at the same height
   // on collapse. The gear now lives in the chrome bar for both states, so the
@@ -255,6 +332,12 @@ export default function SpacesList() {
       icon: <SparklesIcon className="size-4" />,
       onClick: () => setSkillsOpen(true),
     },
+    {
+      id: "agents",
+      label: "Agents",
+      icon: <BotIcon className="size-4" />,
+      onClick: () => setAgentsOpen(true),
+    },
   ];
 
   // The ⌘N / ⌘O chord lives in `useAppShortcuts`, mounted at `App` root — NOT
@@ -267,7 +350,7 @@ export default function SpacesList() {
     // Collapse = `LEFT_PANE_RAIL` + `overflow: hidden` (a SLIVER, not 0 — the
     // content stays mounted, clipped; the `fixed` dialogs escape clipping).
     // The sliver exists so the collapsed rail has somewhere to draw: the
-    // session marks and the three command icons (`SessionRail`). The pane's
+    // session marks and the four command icons (`SessionRail`). The pane's
     // collapse toggle is NOT here any more — it lives in the chrome bar's
     // `ChromeControls` beside the window controls, in both states — which is
     // also why the footer row this pane used to end with is gone.
@@ -318,6 +401,17 @@ export default function SpacesList() {
         >
           <SparklesIcon className="size-4" />
           <span className="flex-1 text-left">Skills</span>
+        </button>
+        {/* The Agents modal (the ONE Agent surface — Settings has no Agents
+            section). No `Kbd`, matching `Skills`: neither is a chord. `BotIcon`
+            moved here from the deleted Settings nav entry. */}
+        <button
+          type="button"
+          onClick={() => setAgentsOpen(true)}
+          className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-ui-base hover:bg-surface-hover"
+        >
+          <BotIcon className="size-4" />
+          <span className="flex-1 text-left">Agents</span>
         </button>
       </div>
       {/* The Sessions header: the label + the `...` menu (the old tab
@@ -425,6 +519,25 @@ export default function SpacesList() {
           from the Settings page is not a thing. */}
       {skillsOpen && (
         <SkillsDialog skills={skills} onClose={() => setSkillsOpen(false)} />
+      )}
+      {/* The Agents modal — OUTSIDE the content region for the same reason the
+          comment above names: that region is `visibility: hidden` while the pane
+          is collapsed, and visibility inherits into `fixed` descendants, so an
+          inside-mount would open the modal invisibly from the rail icon.
+          `settings &&` is why the button stays clickable while the dialog waits:
+          with no settings document there is nothing correct to edit (the modal
+          reads `agentOverrides` off it), and `null` here means the boot load has
+          not landed or failed. */}
+      {agentsOpen && settings && (
+        <AgentsDialog
+          rows={agentRows}
+          noSpaceOpen={activeSpacePath === null}
+          settings={settings}
+          models={models}
+          tools={toolNames}
+          onPatch={(next) => void patchAgentOverrides(next)}
+          onClose={() => setAgentsOpen(false)}
+        />
       )}
       {deleteTarget && (
         <DeleteSessionDialog

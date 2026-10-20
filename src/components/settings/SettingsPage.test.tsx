@@ -588,10 +588,17 @@ describe("SettingsPage (the ZCode port — sections + immediate save)", () => {
       scout: { thinking: "high" },
       plan: { model: "other/m9", tools: ["read"] },
     });
-    // And the ABSENCE is literally preserved (not `undefined`-valued): the
-    // store's `skip_serializing_if` only drops an absent key, and a `model:
-    // undefined` written by a `{ ...override, model: undefined }` spread would
-    // serialize as `"model": null` on the Rust side — so the key must not exist.
+    // And the ABSENCE is literally preserved (not `undefined`-valued): a
+    // hand-rolled `{ ...override, model: undefined }` spread leaves a key that
+    // EXISTS in the object, and this assertion is what keeps the remap from
+    // producing one. Its reason is the state the stored document is not allowed
+    // to hold (ADR 0067 — absence is the only meaning of "does not speak"), NOT
+    // a wire mechanic: measured, `JSON.stringify` DROPS an `undefined`-valued
+    // field, so such a spread would in fact arrive as an absent key rather than
+    // as `"model": null`. The assertion still stands — a two-state object that
+    // happens to serialise correctly is one refactor away from one that does not
+    // (`?? null`, a `Object.entries` walk, or a structured clone all preserve the
+    // key) — the earlier wording just named the wrong hazard.
     expect("model" in (saved.agentOverrides.scout ?? {})).toBe(false);
   });
 
