@@ -70,6 +70,7 @@ vi.mock("../lib/tauri", async () => {
         dir: "/p/.agents/skills/alpha",
         scope: "space",
         body: "B",
+        shadowed: [],
       },
     ]),
     setSessionArchived: vi.fn().mockResolvedValue(true),

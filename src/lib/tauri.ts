@@ -623,6 +623,17 @@ export interface McpServerInfo {
   summary: string;
 }
 
+/** One Skill excluded by **shadowing** (camelCase over IPC — Rust `skills::Shadowed`).
+ *  It has NO `$` mention route and no `read_skill` route in this Space: another
+ *  root contributed the same name first, and name is a Skill's identity (ADR 0065).
+ *  Rendered as a report, never as a row. */
+export interface ShadowedSkill {
+  name: string;
+  /** Canonical path to the shadowed SKILL.md. */
+  path: string;
+  scope: "space" | "user";
+}
+
 /** One discovered skill (camelCase over IPC — the Rust `SkillInfo`). */
 export interface SkillInfo {
   name: string;
@@ -637,6 +648,11 @@ export interface SkillInfo {
    *  `<skills>` prompt section does — ADR 0036), and a `$name` Mention reaches
    *  it WHENEVER the mention grammar can carry the name (`isMentionableSkillName`). */
   disableModelInvocation: boolean;
+  /** The entries this row EXCLUDED by shadowing (ADR 0065 — name is a Skill's
+   *  identity, so the later root's same-named `SKILL.md` never becomes a route).
+   *  REQUIRED because the Rust DTO always serializes the `Vec` (empty as `[]`).
+   *  UI-only, never sent to the model. */
+  shadowed: ShadowedSkill[];
 }
 
 /** One `?` file-completion listing (camelCase over IPC — the Rust `FileListDto`). */

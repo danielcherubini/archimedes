@@ -30,6 +30,7 @@ vi.mock("../lib/tauri", async () => {
         dir: "/p/.agents/skills/alpha-skill",
         scope: "space",
         body: "B",
+        shadowed: [],
       },
     ]),
     listAgentDefinitionsForSpace: vi.fn().mockResolvedValue([

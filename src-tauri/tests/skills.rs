@@ -461,6 +461,11 @@ fn first_wins_dedupe_and_order() {
         "from A",
         "first-wins dedupe: {rows:?}"
     );
+    assert_eq!(
+        find_row(&rows, "shared").shadowed.len(),
+        1,
+        "the shadowed loser must be reported at the integration surface: {rows:?}"
+    );
     let order: Vec<&str> = rows.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(order, vec!["Beta", "shared", "zeta"]);
     assert_eq!(rows[0].scope, SkillScope::User); // `Beta` lives in root B
@@ -876,5 +881,121 @@ fn skill_info_serializes_the_model_hidden_key() {
     assert!(
         json.get("disable_model_invocation").is_none(),
         "must not leak the snake_case name over IPC: {json}"
+    );
+}
+
+#[test]
+fn skill_info_serializes_the_shadowed_key() {
+    // The other half of this contract is a TS interface (`ShadowedSkill` in
+    // `src/lib/tauri.ts`) — the two halves were written against the spec, not
+    // against each other, so NOTHING but this test checks the wire shape the
+    // dialog reads. The dialog groups the report by the WINNER's scope and
+    // words it "hidden by a project skill" vs "hidden by a global skill", so
+    // BOTH the key names and the lowercase scope strings are load-bearing.
+    let space = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    // The collision the report needs: same name, GENUINELY different files,
+    // Space root first so the Space entry wins (mirrors
+    // `first_wins_dedupe_and_order`). `solo` never collides — it pins the
+    // empty case below.
+    write_skill(space.path(), "shared", &skill_md("shared", "license: MIT"));
+    write_skill(user.path(), "shared", &skill_md("shared", "license: ISC"));
+    write_skill(space.path(), "solo", &skill_md("solo", "license: MIT"));
+
+    let rows = discover_in_roots(&[
+        (space.path().to_path_buf(), SkillScope::Space),
+        (user.path().to_path_buf(), SkillScope::User),
+    ]);
+    assert_eq!(rows.len(), 2, "the loser stays unaddressable: {rows:?}");
+    let json = serde_json::to_value(find_row(&rows, "shared")).unwrap();
+
+    // The key is EXACTLY `shadowed` (the TS field name) and it is an array.
+    let losers = json
+        .get("shadowed")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("`shadowed` must serialize as an array: {json}"));
+    assert_eq!(
+        losers.len(),
+        1,
+        "the excluded entry is reported on the winner: {json}"
+    );
+    let loser = &losers[0];
+    // All three keys `ShadowedSkill` declares are present, and `path` is the
+    // canonical path the dialog shows (a `tempdir()` path can be a symlink
+    // prefix — canonicalize the EXPECTED too).
+    assert_eq!(loser.get("name"), Some(&serde_json::json!("shared")));
+    assert_eq!(
+        loser.get("path"),
+        Some(&serde_json::json!(fs::canonicalize(
+            user.path().join("shared/SKILL.md")
+        )
+        .unwrap())),
+        "{json}"
+    );
+    assert_eq!(
+        loser.get("scope"),
+        Some(&serde_json::json!("user")),
+        "the TS union is `\"space\" | \"user\"`: a `rename_all` change on \
+         `SkillScope` silently breaks the dialog's winner/user wording — the \
+         one thing telling \"hidden by a project skill\" from \"hidden by a \
+         global skill\": {json}"
+    );
+    // The WINNER's own scope is what the dialog groups by, so it rides the
+    // same lowercase rule.
+    assert_eq!(
+        json.get("scope"),
+        Some(&serde_json::json!("space")),
+        "the winner keeps its own scope over IPC: {json}"
+    );
+
+    // The two-sided assertion (as above for `disableModelInvocation`): the
+    // key is there AND no other spelling of it leaks.
+    assert!(
+        json.get("shadowed").is_some(),
+        "`shadowed` must be present over IPC: {json}"
+    );
+    assert!(
+        json.get("shadowed_entries").is_none(),
+        "must not leak the snake_case name over IPC: {json}"
+    );
+    // The TOP-LEVEL key is exactly `shadowed` — the TS field name — so a
+    // rename in either direction (`shadowed_entries`, `shadowedEntries`) is
+    // caught here rather than only by the dialog rendering nothing.
+    let mut shadow_keys: Vec<&str> = json
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|k| k.to_lowercase().contains("shadow"))
+        .map(String::as_str)
+        .collect();
+    shadow_keys.sort_unstable();
+    assert_eq!(
+        shadow_keys,
+        vec!["shadowed"],
+        "the IPC key must be exactly `shadowed`: {json}"
+    );
+    // Nor inside the loser item — the TS side has no snake_case key to read.
+    let leaked: Vec<&str> = loser
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|k| k.contains('_'))
+        .map(String::as_str)
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "the loser item must not leak snake_case keys over IPC: {json} (found {leaked:?})"
+    );
+
+    // The EMPTY case: a non-colliding Skill carries `shadowed: []`, NOT an
+    // absent key. Load-bearing — the TS field is REQUIRED (not optional)
+    // because the Rust `Vec` always serializes, and the dialog's `?? []` is a
+    // FALLBACK for a payload from before the field, not the contract.
+    let solo = serde_json::to_value(find_row(&rows, "solo")).unwrap();
+    assert_eq!(
+        solo.get("shadowed"),
+        Some(&serde_json::json!([])),
+        "a Shadowing-free Skill must still serialize `shadowed: []` \
+         (the TS `shadowed` is required, never optional): {solo}"
     );
 }

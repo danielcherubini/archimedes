@@ -16,6 +16,7 @@ vi.mock("../lib/tauri", async () => {
         scope: "space",
         body: "B",
         disableModelInvocation: false,
+        shadowed: [],
       } satisfies SkillInfo,
     ]),
   };
@@ -80,6 +81,7 @@ describe("useSkillCatalog", () => {
       scope: "space",
       body: "B",
       disableModelInvocation: false,
+      shadowed: [],
     };
     const beta: SkillInfo = {
       name: "beta",
@@ -89,6 +91,7 @@ describe("useSkillCatalog", () => {
       scope: "space",
       body: "C",
       disableModelInvocation: false,
+      shadowed: [],
     };
     let resolveBeta!: (rows: SkillInfo[]) => void;
     const betaPromise = new Promise<SkillInfo[]>((resolve) => {
@@ -129,6 +132,7 @@ describe("useSkillCatalog", () => {
           scope: "space",
           body: "B",
           disableModelInvocation: false,
+          shadowed: [],
         } satisfies SkillInfo,
       ]),
     );
@@ -170,6 +174,7 @@ describe("useSkillCatalog", () => {
               scope: "space",
               body: "B",
               disableModelInvocation: false,
+              shadowed: [],
             } satisfies SkillInfo,
           ]);
     });
@@ -205,6 +210,7 @@ describe("useSkillCatalog", () => {
               scope: "space",
               body: "B",
               disableModelInvocation: false,
+              shadowed: [],
             } satisfies SkillInfo,
           ]);
     });

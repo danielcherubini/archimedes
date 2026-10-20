@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { SkillInfo } from "../lib/tauri";
+import type { ShadowedSkill, SkillInfo } from "../lib/tauri";
 import SkillsDialog from "./SkillsDialog";
 
 // The dialog is PROP-DRIVEN (it does not fetch — the fetch lives in
@@ -16,6 +16,20 @@ function skill(overrides: Partial<SkillInfo> = {}): SkillInfo {
     scope: "space",
     body: "B",
     disableModelInvocation: false,
+    shadowed: [],
+    ...overrides,
+  };
+}
+
+/** One `ShadowedSkill` fixture: an entry the row above it EXCLUDED by shadowing.
+ *  Its `name` is EQUAL to its winner's by construction (the name is the dedupe
+ *  key — ADR 0065), so a fixture must never invent an "unrelated" loser name:
+ *  that is a shape discovery can never emit. */
+function shadow(overrides: Partial<ShadowedSkill> = {}): ShadowedSkill {
+  return {
+    name: "alpha",
+    path: "/u/.pi/agent/skills/alpha/SKILL.md",
+    scope: "user",
     ...overrides,
   };
 }
@@ -199,6 +213,11 @@ describe("SkillsDialog", () => {
       dir: "/p/.agents/skills/legacy",
       scope: "user",
       body: "B",
+      // `shadowed` IS present — the `Omit` above is keyed on
+      // `disableModelInvocation` alone (that omission is this test's subject), so
+      // widening it to cover `shadowed` would defeat the test, and making the
+      // field optional to dodge it would defeat the DTO.
+      shadowed: [],
     };
     expect("disableModelInvocation" in legacyRow).toBe(false);
     render(
@@ -302,5 +321,246 @@ describe("SkillsDialog", () => {
     expect(scroll?.className).toContain("pr-2");
     const wrapper = scroll?.parentElement;
     expect(wrapper?.className).toContain("min-w-0");
+  });
+
+  // ---------------------------------------------------------------------------
+  // The shadowing report (ADR 0065: name is a Skill's identity, so a later root
+  // contributing an existing name EXCLUDES that entry — it gets no `$` route and
+  // no `read_skill` route in this Space). Two rules the tests below own:
+  //
+  // 1. It is NEVER a row. A row's onClick inserts `$<name> `, which resolves to
+  //    the WINNER — a row for the loser is a button that loads a different file
+  //    than the one you are reading. So: a non-clickable block, and the winner
+  //    stays the only row for that name.
+  // 2. The "hidden by" clause comes from the WINNER's scope, never the loser's.
+  //    `space_roots()` contributes two roots per level (`.agents/skills`, then
+  //    `.pi/skills`) and `user_roots()` returns TWO User roots
+  //    (`~/.agents/skills`, then `~/.pi/agent/skills`), so a `user` loser CAN
+  //    lose to a `user` winner, and a `space` loser to a same-level `space`
+  //    winner in the other vendor directory — wording keyed on the loser is
+  //    FALSE in shipped configurations (including the symlink farm this feature
+  //    exists to serve).
+  // ---------------------------------------------------------------------------
+
+  it("renders_no_shadow_report_when_nothing_is_shadowed", async () => {
+    // The "a clean install's DOM is unchanged" pin: with no shadows there is
+    // NOTHING new in the tree. Passes before the implementation too — that is
+    // the point of the test, not an accident of it.
+    render(
+      <SkillsDialog
+        skills={[
+          skill(),
+          skill({
+            name: "beta",
+            scope: "user",
+            path: "/u/.agents/skills/beta/SKILL.md",
+            dir: "/u/.agents/skills/beta",
+            shadowed: [],
+          }),
+        ]}
+        onClose={() => {}}
+      />,
+    );
+    await screen.findByText("alpha");
+    expect(screen.queryByText(/hidden by/)).toBeNull();
+  });
+
+  it("reports_a_skill_shadowed_by_a_project_skill_with_its_path", async () => {
+    // A `space` winner (`<space>/.agents/skills`) excluded a `user` entry of the
+    // same name (`~/.pi/agent/skills` — the SECOND User root, which loses to
+    // everything). The CAUSE says "project" because it names the WINNER.
+    render(
+      <SkillsDialog
+        skills={[skill({ shadowed: [shadow()] })]}
+        onClose={() => {}}
+      />,
+    );
+    await screen.findByText(
+      "1 skill is hidden by a project skill with the same name",
+    );
+    // The loser's own line carries its name AND the path the user can check.
+    const path = await screen.findByText("/u/.pi/agent/skills/alpha/SKILL.md");
+    const line = path.parentElement ?? path;
+    expect(line.textContent).toContain("alpha");
+  });
+
+  it("pluralises_the_shadow_count", async () => {
+    // Two same-named losers under one winner (the two extra roots a name can
+    // lose to: the space `.pi/skills` copy and the second User root).
+    render(
+      <SkillsDialog
+        skills={[
+          skill({
+            shadowed: [
+              shadow({ path: "/p/.pi/skills/alpha/SKILL.md", scope: "space" }),
+              shadow(),
+            ],
+          }),
+        ]}
+        onClose={() => {}}
+      />,
+    );
+    await screen.findByText(
+      "2 skills are hidden by a project skill with the same name",
+    );
+    expect(screen.queryByText(/1 skill is hidden/)).toBeNull();
+  });
+
+  it("a_shadow_whose_winner_is_a_global_skill_says_global", async () => {
+    // THE case a loser-keyed wording gets wrong: a `user` winner
+    // (`~/.agents/skills`, the FIRST User root) excluded a `user` loser
+    // (`~/.pi/agent/skills`, the second). Nothing about this pair involves the
+    // project, so a wording that hardcodes "hidden by a project skill" (the
+    // plausible reading of "the winner is always closer") is a lie a user acts
+    // on. MUTATION-CHECKED: pinning the loser's scope instead of the winner's
+    // reddens `reports_a_skill_shadowed_by_a_project_skill_with_its_path`,
+    // `pluralises_the_shadow_count` and `the_search_query_filters_the_shadow_report`
+    // (a `user` loser under a `space` winner — the root order makes a `space`
+    // loser under a `user` winner impossible); pinning "project" always reddens
+    // THIS one.
+    render(
+      <SkillsDialog
+        skills={[
+          skill({
+            scope: "user",
+            path: "/u/.agents/skills/alpha/SKILL.md",
+            dir: "/u/.agents/skills/alpha",
+            shadowed: [shadow()],
+          }),
+        ]}
+        onClose={() => {}}
+      />,
+    );
+    await screen.findByText(
+      "1 skill is hidden by a global skill with the same name",
+    );
+    expect(screen.queryByText(/hidden by a project skill/)).toBeNull();
+  });
+
+  it("the_shadow_report_is_not_clickable", async () => {
+    // A loser has NO route in this Space: a clickable line would insert
+    // `$<name> ` and therefore load the WINNER's file (the bug this task fixes).
+    const events: CustomEvent[] = [];
+    const listener = (e: Event) => {
+      events.push(e as CustomEvent);
+    };
+    window.addEventListener("archimedes:insert-skill", listener);
+    const onClose = vi.fn();
+    try {
+      render(
+        <SkillsDialog skills={[skill({ shadowed: [shadow()] })]} onClose={onClose} />,
+      );
+      const path = await screen.findByText("/u/.pi/agent/skills/alpha/SKILL.md");
+      // Not a row, not a button, not focusable, and not STYLED as one either
+      // (no hover fill, no pointer cursor) — checked on the leaf, the line and
+      // the report container, because a stray wrapper is exactly the shape that
+      // would reintroduce the affordance.
+      const line = path.parentElement ?? path;
+      for (const node of [path, line, line.parentElement ?? line]) {
+        expect(node.getAttribute("role")).not.toBe("button");
+        expect(node.getAttribute("tabindex")).toBeNull();
+        expect(node.className.split(/\s+/)).not.toContain("hover:bg-surface-hover");
+        expect(node.className.split(/\s+/)).not.toContain("cursor-pointer");
+      }
+      fireEvent.click(path);
+      fireEvent.click(line);
+      expect(events.find((e) => e.type === "archimedes:insert-skill")).toBeUndefined();
+      expect(onClose).not.toHaveBeenCalled();
+      // The winner is still the ONE clickable route for this name: every row
+      // dispatches `$alpha `, which resolves to the winner, so a second row
+      // would be a second button pointing at a file this name cannot reach.
+      const routes = screen
+        .getAllByRole("button")
+        .filter((b) => b.textContent?.includes("alpha"));
+      expect(routes).toHaveLength(1);
+      // Two visible "alpha" texts — the winner's row and the report line — and
+      // only ONE of them is a button.
+      expect(screen.getAllByText("alpha")).toHaveLength(2);
+    } finally {
+      window.removeEventListener("archimedes:insert-skill", listener);
+    }
+  });
+
+  it("the_search_query_filters_the_shadow_report", async () => {
+    // TWO winner+shadow pairs, because a loser's name EQUALS its winner's (the
+    // dedupe key) — an "unrelated" loser name is a shape discovery cannot emit.
+    // Typing `alpha` must drop beta's line along with beta's row, or the block
+    // contradicts the list above it.
+    render(
+      <SkillsDialog
+        skills={[
+          skill({ shadowed: [shadow()] }),
+          skill({
+            name: "beta",
+            path: "/p/.agents/skills/beta/SKILL.md",
+            dir: "/p/.agents/skills/beta",
+            shadowed: [shadow({ name: "beta", path: "/u/.pi/agent/skills/beta/SKILL.md" })],
+          }),
+        ]}
+        onClose={() => {}}
+      />,
+    );
+    await screen.findByText("/u/.pi/agent/skills/alpha/SKILL.md");
+    await screen.findByText("/u/.pi/agent/skills/beta/SKILL.md");
+    fireEvent.change(screen.getByPlaceholderText("Search skills…"), {
+      target: { value: "alpha" },
+    });
+    expect(screen.queryByText("/u/.pi/agent/skills/beta/SKILL.md")).toBeNull();
+    expect(screen.getByText("/u/.pi/agent/skills/alpha/SKILL.md")).toBeTruthy();
+    // The COUNT follows the filter too (beta's group is gone, not hidden).
+    expect(
+      screen.getByText("1 skill is hidden by a project skill with the same name"),
+    ).toBeTruthy();
+  });
+
+  it("an_empty_catalog_renders_no_shadow_report", async () => {
+    // The empty state is a SIBLING branch, never a container the block can leak
+    // into — a shadow riding along under "No skills found." would be absurd.
+    render(<SkillsDialog skills={[]} onClose={() => {}} />);
+    await screen.findByText("No skills found.");
+    expect(screen.queryByText(/hidden by/)).toBeNull();
+  });
+
+  it("the_no_match_state_renders_no_shadow_report", async () => {
+    render(
+      <SkillsDialog
+        skills={[skill({ shadowed: [shadow()] })]}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.change(screen.getByPlaceholderText("Search skills…"), {
+      target: { value: "zzz" },
+    });
+    await screen.findByText('No skills match "zzz".');
+    expect(screen.queryByText(/hidden by/)).toBeNull();
+    expect(screen.queryByText("/u/.pi/agent/skills/alpha/SKILL.md")).toBeNull();
+  });
+
+  it("a_row_without_the_shadowed_key_does_not_crash_the_dialog", async () => {
+    // The same IPC tolerance `legacyRow` above pins for
+    // `disableModelInvocation`: a row that genuinely LACKS `shadowed` must not
+    // take the dialog down (a bare `flatMap` over it yields `undefined` entries
+    // that throw on the first property access). `skill()` cannot express it — it
+    // fills `shadowed: []` — so the payload is built WITHOUT the key and cast
+    // once at the prop, rather than widening the shared type to optional.
+    const unshadowedRow: Omit<SkillInfo, "shadowed"> = {
+      name: "unshadowed",
+      description: "Unshadowed skill",
+      path: "/p/.agents/skills/unshadowed/SKILL.md",
+      dir: "/p/.agents/skills/unshadowed",
+      scope: "user",
+      body: "B",
+      disableModelInvocation: false,
+    };
+    expect("shadowed" in unshadowedRow).toBe(false);
+    render(
+      <SkillsDialog
+        skills={[unshadowedRow as SkillInfo, skill()]}
+        onClose={() => {}}
+      />,
+    );
+    await screen.findByText("unshadowed");
+    expect(screen.getByText("alpha")).toBeTruthy();
+    expect(screen.queryByText(/hidden by/)).toBeNull();
   });
 });
