@@ -556,8 +556,19 @@ export interface AppSettings {
   font: FontSettings;
   /** Per-model remembered thinking level (ADR 0015): `"<provider>/<id>"` → the last level the user set for that model. */
   defaultThinkingLevels: Record<string, string>;
-  /** (ADR 0023) Per-agent subagent model overrides: agent name → model key. */
-  subagentModels: Record<string, string>;
+  /**
+   * (ADR 0066) Global Agent overrides: agent name → override. Replaces
+   * `subagentModels`, whose legacy values the backend folds in on read.
+   *
+   * REQUIRED, not optional — and that is backed by the store, not by hope:
+   * `agent_overrides` carries `#[serde(default)]` WITHOUT `skip_serializing_if`,
+   * deliberately matching every other map field in `config.rs` (`mcpServers`,
+   * `defaultThinkingLevels`), so the backend always answers
+   * `"agentOverrides": {}` instead of omitting the key. Dropping the key when
+   * empty would hand the renderer `undefined` for a required field and make the
+   * Agents modal throw for every user who has never pinned anything.
+   */
+  agentOverrides: AgentOverrides;
   /** The working-indicator spinner style (a `braille-loader` variant name, e.g. `"typing"` / `"pendulum"`); `null` = the `typing` default. */
   spinnerStyle: string | null;
   /** (ADR 0030) The per-direction file-access policies. The backend ALWAYS emits it (`#[serde(default)]` fills all-`allow` for a pre-feature file), so it is required here; the UI still falls back to all-`allow` if the key is ever absent. */
@@ -615,6 +626,64 @@ export interface AgentDefinitionDto {
   scope: "space" | "user";
 }
 
+/** One agent's override (ADR 0066: `settings.json`'s `agentOverrides[<name>]`). An ABSENT field means "this override does not speak" (ADR 0067) — never send `null` to mean inherit. */
+export interface AgentOverride {
+  model?: string;
+  thinking?: string;
+  /** An EMPTY list speaks NOTHING (ADR 0067) — no override can zero out a child's tools. */
+  tools?: string[];
+}
+
+/** `settings.json`'s `agentOverrides` (ADR 0066): agent name → override. One global map — there is NO per-Space map, and keys are matched case-insensitively by the backend. */
+export type AgentOverrides = Record<string, AgentOverride>;
+
+/** Which layer supplied a field. `parent` = nothing below the explicit `subagent` param spoke (ADR 0068) — a dispatch that passes the param still overrides it. */
+export type OverrideSource = "override" | "file" | "parent";
+
+/**
+ * One field-triple of the Agents modal's report (the Rust `OverrideFields`).
+ * The three `Option`s are serialized ALWAYS PRESENT — no `skip_serializing_if`
+ * — so "this column has no value" arrives as `null` and the fields are
+ * `… | null`, NOT optional. That is the deliberate opposite of `AgentOverride`,
+ * where absence is the only meaning of "does not speak": these are ROWS of a
+ * report the modal renders (as `Inherits parent`), not the stored document.
+ */
+export interface AgentOverrideFields {
+  model: string | null;
+  thinking: string | null;
+  tools: string[] | null;
+}
+
+/** Which layer supplied each of the report's three fields (the Rust `SourceFields`). */
+export interface AgentOverrideSources {
+  model: OverrideSource;
+  thinking: OverrideSource;
+  tools: OverrideSource;
+}
+
+/** One row of `list_agent_config` (camelCase over IPC — the Rust `AgentConfigDto`). */
+export interface AgentConfigDto {
+  name: string;
+  description: string;
+  scope: "space" | "user";
+  /** The DEFINITION FILE's path. */
+  path: string;
+  /** The frontmatter VERBATIM — before any filtering, so the row can say what the file actually said. */
+  file: AgentOverrideFields;
+  /** The STORED entry VERBATIM (not the resolver's output), so a stale pin stays visible. Rust spells this `override_` (a keyword); the wire name is `override`. */
+  override: AgentOverrideFields;
+  /** What the dispatch will launch with — produced by the resolver itself. */
+  effective: AgentOverrideFields;
+  /** Which layer supplied each of those three values. */
+  source: AgentOverrideSources;
+  /** The entries this name EXCLUDED by shadowing (ADR 0065) — a REPORT
+   *  rendered on this row, never a row of its own. REQUIRED, not optional:
+   *  the Rust DTO always serializes the Vec (empty as `[]`), exactly like
+   *  `SkillInfo.shadowed`, and `SkillsDialog`'s `?? []` tolerance is a
+   *  defence for old rows, not a licence to omit it here. */
+  shadowed: ShadowedAgent[];
+}
+
 /** One effective MCP server (camelCase over IPC — the Rust `McpServerInfo`). */
 export interface McpServerInfo {
   name: string;
@@ -630,6 +699,20 @@ export interface McpServerInfo {
 export interface ShadowedSkill {
   name: string;
   /** Canonical path to the shadowed SKILL.md. */
+  path: string;
+  scope: "space" | "user";
+}
+
+/** One Agent definition excluded by **shadowing** (camelCase over IPC — the same
+ *  Rust `skills::Shadowed<T>` the Skill row above is). A DELIBERATE two-line NAME
+ *  duplicate of `ShadowedSkill`, not a shape duplicate: Rust ships ONE generic
+ *  `Shadowed<T>` for both surfaces, but this file names its wire types per
+ *  surface (`SkillInfo` / `AgentDefinitionDto`), and reusing `ShadowedSkill` on
+ *  an Agent row would make that interface's own doc-comment ("One Skill excluded
+ *  by shadowing") a lie. Two lines of structural duplicate is the cheaper lie. */
+export interface ShadowedAgent {
+  name: string;
+  /** Canonical path to the shadowed agent definition file. */
   path: string;
   scope: "space" | "user";
 }
@@ -870,7 +953,7 @@ export async function shellSandboxAvailable(): Promise<boolean> {
   return invoke<boolean>("shell_sandbox_available");
 }
 
-/** The user-level discovered agent definitions (the Settings page's Subagents section — ADR 0023). */
+/** The user-level discovered agent definitions — the app-scope read of the same total discovery `listAgentDefinitionsForSpace` narrows per Space. It is NO LONGER the Settings page's Subagents' data source: that section is deleted (the sidebar **Agents** modal is the single Agent surface), and this wrapper stays as the one place a future app-scope surface reaches for the catalog. Unreferenced outside `tauri.test.ts` right now, and `noUnusedLocals` cannot flag an exported function, so it is kept on purpose. */
 export async function listAgentDefinitions(): Promise<AgentDefinitionDto[]> {
   return invoke<AgentDefinitionDto[]>("list_agent_definitions");
 }
@@ -922,6 +1005,15 @@ export async function listSkills(spacePath: string | null): Promise<SkillInfo[]>
 /** The agent-definition catalog for a Space (`null` = user-level only). */
 export async function listAgentDefinitionsForSpace(spacePath: string | null): Promise<AgentDefinitionDto[]> {
   return invoke<AgentDefinitionDto[]>("list_agent_definitions_for_space", { cwd: spacePath ?? null });
+}
+
+/** The effective Agent config for the Space's definitions — the sidebar Agents modal's data source (ADR 0068). `cwd: null` = app-scope (user-level definitions only; the override map is global and unaffected). */
+export async function listAgentConfig(
+  cwd: string | null,
+): Promise<AgentConfigDto[]> {
+  return invoke<AgentConfigDto[]>("list_agent_config", {
+    cwd: cwd ?? null,
+  });
 }
 
 /** The effective MCP servers for a Space (`null` = user-level only). */

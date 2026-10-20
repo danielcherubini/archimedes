@@ -120,6 +120,39 @@ pub struct WebSettings {
     pub proxy: String,
 }
 
+/// (ADR 0066 / 0067) One agent's override — the VALUE of
+/// `Settings::agent_overrides`.
+///
+/// **Field ABSENCE is the only meaning of "this override does not speak"**
+/// (ADR 0067): an unset field is absent from the document
+/// (`skip_serializing_if = "Option::is_none"`), never `null` — a `"model":
+/// null` would be a third state for the resolver to reconcile, and the whole
+/// point of the rule is that the UI's "clear this override" and the
+/// resolver's "skip this layer" are literally the same fact. A `tools` list
+/// that is EMPTY also speaks not (ADR 0067, enforced in
+/// `launch::resolve_agent_launch`), so no override can zero out a child.
+///
+/// Derived `Default` is safe HERE and only because every field is an
+/// `Option` (all-absent = "says nothing") — unlike `FontSettings`, whose
+/// hand-written `Default` exists because a derived one would produce
+/// `size_px: 0`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentOverrideFields {
+    /// The model ref (`"provider/id"`, or a hand-edited
+    /// `"provider/id:<level>"` — the `:<level>` suffix is a thinking-level
+    /// candidate handled downstream, exactly as in ADR 0023).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// A thinking level. Honoured only when the model that actually runs
+    /// advertises it (`launch::resolve_agent_launch` demotes it otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+    /// The tool allowlist. An EMPTY list is ABSENT (ADR 0067).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
+}
+
 /// The persisted app settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -194,13 +227,44 @@ pub struct Settings {
     /// `#[serde(default)]` — a pre-feature file parses to an empty map.
     #[serde(default)]
     pub default_thinking_levels: HashMap<String, String>,
-    /// (ADR 0023) Per-agent subagent model overrides: agent name → model key
-    /// (`"provider/id"`, or a hand-edited `"provider/id:<level>"` — the
-    /// `:<level>` suffix is picked up by the dispatch's existing thinking
-    /// candidate handling). `#[serde(default)]` — a pre-feature file parses
-    /// to an empty map (no migration).
-    #[serde(default)]
+    /// (ADR 0023 — RETIRED by ADR 0066) The per-agent subagent model map:
+    /// agent name → model key. READ-ONLY from here on — `load_settings` folds
+    /// its values into [`Settings::agent_overrides`] and clears it, and
+    /// `skip_serializing` (UNCONDITIONAL, not `skip_serializing_if =
+    /// "HashMap::is_empty"`) is what makes the dead key disappear from the
+    /// file on the next save, permanently. The two spellings are equivalent
+    /// for anything reaching a save through `load_settings` (the fold clears
+    /// the map); the unconditional form also survives a writer that builds a
+    /// `Settings` literal by hand, which is the one path where a retired key
+    /// could leak back onto the wire.
+    ///
+    /// Honouring the legacy key on READ is what makes the upgrade a
+    /// non-loss: the models a user pinned in Settings keep applying.
+    #[serde(default, skip_serializing)]
     pub subagent_models: HashMap<String, String>,
+    /// (ADR 0066) Global Agent overrides keyed by agent NAME — the one
+    /// override layer between the explicit `subagent` params and an Agent
+    /// definition's frontmatter (ADR 0067's chain: explicit > override >
+    /// frontmatter > parent). There is NO per-Space map: the Space decides
+    /// which definitions get listed, never which overrides apply (ADR 0066's
+    /// *Deferred: per-Space* is the only door back to a second map, and it
+    /// re-opens additively).
+    ///
+    /// Serialized camelCase like every other key in this file —
+    /// `agentOverrides: { "scout": { "model": … } }` — and matched
+    /// CASE-INSENSITIVELY by name, exactly as ADR 0023's map was (the stored
+    /// key is never rewritten; the UI writes `def.name` verbatim).
+    ///
+    /// `#[serde(default)]` and deliberately **NOT** `skip_serializing_if`:
+    /// every map field in this struct serializes an EMPTY map as `"key": {}`
+    /// (`mcpServers`, `defaultThinkingLevels`), and the TypeScript
+    /// `AppSettings` declares each of them required. Dropping the key when
+    /// empty would hand the renderer `undefined` for a required field and make
+    /// the Agents modal throw for every user who has never pinned anything.
+    /// Pinned by
+    /// `agent_overrides_default_to_an_empty_map_that_still_serializes`.
+    #[serde(default)]
+    pub agent_overrides: HashMap<String, AgentOverrideFields>,
     /// The working-indicator spinner style (the `braille-loader` variant name,
     /// e.g. `"typing"` / `"pendulum"`): the animation the chat's top working
     /// indicator runs while the agent is busy. `None` = the frontend's
@@ -275,6 +339,7 @@ impl Default for Settings {
             font: FontSettings::default(),
             default_thinking_levels: HashMap::new(),
             subagent_models: HashMap::new(),
+            agent_overrides: HashMap::new(),
             spinner_style: None,
             session_naming_enabled: true,
             session_naming_model: None,
@@ -360,6 +425,42 @@ pub fn load_settings(config_dir: &Path) -> Settings {
             {
                 settings.session_naming_model = None;
             }
+            // (ADR 0066) Fold the retired `subagentModels` map (ADR 0023) into
+            // `agentOverrides` so an upgrading user keeps every model they
+            // pinned, then CLEAR the legacy map so the dead key never returns
+            // to the file (`subagent_models` is `skip_serializing`).
+            //
+            // It lives HERE and not in the `get_settings` command because the
+            // Worker reads this file directly (`launch.rs`) — a command-side
+            // fold would give the two processes different views of one file.
+            //
+            // GUARDED by "the new map is EMPTY", NOT merged: a file carrying
+            // BOTH keys is a hand-edit and the new key wins wholesale. Merging
+            // per-agent would make the legacy key able to RESURRECT a value the
+            // user has already cleared in the modal.
+            //
+            // Scope note: this runs only on the read that PRECEDES a save for a
+            // file that PARSES — the missing-file and corrupt/unreadable paths
+            // return `Settings::default()` and never fold, so a hand-edited
+            // legacy key inside an otherwise-corrupt file is dropped (the
+            // pre-existing behaviour for every field in this struct).
+            if settings.agent_overrides.is_empty() && !settings.subagent_models.is_empty() {
+                settings.agent_overrides = settings
+                    .subagent_models
+                    .drain()
+                    .map(|(name, model)| {
+                        (
+                            name,
+                            AgentOverrideFields {
+                                model: Some(model),
+                                thinking: None,
+                                tools: None,
+                            },
+                        )
+                    })
+                    .collect();
+            }
+            settings.subagent_models.clear();
             settings
         }
         Err(e) => {
@@ -929,28 +1030,225 @@ mod tests {
     }
 
     #[test]
-    fn subagent_models_round_trips_in_camel_case() {
-        // (ADR 0023) The per-agent subagent model-override map defaults to
-        // empty and round-trips in camelCase.
-        assert!(Settings::default().subagent_models.is_empty());
-        // A pre-feature file (WITHOUT the field) parses to an empty map
-        // (`#[serde(default)]` — no migration needed).
+    fn subagent_models_is_read_from_camel_case_but_never_written() {
+        // The ADR 0023 camelCase test, REWRITTEN to the ADR 0066 shape (kept,
+        // not deleted — the read side is still a live contract: it is what
+        // makes the upgrade fold possible). `skip_serializing` splits the two
+        // halves of "round-trips": the legacy key is still READ (camelCase),
+        // and never WRITTEN again. The camelCase round-trip for the map that
+        // does survive now lives in
+        // `agent_overrides_round_trip_as_a_flat_camel_case_map`, and the
+        // "never written again" half in
+        // `the_legacy_subagent_models_key_never_reaches_the_file_again`.
+        // A pre-feature file (WITHOUT the field) parses (no migration).
         let settings: Settings = serde_json::from_str(r#"{ "theme": "dark" }"#).unwrap();
         assert!(settings.subagent_models.is_empty());
-        // A file WITH the field parses to the entry.
+        // A file WITH the legacy field still PARSES to the entry — read-once.
         let with_map: Settings =
             serde_json::from_str(r#"{ "subagentModels": { "scout": "tama/m-1" } }"#).unwrap();
         assert_eq!(with_map.subagent_models["scout"], "tama/m-1");
-        // camelCase on the wire (a populated map serializes the field).
+        // …and the camelCase spelling of the map that ships is the new one.
         let settings = Settings {
+            agent_overrides: std::collections::HashMap::from([(
+                "scout".to_string(),
+                AgentOverrideFields {
+                    model: Some("tama/m-1".to_string()),
+                    thinking: None,
+                    tools: None,
+                },
+            )]),
+            ..Settings::default()
+        };
+        let json = serde_json::to_string_pretty(&settings).unwrap();
+        assert!(json.contains("\"agentOverrides\""), "missing key in {json}");
+        assert!(
+            !json.contains("\"subagentModels\""),
+            "the retired key must not reappear: {json}"
+        );
+    }
+
+    // ── (ADR 0066/0067) `agentOverrides`: the flat global Agent-override map ──
+    //
+    // These tests read and write the DOCUMENT (a `serde_json::Value` over the
+    // file `load_settings` / `write_settings` own), not only the Rust struct —
+    // the renderer's `AppSettings` is typed against the document, so the
+    // guarantee that matters ("the key is always there", "an unset field is
+    // ABSENT") is a fact about the bytes, and that is what is pinned here.
+
+    #[test]
+    fn agent_overrides_default_to_an_empty_map_that_still_serializes() {
+        // (ADR 0066) The map is plain `#[serde(default)]` and NOT
+        // `skip_serializing_if = "HashMap::is_empty"` — the same contract every
+        // other map field in this file keeps (`mcpServers`,
+        // `defaultThinkingLevels`): an EMPTY map serializes as `{}`, so the
+        // TypeScript `AppSettings` can declare the field REQUIRED and index it
+        // unconditionally. An omitted key here hands the renderer `undefined`
+        // for a field its type calls required. Asserted on the DOCUMENT rather
+        // than the struct, because the renderer reads the document.
+        let value = serde_json::to_value(Settings::default()).unwrap();
+        assert_eq!(
+            value.get("agentOverrides"),
+            Some(&serde_json::json!({})),
+            "an empty override map must serialize as `{{}}`, not vanish"
+        );
+        // A pre-feature file (WITHOUT the key) parses to an empty map — i.e.
+        // the document still carries `{}`, so a save of a pre-feature file
+        // leaves the required key present.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("settings.json"), r#"{ "theme": "dark" }"#).unwrap();
+        write_settings(dir.path(), &load_settings(dir.path())).unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.path().join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            raw.get("agentOverrides"),
+            Some(&serde_json::json!({})),
+            "a pre-feature file gains the required key (empty map) on the next save"
+        );
+    }
+
+    #[test]
+    fn agent_overrides_round_trip_as_a_flat_camel_case_map() {
+        // (ADR 0066) FLAT: `agentOverrides → name → fields`. The rejected
+        // nested `{ global, spaces }` shape is what this assertion rules out —
+        // the per-Space door re-opens it additively (ADR 0066 *Deferred*), and
+        // nothing before then may ship a level the reader must step through.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("settings.json"),
+            r#"{ "theme": "dark", "agentOverrides": { "scout": { "model": "tama/m-1", "thinking": "low", "tools": ["read"] } } }"#,
+        )
+        .unwrap();
+        let settings = load_settings(dir.path());
+        write_settings(dir.path(), &settings).unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.path().join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(raw["agentOverrides"]["scout"]["model"], "tama/m-1");
+        assert_eq!(raw["agentOverrides"]["scout"]["thinking"], "low");
+        assert_eq!(raw["agentOverrides"]["scout"]["tools"][0], "read");
+        let map = raw["agentOverrides"].as_object().unwrap();
+        assert_eq!(
+            map.keys().collect::<Vec<_>>(),
+            vec!["scout"],
+            "the map's keys are agent NAMES — no `global` / `spaces` level"
+        );
+    }
+
+    #[test]
+    fn an_unset_field_inside_an_override_entry_is_absent_not_null() {
+        // (ADR 0067) Field ABSENCE is the ONLY meaning of "this override does
+        // not speak", so an unset field must never reach the document as
+        // `null` — a `"model": null` is a third state the resolver would have
+        // to reconcile. `skip_serializing_if = "Option::is_none"` on the three
+        // fields inside an entry is what enforces this (and it is the ONLY
+        // place in this struct where `skip_serializing*` is correct).
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("settings.json"),
+            r#"{ "theme": "dark", "agentOverrides": { "scout": { "model": "tama/m-1" } } }"#,
+        )
+        .unwrap();
+        let settings = load_settings(dir.path());
+        write_settings(dir.path(), &settings).unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.path().join("settings.json")).unwrap())
+                .unwrap();
+        let entry = raw["agentOverrides"]["scout"].as_object().unwrap();
+        assert_eq!(entry.get("model"), Some(&serde_json::json!("tama/m-1")));
+        assert!(
+            !entry.contains_key("thinking") && !entry.contains_key("tools"),
+            "an unset field is ABSENT, never `null`: {entry:?}"
+        );
+    }
+
+    #[test]
+    fn a_legacy_subagent_models_file_folds_into_agent_overrides_on_load() {
+        // (ADR 0066) An upgrading user keeps every model they pinned: the
+        // legacy `subagentModels` value joins the new map as a model-only
+        // entry. The fold lives in `load_settings` — NOT in the `get_settings`
+        // command — because the Worker reads this file directly
+        // (`launch.rs`), and two processes must not see one file differently.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("settings.json"),
+            r#"{ "theme": "dark", "subagentModels": { "scout": "tama/m-1" } }"#,
+        )
+        .unwrap();
+        let settings = load_settings(dir.path());
+        let value = serde_json::to_value(&settings).unwrap();
+        assert_eq!(
+            value["agentOverrides"]["scout"]["model"], "tama/m-1",
+            "the legacy value folds into the new map"
+        );
+        // A model-only entry: no thinking, no tools (the legacy map could
+        // only ever carry a model).
+        let entry = value["agentOverrides"]["scout"].as_object().unwrap();
+        assert!(!entry.contains_key("thinking") && !entry.contains_key("tools"));
+    }
+
+    #[test]
+    fn a_non_empty_agent_overrides_map_wins_over_the_legacy_key_wholesale() {
+        // The fold is guarded by "the new map is EMPTY", not merged. A file
+        // carrying BOTH keys is a hand-edit, and the new key wins wholesale:
+        // merging per-agent would let the legacy key resurrect a value the
+        // user already cleared in the modal.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("settings.json"),
+            r#"{ "subagentModels": { "scout": "legacy/m", "ghost": "legacy/g" }, "agentOverrides": { "scout": { "model": "new/m", "tools": ["read"] } } }"#,
+        )
+        .unwrap();
+        let value = serde_json::to_value(load_settings(dir.path())).unwrap();
+        assert_eq!(value["agentOverrides"]["scout"]["model"], "new/m");
+        assert_eq!(value["agentOverrides"]["scout"]["tools"][0], "read");
+        assert!(
+            value["agentOverrides"].get("ghost").is_none(),
+            "the legacy key contributes NOTHING when the new map is non-empty: {value:?}",
+        );
+    }
+
+    #[test]
+    fn the_legacy_subagent_models_key_never_reaches_the_file_again() {
+        // (ADR 0066) Retirement is unconditional: `skip_serializing` (not
+        // `skip_serializing_if = "HashMap::is_empty"`) — the unconditional
+        // form also survives a writer that builds a `Settings` literal by
+        // hand, which is the one path where a retired key could leak back
+        // onto the wire.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("settings.json"),
+            r#"{ "subagentModels": { "scout": "tama/m-1" } }"#,
+        )
+        .unwrap();
+        let settings = load_settings(dir.path());
+        // The fold CLEARS the legacy map, so even a `skip_serializing_if`
+        // would not save it here — but the read must leave it empty:
+        assert!(
+            settings.subagent_models.is_empty(),
+            "load_settings clears the legacy map"
+        );
+        write_settings(dir.path(), &settings).unwrap();
+        let raw = fs::read_to_string(dir.path().join("settings.json")).unwrap();
+        assert!(
+            !raw.contains("\"subagentModels\""),
+            "the retired key must never be written again: {raw}"
+        );
+        assert!(raw.contains("\"agentOverrides\""), "missing key in {raw}");
+        // And the hand-built-literal path (the one `load_settings` never
+        // runs) cannot emit it either — the unconditional `skip_serializing`:
+        let hand_built = Settings {
             subagent_models: std::collections::HashMap::from([(
                 "scout".to_string(),
                 "tama/m-1".to_string(),
             )]),
             ..Settings::default()
         };
-        let json = serde_json::to_string_pretty(&settings).unwrap();
-        assert!(json.contains("\"subagentModels\""), "missing key in {json}");
+        let json = serde_json::to_string(&hand_built).unwrap();
+        assert!(
+            !json.contains("\"subagentModels\""),
+            "a hand-built `Settings` cannot re-emit the retired key: {json}"
+        );
     }
 
     #[test]
@@ -1045,9 +1343,25 @@ mod tests {
                 "a/b".to_string(),
                 "xhigh".to_string(),
             )]),
-            subagent_models: std::collections::HashMap::from([(
+            // (ADR 0066) The legacy `subagentModels` map stays in this
+            // exhaustive literal (a struct-update base is not available here)
+            // but must be EMPTY: a `skip_serializing` field cannot come back
+            // from the document, so a POPULATED value would redden the
+            // `assert_eq!(back, settings)` below for the correct reason — the
+            // key is never written again. The legacy READ path is pinned
+            // through `load_settings` on a JSON string instead, see
+            // `a_legacy_subagent_models_file_folds_into_agent_overrides_on_load`,
+            // and the never-written guarantee is asserted directly just under
+            // the key list. The populated-map round-trip this literal used to
+            // cover now belongs to the map that ships:
+            subagent_models: HashMap::new(),
+            agent_overrides: std::collections::HashMap::from([(
                 "scout".to_string(),
-                "tama/m-1".to_string(),
+                AgentOverrideFields {
+                    model: Some("tama/m-1".to_string()),
+                    thinking: Some("low".to_string()),
+                    tools: Some(vec!["read".to_string()]),
+                },
             )]),
             spinner_style: Some("marquee".to_string()),
             session_naming_enabled: false,
@@ -1083,7 +1397,7 @@ mod tests {
             "\"font\"",
             "\"sizePx\"",
             "\"defaultThinkingLevels\"",
-            "\"subagentModels\"",
+            "\"agentOverrides\"",
             "\"spinnerStyle\"",
             "\"filePolicy\"",
             "\"web\"",
@@ -1097,6 +1411,13 @@ mod tests {
         ] {
             assert!(json.contains(key), "missing {key} in {json}");
         }
+        // (ADR 0066) Stated positively, not inherited from
+        // `the_legacy_subagent_models_key_never_reaches_the_file_again`: a
+        // populated `Settings` must not carry the retired key.
+        assert!(
+            !json.contains("\"subagentModels\""),
+            "the retired legacy key must never be serialized: {json}"
+        );
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back, settings);
     }

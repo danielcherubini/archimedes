@@ -298,7 +298,11 @@ export default function GeneralSection({
                 </SelectItem>
               ))}
               {storedLevelOutsideUnion !== null && (
-                <SelectItem value={storedLevelOutsideUnion}>
+                // DISABLED, symmetric with the Agents modal's stale items: the
+                // control already holds this value, so clicking the item re-fires
+                // `onValueChange` with the same string and rewrites the same level —
+                // a control that looks like it does something and only costs a save.
+                <SelectItem value={storedLevelOutsideUnion} disabled>
                   {storedLevelOutsideUnion}
                 </SelectItem>
               )}

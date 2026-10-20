@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import {
   ArrowLeftIcon,
-  BotIcon,
   DownloadIcon,
   GlobeIcon,
   PackageIcon,
@@ -15,14 +14,13 @@ import { applySettingsToDocument } from "@/lib/settings";
 import { getAppInfo } from "@/lib/version";
 import {
   getSettings,
-  listAgentDefinitions,
   listKnownProviders,
   listModels,
   listTools,
   saveSettings,
   shellSandboxAvailable,
-  type AgentDefinitionDto,
   type AppSettings,
+  type AgentOverrides,
   type McpServerEntry,
   type ModelDto,
   type ProviderConfig,
@@ -35,7 +33,6 @@ import { useSettings } from "@/store/settings";
 import GeneralSection from "./GeneralSection";
 import AppearanceSection from "./AppearanceSection";
 import ProviderSection from "./ProviderSection";
-import SubagentSection from "./SubagentSection";
 import UpdateSection from "./UpdateSection";
 import McpSection, { type McpDraft } from "./McpSection";
 import WebSearchSection from "./WebSearchSection";
@@ -44,7 +41,6 @@ type Section =
   | "general"
   | "appearance"
   | "providers"
-  | "subagents"
   | "mcp"
   | "web-search"
   | "updates";
@@ -73,6 +69,12 @@ function uniqueSlug(slug: string, taken: Set<string>): string {
  * `"<providerId>/<modelId>"`) from a provider's old id to its new one (a
  * name commit re-identifies the provider — the reference must not orphan).
  * A `null` / non-matching key is untouched.
+ *
+ * The parameter stays `string | null` (NOT `string | null | undefined`): the
+ * `agentOverrides` walk below handles an ABSENT `.model` before calling this,
+ * because absence is ADR 0067's "this override does not speak" — a third state
+ * a model reference cannot hold, and folding it into this signature would let a
+ * `null` reach the store, where `null` is forbidden.
  */
 function remapModelRef(
   key: string | null,
@@ -99,7 +101,7 @@ function remapModelRefs(
 /**
  * The settings page (the approved ZCode-parity design, spec §1/§4): a full
  * content-area view — a 268px section sidebar (back button + General /
- * Appearance / Providers / Subagents / MCP / Updates) + the active section's content. Immediate save:
+ * Appearance / Providers / MCP / Updates) + the active section's content. Immediate save:
  * a control change → `saveSettings` with the COMPLETE document (text
  * fields commit on blur/Enter; no save button, no dirty state).
  */
@@ -113,9 +115,6 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
   // The picker's selected template id ("" = nothing selected — the
   // placeholder; the Add button is disabled until one is picked).
   const [selectedKnown, setSelectedKnown] = useState("");
-  // The user-level discovered agent definitions (ADR 0023 — the Subagents
-  // section's data source; `null` until the first list lands).
-  const [agentDefs, setAgentDefs] = useState<AgentDefinitionDto[] | null>(null);
   // The native harness's tool names (the enabled-tools checkbox list).
   const [tools, setTools] = useState<string[]>([]);
   // (ADR 0030) The OS the app runs on — the Shell `Sandboxed` tier is
@@ -150,9 +149,6 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
     listModels()
       .then(setModels)
       .catch(() => {});
-    void listAgentDefinitions()
-      .then(setAgentDefs)
-      .catch(() => setAgentDefs([]));
     listTools()
       .then(setTools)
       .catch(() => {});
@@ -262,15 +258,35 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
         current.id,
         id,
       );
-      // (ADR 0023) `subagentModels` is `agent name → model key`: the model
-      // refs are the VALUES (the agent names are the KEYS — `remapModelRefs`
-      // remaps map KEYS and would be a no-op here). A non-matching value
-      // stays untouched.
-      const remappedSubagentModels: Record<string, string> = {};
-      for (const [name, model] of Object.entries(settings.subagentModels)) {
-        remappedSubagentModels[name] = remapModelRef(model, current.id, id) ?? model;
+      // (ADR 0066) `agentOverrides` is `agent name → override`: the model ref is
+      // the entry's `.model` VALUE (the agent names are the KEYS —
+      // `remapModelRefs` remaps map KEYS and would be a no-op here). A
+      // non-matching ref stays untouched, and an entry whose `.model` is ABSENT
+      // is copied VERBATIM: absence is ADR 0067's only meaning of "this override
+      // does not speak", so the rename must never turn it into `null` — NOR into
+      // `""` (the same violation in a different literal: a value that was not
+      // there before, which the resolver reads as "no opinion" at best).
+      const remappedOverrides: AgentOverrides = {};
+      for (const [name, override] of Object.entries(settings.agentOverrides)) {
+        if (override.model === undefined) {
+          // A silent entry gains NO `model` key at all — not even one holding
+          // `undefined`. Such a key does serialize away (`JSON.stringify` drops
+          // it, and that IS Tauri's IPC message serializer), but it still shows
+          // up in the in-memory document, where `"model" in entry` flips to
+          // true — so the key is simply never added.
+          remappedOverrides[name] = { ...override };
+          continue;
+        }
+        // A `null` can never come back from `remapModelRef` for a non-null key
+        // (it either renames or returns the key), so the fallback is the type's
+        // proof that absence never enters this branch; should it ever change,
+        // the entry keeps its own value instead of gaining a `null`.
+        remappedOverrides[name] = {
+          ...override,
+          model: remapModelRef(override.model, current.id, id) ?? override.model,
+        };
       }
-      nextSettings.subagentModels = remappedSubagentModels;
+      nextSettings.agentOverrides = remappedOverrides;
     }
     update(nextSettings);
     void listModels(id).then(setModels).catch(() => {});
@@ -375,15 +391,6 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
     />
   );
 
-  const subagentsSection = (
-    <SubagentSection
-      settings={settings}
-      agentDefs={agentDefs}
-      models={models}
-      onSave={update}
-    />
-  );
-
   const mcpSection = (
     <McpSection
       settings={settings}
@@ -441,12 +448,6 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
                 onClick={() => setSection("providers")}
               />
               <SettingsSidebarButton
-                icon={BotIcon}
-                label="Subagents"
-                active={section === "subagents"}
-                onClick={() => setSection("subagents")}
-              />
-              <SettingsSidebarButton
                 icon={ServerIcon}
                 label="MCP"
                 active={section === "mcp"}
@@ -476,13 +477,11 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
               ? appearanceSection
               : section === "providers"
                 ? providersSection
-                : section === "subagents"
-                  ? subagentsSection
-                  : section === "mcp"
-                    ? mcpSection
-                    : section === "web-search"
-                      ? webSearchSection
-                      : updatesSection}
+                : section === "mcp"
+                  ? mcpSection
+                  : section === "web-search"
+                    ? webSearchSection
+                    : updatesSection}
         </div>
       </section>
     </div>

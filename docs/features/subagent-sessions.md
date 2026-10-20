@@ -43,9 +43,11 @@ tool). An **unknown or omitted `agentName` is a config-less label-only
 dispatch** — never an error. The layers:
 
 - **`model`**: the explicit param, else the **settings override** (the
-  `settings.json` `subagentModels` entry for the agent's name — ADR 0023; read
-  at dispatch time; a stale value degrades to the next layer, like the
-  frontmatter), else the frontmatter `model`, else the parent's model.
+  `settings.json` `agentOverrides` entry for the agent's name — ADR 0066, the
+  trio map that replaced ADR 0023's single-field `subagentModels` map (legacy,
+  folded into it on read); read at dispatch time; a stale value degrades to the
+  next layer, like the frontmatter), else the frontmatter `model`, else the
+  parent's model.
   Resolved **at dispatch time against the effective catalog**
   (`EffectiveCatalog::resolve` — the base catalog + the settings' providers
   + live discovery; `NativeDeps` carries a catalog *supplier*, NOT a startup

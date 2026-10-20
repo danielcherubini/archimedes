@@ -1,7 +1,19 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { deleteSession, listSkills, setSessionArchived, startSession } from "../lib/tauri";
+import * as React from "react";
+import {
+  deleteSession,
+  getSettings,
+  listAgentConfig,
+  listSkills,
+  saveSettings,
+  setSessionArchived,
+  startSession,
+  type AgentConfigDto,
+  type AppSettings,
+} from "../lib/tauri";
 import { useSessions } from "../store/sessions";
+import { useSettings } from "../store/settings";
 import { usePermissions } from "../store/permissions";
 import { useInteractive } from "../store/interactive";
 import {
@@ -14,7 +26,68 @@ import {
   setNewSpaceDialogOpen,
 } from "../lib/newSpaceDialogState";
 import { clearSkillCatalogCache } from "../hooks/useSkillCatalog";
+import { clearAgentCatalogCache } from "../hooks/useAgentCatalog";
 import SpacesList from "./SpacesList";
+
+/**
+ * The settings document the STORE is seeded with (see the `beforeEach` below).
+ *
+ * TYPED as `AppSettings`, which is deliberate: the `getSettings` mock factory's
+ * literal below is untyped (a hoisted `vi.mock` factory cannot reference an outer
+ * const), so `tsc` cannot check that document for a missing key. This one is
+ * checked, and `AgentsDialog` reads `settings.agentOverrides` off the STORE — so
+ * if this fixture ever lacks the field, the build catches it instead of the modal
+ * throwing for a key that only shows up at runtime.
+ */
+const SETTINGS_FIXTURE: AppSettings = {
+  theme: "dark",
+  palette: null,
+  paneLayout: {},
+  defaultTrustNewSpaces: false,
+  // The value the STORE holds. The read-modify-write test below makes the
+  // RE-READ return a different one, which is what proves the save composes from
+  // the fresh document and not from this copy.
+  defaultModel: "stale/model",
+  defaultThinkingLevel: null,
+  enabledTools: [],
+  providers: [],
+  mcpServers: {},
+  font: { sizePx: 14, uiFamily: null, codeFamily: null },
+  defaultThinkingLevels: {},
+  agentOverrides: {},
+  spinnerStyle: null,
+  filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
+  web: {
+    braveApiKey: "",
+    tavilyApiKey: "",
+    perplexityApiKey: "",
+    searxngUrl: "",
+    defaultProvider: "auto",
+    proxy: "",
+  },
+  mcpMentionsEnabled: false,
+  sessionNamingEnabled: true,
+  sessionNamingModel: null,
+  sessionNamingReasoning: null,
+  attentionAlertsEnabled: true,
+  attentionAlertDelaySecs: 15,
+};
+
+/** One `list_agent_config` row (the Agents modal's data). */
+function agentRow(overrides: Partial<AgentConfigDto> = {}): AgentConfigDto {
+  return {
+    name: "scout",
+    description: "Fast recon",
+    scope: "user",
+    path: "/u/.agents/agents/scout.md",
+    file: { model: null, thinking: null, tools: null },
+    override: { model: null, thinking: null, tools: null },
+    effective: { model: null, thinking: null, tools: null },
+    source: { model: "parent", thinking: "parent", tools: "parent" },
+    shadowed: [],
+    ...overrides,
+  };
+}
 
 // Mock the Tauri IPC layer; everything else (stores) is the real code.
 vi.mock("../lib/tauri", async () => {
@@ -22,9 +95,13 @@ vi.mock("../lib/tauri", async () => {
   return {
     ...actual,
     // `AppSettings` document (a full shape — the `AppSettings` interface
-    // mirrors the Rust `Settings` struct exactly).
+    // mirrors the Rust `Settings` struct exactly). UNtyped, because a hoisted
+    // `vi.mock` factory cannot reference the typed `SETTINGS_FIXTURE` above —
+    // which is exactly why `agentOverrides: {}` had to be added to this literal
+    // BY HAND and why the store seeding below uses the typed one instead.
     getSettings: vi.fn().mockResolvedValue({
       theme: "dark",
+      palette: null,
       paneLayout: {},
       defaultTrustNewSpaces: false,
       defaultModel: null,
@@ -34,7 +111,8 @@ vi.mock("../lib/tauri", async () => {
       mcpServers: {},
       font: { sizePx: 14, uiFamily: null, codeFamily: null },
       defaultThinkingLevels: {},
-      subagentModels: {},
+      agentOverrides: {},
+      spinnerStyle: null,
       filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
       web: {
         braveApiKey: "",
@@ -75,12 +153,101 @@ vi.mock("../lib/tauri", async () => {
     ]),
     setSessionArchived: vi.fn().mockResolvedValue(true),
     deleteSession: vi.fn().mockResolvedValue(undefined),
+    // The Agents modal's three catalog sources + its write path.
+    listAgentConfig: vi.fn().mockResolvedValue([agentRow()]),
+    listModels: vi.fn().mockResolvedValue([
+      {
+        id: "Qwen3.8",
+        provider: "tama",
+        contextWindow: 200_000,
+        supportsThinking: true,
+        thinkingLevels: ["high", "medium", "low"],
+      },
+    ]),
+    listTools: vi.fn().mockResolvedValue(["grep", "read_file"]),
+    saveSettings: vi.fn().mockResolvedValue(undefined),
   };
 });
 
 const mockedStartSession = vi.mocked(startSession);
 const mockedListSkills = vi.mocked(listSkills);
 const mockedDeleteSession = vi.mocked(deleteSession);
+const mockedGetSettings = vi.mocked(getSettings);
+const mockedSaveSettings = vi.mocked(saveSettings);
+const mockedListAgentConfig = vi.mocked(listAgentConfig);
+
+/**
+ * The MOUNT PROBE for the render-site pin (see
+ * `the dialog is mounted OUTSIDE the panes content region`).
+ *
+ * Why a probe and not an ancestor walk on the dialog node: `DialogContent` portals
+ * itself to `document.body` — Radix's `Dialog.Content` renders an internal `Portal`
+ * for a modal dialog, NOT the `DialogPortal` the app's `ui/dialog` merely re-exports
+ * (stubbing that wrapper is INERT; `Dialog.Content` portals regardless, which is how
+ * this test was first written and found vacuous). So in any real mount the dialog
+ * node is a child of `document.body` whether the component was mounted inside the
+ * `visibility: hidden` content region or beside it — `contains()` and any
+ * `painted()`-style ancestor walk pass EVEN WITH THE BUG PRESENT.
+ *
+ * The wrapper below renders an ordinary (unportalled) node next to the real dialog.
+ * Its position in the DOM is EXACTLY where `SpacesList` mounted the component, so it
+ * reports the one fact the collapse depends on. Real `AgentsDialog` is still
+ * rendered, so every other test in this file runs against the real modal; the probe
+ * is a sibling `div` with no role, so it cannot disturb a `getByRole` query.
+ */
+let probeOn = false;
+
+/**
+ * A RENDER-TIME RECORD of the `rolledBackWrites` value the mount handed the dialog,
+ * consecutive duplicates collapsed (the shape `traceAgentOverrides` uses).
+ *
+ * Why the renders and not the DOM: this counter is the FACT the modal's stored-pin
+ * suppression is stamped against (see `AgentsDialog`'s `edits`), and a test whose
+ * rows carry all-`null` `override` columns has no column disagreement for the cue to
+ * name — the cue is then unobservable in the DOM, while the spurious increment that
+ * would have armed it is still a lie the mount told. The counter is that cue's
+ * upstream, and it is readable on every render.
+ *
+ * Recorded in the mock wrapper below (the seam the mount probe already uses), because
+ * the prop belongs to the dialog and the mount is its only writer. Pushed at render
+ * time, so a value that appeared for one render and was overwritten next render is
+ * still in the record. Readers reset it first — this is module scope, shared across
+ * every test in the file.
+ */
+let rollsSeen: (number | undefined)[] = [];
+
+/** Discard the record so it describes ONE test's renders. */
+function resetRolledBackWritesRecord(): void {
+  rollsSeen = [];
+}
+
+vi.mock("./AgentsDialog", async () => {
+  const actual = await vi.importActual<typeof import("./AgentsDialog")>(
+    "./AgentsDialog",
+  );
+  const Real = actual.default;
+  return {
+    default: (props: Parameters<typeof Real>[0]) => {
+      // Both reads happen at RENDER time (the factory is hoisted above this file's
+      // `let`s, so the factory BODY could not touch them at all — only this closure
+      // body, which runs per render, can).
+      if (rollsSeen[rollsSeen.length - 1] !== props.rolledBackWrites) {
+        rollsSeen.push(props.rolledBackWrites);
+      }
+      return React.createElement(
+        React.Fragment,
+        null,
+        // Read at RENDER time (the factory is hoisted above this file's `let`).
+        probeOn
+          ? React.createElement("div", {
+              "data-testid": "agents-mount-probe",
+            })
+          : null,
+        React.createElement(Real, props),
+      );
+    },
+  };
+});
 
 /**
  * Whether a node is PAINTED — i.e. neither it nor any ancestor carries
@@ -93,6 +260,56 @@ function painted(node: HTMLElement): boolean {
     if (el.classList.contains("invisible")) return false;
   }
   return true;
+}
+
+/**
+ * Open the Agents modal AND wait until it holds a ROW.
+ *
+ * `await screen.findByRole("dialog")` on its own is not enough to open the modal
+ * the tests then edit: the rows come from `useAgentCatalog`, which starts at `[]`
+ * and only fills in when `list_agent_config` lands, so a dialog found on the
+ * click's own tick can be the one rendering `No Agent definitions found.`. Every
+ * test below that open makes the next lookup SYNCHRONOUS
+ * (`within(dialog).getByRole("Model for scout")`), so whenever the fetch lost that
+ * race the failure read "the model button is missing" for a modal that was fine and
+ * a write path that was fine — a flake with no subject. Awaiting one row control
+ * makes the open deterministic, and it happens BEFORE any edit, so it cannot reorder
+ * the writes the tests are about.
+ */
+async function openAgentsModal(): Promise<HTMLElement> {
+  fireEvent.click(screen.getByRole("button", { name: "Agents" }));
+  const dialog = await screen.findByRole("dialog");
+  await within(dialog).findByRole("button", { name: "Model for scout" });
+  return dialog;
+}
+
+/**
+ * A RECORDING SUBSCRIPTION to the settings store: every `agentOverrides` map the
+ * store holds from now on, in order, as JSON (consecutive duplicates collapsed).
+ *
+ * Why a trace and not a final read: the defect this exists for is a GLIMPSE, not
+ * an end state. Each link of the `agentOverrides` write chain publishes its own
+ * snapshot when it completes, so a slow link finishing AFTER a newer optimistic
+ * publish hands the store the OLDER map — the user's newer pick flickers back to
+ * "Inherits" for a frame, and any edit composed inside that window silently loses
+ * a field from `settings.json`. `waitFor(() => store == X)` cannot see that at
+ * all: it polls for a condition that the buggy code also ends up satisfying, so
+ * the assertion of record has to be about the SEQUENCE the store passed through.
+ *
+ * `subscribe` is the store's own notify path (zustand without the selector
+ * middleware, hence the manual dedupe), and the record is synchronous with each
+ * `set`, so a publish that happens inside a promise continuation is captured even
+ * when no React render is watching.
+ */
+function traceAgentOverrides(): { seen: () => string[]; stop: () => void } {
+  const seen: string[] = [];
+  const record = (settings: AppSettings | null) => {
+    const map = JSON.stringify(settings?.agentOverrides ?? null);
+    if (seen[seen.length - 1] !== map) seen.push(map);
+  };
+  record(useSettings.getState().settings);
+  const unsubscribe = useSettings.subscribe((state) => record(state.settings));
+  return { seen: () => seen, stop: unsubscribe };
 }
 
 /**
@@ -144,17 +361,66 @@ function seed(): void {
 beforeEach(() => {
   seed();
   vi.clearAllMocks();
+  // `clearAllMocks` clears CALL RECORDS and nothing else: an UNCONSUMED `…Once`
+  // arm survives it and fires in the NEXT test (measured — a `mockRejectedValueOnce`
+  // left over from a test whose assertion threw before consuming it rejects the
+  // next test's `saveSettings`), and so does a bare `mockResolvedValue` override.
+  // The mocks this file re-arms are therefore reset and handed their factory
+  // default again, so "which test ran before me" cannot decide what my IPC layer
+  // answers.
+  //
+  // (`listSkills` is deliberately NOT in this list, and the reason is mechanical
+  // rather than about any one test: `mockReset()` strips a mock's implementation, so
+  // the bare reset leaves `listSkills()` returning `undefined`, and
+  // `useSkillCatalog.ts:66` calls `listSkills(spacePath).catch(…)` on EVERY mount —
+  // adding this line as-is measured 67 of this file's 69 tests failing on
+  // "Cannot read properties of undefined (reading 'catch')". It would need its
+  // factory default restated to belong here — which is ALSO the fix for the
+  // override the empty-skills test leaves behind (see its comment: declaration
+  // order is what keeps that `mockResolvedValue([])` from leaking further).)
+  mockedSaveSettings.mockReset().mockResolvedValue(undefined);
+  // Each re-arm restates that mock's FACTORY default (`getSettings`'s differs from
+  // `SETTINGS_FIXTURE` by `defaultModel: null` alone — verified deep-equal), so
+  // re-arming here changes no behavior; it only makes the default unconditional.
+  mockedGetSettings
+    .mockReset()
+    .mockResolvedValue({ ...SETTINGS_FIXTURE, defaultModel: null });
+  mockedListAgentConfig.mockReset().mockResolvedValue([agentRow()]);
+  vi.mocked(setSessionArchived).mockReset().mockResolvedValue(true);
+  mockedDeleteSession.mockReset().mockResolvedValue(undefined);
+});
+// Seed the SETTINGS STORE. `SpacesList.tsx` did not read `useSettings` before the
+// Agents modal mounted (only `main.tsx`'s boot path ever populated it), and this
+// file never seeded it — so with the mount's `settings &&` guard the dialog would
+// render in NO test here, and every failure would read as "the Agents button is
+// broken" when the real cause is an empty store. The same seeding pattern
+// `ChatStream.test.tsx` uses. Reset to `null` first: the store is module-scoped,
+// so a test that writes settings must not leak them into the next one.
+beforeEach(() => {
+  useSettings.setState({ settings: null, loaded: false });
+  useSettings.getState().setSettings(SETTINGS_FIXTURE);
 });
 // The hook's module-level catalog cache is shared across tests in a
 // file: clear it so each test refetches (without this, test 1's warm
 // cache — keyed by the `seed()` fixture's `cwd` — makes a later test's
 // fresh `listSkills` mock moot).
 beforeEach(clearSkillCatalogCache);
+// …and the same for the Agent catalog's module-level cache (the Agents modal
+// fetches through `useAgentCatalog`, keyed by the `seed()` fixture's Space).
+beforeEach(clearAgentCatalogCache);
 // The left-pane collapsed flag is module-scoped: reset it between tests
 // (the module is the single persistence owner — `setLeftPaneCollapsed`
 // writes localStorage itself).
 beforeEach(() => {
   setLeftPaneCollapsed(false);
+});
+// jsdom has no layout, so Radix's `Select` throws on the focus-first-option
+// scroll (`candidate?.scrollIntoView is not a function`). The repo-wide
+// convention for this in every file that mounts a `Select`
+// (`SettingsPage.test.tsx`, `SessionConfigSelect.test.tsx`, …) — this file
+// needed it the moment a test opened the Agents modal's Thinking select.
+beforeEach(() => {
+  Element.prototype.scrollIntoView = vi.fn();
 });
 // The Open-Space-dialog flag is module-scoped too, and THIS file can raise
 // it (the `Open Space` button, the rail icon, `⌘O`, the `…` menu). A leaked
@@ -166,9 +432,29 @@ beforeEach(() => {
 beforeEach(() => {
   setNewSpaceDialogOpen(false);
 });
+// The mount probe above is a module-level switch: a test that asks for it must
+// not leak it into the tests after it.
+beforeEach(() => {
+  probeOn = false;
+});
+// FILE-SCOPE spy restore. Several tests below install a `console.error` spy to
+// swallow (or observe) a failure log and restore it on the last line — with no
+// `try/finally`. An assertion that throws mid-test therefore never reaches that
+// restore, and a SILENCED `console.error` walks into every later test in the
+// file: exactly the leak that makes the first red hard to read, because the
+// tests after it stop printing the errors they were supposed to print. Restoring
+// here costs the tests nothing and holds whatever the throw skipped.
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("SpacesList", () => {
-  it("renders the two action buttons with their labels and kbd hints", () => {
+  it("renders its labelled action buttons with their labels and kbd hints", () => {
+    // The row holds FOUR labelled buttons (Open Space, New Session, Skills,
+    // Agents) since Agents landed — this name used to say "two", which was true only
+    // of the two that carry a chord. The kbd assertions below stay on those two on
+    // purpose: `Skills` and `Agents` render no `Kbd` at all (matching each other), so
+    // a `⌘`-hint assertion for them would pin copy the component never renders.
     render(<SpacesList />);
     expect(screen.getByRole("button", { name: /New Session/ })).toBeTruthy();
     expect(screen.getByText("⌘N")).toBeTruthy();
@@ -559,6 +845,864 @@ describe("SpacesList", () => {
     fireEvent.click(screen.getByRole("button", { name: "Skills" }));
     await screen.findByText("No skills found.");
   });
+
+  // -------------------------------------------------------------------------
+  // The Agents modal (ADR 0066 / ADR 0068) — the fourth command in this pane,
+  // mounted beside `Skills` with the same two boundaries: it must survive the
+  // collapse (the rail icon), and it must render OUTSIDE the content region.
+  // -------------------------------------------------------------------------
+
+  it("an_Agents_button_exists_and_opens_the_dialog", async () => {
+    render(<SpacesList />);
+    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
+    // `getByRole("dialog")`, NEVER a text query: the pane now holds BOTH a
+    // button labelled `Agents` AND a `DialogTitle` reading `Agents`, so
+    // `findByText("Agents")` matches two nodes and throws on ambiguity (the same
+    // hazard this file documents for `Skills`).
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Agents")).toBeTruthy();
+    // The row came from `list_agent_config` keyed by the ACTIVE Space. AWAITED,
+    // for the reason `openAgentsModal` states: the rows arrive with the fetch, so
+    // a row queried on the dialog's own tick can race it.
+    expect(await within(dialog).findByText("scout")).toBeTruthy();
+  });
+
+  it("the_collapsed_rails_Agents_icon_opens_the_dialog_too", async () => {
+    act(() => {
+      setLeftPaneCollapsed(true);
+    });
+    render(<SpacesList />);
+    fireEvent.click(screen.getByTitle("Agents"));
+    // The dialog renders while the pane is COLLAPSED — the acceptance criterion,
+    // and the reason the render site sits outside the `invisible` content region.
+    const dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findByText("scout")).toBeTruthy();
+  });
+
+  it("the dialog is mounted OUTSIDE the panes content region (structural)", async () => {
+    // The hazard is real and invisible: the content region carries
+    // `visibility: hidden` while the pane is collapsed, and `visibility` INHERITS
+    // into `fixed` descendants — a dialog mounted inside that region opens with
+    // nothing painted. The file's comment at the close of the region says exactly
+    // this about `SkillsDialog`, and the Agents dialog has the same requirement.
+    //
+    // WHY THE ASSERTION IS STRUCTURAL AND NOT A `visibility` TEST OF THE DIALOG.
+    // `DialogContent` portals itself to `document.body` (Radix's `Dialog.Content`
+    // renders an internal `Portal` — not the `DialogPortal` `ui/dialog`
+    // re-exports, so stubbing THAT wrapper is inert; an ancestor walk on the real
+    // dialog passed even with the dialog mounted inside the hidden region).
+    // jsdom therefore CANNOT demonstrate the `visibility` argument behaviourally on
+    // the dialog node: it is never a DOM descendant of the region in ANY
+    // configuration.
+    //
+    // The `agents-mount-probe` (see the mock at the top of this file) is an
+    // ordinary un-portalled node rendered at the same site as the dialog, so its
+    // PARENT reports where the component was actually mounted. The second
+    // assertion reads the same `invisible` class the collapse applies through the
+    // `painted()` helper — the structural statement of the `visibility` argument.
+    // Move the `{agentsOpen && settings && …}` render inside the content-region
+    // `<div>` and BOTH assertions go red (measured; see the commit notes).
+    probeOn = true;
+    act(() => {
+      setLeftPaneCollapsed(true);
+    });
+    const { container } = render(<SpacesList />);
+    const pane = container.firstChild as HTMLElement;
+    expect(pane.tagName).toBe("ASIDE");
+    // THE CONTENT REGION — the div that carries `invisible` while collapsed. The
+    // dialogs sit under the `<aside>` BESIDE this div, so the region (not the pane
+    // frame) is the container whose `visibility` is the hazard.
+    const contentRegion = pane.firstElementChild as HTMLElement;
+    expect(contentRegion.classList.contains("invisible")).toBe(true);
+    fireEvent.click(screen.getByTitle("Agents"));
+    const probe = await screen.findByTestId("agents-mount-probe");
+    // The dialog ITSELF is rendered too (the probe is a sibling, not a
+    // replacement) — so this cannot pass on a component that never mounted.
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    // The mount site is outside the hidden region…
+    expect(contentRegion.contains(probe)).toBe(false);
+    // …and consequently PAINTED while collapsed.
+    expect(painted(probe)).toBe(true);
+  });
+
+  it("the Portal relocates the dialog to document.body (why the test above needs a probe)", async () => {
+    // The fact that makes a plain structural walk vacuous, pinned rather than
+    // assumed: with the Portal live (the default here), the dialog node is a
+    // child of `document.body` — NOT of the pane — whichever render site the
+    // component uses. If Radix ever stops relocating (or the app starts passing a
+    // `container`), the probe above stops being the only discriminator and this
+    // test says so out loud.
+    act(() => {
+      setLeftPaneCollapsed(true);
+    });
+    const { container } = render(<SpacesList />);
+    const pane = container.firstChild as HTMLElement;
+    fireEvent.click(screen.getByTitle("Agents"));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.parentElement).toBe(document.body);
+    // Which is exactly the configuration in which `pane.contains(dialog)` is
+    // `false` for BOTH render sites — the reason it is not the assertion of
+    // record above.
+    expect(pane.contains(dialog)).toBe(false);
+  });
+
+  it("the dialog opens cleanly when the catalog answers with no definitions", async () => {
+    // The empty path, which no test here used to take: every other open goes
+    // through `openAgentsModal`, which WAITS FOR A ROW, so `[]` was only ever
+    // reachable as the transient pre-fetch paint that helper is written to avoid.
+    // The state is real — `list_agent_config` can answer `[]`, and the hook
+    // degrades a FAILED fetch to `[]` — and the dialog's orphan scan, its
+    // thinking-level union and the per-row `stored` lookup all read those rows.
+    //
+    // Which arm this reaches, stated honestly: `useAgentCatalog` starts at
+    // `rows: []`, so `rows.length === 0` is ALSO what a still-pending fetch
+    // paints (measured — handing the mock a promise that never settles renders the
+    // same line). And the dialog's only `Loading…` arm is gated on
+    // `settings === null`, which the mount's `settings &&` guard already excludes,
+    // so that arm is unreachable from this render site. So the copy pinned below
+    // is the empty/unknown-rows arm, `Loading…` is asserted absent, and this test
+    // proves "an empty answer renders instead of throwing" — not "a hung IPC is
+    // distinguishable from an empty answer", which the component cannot express.
+    mockedListAgentConfig.mockResolvedValue([]);
+    render(<SpacesList />);
+    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      await within(dialog).findByText("No Agent definitions found."),
+    ).toBeTruthy();
+    expect(within(dialog).queryByText("Loading…")).toBeNull();
+    // …and the modal is still a working dialog, not a crashed shell: the search
+    // field survived, and the dialog found by the empty copy is the open one.
+    expect(within(dialog).getByPlaceholderText("Search agents…")).toBeTruthy();
+    expect(screen.getByRole("dialog")).toBe(dialog);
+    // One fetch for the mount (no retry storm against the empty answer).
+    expect(mockedListAgentConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it("picking_a_model_saves_agentOverrides_through_a_read_modify_write", async () => {
+    // The one new write path in the feature. The save must be composed from a
+    // FRESH `get_settings` read, never from the store's copy: Rust writes
+    // `settings.json` on its own (`agent/session/mod.rs:1678` persists a
+    // remembered thinking level via load-mutate-write), so the store can be
+    // holding a stale document and composing from it would silently clobber a
+    // concurrent change.
+    //
+    // The re-read returns a document whose `defaultModel` DIFFERS from the store
+    // fixture's, so "every other field preserved" can only pass by reading the
+    // fresh document — a save composed from the store would write `stale/model`.
+    // Its `agentOverrides` carries a SECOND agent on purpose: that entry is
+    // expected to be REPLACED away, because the map is the one field the user is
+    // editing and the dialog hands over the whole edited map (see the write
+    // helper's comment in `SpacesList.tsx` — sound because no writer outside this
+    // modal is live while the modal is, the one exception being `SettingsPage`'s
+    // Provider-rename remap, which cannot overlap because Settings unmounts this pane).
+    const fresh: AppSettings = {
+      ...SETTINGS_FIXTURE,
+      defaultModel: "fresh/model",
+      agentOverrides: { plan: { thinking: "high" } },
+    };
+    // The store seed (already set) is `SETTINGS_FIXTURE`; the RE-READ is `fresh`.
+    mockedGetSettings.mockResolvedValue(fresh);
+    render(<SpacesList />);
+    const dialog = await openAgentsModal();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Model for scout" }),
+    );
+    fireEvent.click(await screen.findByText("Qwen3.8"));
+    await waitFor(() => expect(mockedSaveSettings).toHaveBeenCalledTimes(1));
+    // The re-read happened BEFORE the save (the read-modify-write order).
+    expect(mockedGetSettings.mock.invocationCallOrder[0]).toBeLessThan(
+      mockedSaveSettings.mock.invocationCallOrder[0],
+    );
+    expect(mockedSaveSettings).toHaveBeenCalledWith({
+      ...fresh,
+      agentOverrides: { scout: { model: "tama/Qwen3.8" } },
+    });
+    // Every field OTHER than the edited map is the FRESH document's, byte-identical
+    // — the store's stale `defaultModel` must not appear anywhere in the call.
+    const saved = mockedSaveSettings.mock.calls[0][0];
+    expect(saved.defaultModel).toBe("fresh/model");
+    expect(JSON.stringify(saved)).not.toContain("stale/model");
+    // And the store now agrees with the file (a divergent store is how the next
+    // write gets composed from a document that no longer exists).
+    expect(useSettings.getState().settings).toEqual({
+      ...fresh,
+      agentOverrides: { scout: { model: "tama/Qwen3.8" } },
+    });
+  });
+
+  it("two rapid edits both land in the file (the writes are serialized)", async () => {
+    // The dialog builds the map it hands over from the RENDER-TIME store
+    // snapshot, and the store only catches up once `getSettings` → `saveSettings`
+    // resolve. So a second edit issued inside that window carries a map that has
+    // never seen the first edit's field, and the write replaces the map
+    // WHOLESALE — the first pick vanishes from `settings.json` with no feedback.
+    // A model-pick then a thinking-pick is one natural ~300ms gesture, so this is
+    // the ordinary case, not a corner.
+    //
+    // The save is held open here to make that window deterministic instead of
+    // timing-dependent: the second edit is issued while the first save is
+    // provably still in flight. What is asserted is the END STATE of the file —
+    // the LAST document written carries both fields, whether that comes from one
+    // coalesced save or from two serialized ones.
+    let releaseFirstSave!: () => void;
+    mockedSaveSettings.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseFirstSave = resolve;
+        }),
+    );
+    render(<SpacesList />);
+    const dialog = await openAgentsModal();
+    // Edit 1: the model.
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Model for scout" }),
+    );
+    fireEvent.click(await screen.findByText("Qwen3.8"));
+    // Edit 2: the thinking level, WITHOUT awaiting the first save.
+    fireEvent.click(
+      within(dialog).getByRole("combobox", { name: "Thinking for scout" }),
+    );
+    fireEvent.click(await screen.findByRole("option", { name: "high" }));
+    act(() => releaseFirstSave());
+    // The second write still flows after the first lands (the chain is not
+    // abandoned when a link resolves slowly — or when one fails).
+    //
+    // The pass-condition must be as strong as the read: a weaker condition makes
+    // correctness depend on RTL internals. `>= 1` here is satisfied while only
+    // edit 1's link has been issued, and passing anyway would then be a property
+    // of RTL's `asyncWrapper` draining the macrotask queue before the assertion
+    // below runs — not a property of the write chain. Both edits were demanded,
+    // so the LAST call is the one the file ends up holding.
+    await waitFor(() =>
+      expect(mockedSaveSettings.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
+    const lastSaved =
+      mockedSaveSettings.mock.calls[mockedSaveSettings.mock.calls.length - 1][0];
+    expect(lastSaved.agentOverrides).toEqual({
+      scout: { model: "tama/Qwen3.8", thinking: "high" },
+    });
+    // …and the store agrees with the file the user just wrote.
+    await waitFor(() =>
+      expect(useSettings.getState().settings?.agentOverrides.scout).toEqual({
+        model: "tama/Qwen3.8",
+        thinking: "high",
+      }),
+    );
+  });
+
+  it("a newer optimistic publish is never reverted by an older link completing (no flicker)", async () => {
+    // The half of the serialized chain the FILE writes do not cover. Every link
+    // writes its map in the right ORDER, but each link also PUBLISHES its own
+    // snapshot on completion: success → `setSettings(freshDocument)` with THIS
+    // link's map, failure → a re-fetched FILE document published under a commit-time
+    // staleness check. So with edit A in flight and
+    // edit B published optimistically on top of it, link A landing hands the store
+    // the {A}-only map — B's pick visibly reverts for a frame, and an edit C
+    // composed in that window builds on {A} and silently drops B from the file.
+    // Deterministic on every rapid two-edit gesture (this is the same window the
+    // test above holds open on purpose).
+    //
+    // The assertion is the STORE TRACE (see `traceAgentOverrides`): the end state
+    // is what the buggy code also eventually reaches, so only the SEQUENCE shows
+    // the regression. `settle()` is a macrotask turn — enough for the continuation
+    // after a resolved `getSettings`/`saveSettings` to run and publish, which is
+    // the exact moment the bug paints.
+    const MODEL_ONLY = JSON.stringify({ scout: { model: "tama/Qwen3.8" } });
+    const BOTH = JSON.stringify({
+      scout: { model: "tama/Qwen3.8", thinking: "high" },
+    });
+    let releaseFirstSave!: () => void;
+    mockedSaveSettings.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseFirstSave = resolve;
+        }),
+    );
+    // The trace starts BEFORE any edit, so its first entry is the empty map and
+    // every later entry is something the write path published.
+    const trace = traceAgentOverrides();
+    try {
+      render(<SpacesList />);
+      const dialog = await openAgentsModal();
+      // Edit A: the model — its save is now provably in flight.
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "Model for scout" }),
+      );
+      fireEvent.click(await screen.findByText("Qwen3.8"));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(mockedSaveSettings).toHaveBeenCalledTimes(1);
+      // Edit B: the thinking level, composed on the optimistically-published map.
+      fireEvent.click(
+        within(dialog).getByRole("combobox", { name: "Thinking for scout" }),
+      );
+      fireEvent.click(await screen.findByRole("option", { name: "high" }));
+      // B's optimistic publish is in the trace, and nothing older has landed yet.
+      expect(trace.seen()).toContain(BOTH);
+      // Now land A. Its link still holds the {A}-only map.
+      act(() => releaseFirstSave());
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      // THE FLICKER: after B published the two-field map, the store must never be
+      // handed the {A}-only map again. (Read off the trace, not off the store — a
+      // later link republishes the newer map, so the end state hides this.)
+      const afterB = trace.seen().slice(trace.seen().indexOf(BOTH) + 1);
+      expect(afterB).not.toContain(MODEL_ONLY);
+      // End states, in the shape `two rapid edits both land` asserts them: the last
+      // write is the file's answer and the store agrees with it. The count is
+      // awaited FIRST — reading `calls[length-1]` before demanding both links were
+      // issued makes the pass depend on the settle above having drained the queue,
+      // i.e. on RTL internals rather than on the write chain.
+      await waitFor(() =>
+        expect(mockedSaveSettings.mock.calls.length).toBeGreaterThanOrEqual(2),
+      );
+      const lastSaved =
+        mockedSaveSettings.mock.calls[
+          mockedSaveSettings.mock.calls.length - 1
+        ][0];
+      expect(JSON.stringify(lastSaved.agentOverrides)).toBe(BOTH);
+      expect(JSON.stringify(useSettings.getState().settings?.agentOverrides)).toBe(
+        BOTH,
+      );
+    } finally {
+      trace.stop();
+    }
+  });
+
+  it("three edits while the first save is in flight keep the middle pick", async () => {
+    // The gesture the flicker actually costs something in. With link A still in
+    // flight, B publishes {A,B}; A's completion reverts the store to {A}; edit C is
+    // then composed off the REVERTED store, so the map handed to the third write
+    // never saw B and B is deleted from `settings.json` with no feedback. The
+    // middle pick is the one the user cannot see being lost, because the picker
+    // they are looking at is already showing C.
+    //
+    // BOTH of the first two saves are held open, so the window between link A's
+    // publish and link B's is open for the whole time C is issued — the window the
+    // bug lives in, made deterministic instead of a race. (Holding only the first
+    // would let link B republish the two-field map before C happens, and the test
+    // would pass for the wrong reason.)
+    const deferred = (): { promise: Promise<void>; release: () => void } => {
+      let release!: () => void;
+      const promise = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { promise, release };
+    };
+    const first = deferred();
+    const second = deferred();
+    mockedSaveSettings
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+    render(<SpacesList />);
+    const dialog = await openAgentsModal();
+    // A — the model.
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Model for scout" }),
+    );
+    fireEvent.click(await screen.findByText("Qwen3.8"));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(mockedSaveSettings).toHaveBeenCalledTimes(1);
+    // B — the thinking level.
+    fireEvent.click(
+      within(dialog).getByRole("combobox", { name: "Thinking for scout" }),
+    );
+    fireEvent.click(await screen.findByRole("option", { name: "high" }));
+    // Link A lands and publishes while link B's save is still held — the exact
+    // moment the store is holding the OLDER map.
+    act(() => first.release());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(mockedSaveSettings).toHaveBeenCalledTimes(2);
+    // C — a tool tick, composed off whatever the store is holding right now.
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "Override tool grep for scout" }),
+    );
+    // Let C's link start its save, then land B's (the queued one).
+    act(() => second.release());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await waitFor(() =>
+      expect(mockedSaveSettings.mock.calls.length).toBeGreaterThanOrEqual(3),
+    );
+    // End states (same shape as `two rapid edits both land`): the LAST document
+    // written carries all three fields, and the store agrees with the file.
+    const lastSaved =
+      mockedSaveSettings.mock.calls[mockedSaveSettings.mock.calls.length - 1][0];
+    expect(lastSaved.agentOverrides).toEqual({
+      scout: { model: "tama/Qwen3.8", thinking: "high", tools: ["grep"] },
+    });
+    await waitFor(() =>
+      expect(useSettings.getState().settings?.agentOverrides.scout).toEqual({
+        model: "tama/Qwen3.8",
+        thinking: "high",
+        tools: ["grep"],
+      }),
+    );
+  });
+
+  it("a slow first save cannot land after the second edit's save (out-of-order writes)", async () => {
+    // The other half of the same gesture, and the half the store's optimistic
+    // publish CANNOT fix: two `saveSettings` calls are two independent IPC round
+    // trips, so the FIRST one can resolve LAST and write the older map over the
+    // newer file. The chain in `patchAgentOverrides` is what makes "last edit
+    // wins" mean the last map the user produced rather than whichever round trip
+    // finished second.
+    //
+    // Deterministic instead of racy: call 1's save is held open, call 2's resolves
+    // at once (the factory's default). Unserialized, call 2 writes both fields
+    // first and call 1 then writes the model-only map on top of it; serialized,
+    // call 2 does not even start until call 1 has landed.
+    let releaseFirstSave!: () => void;
+    mockedSaveSettings.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseFirstSave = resolve;
+        }),
+    );
+    render(<SpacesList />);
+    const dialog = await openAgentsModal();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Model for scout" }),
+    );
+    fireEvent.click(await screen.findByText("Qwen3.8"));
+    fireEvent.click(
+      within(dialog).getByRole("combobox", { name: "Thinking for scout" }),
+    );
+    fireEvent.click(await screen.findByRole("option", { name: "high" }));
+    // Let whatever is queued settle, THEN land the first save. Anything that
+    // writes after this point is the last word the file gets.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => releaseFirstSave());
+    // A REAL settle (not a bare `waitFor`, which would pass on the store's state
+    // from BEFORE the late save landed — the exact state the bug leaves behind):
+    // each successful save publishes its own document, so the store now reports
+    // what the LAST-RESOLVING write wrote, i.e. what the file ends up holding.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(useSettings.getState().settings?.agentOverrides.scout).toEqual({
+      model: "tama/Qwen3.8",
+      thinking: "high",
+    });
+    // The settle above is what makes the SECOND save exist, but it is a fact about
+    // macrotask ordering; the read below takes the last call, so the count is what
+    // has to be demanded.
+    await waitFor(() =>
+      expect(mockedSaveSettings.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
+    const lastSaved =
+      mockedSaveSettings.mock.calls[mockedSaveSettings.mock.calls.length - 1][0];
+    expect(lastSaved.agentOverrides).toEqual({
+      scout: { model: "tama/Qwen3.8", thinking: "high" },
+    });
+  });
+
+  it("a failed save does not strand the edit after it (the chain stays alive)", async () => {
+    // The chain is a promise held in a ref, so a rejection would be POISON: every
+    // later link would resolve to that same stale rejection and no subsequent edit
+    // would ever reach the file. The write helper swallows its own error (log +
+    // re-seed) precisely so the chain survives a failed link.
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockedSaveSettings.mockRejectedValueOnce(new Error("boom"));
+    render(<SpacesList />);
+    const dialog = await openAgentsModal();
+    // Edit 1 fails.
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Model for scout" }),
+    );
+    fireEvent.click(await screen.findByText("Qwen3.8"));
+    await waitFor(() =>
+      expect(consoleError).toHaveBeenCalledWith(
+        "Failed to save agent overrides:",
+        expect.anything(),
+      ),
+    );
+    // Edit 2 still reaches the file.
+    fireEvent.click(
+      within(dialog).getByRole("combobox", { name: "Thinking for scout" }),
+    );
+    fireEvent.click(await screen.findByRole("option", { name: "high" }));
+    await waitFor(() =>
+      expect(mockedSaveSettings.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
+    // …and the map that landed carries the second edit.
+    const lastSaved =
+      mockedSaveSettings.mock.calls[mockedSaveSettings.mock.calls.length - 1][0];
+    expect(lastSaved.agentOverrides.scout?.thinking).toBe("high");
+  });
+
+  it("a throwing failure logger does not poison the chain (the swallow is structural)", async () => {
+    // The swallow's own failure mode. A `catch` block inside `writeAgentOverrides`
+    // makes the swallow depend on the error HANDLER being infallible: if
+    // `console.error` itself throws — a broken logger, an environment that throws
+    // on logging, a re-seed that throws — the CATCH throws, the link resolves to a
+    // REJECTION, and every write chained after it silently resolves to that same
+    // stale rejection without touching the file. The modal keeps looking like it
+    // saves (the optimistic publish is synchronous) forever after.
+    //
+    // So the swallow belongs on the CHAIN LINK, not only inside the helper: nothing
+    // the failure path does can then disable the queue. This test is the difference
+    // between those spellings — with the swallow inside the helper it fails, because
+    // the poisoned link eats edit 2's save entirely (`saveSettings` is never called a
+    // second time).
+    //
+    // Which half of the link's TWO swallows reddens this test — measured, because the
+    // comment used to credit the wrong one: deleting the TRAILING `.catch` fails the
+    // run (exit 1) with an UNHANDLED REJECTION pointing at this test's `console.error`
+    // spy, because the call site `void`s the link and the mount has nowhere to attach
+    // a handler; deleting the LEADING one stays green, since the trailing half covers
+    // the same rejection AND the promise stored in the ref is the swallowed one. The
+    // leading half is belt-and-braces for link order, and this test pins it not at
+    // all — see the `patchAgentOverrides` comment for the division of labour.
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {
+        throw new Error("the logger is broken too");
+      });
+    mockedSaveSettings.mockRejectedValueOnce(new Error("boom"));
+    render(<SpacesList />);
+    const dialog = await openAgentsModal();
+    // Edit 1 fails, and handling that failure fails as well.
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Model for scout" }),
+    );
+    fireEvent.click(await screen.findByText("Qwen3.8"));
+    await waitFor(() => expect(consoleError).toHaveBeenCalled());
+    // Edit 2 still reaches the file.
+    fireEvent.click(
+      within(dialog).getByRole("combobox", { name: "Thinking for scout" }),
+    );
+    fireEvent.click(await screen.findByRole("option", { name: "high" }));
+    await waitFor(() =>
+      expect(mockedSaveSettings.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
+    const lastSaved =
+      mockedSaveSettings.mock.calls[mockedSaveSettings.mock.calls.length - 1][0];
+    expect(lastSaved.agentOverrides.scout?.thinking).toBe("high");
+  });
+
+  it("a landed save still evicts the catalog when the store publish throws (and is not logged as a save failure)", async () => {
+    // The other half of making the swallow STRUCTURAL: what the error handler
+    // COVERS. Today `setSettings` sits inside the same `try` as the save and the
+    // eviction, so a publish that throws after a save that LANDED is reported as
+    // "Failed to save agent overrides" — a lie about a write the file has — and the
+    // eviction after it is skipped, so the modal keeps serving `runs` columns
+    // resolved against the map that edit replaced.
+    //
+    // The two facts are independent: the save landed (→ evict, → do not log a save
+    // failure), and the store mirror failed (→ the store lags, nothing more). So the
+    // publish is the one step the epoch guard already stands in front of, and the
+    // eviction happens whatever the publish does.
+    const realPublish = useSettings.getState().setSettings;
+    let publishes = 0;
+    // Replaced ON THE LIVE STATE OBJECT (not `vi.spyOn(getState(), …)`): zustand
+    // `set` builds a NEW state object on every write, so a spy installed on the old
+    // one is what gets restored, and the live store would keep the spy.
+    const publish = (document: AppSettings) => {
+      publishes += 1;
+      // Call 1 is the optimistic publish in `patchAgentOverrides` — let it through,
+      // or the modal never re-renders and the second edit cannot happen. Call 2 is
+      // the success mirror, and it is the one that throws.
+      if (publishes > 1) throw new Error("store publish failed");
+      realPublish(document);
+    };
+    useSettings.setState({ setSettings: publish });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const first = render(<SpacesList />);
+      const dialog = await openAgentsModal();
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "Model for scout" }),
+      );
+      fireEvent.click(await screen.findByText("Qwen3.8"));
+      await waitFor(() => expect(mockedSaveSettings).toHaveBeenCalledTimes(1));
+      // Let the success path run to completion (the throw is inside it).
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      // A save that landed is not a save failure.
+      expect(consoleError).not.toHaveBeenCalledWith(
+        "Failed to save agent overrides:",
+        expect.anything(),
+      );
+      // …and the catalog the edit invalidated is gone anyway — the assertion the
+      // eviction test uses (the next MOUNT of the hook, since the pane owns the
+      // fetch): unmount and re-mount with the same Space key.
+      expect(mockedListAgentConfig).toHaveBeenCalledTimes(1);
+      first.unmount();
+      render(<SpacesList />);
+      await waitFor(() =>
+        expect(mockedListAgentConfig).toHaveBeenCalledTimes(2),
+      );
+    } finally {
+      useSettings.setState({ setSettings: realPublish });
+      consoleError.mockRestore();
+    }
+  });
+
+  it("logs a console error when saving Agent overrides fails (the store re-seeds from the file)", async () => {
+    // The failure arm of the one write path, in this file's established shape for
+    // that class (`logs a console error when Archive fails`, Unfail, Delete): the
+    // rejection is LOGGED (no unhandled rejection in the webview) and the state
+    // ends up agreeing with the FILE.
+    //
+    // The second half matters more here than it does for the archive move, because
+    // the write path publishes the edited map into the store OPTIMISTICALLY before
+    // the save resolves. A save that did not land therefore leaves the store
+    // claiming an override the file has never seen — and the NEXT edit would be
+    // composed on top of it. The re-fetch has to roll that back, so the fixture's
+    // re-read carries a map that is NOT what the user picked.
+    const fresh: AppSettings = {
+      ...SETTINGS_FIXTURE,
+      agentOverrides: { plan: { thinking: "high" } },
+    };
+    mockedGetSettings.mockResolvedValue(fresh);
+    mockedSaveSettings.mockRejectedValueOnce(new Error("boom"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(<SpacesList />);
+    const dialog = await openAgentsModal();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Model for scout" }),
+    );
+    fireEvent.click(await screen.findByText("Qwen3.8"));
+    // ...the rejection is logged...
+    await waitFor(() =>
+      expect(consoleError).toHaveBeenCalledWith(
+        "Failed to save agent overrides:",
+        expect.anything(),
+      ),
+    );
+    // ...and the store ends up holding the RE-FETCHED document: the optimistic map
+    // is gone, the file's map is back. (A store left holding `scout` would be the
+    // lie — the picker would show a pin nothing saved.)
+    await waitFor(() => expect(useSettings.getState().settings).toEqual(fresh));
+    expect(useSettings.getState().settings?.agentOverrides.scout).toBeUndefined();
+  });
+
+  it("a failure re-seed that lands after a newer edit was published is discarded at commit", async () => {
+    // The epoch guard's OTHER arm — the one the dispatch-time check did not cover.
+    // Every link re-checks `isStale()` BEFORE it starts its work; the failure arm's
+    // work is a whole `get_settings` round trip, and that round trip was never
+    // re-checked at COMMIT. A re-seed that resolves after every later optimistic
+    // publish therefore lands LAST and writes the FILE's older map into a store the
+    // newer edit owns. Nothing publishes over it afterwards — the queue is drained —
+    // so the store is left PERMANENTLY behind the file, and the next `patch`
+    // composes from it: the wholesale map replace then DELETES from `settings.json`
+    // a field the file still holds. That is the drop-a-write class this chain exists
+    // to prevent, arriving through the rollback instead of through the publish.
+    //
+    // MECHANICS. The re-seed's read is held by the mock, so "still in flight" is a
+    // state this test looks at rather than races:
+    // - read #1 is edit A's in-`try` read (the read-modify-write);
+    // - read #2 is THE RE-SEED's read — issued before the failure arm returns, so it
+    //   is the second read under either spelling (`getSettings()` in the arm, or
+    //   `loadSettings()` fetching internally), which is what makes this repro about
+    //   the commit-time check and not about the mock's shape;
+    // - read #3 is edit B's link read, and it resolves normally so B can complete.
+    // Order of operations: A's save REJECTS → B is issued and its link SUCCEEDS and
+    // publishes → only then is the held re-seed released.
+    const fileDoc: AppSettings = {
+      ...SETTINGS_FIXTURE,
+      // A map the user never picked and never cleared: the FILE's answer, and the
+      // document a clobbered store would be holding.
+      agentOverrides: { plan: { thinking: "high" } },
+    };
+    const bDocument: AppSettings = {
+      ...fileDoc,
+      // B composes on A's OPTIMISTICALLY published map, so the map the user is
+      // looking at — and the one the file ends up holding — carries both fields.
+      agentOverrides: { scout: { model: "tama/Qwen3.8", thinking: "high" } },
+    };
+    let releaseReseed!: () => void;
+    let reads = 0;
+    mockedGetSettings.mockImplementation(() => {
+      reads += 1;
+      if (reads === 2) {
+        return new Promise<AppSettings>((resolve) => {
+          releaseReseed = () => resolve(fileDoc);
+        });
+      }
+      return Promise.resolve(fileDoc);
+    });
+    // Edit A's save fails; edit B's lands.
+    mockedSaveSettings.mockRejectedValueOnce(new Error("boom"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    // Start the roll-counter record before this mount exists, so what it holds is
+    // exactly what THIS mount handed the dialog (see `rollsSeen`).
+    resetRolledBackWritesRecord();
+    render(<SpacesList />);
+    const dialog = await openAgentsModal();
+    // Edit A: the model — and its save is rejected, so the failure arm runs.
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Model for scout" }),
+    );
+    fireEvent.click(await screen.findByText("Qwen3.8"));
+    await waitFor(() =>
+      expect(consoleError).toHaveBeenCalledWith(
+        "Failed to save agent overrides:",
+        expect.anything(),
+      ),
+    );
+    // Edit B: issued while A's re-seed read is provably still held (nothing has
+    // released it yet), so B publishes on top of a store whose rollback is pending.
+    fireEvent.click(
+      within(dialog).getByRole("combobox", { name: "Thinking for scout" }),
+    );
+    fireEvent.click(await screen.findByRole("option", { name: "high" }));
+    // B's link ran to completion: demanded by the COUNT before the last call is read
+    // (the discipline the earlier tests in this file had to learn the hard way).
+    await waitFor(() =>
+      expect(mockedSaveSettings.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
+    await waitFor(() =>
+      expect(useSettings.getState().settings?.agentOverrides.scout).toEqual({
+        model: "tama/Qwen3.8",
+        thinking: "high",
+      }),
+    );
+    const savedByB =
+      mockedSaveSettings.mock.calls[
+        mockedSaveSettings.mock.calls.length - 1
+      ][0];
+    expect(savedByB.agentOverrides).toEqual(bDocument.agentOverrides);
+    // The roll counter BEFORE the re-seed is allowed to answer: A's save failed, but
+    // nothing has been rolled back YET — the rollback IS the re-seed's publish, and
+    // that read is still held. So the mount has nothing to have told the dialog, and
+    // the counter it hands down is still the zero it mounted at (B, a SUCCEEDING
+    // link, never touches it either).
+    expect(rollsSeen).toEqual([0]);
+    // NOW the held re-seed resolves — after B's publish, which is the race.
+    act(() => releaseReseed());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // THE CLOBBER: a re-seed that arrives this late carries the file's map from
+    // BEFORE B, and B is gone from the store mirror. The store mirror is what the
+    // next edit composes from, so this is not a flicker — it is the poisoned
+    // composition, with no later link left to republish over it.
+    expect(useSettings.getState().settings).not.toEqual(fileDoc);
+    // …and stated positively: the released re-seed leaves the store where B left it,
+    // i.e. still agreeing with the file B just wrote.
+    expect(useSettings.getState().settings).toEqual(bDocument);
+    // THE OTHER HALF OF THE DISCARD: nothing was reported either. `onRolledBack`
+    // moved next to the publish precisely because a discarded re-seed rolled NOTHING
+    // back — the file already holds B's write, and A's field is being carried by B's
+    // composed map, so there is no unexplained difference for the modal to re-arm.
+    // An increment here would be the mount claiming a rollback that never happened,
+    // and the dialog's stamp would drop the `edited` suppression for a write the user
+    // did make: the stored-pin cue then re-appears to blame the last fetch for a
+    // difference this modal caused. Read as the whole record (not the last value), so
+    // a roll that moved and moved back cannot slip past.
+    expect(rollsSeen).toEqual([0]);
+  });
+
+  it("a failed save re-arms the stored-pin cue the failed edit explained nothing about", async () => {
+    // The cue's suppression has a half-life. A field the user wrote in this mount is
+    // skipped, because the difference against the FETCH-time `row.override` column is
+    // explained by a save the backend already has. A save that DID NOT LAND takes
+    // that explanation away: the failure path re-fetches, so the store goes back to
+    // the FILE's map and the difference is again one this modal did not cause — the
+    // fetch predating the file, which is exactly the case the cue exists to name. If
+    // the suppression survives the failure, the row silently hides a stale-column
+    // disagreement forever after, for a gesture that never happened.
+    //
+    // The fixture wires that case end to end: the fetched row says the stored pin was
+    // `max`, the FILE says `low`, and the store starts with no pin at all — so the cue
+    // is legitimately up at mount, the pick suppresses it, and only the rollback can
+    // bring it back.
+    const fresh: AppSettings = {
+      ...SETTINGS_FIXTURE,
+      agentOverrides: { scout: { thinking: "low" } },
+    };
+    mockedGetSettings.mockResolvedValue(fresh);
+    // The save is held open, so "in flight" is a state the test can look at: the
+    // rejection has to arrive on the test's schedule or the suppressed window is
+    // over before the assertion runs.
+    let failSave!: () => void;
+    mockedSaveSettings.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          failSave = () => reject(new Error("boom"));
+        }),
+    );
+    mockedListAgentConfig.mockResolvedValue([
+      agentRow({ override: { model: null, thinking: "max", tools: null } }),
+    ]);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(<SpacesList />);
+    const dialog = await openAgentsModal();
+    // Mount: the fetch's column (`max`) and the store's map (no pin) disagree, and
+    // nothing in this modal caused that.
+    expect(
+      await screen.findByText(/stored pin the last fetch saw differs/),
+    ).toBeTruthy();
+    // The edit: `high`, and its save is provably still in flight.
+    fireEvent.click(
+      within(dialog).getByRole("combobox", { name: "Thinking for scout" }),
+    );
+    fireEvent.click(await screen.findByRole("option", { name: "high" }));
+    await waitFor(() => expect(mockedSaveSettings).toHaveBeenCalledTimes(1));
+    // The difference is explained by a save the backend is being told about, so the
+    // cue goes quiet for that field.
+    expect(
+      screen.queryByText(/stored pin the last fetch saw differs/),
+    ).toBeNull();
+    // The save fails and the store rolls back to the FILE's map (`low`).
+    act(() => failSave());
+    await waitFor(() =>
+      expect(consoleError).toHaveBeenCalledWith(
+        "Failed to save agent overrides:",
+        expect.anything(),
+      ),
+    );
+    await waitFor(() => expect(useSettings.getState().settings).toEqual(fresh));
+    // THE RE-ARM: the suppressed edit never landed, so the `max`-vs-`low`
+    // disagreement is unexplained again and the row has to say it.
+    const cue = await screen.findByText(/stored pin the last fetch saw differs/);
+    expect(cue.textContent).toContain("thinking max");
+  });
+
+  it("a successful save evicts the Agent catalog (no stale runs after an edit)", async () => {
+    // `useAgentCatalog` caches the in-flight promise per Space on purpose (rule 3
+    // of the hook's four rules): an UNCHANGED key never evicts, so a remount reuses
+    // the settled entry instead of re-running a NETWORK-BOUND discovery. That is
+    // right for a remount that changes nothing, and wrong after a WRITE — `runs` is
+    // "what the last fetch saw the dispatch launch with", and the map that fetch
+    // resolved against has just been replaced. Invalidation-on-write is what rule
+    // 3 assumed someone would add if a writer ever appeared; this is that writer.
+    //
+    // The assertion is about the next MOUNT of the hook, because that is what the
+    // eviction can affect: the catalog is fetched by the PANE (the dialog is
+    // prop-driven), so re-opening the modal inside one pane mount cannot re-run the
+    // effect — the rows it renders were fetched at mount. Unmounting the pane (the
+    // Settings view does exactly that) and mounting it again with the SAME key is
+    // the case the cache would otherwise serve a pre-edit answer for.
+    const first = render(<SpacesList />);
+    const dialog = await openAgentsModal();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Model for scout" }),
+    );
+    fireEvent.click(await screen.findByText("Qwen3.8"));
+    await waitFor(() => expect(mockedSaveSettings).toHaveBeenCalledTimes(1));
+    // One fetch so far — the mount's.
+    expect(mockedListAgentConfig).toHaveBeenCalledTimes(1);
+    // …the pane unmounts (Settings view) and mounts again, same Space key…
+    first.unmount();
+    render(<SpacesList />);
+    // …and the catalog is re-fetched rather than served from the entry the write
+    // invalidated.
+    await waitFor(() => expect(mockedListAgentConfig).toHaveBeenCalledTimes(2));
+  });
 });
 
 describe("SpacesList (archive, ADR 0016)", () => {
@@ -728,7 +1872,6 @@ describe("SpacesList (archive, ADR 0016)", () => {
     const { archivedSessions, historySessions } = useSessions.getState();
     expect(archivedSessions.some((s) => s.sessionId === "h1")).toBe(false);
     expect(historySessions.some((s) => s.sessionId === "h1")).toBe(true);
-    consoleError.mockRestore();
   });
 
   it("logs a console error when Unarchive fails (the row is NOT moved)", async () => {
@@ -748,7 +1891,6 @@ describe("SpacesList (archive, ADR 0016)", () => {
     const { archivedSessions, historySessions } = useSessions.getState();
     expect(archivedSessions.some((s) => s.sessionId === "a1")).toBe(true);
     expect(historySessions.some((s) => s.sessionId === "a1")).toBe(false);
-    consoleError.mockRestore();
   });
 
   it("closes the delete dialog and logs a console error when Delete fails (the row remains)", async () => {
@@ -777,7 +1919,6 @@ describe("SpacesList (archive, ADR 0016)", () => {
     expect(
       useSessions.getState().archivedSessions.some((s) => s.sessionId === "a1"),
     ).toBe(true);
-    consoleError.mockRestore();
   });
 
   // -- The `...` menu (moved from the tab bar to the `Sessions` header,
@@ -825,8 +1966,8 @@ describe("SpacesList (archive, ADR 0016)", () => {
       // Every label the toggle has ever carried, plus the gear's, so a rename
       // cannot quietly re-add one of these two controls here and leave this
       // test vacuous. The pane's OWN commands (`Open Space`, `New Session`,
-      // `Skills`) are NOT in this list — they legitimately survive the collapse
-      // as rail icons, which is what the rail's own tests assert.
+      // `Skills`, `Agents`) are NOT in this list — they legitimately survive the
+      // collapse as rail icons, which is what the rail's own tests assert.
       for (const label of [
         "Collapse sidebar",
         "Expand sidebar",
@@ -945,7 +2086,7 @@ describe("SpacesList (archive, ADR 0016)", () => {
     // takes the content AND ITS SCROLLBAR out of the paint while leaving it
     // mounted (`hidden` would unlayout it, and clipping alone is what produced
     // the wrapped text and the stray scrollbar).
-    for (const label of ["Open Space", "New Session", "Skills", "Sessions", "Archived"]) {
+    for (const label of ["Open Space", "New Session", "Skills", "Agents", "Sessions", "Archived"]) {
       const node = screen.queryByText(label);
       if (node) {
         expect(painted(node), `${label} bleeds into the sliver`).toBe(false);
@@ -1050,16 +2191,22 @@ describe("SpacesList (archive, ADR 0016)", () => {
 
   // -- The rail's action strip: the pane's commands survive the collapse --
 
-  it("offers the pane's three commands as icons while collapsed (not Settings)", () => {
+  it("offers the pane's four commands as icons while collapsed (not Settings)", () => {
     act(() => {
       setLeftPaneCollapsed(true);
     });
     const { container } = render(<SpacesList />);
-    // The list's own three buttons survive the collapse as icons. `Settings` is
+    // The list's own four buttons survive the collapse as icons. `Settings` is
     // deliberately NOT among them: the gear lives in the chrome bar in both
     // states, so the rail used to carry a second copy and that tail strip is
     // gone (see `SessionRail`'s doc).
-    for (const label of ["Open Space", "New Session", "Skills"]) {
+    //
+    // FOUR, not three: `Agents` is the fourth, and it is on the rail because the
+    // labelled button sits inside the region the collapse hides — dropping it
+    // here would give the command a vanishing door, which is the exact defect the
+    // `railActions` comment exists to prevent. Widening the count and this name
+    // together is intentional, not a broken pin.
+    for (const label of ["Open Space", "New Session", "Skills", "Agents"]) {
       expect(
         within(screen.getByTestId("session-rail-actions")).getByRole("button", {
           name: label,
@@ -1069,7 +2216,7 @@ describe("SpacesList (archive, ADR 0016)", () => {
     }
     expect(
       within(screen.getByTestId("session-rail-actions")).getAllByRole("button"),
-    ).toHaveLength(3);
+    ).toHaveLength(4);
     // And nothing here reaches for Settings, in either strip or anywhere else.
     expect(container.querySelector('[data-testid="session-rail-tail-actions"]')).toBeNull();
     expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();

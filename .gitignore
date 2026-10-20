@@ -24,6 +24,10 @@ src-tauri/target
 *.sln
 *.sw?
 
+# The junit report CI's `pnpm test` step writes (`--outputFile`); produced locally
+# by the same command, and never a file anyone wants to commit.
+vitest-results.xml
+
 # local scratch
 .research/
 # The review workflow's scratch dir (`$PWD/.tmp`: test scratch, Tailwind probes).

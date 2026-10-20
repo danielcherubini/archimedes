@@ -48,7 +48,7 @@ export function providerDisplayName(
  * the boundary. A value without a `/` keeps its name and gets no cue.
  *
  * The VALUE always keeps the full composed key — this is a DISPLAY-only
- * derivation (`settings.defaultModel`, `subagentModels` and
+ * derivation (`settings.defaultModel`, `agentOverrides` and
  * `set_config_option` all still carry `provider/id`).
  */
 export function modelItemsFromCatalog(

@@ -159,9 +159,11 @@ jobs:
       # check step below needs no OS branch of its own.
       #
       # `cargo fmt` / `cargo clippy` above get no redirect: they compile, they do
-      # not run the app. `pnpm test` / `pnpm build` below are untouched for the
+      # not run the app. `pnpm test` / `pnpm build` below get no redirect for the
       # same reason — and because a job-wide `HOME` override would move pnpm's
-      # cache, which is why the redirect sits on STEP env, not job env.
+      # cache, which is why the redirect sits on STEP env, not job env. ("No
+      # redirect", not "untouched": the test step below does carry its own reporter
+      # args, which are unrelated to this variable.)
       #
       # Gates are `runner.os`, lowercase, matching `Install Linux build
       # dependencies` above (GitHub's string `==` is case-insensitive; the file
@@ -223,8 +225,32 @@ jobs:
           ARCHIMEDES_TEST_DATA_DIR: ${{ runner.temp }}/archimedes-test-data
         run: bash scripts/check-test-data-dir.sh "$ARCHIMEDES_TEST_DATA_DIR"
 
+      # The junit report exists for the one failure mode this workflow could not
+      # answer: a single test failing ONCE, on a cold first run, with nothing to
+      # reproduce it. The log that named it is the log the next push overwrites in
+      # the PR view, so the datapoint is gone by the time anyone goes looking —
+      # this artifact keeps the per-test names, times and failure messages past the
+      # log. `pnpm test` is `vitest run`, so the reporter args reach vitest
+      # untouched (verified locally, including on a failing run: the report is
+      # written and the step still exits non-zero, so `failure()` below fires).
       - name: pnpm test
-        run: pnpm test
+        run: pnpm test --reporter=default --reporter=junit --outputFile=vitest-results.xml
+
+      # `if: failure()` — on a green run the answer is already in the log, and
+      # three reports per push (one per OS) would cost quota to say nothing.
+      # `if: always()` would additionally upload the CANCELLED case, which is a
+      # timeout of the JOB rather than a test result. The name carries the OS
+      # because artifact names must be unique within a run in upload-artifact v4:
+      # three matrix legs posting one name fail the second leg instead of keeping
+      # both, and which OS flaked is half the answer. Short retention on purpose —
+      # a stale report is worse than no report.
+      - name: Upload the vitest junit report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-results-${{ matrix.os }}
+          path: vitest-results.xml
+          retention-days: 7
 
       - name: pnpm build
         run: pnpm build
