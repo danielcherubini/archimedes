@@ -1854,18 +1854,25 @@ mod tests {
         );
     }
 
-    /// `resolve_launch` keeps its own signature byte-identical and delegates to
-    /// the shared resolver, so the `config_dir: None` path goes THROUGH the
-    /// selector instead of hand-rolling "no layer".
+    /// An EMPTY `agent_name` short-circuits `resolve_launch` BEFORE any layer
+    /// or resolver is built — the label-only, config-less case returns the
+    /// `launch` verbatim, so this test pins that return and NOTHING else.
+    ///
+    /// Delegation to the shared `resolve_agent_launch` is NOT pinned here (an
+    /// empty name never reaches it, so this body would stay green with the
+    /// delegation deleted); it is pinned by the cross-module
+    /// `commands::agents::tests::agent_config_and_the_dispatch_resolve_the_same_row`,
+    /// which calls this real `resolve_launch` and compares its row against the
+    /// modal's. A same-seam test could not catch seam-internal drift, which is
+    /// why that pin lives where it does.
     #[test]
-    fn resolve_launch_delegates_to_the_shared_resolver() {
+    fn resolve_launch_with_an_empty_agent_name_short_circuits() {
         let ctx = build_ctx(vec![fake_model("m1")], None);
         let launch = LaunchConfig {
             system_prompt: Some("explicit".to_string()),
             ..Default::default()
         };
-        // An empty name short-circuits BEFORE any layer is built (the label-only,
-        // config-less case) — the verbatim return is not the resolver's doing.
+        // The verbatim return is the SHORT-CIRCUIT's doing, not the resolver's.
         let resolved = resolve_launch(
             &launch,
             "",

@@ -166,10 +166,19 @@ pub struct AgentConfigDto {
     /// The frontmatter VERBATIM — before the filter, so the row can say what
     /// the file actually said even when none of it survived.
     pub file: OverrideFields,
-    /// The stored override for this name, VERBATIM (not the resolver's
-    /// output) — so the modal can print "you pinned `tama/m-1`" beside "the
-    /// catalog can no longer resolve it, so this is what actually runs".
-    /// Named `override_` in Rust (`override` is a keyword); the wire name is
+    /// The stored override for this name as the SUPERVISOR read it, VERBATIM
+    /// (not the resolver's output). The consumer is the modal's `override`
+    /// column, and its job is to show what the user pinned whenever that
+    /// differs from what the store-side lookup behind the picker controls
+    /// shows: a stale pinned model the catalog no longer resolves (`source`
+    /// then names a different layer, so the row must say both what was pinned
+    /// and what runs), and a hand-edited case-fold twin — this side takes the
+    /// entry the shared ASCII-fold scan reaches through the `HashMap` (so a
+    /// `"Scout"` beside `scout` is chosen in nondeterministic order), while the
+    /// renderer's own lookup takes the first entry in the document's key order,
+    /// and those two can land on different entries. Not the value the controls
+    /// are bound to (they keep reading the live settings document). Named
+    /// `override_` in Rust (`override` is a keyword); the wire name is
     /// `override`.
     #[serde(rename = "override")]
     pub override_: OverrideFields,
@@ -1074,9 +1083,10 @@ mod tests {
     }
 
     /// The app-scope read (`cwd: None` → `discover_agents(None)`) — exactly
-    /// what the deleted Settings section listed: USER-level rows only. And
-    /// every `source` it reports is one of the three labels below the explicit
-    /// param (`override` / `file` / `parent`).
+    /// what the deleted Settings section listed: USER-level rows only, and the
+    /// one surviving row's `source` triple names the layer each field really
+    /// came from (`file` for its frontmatter `model`, `parent` for the two
+    /// fields nothing spoke about).
     #[test]
     fn the_app_scope_read_is_user_level_rows_only() {
         let _lock = crate::test_support::env_lock();
@@ -1113,19 +1123,30 @@ mod tests {
         assert_eq!(rows.len(), 1, "user-level only: {rows:?}");
         assert_eq!(rows[0].name, "user-agent");
         assert_eq!(rows[0].scope, "user");
-        for src in [
+        // The `source` triple for THIS row, named value by value rather than
+        // "some variant of a three-variant enum" (a `matches!` over every
+        // variant can never fail — and a fourth variant is already a COMPILE
+        // error in
+        // `the_source_label_space_is_exactly_three_layers_and_never_space`).
+        // The fixture speaks about ONE field: `model: fake/m1` in the file, no
+        // override, no `thinking`, no `tools`. MUTATION-CHECKED: relabelling
+        // the frontmatter `model` rung from `File` to `Parent` reddens the
+        // first assertion below, where the deleted loop stayed green.
+        assert_eq!(
             rows[0].source.model,
+            OverrideSource::File,
+            "the file's `model: fake/m1` is the only layer that speaks"
+        );
+        assert_eq!(
             rows[0].source.thinking,
+            OverrideSource::Parent,
+            "the file says nothing about thinking and no override exists"
+        );
+        assert_eq!(
             rows[0].source.tools,
-        ] {
-            assert!(
-                matches!(
-                    src,
-                    OverrideSource::Override | OverrideSource::File | OverrideSource::Parent
-                ),
-                "every source is a layer below the explicit param: {src:?}"
-            );
-        }
+            OverrideSource::Parent,
+            "the file says nothing about tools and no override exists"
+        );
     }
 
     /// A stale pinned model: `source` names the layer that ACTUALLY won, while
@@ -1325,6 +1346,13 @@ mod tests {
 
         // And nothing a real row carries escapes the space: a Space-scoped
         // definition still reports one of the three layers.
+        //
+        // BELT-AND-BRACES, stated honestly: the exhaustive `label` match above
+        // is the pin, and a fourth `OverrideSource` variant is a COMPILE failure
+        // before any line below runs. These two substring-level checks therefore
+        // catch only what a rewrite of that match could hide — a wire spelling
+        // that drifted toward a Space word — so they are a cheap regression net,
+        // not the thing making "three layers" a fact.
         let rows = agent_config(
             &settings_with(&[("scout", model_override("fake/m1"))]),
             std::slice::from_ref(&definition("scout", AgentScope::Space)),
