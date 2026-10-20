@@ -119,6 +119,10 @@ function editedKey(name: string, field: keyof AgentOverride): string {
   return `${foldAscii(name)}\u0000${field}`;
 }
 
+/** The empty suppression set (see `edited`): allocated ONCE so the "nothing is
+ *  suppressed" identity is stable across renders — it is handed down as a prop. */
+const NO_KEYS: ReadonlySet<string> = new Set();
+
 interface AgentsDialogProps {
   rows: AgentConfigDto[];
   /**
@@ -137,6 +141,17 @@ interface AgentsDialogProps {
   settings: AppSettings | null;
   models: ModelDto[];
   tools: string[];
+  /**
+   * How many of THIS mount's writes have FAILED and rolled the store back to the
+   * file's map. The mount owns the save, and a rollback takes back the one thing the
+   * `edited` set was built on — the explanation that a difference against the fetch
+   * column is a save the backend already has. A write that never landed explains
+   * nothing, so the suppression is dropped when this moves (see `edited`).
+   *
+   * Optional because the dialog is prop-driven and its own tests have no writes; the
+   * mount always passes it.
+   */
+  rolledBackWrites?: number;
   onPatch: (next: AgentOverrides) => void;
   onClose: () => void;
 }
@@ -147,6 +162,7 @@ export default function AgentsDialog({
   settings,
   models,
   tools,
+  rolledBackWrites = 0,
   onPatch,
   onClose,
 }: AgentsDialogProps) {
@@ -198,8 +214,9 @@ export default function AgentsDialog({
   // orphaned away — the map is global, and a name no root contributes stays
   // undiscovered in EVERY Space's catalog, so the same key surfaces (with its remove
   // button) as soon as any Space is open. ADR 0023's cleanup duty is therefore
-  // reachable, just not from the one state in which the modal can only see half the
-  // roots; what the no-Space state loses is only the stale claim it cannot support.
+  // reachable FROM ANY STATE IN WHICH A SPACE IS OPEN, just not from the one state in
+  // which the modal can only see half the roots; what the no-Space state loses is
+  // only the stale claim it cannot support.
   const orphans =
     settings === null || rows.length === 0 || noSpaceOpen
       ? []
@@ -212,11 +229,32 @@ export default function AgentsDialog({
    * The `edited` bookkeeping exists for the stored-pin cue and nowhere else: a
    * field the user has written in this mount has an EXPLAINED difference between
    * the store map and the fetch-time `row.override` column, so the cue must not
-   * claim the backend is reading something stale that the backend was just told. */
-  const [edited, setEdited] = useState<Set<string>>(() => new Set());
+   * claim the backend is reading something stale that the backend was just told.
+   *
+   * The set is stamped with the `rolledBackWrites` value it was recorded against,
+   * and a stamp that no longer matches is treated as EMPTY — the state-adjustment
+   * pattern, so no effect and no extra render is involved. A failed save rolls the
+   * store back to the FILE's map, which takes back the explanation the suppression
+   * rests on: the difference is unexplained again, and the row has to say it.
+   *
+   * The whole set goes, not just the failed field's key, because that is the fact
+   * the mount actually has — the save is per-MAP, so a failure names no field. The
+   * collateral is a cue that comes back for an earlier edit of the same mount that
+   * DID land; that one is a nuisance rather than a lie, since the line reports what
+   * the last fetch saw and the fetch really does predate the landed write. (The
+   * narrower version needs the failure to carry the fields it rolled back, which the
+   * map-shaped write API has no way to say.) */
+  const [edits, setEdits] = useState<{ rolls: number; keys: Set<string> }>(
+    () => ({ rolls: 0, keys: new Set() }),
+  );
+  const edited: ReadonlySet<string> =
+    edits.rolls === rolledBackWrites ? edits.keys : NO_KEYS;
   const patch = (name: string, field: keyof AgentOverride, value: string | string[] | undefined) => {
     if (settings === null) return;
-    setEdited((prev) => new Set(prev).add(editedKey(name, field)));
+    setEdits({
+      rolls: rolledBackWrites,
+      keys: new Set(edited).add(editedKey(name, field)),
+    });
     onPatch(withOverride(settings.agentOverrides, name, field, value));
   };
 
@@ -363,10 +401,16 @@ export default function AgentsDialog({
  * skipped. `row.override` is a FETCH-time value — the same lag the `runs` columns
  * carry — so the moment the user picks a different model the wire column differs
  * from the store-side map on purpose, and the backend already has the newer value.
- * Calling a difference the user just caused "the pin the backend reads differs"
- * would be the reverse of the honesty this line exists for. What is worth naming is
- * a disagreement the modal did NOT cause: two selectors reading one map differently,
- * or a file something else wrote.
+ * Calling a difference the user just caused "the stored pin the last fetch saw
+ * differs" would be the reverse of the honesty this line exists for. What is worth
+ * naming is a disagreement the modal did NOT cause, and it runs BOTH ways: the file
+ * moved under a fetch that predates it (Rust remembered a thinking level, something
+ * else wrote `settings.json`, or this modal's own save failed and rolled the store
+ * back to the file), and two selectors reading one map differently (the case-fold
+ * twin). Hence the PAST tense in the copy — the line reports what the last FETCH saw,
+ * which is a fact about a finished read, not a claim about what the backend reads now.
+ * A save that failed clears the suppression entirely (see `rolledBackWrites`), so the
+ * first of those cases cannot be silenced by a write that never landed.
  */
 function storedPinDiff(
   rowName: string,
@@ -501,7 +545,7 @@ function AgentRow({
           a repair this component cannot perform. */}
       {pinDiff.length > 0 && (
         <span className="min-w-0 truncate text-ui-xs text-foreground-subtlest">
-          stored pin the backend reads differs — {pinDiff.join(", ")}
+          stored pin the last fetch saw differs — {pinDiff.join(", ")}
         </span>
       )}
 

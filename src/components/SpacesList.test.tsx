@@ -232,6 +232,56 @@ function painted(node: HTMLElement): boolean {
 }
 
 /**
+ * Open the Agents modal AND wait until it holds a ROW.
+ *
+ * `await screen.findByRole("dialog")` on its own is not enough to open the modal
+ * the tests then edit: the rows come from `useAgentCatalog`, which starts at `[]`
+ * and only fills in when `list_agent_config` lands, so a dialog found on the
+ * click's own tick can be the one rendering `No Agent definitions found.`. Every
+ * test below that open makes the next lookup SYNCHRONOUS
+ * (`within(dialog).getByRole("Model for scout")`), so whenever the fetch lost that
+ * race the failure read "the model button is missing" for a modal that was fine and
+ * a write path that was fine — a flake with no subject. Awaiting one row control
+ * makes the open deterministic, and it happens BEFORE any edit, so it cannot reorder
+ * the writes the tests are about.
+ */
+async function openAgentsModal(): Promise<HTMLElement> {
+  fireEvent.click(screen.getByRole("button", { name: "Agents" }));
+  const dialog = await screen.findByRole("dialog");
+  await within(dialog).findByRole("button", { name: "Model for scout" });
+  return dialog;
+}
+
+/**
+ * A RECORDING SUBSCRIPTION to the settings store: every `agentOverrides` map the
+ * store holds from now on, in order, as JSON (consecutive duplicates collapsed).
+ *
+ * Why a trace and not a final read: the defect this exists for is a GLIMPSE, not
+ * an end state. Each link of the `agentOverrides` write chain publishes its own
+ * snapshot when it completes, so a slow link finishing AFTER a newer optimistic
+ * publish hands the store the OLDER map — the user's newer pick flickers back to
+ * "Inherits" for a frame, and any edit composed inside that window silently loses
+ * a field from `settings.json`. `waitFor(() => store == X)` cannot see that at
+ * all: it polls for a condition that the buggy code also ends up satisfying, so
+ * the assertion of record has to be about the SEQUENCE the store passed through.
+ *
+ * `subscribe` is the store's own notify path (zustand without the selector
+ * middleware, hence the manual dedupe), and the record is synchronous with each
+ * `set`, so a publish that happens inside a promise continuation is captured even
+ * when no React render is watching.
+ */
+function traceAgentOverrides(): { seen: () => string[]; stop: () => void } {
+  const seen: string[] = [];
+  const record = (settings: AppSettings | null) => {
+    const map = JSON.stringify(settings?.agentOverrides ?? null);
+    if (seen[seen.length - 1] !== map) seen.push(map);
+  };
+  record(useSettings.getState().settings);
+  const unsubscribe = useSettings.subscribe((state) => record(state.settings));
+  return { seen: () => seen, stop: unsubscribe };
+}
+
+/**
  * Fixture: two spaces. `alpha` holds a live session `s1` (in-turn, with a
  * loaded transcript) + a stored session `h1` (loaded transcript, ~1h old);
  * `beta` holds a stored session `h2` that was NOT opened this boot (no
@@ -738,8 +788,10 @@ describe("SpacesList", () => {
     // hazard this file documents for `Skills`).
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("Agents")).toBeTruthy();
-    // The row came from `list_agent_config` keyed by the ACTIVE Space.
-    expect(within(dialog).getByText("scout")).toBeTruthy();
+    // The row came from `list_agent_config` keyed by the ACTIVE Space. AWAITED,
+    // for the reason `openAgentsModal` states: the rows arrive with the fetch, so
+    // a row queried on the dialog's own tick can race it.
+    expect(await within(dialog).findByText("scout")).toBeTruthy();
   });
 
   it("the_collapsed_rails_Agents_icon_opens_the_dialog_too", async () => {
@@ -751,7 +803,7 @@ describe("SpacesList", () => {
     // The dialog renders while the pane is COLLAPSED — the acceptance criterion,
     // and the reason the render site sits outside the `invisible` content region.
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText("scout")).toBeTruthy();
+    expect(await within(dialog).findByText("scout")).toBeTruthy();
   });
 
   it("the dialog is mounted OUTSIDE the panes content region (structural)", async () => {
@@ -835,8 +887,9 @@ describe("SpacesList", () => {
     // Its `agentOverrides` carries a SECOND agent on purpose: that entry is
     // expected to be REPLACED away, because the map is the one field the user is
     // editing and the dialog hands over the whole edited map (see the write
-    // helper's comment in `SpacesList.tsx` — sound precisely because nothing
-    // outside this modal ever writes the map).
+    // helper's comment in `SpacesList.tsx` — sound because no writer outside this
+    // modal is live while the modal is, the one exception being `SettingsPage`'s
+    // Provider-rename remap, which cannot overlap because Settings unmounts this pane).
     const fresh: AppSettings = {
       ...SETTINGS_FIXTURE,
       defaultModel: "fresh/model",
@@ -845,8 +898,7 @@ describe("SpacesList", () => {
     // The store seed (already set) is `SETTINGS_FIXTURE`; the RE-READ is `fresh`.
     mockedGetSettings.mockResolvedValue(fresh);
     render(<SpacesList />);
-    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await openAgentsModal();
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Model for scout" }),
     );
@@ -895,8 +947,7 @@ describe("SpacesList", () => {
         }),
     );
     render(<SpacesList />);
-    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await openAgentsModal();
     // Edit 1: the model.
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Model for scout" }),
@@ -927,6 +978,156 @@ describe("SpacesList", () => {
     );
   });
 
+  it("a newer optimistic publish is never reverted by an older link completing (no flicker)", async () => {
+    // The half of the serialized chain the FILE writes do not cover. Every link
+    // writes its map in the right ORDER, but each link also PUBLISHES its own
+    // snapshot on completion: success → `setSettings(freshDocument)` with THIS
+    // link's map, failure → `loadSettings()` re-seed. So with edit A in flight and
+    // edit B published optimistically on top of it, link A landing hands the store
+    // the {A}-only map — B's pick visibly reverts for a frame, and an edit C
+    // composed in that window builds on {A} and silently drops B from the file.
+    // Deterministic on every rapid two-edit gesture (this is the same window the
+    // test above holds open on purpose).
+    //
+    // The assertion is the STORE TRACE (see `traceAgentOverrides`): the end state
+    // is what the buggy code also eventually reaches, so only the SEQUENCE shows
+    // the regression. `settle()` is a macrotask turn — enough for the continuation
+    // after a resolved `getSettings`/`saveSettings` to run and publish, which is
+    // the exact moment the bug paints.
+    const MODEL_ONLY = JSON.stringify({ scout: { model: "tama/Qwen3.8" } });
+    const BOTH = JSON.stringify({
+      scout: { model: "tama/Qwen3.8", thinking: "high" },
+    });
+    let releaseFirstSave!: () => void;
+    mockedSaveSettings.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseFirstSave = resolve;
+        }),
+    );
+    // The trace starts BEFORE any edit, so its first entry is the empty map and
+    // every later entry is something the write path published.
+    const trace = traceAgentOverrides();
+    try {
+      render(<SpacesList />);
+      const dialog = await openAgentsModal();
+      // Edit A: the model — its save is now provably in flight.
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "Model for scout" }),
+      );
+      fireEvent.click(await screen.findByText("Qwen3.8"));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(mockedSaveSettings).toHaveBeenCalledTimes(1);
+      // Edit B: the thinking level, composed on the optimistically-published map.
+      fireEvent.click(
+        within(dialog).getByRole("combobox", { name: "Thinking for scout" }),
+      );
+      fireEvent.click(await screen.findByRole("option", { name: "high" }));
+      // B's optimistic publish is in the trace, and nothing older has landed yet.
+      expect(trace.seen()).toContain(BOTH);
+      // Now land A. Its link still holds the {A}-only map.
+      act(() => releaseFirstSave());
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      // THE FLICKER: after B published the two-field map, the store must never be
+      // handed the {A}-only map again. (Read off the trace, not off the store — a
+      // later link republishes the newer map, so the end state hides this.)
+      const afterB = trace.seen().slice(trace.seen().indexOf(BOTH) + 1);
+      expect(afterB).not.toContain(MODEL_ONLY);
+      // End states, in the shape `two rapid edits both land` asserts them: the last
+      // write is the file's answer and the store agrees with it.
+      const lastSaved =
+        mockedSaveSettings.mock.calls[
+          mockedSaveSettings.mock.calls.length - 1
+        ][0];
+      expect(JSON.stringify(lastSaved.agentOverrides)).toBe(BOTH);
+      expect(JSON.stringify(useSettings.getState().settings?.agentOverrides)).toBe(
+        BOTH,
+      );
+    } finally {
+      trace.stop();
+    }
+  });
+
+  it("three edits while the first save is in flight keep the middle pick", async () => {
+    // The gesture the flicker actually costs something in. With link A still in
+    // flight, B publishes {A,B}; A's completion reverts the store to {A}; edit C is
+    // then composed off the REVERTED store, so the map handed to the third write
+    // never saw B and B is deleted from `settings.json` with no feedback. The
+    // middle pick is the one the user cannot see being lost, because the picker
+    // they are looking at is already showing C.
+    //
+    // BOTH of the first two saves are held open, so the window between link A's
+    // publish and link B's is open for the whole time C is issued — the window the
+    // bug lives in, made deterministic instead of a race. (Holding only the first
+    // would let link B republish the two-field map before C happens, and the test
+    // would pass for the wrong reason.)
+    const deferred = (): { promise: Promise<void>; release: () => void } => {
+      let release!: () => void;
+      const promise = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { promise, release };
+    };
+    const first = deferred();
+    const second = deferred();
+    mockedSaveSettings
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+    render(<SpacesList />);
+    const dialog = await openAgentsModal();
+    // A — the model.
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Model for scout" }),
+    );
+    fireEvent.click(await screen.findByText("Qwen3.8"));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(mockedSaveSettings).toHaveBeenCalledTimes(1);
+    // B — the thinking level.
+    fireEvent.click(
+      within(dialog).getByRole("combobox", { name: "Thinking for scout" }),
+    );
+    fireEvent.click(await screen.findByRole("option", { name: "high" }));
+    // Link A lands and publishes while link B's save is still held — the exact
+    // moment the store is holding the OLDER map.
+    act(() => first.release());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(mockedSaveSettings).toHaveBeenCalledTimes(2);
+    // C — a tool tick, composed off whatever the store is holding right now.
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "Override tool grep for scout" }),
+    );
+    // Let C's link start its save, then land B's (the queued one).
+    act(() => second.release());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await waitFor(() =>
+      expect(mockedSaveSettings.mock.calls.length).toBeGreaterThanOrEqual(3),
+    );
+    // End states (same shape as `two rapid edits both land`): the LAST document
+    // written carries all three fields, and the store agrees with the file.
+    const lastSaved =
+      mockedSaveSettings.mock.calls[mockedSaveSettings.mock.calls.length - 1][0];
+    expect(lastSaved.agentOverrides).toEqual({
+      scout: { model: "tama/Qwen3.8", thinking: "high", tools: ["grep"] },
+    });
+    await waitFor(() =>
+      expect(useSettings.getState().settings?.agentOverrides.scout).toEqual({
+        model: "tama/Qwen3.8",
+        thinking: "high",
+        tools: ["grep"],
+      }),
+    );
+  });
+
   it("a slow first save cannot land after the second edit's save (out-of-order writes)", async () => {
     // The other half of the same gesture, and the half the store's optimistic
     // publish CANNOT fix: two `saveSettings` calls are two independent IPC round
@@ -947,8 +1148,7 @@ describe("SpacesList", () => {
         }),
     );
     render(<SpacesList />);
-    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await openAgentsModal();
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Model for scout" }),
     );
@@ -989,8 +1189,7 @@ describe("SpacesList", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     mockedSaveSettings.mockRejectedValueOnce(new Error("boom"));
     render(<SpacesList />);
-    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await openAgentsModal();
     // Edit 1 fails.
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Model for scout" }),
@@ -1017,6 +1216,107 @@ describe("SpacesList", () => {
     consoleError.mockRestore();
   });
 
+  it("a throwing failure logger does not poison the chain (the swallow is structural)", async () => {
+    // The swallow's own failure mode. A `catch` block inside `writeAgentOverrides`
+    // makes the swallow depend on the error HANDLER being infallible: if
+    // `console.error` itself throws — a broken logger, an environment that throws
+    // on logging, a re-seed that throws — the CATCH throws, the link resolves to a
+    // REJECTION, and every write chained after it silently resolves to that same
+    // stale rejection without touching the file. The modal keeps looking like it
+    // saves (the optimistic publish is synchronous) forever after.
+    //
+    // So the swallow belongs on the CHAIN LINK (`.catch(() => {})` before the
+    // `.then`), not only inside the helper: nothing the failure path does can then
+    // disable the queue. This test is the difference between those two spellings —
+    // with the swallow inside the helper it fails, because the poisoned link eats
+    // edit 2's save entirely (`saveSettings` is never called a second time).
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {
+        throw new Error("the logger is broken too");
+      });
+    mockedSaveSettings.mockRejectedValueOnce(new Error("boom"));
+    render(<SpacesList />);
+    const dialog = await openAgentsModal();
+    // Edit 1 fails, and handling that failure fails as well.
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Model for scout" }),
+    );
+    fireEvent.click(await screen.findByText("Qwen3.8"));
+    await waitFor(() => expect(consoleError).toHaveBeenCalled());
+    // Edit 2 still reaches the file.
+    fireEvent.click(
+      within(dialog).getByRole("combobox", { name: "Thinking for scout" }),
+    );
+    fireEvent.click(await screen.findByRole("option", { name: "high" }));
+    await waitFor(() =>
+      expect(mockedSaveSettings.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
+    const lastSaved =
+      mockedSaveSettings.mock.calls[mockedSaveSettings.mock.calls.length - 1][0];
+    expect(lastSaved.agentOverrides.scout?.thinking).toBe("high");
+    consoleError.mockRestore();
+  });
+
+  it("a landed save still evicts the catalog when the store publish throws (and is not logged as a save failure)", async () => {
+    // The other half of making the swallow STRUCTURAL: what the error handler
+    // COVERS. Today `setSettings` sits inside the same `try` as the save and the
+    // eviction, so a publish that throws after a save that LANDED is reported as
+    // "Failed to save agent overrides" — a lie about a write the file has — and the
+    // eviction after it is skipped, so the modal keeps serving `runs` columns
+    // resolved against the map that edit replaced.
+    //
+    // The two facts are independent: the save landed (→ evict, → do not log a save
+    // failure), and the store mirror failed (→ the store lags, nothing more). So the
+    // publish is the one step the epoch guard already stands in front of, and the
+    // eviction happens whatever the publish does.
+    const realPublish = useSettings.getState().setSettings;
+    let publishes = 0;
+    // Replaced ON THE LIVE STATE OBJECT (not `vi.spyOn(getState(), …)`): zustand
+    // `set` builds a NEW state object on every write, so a spy installed on the old
+    // one is what gets restored, and the live store would keep the spy.
+    const publish = (document: AppSettings) => {
+      publishes += 1;
+      // Call 1 is the optimistic publish in `patchAgentOverrides` — let it through,
+      // or the modal never re-renders and the second edit cannot happen. Call 2 is
+      // the success mirror, and it is the one that throws.
+      if (publishes > 1) throw new Error("store publish failed");
+      realPublish(document);
+    };
+    useSettings.setState({ setSettings: publish });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const first = render(<SpacesList />);
+      const dialog = await openAgentsModal();
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "Model for scout" }),
+      );
+      fireEvent.click(await screen.findByText("Qwen3.8"));
+      await waitFor(() => expect(mockedSaveSettings).toHaveBeenCalledTimes(1));
+      // Let the success path run to completion (the throw is inside it).
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      // A save that landed is not a save failure.
+      expect(consoleError).not.toHaveBeenCalledWith(
+        "Failed to save agent overrides:",
+        expect.anything(),
+      );
+      // …and the catalog the edit invalidated is gone anyway — the assertion the
+      // eviction test uses (the next MOUNT of the hook, since the pane owns the
+      // fetch): unmount and re-mount with the same Space key.
+      expect(mockedListAgentConfig).toHaveBeenCalledTimes(1);
+      first.unmount();
+      render(<SpacesList />);
+      await waitFor(() =>
+        expect(mockedListAgentConfig).toHaveBeenCalledTimes(2),
+      );
+    } finally {
+      useSettings.setState({ setSettings: realPublish });
+      consoleError.mockRestore();
+    }
+  });
+
   it("logs a console error when saving Agent overrides fails (the store re-seeds from the file)", async () => {
     // The failure arm of the one write path, in this file's established shape for
     // that class (`logs a console error when Archive fails`, Unfail, Delete): the
@@ -1037,8 +1337,7 @@ describe("SpacesList", () => {
     mockedSaveSettings.mockRejectedValueOnce(new Error("boom"));
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     render(<SpacesList />);
-    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await openAgentsModal();
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Model for scout" }),
     );
@@ -1058,6 +1357,73 @@ describe("SpacesList", () => {
     consoleError.mockRestore();
   });
 
+  it("a failed save re-arms the stored-pin cue the failed edit explained nothing about", async () => {
+    // The cue's suppression has a half-life. A field the user wrote in this mount is
+    // skipped, because the difference against the FETCH-time `row.override` column is
+    // explained by a save the backend already has. A save that DID NOT LAND takes
+    // that explanation away: the failure path re-fetches, so the store goes back to
+    // the FILE's map and the difference is again one this modal did not cause — the
+    // fetch predating the file, which is exactly the case the cue exists to name. If
+    // the suppression survives the failure, the row silently hides a stale-column
+    // disagreement forever after, for a gesture that never happened.
+    //
+    // The fixture wires that case end to end: the fetched row says the stored pin was
+    // `max`, the FILE says `low`, and the store starts with no pin at all — so the cue
+    // is legitimately up at mount, the pick suppresses it, and only the rollback can
+    // bring it back.
+    const fresh: AppSettings = {
+      ...SETTINGS_FIXTURE,
+      agentOverrides: { scout: { thinking: "low" } },
+    };
+    mockedGetSettings.mockResolvedValue(fresh);
+    // The save is held open, so "in flight" is a state the test can look at: the
+    // rejection has to arrive on the test's schedule or the suppressed window is
+    // over before the assertion runs.
+    let failSave!: () => void;
+    mockedSaveSettings.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          failSave = () => reject(new Error("boom"));
+        }),
+    );
+    mockedListAgentConfig.mockResolvedValue([
+      agentRow({ override: { model: null, thinking: "max", tools: null } }),
+    ]);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(<SpacesList />);
+    const dialog = await openAgentsModal();
+    // Mount: the fetch's column (`max`) and the store's map (no pin) disagree, and
+    // nothing in this modal caused that.
+    expect(
+      await screen.findByText(/stored pin the last fetch saw differs/),
+    ).toBeTruthy();
+    // The edit: `high`, and its save is provably still in flight.
+    fireEvent.click(
+      within(dialog).getByRole("combobox", { name: "Thinking for scout" }),
+    );
+    fireEvent.click(await screen.findByRole("option", { name: "high" }));
+    await waitFor(() => expect(mockedSaveSettings).toHaveBeenCalledTimes(1));
+    // The difference is explained by a save the backend is being told about, so the
+    // cue goes quiet for that field.
+    expect(
+      screen.queryByText(/stored pin the last fetch saw differs/),
+    ).toBeNull();
+    // The save fails and the store rolls back to the FILE's map (`low`).
+    act(() => failSave());
+    await waitFor(() =>
+      expect(consoleError).toHaveBeenCalledWith(
+        "Failed to save agent overrides:",
+        expect.anything(),
+      ),
+    );
+    await waitFor(() => expect(useSettings.getState().settings).toEqual(fresh));
+    // THE RE-ARM: the suppressed edit never landed, so the `max`-vs-`low`
+    // disagreement is unexplained again and the row has to say it.
+    const cue = await screen.findByText(/stored pin the last fetch saw differs/);
+    expect(cue.textContent).toContain("thinking max");
+    consoleError.mockRestore();
+  });
+
   it("a successful save evicts the Agent catalog (no stale runs after an edit)", async () => {
     // `useAgentCatalog` caches the in-flight promise per Space on purpose (rule 3
     // of the hook's four rules): an UNCHANGED key never evicts, so a remount reuses
@@ -1074,8 +1440,7 @@ describe("SpacesList", () => {
     // Settings view does exactly that) and mounting it again with the SAME key is
     // the case the cache would otherwise serve a pre-edit answer for.
     const first = render(<SpacesList />);
-    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await openAgentsModal();
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Model for scout" }),
     );

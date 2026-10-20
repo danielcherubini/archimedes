@@ -98,32 +98,75 @@ function spaceNameFor(cwd: string, spaces: { path: string }[]): string {
  * ONE link of the `agentOverrides` write chain (see `patchAgentOverrides` in the
  * component): read the document, replace the map, write it back.
  *
- * It SWALLOWS its own failure — log, then RE-FETCH into the store — and that is
- * load-bearing for the chain: a rejection would leave the held promise rejected,
- * and every write chained after it would resolve to that same stale rejection
- * without ever reaching the file. The chain stays alive because this does not
- * throw.
+ * Its failure arm does TWO things — log, then RE-FETCH into the store — and the
+ * re-fetch is the load-bearing one for the user: without it the store keeps an
+ * optimistic map the file never saw, and the next edit composes on that. Keeping the
+ * failure inside this body (rather than re-throwing) is what lets it finish that job;
+ * it is NOT what protects the chain any more — the chain's `.catch`es do that
+ * (see `patchAgentOverrides`), which is the point of making the swallow STRUCTURAL:
+ * an error handler that can itself throw (a `console.error` that throws, a store that
+ * throws while re-seeding) used to reintroduce the very poisoning the swallow exists
+ * to prevent, silently disabling every later write.
+ *
+ * `epoch` is the publish epoch this link captured at its own optimistic publish
+ * (see `patchAgentOverrides`). Every link mirrors the store with ITS OWN snapshot,
+ * so a link finishing after a newer edit was published would hand the store back
+ * the OLDER map; `isStale()` is when to leave the store to the newer answer.
  *
  * The re-fetch on failure is also what rolls back the optimistic publish: the
- * store ends up holding the FILE's map, not the one that never landed.
+ * store ends up holding the FILE's map, not the one that never landed. That
+ * rollback is TRANSIENT once a queue exists — a later queued link whose composed
+ * map still carries the failed field re-applies it when it completes — and that is
+ * the accepted semantics, not a hole: the map IS the user's last composed intent,
+ * and dropping the field from it would be the drop-a-write class of bug.
+ *
+ * `onRolledBack` reports that the rollback actually RAN (it is skipped for a stale
+ * link, whose store mirror a newer publish owns). The modal needs the fact because
+ * its stored-pin cue suppresses fields the user has edited on the theory that the
+ * backend has the newer value — a theory a rolled-back write takes back.
  */
-async function writeAgentOverrides(next: AgentOverrides): Promise<void> {
+async function writeAgentOverrides(
+  next: AgentOverrides,
+  epoch: number,
+  epochRef: { current: number },
+  onRolledBack: () => void,
+): Promise<void> {
+  // A newer optimistic publish has mirrored a NEWER map into the store since this
+  // link published, so this link's snapshot is the older answer.
+  const isStale = () => epochRef.current !== epoch;
+  let freshDocument: AppSettings;
   try {
     const fresh = await getSettings();
-    const freshDocument: AppSettings = { ...fresh, agentOverrides: next };
+    freshDocument = { ...fresh, agentOverrides: next };
     await saveSettings(freshDocument);
-    useSettings.getState().setSettings(freshDocument);
-    // (F6 of the review round) The catalog this modal's `runs` columns came from
-    // was resolved against the map that was just REPLACED, so drop it: the next
-    // fetch goes back to Rust instead of serving the settled promise the edit
-    // invalidated. Clearing the WHOLE cache (not just this Space's key) is the
-    // honest scope — the override map is global, so an edit changes the answer for
-    // every Space's rows, not just the one on screen.
-    clearAgentCatalogCache();
   } catch (err) {
+    // The ONLY thing this catch covers is the save. Publishing to the store lives
+    // below it on purpose: a `setSettings` that throws while sitting in this try
+    // would be logged as "Failed to save" for a save that LANDED.
     console.error("Failed to save agent overrides:", err);
-    void useSettings.getState().loadSettings();
+    // Roll the optimistic publish back — unless a newer edit has since published,
+    // in which case the store is holding that instead and the file re-read would
+    // erase it. (The chain still runs the link: only the store mirror is skipped.)
+    if (!isStale()) {
+      onRolledBack();
+      void useSettings.getState().loadSettings();
+    }
+    return;
   }
+  // The save LANDED, so the catalog the modal's `runs` columns came from is
+  // resolved against a map that no longer exists — evict it.
+  // Ahead of the store publish and OUTSIDE its outcome on purpose: eviction answers
+  // "the file changed", which stays true even if mirroring the store is what fails.
+  // The next fetch goes back to Rust instead of serving the settled promise this
+  // edit invalidated. Clearing the WHOLE cache (not just this Space's key) is the
+  // honest scope — the override map is global, so an edit changes the answer for
+  // every Space's rows, not just the one on screen.
+  clearAgentCatalogCache();
+  // The store mirror is the ONLY thing the epoch guards. The chain's file writes
+  // were already correctly ordered by the queue; this is the one step that could
+  // still publish an older snapshot into a store a newer edit has moved on from.
+  if (isStale()) return;
+  useSettings.getState().setSettings(freshDocument);
 }
 
 export default function SpacesList() {
@@ -281,23 +324,39 @@ export default function SpacesList() {
    * On failure, log and RE-FETCH into the store: a save that did not land means
    * the file and the UI disagree, and the file is right (and the optimistic
    * publish below is rolled back — the store ends up holding the FILE's map, not
-   * the one that was never written).
+   * the one that was never written). That rollback is TRANSIENT once the queue
+   * below holds a link whose composed map still carries the failed field: when
+   * that link completes it re-applies the field. Accepted semantics, not a hole —
+   * the map IS the user's last composed intent, and dropping the field out of it
+   * would be the drop-a-write class of bug this whole seam exists to prevent.
    *
    * Note what is replaced and what is preserved: the OTHER fields come from the
    * re-read document, and `agentOverrides` is the map the dialog handed over
    * wholesale (it edited that map, so it is the newer answer). That is safe for
-   * exactly one reason — this modal is the ONLY writer of the map in the app, so
-   * no concurrent Rust write can be sitting inside it. If a second writer ever
-   * appears for this field, this line becomes a merge, not a replace.
+   * exactly one reason — apart from ONE named exception, this modal is the only
+   * writer of the map in the app, so no concurrent write can be sitting inside it
+   * while this replace is in flight.
    *
-   * …and the modal is now a SECOND writer of its own field, which is why the two
-   * halves below exist. A rapid pair of edits (pick a model, then pick a thinking
-   * level — one ~300ms gesture) issues two `onPatch` calls, and the second one is
-   * built from the map the dialog was RENDERED with: the store only caught up
-   * after `getSettings` → `saveSettings` resolved, so the second map has never
-   * seen the first edit's field, and handing over a whole map means the second
-   * write deletes the first pick from `settings.json` with no feedback. Neither
-   * half of the fix alone closes that:
+   * THE EXCEPTION, and it is a real one: `SettingsPage.tsx`'s Provider-rename
+   * handler is a SECOND writer of `agentOverrides` (it walks the map remapping
+   * each entry's `.model` when a Provider is renamed — ADR 0066 records it). So
+   * the sentence above holds for the modal versus RUST, not absolutely. A rename
+   * landing concurrently with a modal write can be clobbered: the modal's whole-map
+   * replace writes back the pre-rename refs, so the remapped refs revert and the
+   * overrides re-orphan. Accepted as a narrow window because opening Settings
+   * UNMOUNTS this pane — and with it this modal and its queue — so the two writers
+   * cannot be live in the same screen; the queued-epoch guard below covers this
+   * file's own links and does NOT reach that writer. (The follow-up idea, not
+   * taken here: route the rename remap through the same helper, which would need
+   * it lifted out of this component because the two live on different lifecycles.)
+   *
+   * Why the two halves below exist. A rapid pair of edits (pick a model, then pick
+   * a thinking level — one ~300ms gesture) issues two `onPatch` calls, and the
+   * second one is built from the map the dialog was RENDERED with: the store only
+   * caught up after `getSettings` → `saveSettings` resolved, so the second map has
+   * never seen the first edit's field, and handing over a whole map means the
+   * second write deletes the first pick from `settings.json` with no feedback.
+   * Neither half of the fix alone closes that:
    *
    * - PUBLISH the incoming map into the store immediately (the store's own
    *   `setSettings` is documented as the settings UI's optimistic write, and the
@@ -308,8 +367,20 @@ export default function SpacesList() {
    *   means the LAST map the user produced and not whichever `saveSettings`
    *   happened to resolve first.
    *
-   * The chain never carries a rejection: `writeAgentOverrides` swallows its own
-   * error (log + re-seed), so a failed link cannot strand every write after it.
+   * …and a THIRD half, because the first two interact badly. Serializing the FILE
+   * writes says nothing about the store MIRROR: each link still publishes its own
+   * snapshot on completion, so the link for edit A finishing after edit B was
+   * published hands the store the {A}-only map — B's pick visibly flickers back to
+   * "Inherits", and an edit C composed inside that window builds on {A} and drops
+   * B from the file. Hence the PUBLISH EPOCH: `epochRef` counts optimistic
+   * publishes, each link captures the count at its own publish, and a link only
+   * mirrors the store (`setSettings` on success, `loadSettings` on failure) while
+   * nothing newer has published since. The file writes needed no guard — the queue
+   * already orders them — this is only the store catching up with an old answer.
+   *
+   * The chain never carries a rejection: `writeAgentOverrides` logs its own error
+   * (log + re-seed) AND the link is `.catch`-swallowed here, so a failed link — or
+   * a throwing error handler inside it — cannot strand every write after it.
    *
    * What is deliberately NOT done here is a field-level merge of the incoming map
    * with the re-read one. The map carries no intent: an absent field is BOTH "the
@@ -318,18 +389,54 @@ export default function SpacesList() {
    * "does not speak").
    */
   const writeChainRef = useRef<Promise<void>>(Promise.resolve());
-  const patchAgentOverrides = useCallback((next: AgentOverrides) => {
-    const current = useSettings.getState().settings;
-    // Publish first (before the awaits), so the dialog's next render — and thus
-    // its next edit — sees this one.
-    if (current !== null) {
-      useSettings.getState().setSettings({ ...current, agentOverrides: next });
-    }
-    writeChainRef.current = writeChainRef.current.then(() =>
-      writeAgentOverrides(next),
-    );
-    return writeChainRef.current;
-  }, []);
+  // How many optimistic publishes this modal has made. A write link captures the
+  // value at its own publish and compares on completion (see the doc comment).
+  const publishEpochRef = useRef(0);
+  // How many of this modal's writes FAILED and rolled the store back. A counter, not
+  // a boolean, so a second failure still reads as a change to the modal. Handed to
+  // `AgentsDialog` as `rolledBackWrites`: the mount owns the save, and the dialog owns
+  // the `edited` suppression that a rollback invalidates.
+  const [rolledBackWrites, setRolledBackWrites] = useState(0);
+  const noteRolledBack = useCallback(() => setRolledBackWrites((n) => n + 1), []);
+  const patchAgentOverrides = useCallback(
+    (next: AgentOverrides) => {
+      const current = useSettings.getState().settings;
+      // Publish first (before the awaits), so the dialog's next render — and thus
+      // its next edit — sees this one. The epoch moves WITH the publish: one count
+      // per map the store is handed, which is exactly what a completing link has to
+      // compare against to know whether it is still the newest answer.
+      publishEpochRef.current += 1;
+      const epoch = publishEpochRef.current;
+      if (current !== null) {
+        useSettings.getState().setSettings({ ...current, agentOverrides: next });
+      }
+      // SWALLOW STRUCTURALLY, at both ends of the link, because the two halves do
+      // different work:
+      // - the LEADING `.catch` turns a rejected held promise back into a resolved one
+      //   before the `.then`, so a poisoned link can never make the NEXT write skip
+      //   (a bare trailing swallow would swallow the error and still skip the write);
+      // - the TRAILING `.catch` is the LOAD-BEARING half: the rejected link is what
+      //   the call site `void`s, and the mount has nowhere to attach a handler, so
+      //   without it a poisoned save is an unhandled rejection in the webview (this
+      //   is exactly what the suite reported before it was added). It also covers the
+      //   NEXT link, because the promise stored in the ref is the swallowed one.
+      // The leading `.catch` is therefore not what saves the next write today — it is
+      // here so the invariant does not depend on remembering the trailing half: the
+      // held promise stays clean whatever order the two links are written in.
+      // Neither half relies on the helper's error HANDLER being infallible, which is
+      // the point: a `console.error` that throws, or a store that throws while
+      // mirroring, used to leave the held promise rejected and silently disable every
+      // later write while the modal kept looking like it saved.
+      writeChainRef.current = writeChainRef.current
+        .catch(() => {})
+        .then(() =>
+          writeAgentOverrides(next, epoch, publishEpochRef, noteRolledBack),
+        )
+        .catch(() => {});
+      return writeChainRef.current;
+    },
+    [noteRolledBack],
+  );
 
   // The session awaiting delete confirmation (the ONLY destructive
   // action in the sidebar — archive/unarchive are reversible and have
@@ -608,6 +715,10 @@ export default function SpacesList() {
           settings={settings}
           models={models}
           tools={toolNames}
+          // The mount owns the save, so it is the only place that can say "that write
+          // did not land". The dialog hands its stored-pin suppression back on that
+          // fact — a rolled-back edit explains nothing about the fetch-time column.
+          rolledBackWrites={rolledBackWrites}
           onPatch={(next) => void patchAgentOverrides(next)}
           onClose={() => setAgentsOpen(false)}
         />

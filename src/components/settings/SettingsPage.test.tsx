@@ -789,12 +789,16 @@ describe("SettingsPage (the ZCode port — sections + immediate save)", () => {
     );
   });
 
-  it("a_stored_default_thinking_level_outside_the_union_renders_as_its_own_option", async () => {
+  it("a_stored_default_thinking_level_outside_the_union_renders_as_its_own_disabled_option", async () => {
     // A stored level no model currently advertises (a provider removed it /
     // the level sets changed — the select offers the UNION): the select
-    // must show the ACTUAL stored value as its own selectable option, not
-    // fall back to the "Model default" placeholder (which would lie about
-    // the stored value).
+    // must show the ACTUAL stored value as its own option, not fall back to the
+    // "Model default" placeholder (which would lie about the stored value).
+    //
+    // DISABLED, the same rule the Agents modal's per-row stale item keeps: the
+    // control ALREADY holds this value, so clicking the item re-fires
+    // `onValueChange` with the same string and re-saves the level it started with —
+    // a control that looks like it does something and only costs a write.
     vi.mocked(getSettings).mockResolvedValueOnce({
       ...baseSettings,
       defaultThinkingLevel: "ultra",
@@ -811,6 +815,8 @@ describe("SettingsPage (the ZCode port — sections + immediate save)", () => {
     // the stored value).
     const ultra = await screen.findByRole("option", { name: "ultra" });
     expect(ultra.getAttribute("data-state")).toBe("checked");
+    // …and it cannot be re-committed (the item is rendered, not selectable).
+    expect(ultra.getAttribute("aria-disabled")).toBe("true");
     expect(trigger.textContent).toContain("ultra");
     expect(trigger.textContent).not.toContain("Model default");
   });

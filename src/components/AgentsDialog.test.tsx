@@ -443,10 +443,12 @@ describe("AgentsDialog", () => {
     // things at once: the picker still shows the pinned level (it shows what the
     // user saved), and the `runs` column says nothing runs it.
     //
-    // `high` IS in the union here on purpose: this is not the "level outside the
-    // union" case, it is a level a DIFFERENT model advertises and the winning one
-    // does not — so no extra option is needed, and the assertion is about the two
-    // columns disagreeing honestly.
+    // `max` is outside EVERY model's advertised set here (the fixture's union is
+    // `high`/`medium`/`low`), so the DISABLED stale item is what carries the pin in
+    // the opened list — the same item the test above pins, doing the same job for a
+    // level the winning model demoted. It is not decoration: drop `disabled` and the
+    // assertion below fails, so this pair of columns disagreeing honestly is pinned
+    // through a control that cannot re-commit the value.
     openDialog({
       agentOverrides: { scout: { model: "openai/GPT-5", thinking: "max" } },
       rows: [
@@ -466,8 +468,10 @@ describe("AgentsDialog", () => {
     // …and it is not offered as a live choice the click could re-commit.
     fireEvent.click(trigger);
     expect(
-      await screen.findByRole("option", { name: "max" }),
-    ).toBeTruthy();
+      (await screen.findByRole("option", { name: "max" })).getAttribute(
+        "aria-disabled",
+      ),
+    ).toBe("true");
     // The runs column tells the other half: nothing runs the pinned level.
     const thinkingLine = screen.getByText("Thinking").closest("div")!;
     expect(thinkingLine.textContent).toContain("runs —");
@@ -676,7 +680,7 @@ describe("AgentsDialog", () => {
         }),
       ],
     });
-    const cue = await screen.findByText(/stored pin the backend reads differs/);
+    const cue = await screen.findByText(/stored pin the last fetch saw differs/);
     // It NAMES the value, or it would be a warning the user cannot act on.
     expect(cue.textContent).toContain("openai/GPT-5");
     // And it names WHICH field, because three fields can disagree independently.
@@ -708,10 +712,13 @@ describe("AgentsDialog", () => {
     // The cue's one false positive, pinned away. `row.override` is a FETCH-time
     // value (the same lag the `runs` columns carry), so the moment the user picks a
     // different model the wire column differs from the store-side map ON PURPOSE.
-    // Calling that "the backend reads a different pin" would be a lie — the save is
+    // Calling that "the pin the last fetch saw differs" would be a lie — the save is
     // in flight, and the backend already has the new value. The disagreement worth
     // naming is the one this dialog did not cause: two selectors reading one map
-    // differently (the case-fold twin), or a file something else wrote.
+    // differently (the case-fold twin), or a file something else wrote (and the
+    // failed-save case, which the harness here cannot show because it never fails a
+    // write — `SpacesList.test.tsx`'s `a failed save re-arms the stored-pin cue…`
+    // covers that direction).
     //
     // Rendered through `renderControlled`, because the false positive needs the
     // write to land in the document the dialog is handed while the rows stay the
