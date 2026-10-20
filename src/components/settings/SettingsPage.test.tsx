@@ -595,6 +595,46 @@ describe("SettingsPage (the ZCode port — sections + immediate save)", () => {
     expect("model" in (saved.agentOverrides.scout ?? {})).toBe(false);
   });
 
+  it("a_name_commit_never_gives_a_silent_override_a_model_value_on_the_wire", async () => {
+    // The regression this guards is the `?? ""` coercion: feeding an ABSENT
+    // `.model` through `remapModelRef` as an empty key turns "does not speak"
+    // (ADR 0067) into a WRITTEN value. `""` is the same violation as `null`
+    // wearing a different literal — a value that was not there before, which the
+    // Rust side reads as "no opinion" at best and mis-resolves at worst. The
+    // assertions below are WIRE-LEVEL (`JSON.stringify` — the serializer's
+    // semantics: an `undefined`-valued key is dropped, a `null` one is NOT), so
+    // a future "fix" that silences the type error with a cast or a `?? ""` still
+    // fails here.
+    vi.mocked(getSettings).mockResolvedValueOnce({
+      ...baseSettings,
+      agentOverrides: {
+        scout: { thinking: "high" },
+        plan: { model: "other/m9", tools: ["read"] },
+      },
+    });
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    await go("Providers");
+    const nameInput = await screen.findByDisplayValue("Tama");
+    fireEvent.change(nameInput, { target: { value: "Another Name" } });
+    fireEvent.blur(nameInput);
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(1));
+    const saved = vi.mocked(saveSettings).mock.calls[0][0] as AppSettings;
+    const wire = JSON.parse(JSON.stringify(saved.agentOverrides)) as Record<
+      string,
+      Record<string, unknown>
+    >;
+    // The silent entry: NO `model` key in the serialized document at all —
+    // neither `""` nor `null`.
+    expect("model" in (wire.scout ?? {})).toBe(false);
+    expect(JSON.stringify(wire.scout)).toBe(JSON.stringify({ thinking: "high" }));
+    // The entry whose ref belongs to a DIFFERENT provider keeps its value
+    // verbatim (and its `tools` list with it).
+    expect(wire.plan).toEqual({ model: "other/m9", tools: ["read"] });
+    // The agent NAMES (the map keys) are never touched.
+    expect(Object.keys(saved.agentOverrides).sort()).toEqual(["plan", "scout"]);
+  });
+
   it("a_blank_name_keeps_the_provider_id", async () => {
     render(<SettingsPage onBack={vi.fn()} />);
     await loaded();

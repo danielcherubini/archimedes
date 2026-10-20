@@ -263,12 +263,27 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
       // `remapModelRefs` remaps map KEYS and would be a no-op here). A
       // non-matching ref stays untouched, and an entry whose `.model` is ABSENT
       // is copied VERBATIM: absence is ADR 0067's only meaning of "this override
-      // does not speak", so the rename must never turn it into `null`.
+      // does not speak", so the rename must never turn it into `null` — NOR into
+      // `""` (the same violation in a different literal: a value that was not
+      // there before, which the resolver reads as "no opinion" at best).
       const remappedOverrides: AgentOverrides = {};
       for (const [name, override] of Object.entries(settings.agentOverrides)) {
+        if (override.model === undefined) {
+          // A silent entry gains NO `model` key at all — not even one holding
+          // `undefined`. Such a key does serialize away (`JSON.stringify` drops
+          // it, and that IS Tauri's IPC message serializer), but it still shows
+          // up in the in-memory document, where `"model" in entry` flips to
+          // true — so the key is simply never added.
+          remappedOverrides[name] = { ...override };
+          continue;
+        }
+        // A `null` can never come back from `remapModelRef` for a non-null key
+        // (it either renames or returns the key), so the fallback is the type's
+        // proof that absence never enters this branch; should it ever change,
+        // the entry keeps its own value instead of gaining a `null`.
         remappedOverrides[name] = {
           ...override,
-          model: remapModelRef(override.model ?? "", current.id, id),
+          model: remapModelRef(override.model, current.id, id) ?? override.model,
         };
       }
       nextSettings.agentOverrides = remappedOverrides;
