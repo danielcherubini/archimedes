@@ -850,9 +850,10 @@ function SessionRow({
   // The row's mark (spinner / `?` / ring) comes from the SAME rule the
   // collapsed rail and the tab use — see `useSessionStatus`.
   const status = useSessionStatus(sessionId);
-  // The SAME field `stopSession` reads at click time — so the tooltip's promise
-  // and the action's effect cannot disagree just because a render happened in
-  // between.
+  // The SAME field `stopSession` reads at click time — so tooltip and action can
+  // never disagree about WHICH field they mean. A flip between the last render
+  // and the click is the render/click gap `stopSession` accepts on purpose
+  // ("paint and click are not the same tick"), not drift this row could hide.
   const inTurn = useSessions((s) => !!s.inTurn[sessionId]);
   const stopSession = useSessions((s) => s.stopSession);
   const time = relativeTimeFor(messages);
@@ -914,8 +915,11 @@ function SessionRow({
           be stopped or put away without opening it first. */}
       <span className="group-hover:hidden">{rightSlot}</span>
       {isLive && (
-        // Stop before Archive: the more consequential action sits innermost, the
-        // same order the Archived row draws for Unarchive-then-Delete.
+        // Stop first: it is the action that pertains to a session that is RUNNING,
+        // so the row reads left-to-right as "stop what's running, then put it away".
+        // The Archived row keeps its destructive control OUTERMOST (Unarchive then
+        // Delete); this row deliberately does not copy that — Archive is not
+        // destructive (ADR 0016: reversible, and it never destroys a transcript).
         <button
           type="button"
           title={inTurn ? "Stop this turn" : "Stop this session"}

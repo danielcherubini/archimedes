@@ -2690,6 +2690,12 @@ describe("archivedSessions (sticky, ADR 0016)", () => {
     expect(st.sessions.map((s) => s.sessionId)).toContain("s1");
     expect(st.archivedSessions.map((s) => s.sessionId)).toContain("s1");
     expect(st.historySessions.map((s) => s.sessionId)).not.toContain("s1");
+    // The pin for capturing `wasLive` BEFORE the await: the id was STORED at
+    // click time and only became live when the resume won the mid-await race,
+    // so Archive must NOT close it. Re-reading liveness after the `set` would
+    // close a Session nobody clicked Archive on — and nothing else in this suite
+    // can tell the two reads apart.
+    expect(vi.mocked(closeSession)).not.toHaveBeenCalled();
   });
 
   it("an unarchive that lands after a resume of the same session does not duplicate the live id into historySessions", async () => {

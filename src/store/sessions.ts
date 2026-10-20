@@ -293,11 +293,23 @@ interface SessionsState {
    *  - live and idle → `closeSession`: the Worker is reaped and `session-closed`
    *    drops the row to stored (the transcript survives — a close is a pause).
    * The race is harmless in both directions, which is what makes ONE button
-   * honest: a turn that ended in between makes `send_abort` a documented no-op
-   * (`agent/session/mod.rs:1504`) and a second click closes; a turn that started
-   * in between is cancelled by `close_session` regardless (`:1885` sets
-   * `cancel_requested` before the detach). No branch of Stop can leave a turn
-   * running.
+   * honest: a turn that ended in between makes the cancel a documented no-op
+   * (`cancel_session`'s abort does nothing when no turn is in flight) and a
+   * second click closes; a turn that started in between is cancelled regardless,
+   * because `close_session` sets `cancel_requested` before the Worker detach. No
+   * branch of Stop can leave a turn running.
+   *
+   * A THIRD state exists beyond those two arms and takes the harsher one: a
+   * hand-triggered `/compact` runs on the loop's CONTROL channel while the loop is
+   * IDLE (see `compact_session`'s doc — it is always an idle action) and
+   * deliberately never calls `beginTurn`, so `inTurn` is false and Stop CLOSES the
+   * Session. The Esc chord additionally gates on `compacting` (see `ChatStream`)
+   * and only ever cancels, so Stop is harsher there. That asymmetry is ACCEPTED,
+   * not an oversight: a close ends the Worker and `handleSessionClosed` already
+   * clears `compacting`, so nothing pins the composer. (A threshold/overflow
+   * compaction runs INSIDE a turn, so it takes the cancel arm.) Adding a
+   * `compacting` branch here is a decision to make, not a tidy-up to do.
+   *
    * A no-op for a non-live id. Rejections propagate — the row logs them.
    */
   stopSession: (sessionId: string) => Promise<void>;
@@ -860,7 +872,11 @@ export const useSessions = create<SessionsState>((set, get) => ({
       // Distinguish "gone" (in NEITHER list — deleted) from "live" (in
       // `sessions` — a resume landed mid-await and removed the id from
       // `historySessions`): the DB flag is now `true`, so a live id must
-      // land in `archivedSessions` (the sticky semantics) — not no-op.
+      // land in `archivedSessions` (the sticky semantics) — not no-op. Note
+      // that the row appended for a live id is the LIVE `SessionInfo`, so it
+      // carries `archived: false` from that copy: these lists are read by
+      // MEMBERSHIP, which is the source of truth — the `.archived` field on a
+      // moved row is stale by construction and must not be read off them.
       const inHistory = state.historySessions.some(
         (s) => s.sessionId === sessionId,
       );
