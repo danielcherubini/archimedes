@@ -24,6 +24,7 @@ import {
   setSpaceTrusted,
   deleteSpace,
   closeSession,
+  cancelSession,
   startSession,
 } from "../lib/tauri";
 import {
@@ -58,6 +59,8 @@ vi.mock("../lib/tauri", async () => {
     setSpaceTrusted: vi.fn().mockResolvedValue(undefined),
     // The store's `closeSpace` stops the Space's live sessions with this.
     closeSession: vi.fn().mockResolvedValue(undefined),
+    // `stopSession` cancels an in-flight turn with this.
+    cancelSession: vi.fn().mockResolvedValue(undefined),
     // `startSessionInActiveSpace` starts the native session with this.
     startSession: vi.fn().mockResolvedValue({
       sessionId: "new1",
@@ -2529,6 +2532,66 @@ describe("archivedSessions (sticky, ADR 0016)", () => {
     useSessions.setState({ historySessions: [] });
     await useSessions.getState().archiveSession("missing");
     expect(vi.mocked(setSessionArchived)).not.toHaveBeenCalled();
+    // And nothing is closed either: an id in NONE of the three lists is not a
+    // Session this app run knows anything about, so Stop/Archive may not ask
+    // the backend to tear one down.
+    expect(vi.mocked(closeSession)).not.toHaveBeenCalled();
+  });
+
+  it("archiveSession on a LIVE session sets the flag, moves the row, and closes it — in that order", async () => {
+    // The sidebar offers Archive on a live row too (a live Session is not
+    // "put away" while its Worker runs, so Archive has to stop it). The id is
+    // in `sessions` ONLY — the pre-change guard read `historySessions` and
+    // returned early, so nothing reached the backend at all.
+    useSessions.setState({ sessions: [info("s1", "/x")] });
+    await useSessions.getState().archiveSession("s1");
+    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith("s1", true);
+    expect(vi.mocked(closeSession)).toHaveBeenCalledWith("s1");
+    const st = useSessions.getState();
+    expect(st.archivedSessions.map((s) => s.sessionId)).toContain("s1");
+    // Archive does not itself detach the Session: dropping the row out of the
+    // live group is `handleSessionClosed`'s job, when `session-closed` lands.
+    expect(st.sessions.map((s) => s.sessionId)).toContain("s1");
+    // THE ORDER IS THE DESIGN, not an accident of `await` placement: the flag
+    // is committed and the lists moved FIRST, so the closing event is caught by
+    // `handleSessionClosed`'s sticky guard. Close-first would race the async
+    // event against the store move and flicker the row through the Space group.
+    expect(
+      vi.mocked(setSessionArchived).mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(closeSession).mock.invocationCallOrder[0]);
+    // The second half of that proof: replay the event the close will produce
+    // and the sticky guard must land the row in `archivedSessions` ALONE — the
+    // pair of assertions below is what makes the ordering load-bearing rather
+    // than decorative (a close that beat the move would file it under
+    // `historySessions`, i.e. an un-archived-looking row).
+    useSessions.getState().handleSessionClosed("s1", "user");
+    const after = useSessions.getState();
+    expect(after.historySessions.map((s) => s.sessionId)).not.toContain("s1");
+    expect(after.archivedSessions.map((s) => s.sessionId)).toContain("s1");
+  });
+
+  it("a failed close still leaves the session archived", async () => {
+    // The flag is Archive's ONE durable job (it hides the row from the next
+    // boot); a `close_session` that rejects — a mid-await delete answers
+    // `UnknownSession` — must not undo it and must not surface as a failed
+    // Archive. Best-effort like `closeSpace`: log, do not throw, do not roll
+    // back.
+    useSessions.setState({ sessions: [info("s1", "/x")] });
+    vi.mocked(closeSession).mockRejectedValueOnce(new Error("gone"));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // `expect(...).resolves` would need the promise in hand; awaiting a call
+    // that rejects throws, so the assertion IS the await not throwing.
+    await expect(
+      useSessions.getState().archiveSession("s1"),
+    ).resolves.toBeUndefined();
+    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith("s1", true);
+    expect(
+      useSessions.getState().archivedSessions.map((s) => s.sessionId),
+    ).toContain("s1");
+    expect(spy).toHaveBeenCalled();
+    // This file has no file-scope `mockRestore` (unlike `SpacesList.test.tsx`),
+    // so the spy goes away here or it swallows the next test's real errors.
+    spy.mockRestore();
   });
 
   it("unarchiveSession is the mirror", async () => {
@@ -2627,6 +2690,12 @@ describe("archivedSessions (sticky, ADR 0016)", () => {
     expect(st.sessions.map((s) => s.sessionId)).toContain("s1");
     expect(st.archivedSessions.map((s) => s.sessionId)).toContain("s1");
     expect(st.historySessions.map((s) => s.sessionId)).not.toContain("s1");
+    // The pin for capturing `wasLive` BEFORE the await: the id was STORED at
+    // click time and only became live when the resume won the mid-await race,
+    // so Archive must NOT close it. Re-reading liveness after the `set` would
+    // close a Session nobody clicked Archive on — and nothing else in this suite
+    // can tell the two reads apart.
+    expect(vi.mocked(closeSession)).not.toHaveBeenCalled();
   });
 
   it("an unarchive that lands after a resume of the same session does not duplicate the live id into historySessions", async () => {
@@ -2957,6 +3026,76 @@ describe("closeSpace (closing a Space TAB — the tab bar's ×)", () => {
     // a transcript whose Space row (and therefore whose sidebar row) is gone,
     // instead of its "No active session" empty state.
     expect(s.activeSessionId).toBeNull();
+  });
+});
+
+describe("stopSession (the sidebar row's Stop button)", () => {
+  beforeEach(() => {
+    useSessions.setState({
+      sessions: [],
+      historySessions: [],
+      archivedSessions: [],
+      activeSessionId: null,
+      inTurn: {},
+      closeReasons: {},
+      messages: {},
+      history: {},
+    });
+    // Vitest's default `clearMocks` already wipes call history between tests,
+    // but these two assertions are about "NOT called", so their truth is made
+    // explicit here rather than inherited from the runner config: the
+    // `closeSpace` block above calls `closeSession` on purpose, and a
+    // "not called" assertion that leans on the config instead of on this
+    // block is one config tweak away from passing on call history.
+    vi.mocked(closeSession).mockClear();
+    vi.mocked(cancelSession).mockClear();
+  });
+
+  it("a turn in flight is CANCELLED, not closed (the Session stays live)", async () => {
+    useSessions.setState({
+      sessions: [info("s1", "/x")],
+      inTurn: { s1: true },
+    });
+    await useSessions.getState().stopSession("s1");
+    // `cancelSession` keeps the Worker, so the Session is re-promptable at
+    // once — a close would drop the row to stored for no benefit.
+    expect(vi.mocked(cancelSession)).toHaveBeenCalledWith("s1");
+    expect(vi.mocked(closeSession)).not.toHaveBeenCalled();
+    expect(useSessions.getState().sessions.map((s) => s.sessionId)).toContain(
+      "s1",
+    );
+  });
+
+  it("live and idle CLOSES the Session (the Worker is reaped)", async () => {
+    useSessions.setState({ sessions: [info("s1", "/x")], inTurn: {} });
+    await useSessions.getState().stopSession("s1");
+    expect(vi.mocked(closeSession)).toHaveBeenCalledWith("s1");
+    expect(vi.mocked(cancelSession)).not.toHaveBeenCalled();
+  });
+
+  it("a non-live id is a no-op (a stored or archived row has nothing to stop)", async () => {
+    // Stop lives on the LIVE row; a stored/archived id has no Worker, and
+    // `close_session` on a stored id would be an ask the backend has no
+    // business receiving.
+    useSessions.setState({
+      historySessions: [info("h1", "/x")],
+      archivedSessions: [info("a1", "/x")],
+    });
+    await useSessions.getState().stopSession("h1");
+    await useSessions.getState().stopSession("a1");
+    expect(vi.mocked(closeSession)).not.toHaveBeenCalled();
+    expect(vi.mocked(cancelSession)).not.toHaveBeenCalled();
+  });
+
+  it("a rejected command propagates (the row logs it)", async () => {
+    // Unlike Archive's best-effort close, Stop has nothing durable behind it:
+    // a Stop that silently "succeeded" while the Worker kept running would be
+    // a lie on the row, so the rejection goes to the caller.
+    useSessions.setState({ sessions: [info("s1", "/x")], inTurn: {} });
+    vi.mocked(closeSession).mockRejectedValueOnce(new Error("gone"));
+    await expect(useSessions.getState().stopSession("s1")).rejects.toThrow(
+      "gone",
+    );
   });
 });
 

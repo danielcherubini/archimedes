@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import * as React from "react";
 import {
+  cancelSession,
+  closeSession,
   deleteSession,
   getSettings,
   listAgentConfig,
@@ -153,6 +155,9 @@ vi.mock("../lib/tauri", async () => {
     ]),
     setSessionArchived: vi.fn().mockResolvedValue(true),
     deleteSession: vi.fn().mockResolvedValue(undefined),
+    // The row's Stop button: cancel a turn, or close the Session.
+    closeSession: vi.fn().mockResolvedValue(undefined),
+    cancelSession: vi.fn().mockResolvedValue(undefined),
     // The Agents modal's three catalog sources + its write path.
     listAgentConfig: vi.fn().mockResolvedValue([agentRow()]),
     listModels: vi.fn().mockResolvedValue([
@@ -388,6 +393,17 @@ beforeEach(() => {
   mockedListAgentConfig.mockReset().mockResolvedValue([agentRow()]);
   vi.mocked(setSessionArchived).mockReset().mockResolvedValue(true);
   mockedDeleteSession.mockReset().mockResolvedValue(undefined);
+  // Stop's two commands, re-armed for the SAME reason as the two lines above:
+  // `clearAllMocks` clears the CALL RECORD only and never an armed implementation,
+  // so a `mockRejectedValueOnce` left unconsumed (a Stop test that pins the
+  // rejection reaching the row's logger and asserts before draining it) would be
+  // handed to the NEXT test's click. None is armed today, which is exactly the
+  // claim the neighbours make too: restating the factory default here changes no
+  // behaviour, it only makes the default unconditional. `mockReset` alone would
+  // not do — it strips the implementation, leaving the mock answering
+  // `undefined`, which is not the `Promise` these wrappers return.
+  vi.mocked(closeSession).mockReset().mockResolvedValue(undefined);
+  vi.mocked(cancelSession).mockReset().mockResolvedValue(undefined);
 });
 // Seed the SETTINGS STORE. `SpacesList.tsx` did not read `useSettings` before the
 // Agents modal mounted (only `main.tsx`'s boot path ever populated it), and this
@@ -1728,6 +1744,23 @@ describe("SpacesList (archive, ADR 0016)", () => {
     });
   }
 
+  /**
+   * Scope a query to ONE row. A row is itself `role="button"` and its inner
+   * buttons carry `aria-label`s beginning with the action verb, so a whole-
+   * document `getByRole("button", { name: "Stop …" })` is not the problem — but
+   * a LOOSE regex (`/Stop/`) would match the row too, and worse: in a render
+   * where `s1` is live and `h1` is stored, an unscoped query cannot tell which
+   * row's button it found. The `.closest('[role="button"]')` step is this file's
+   * own row-locating pattern (see the mark tests above).
+   *
+   * TYPED as the bound-query object `within` returns rather than as the row
+   * element, so callers write `rowOf(… ).getByRole(…)` directly. (Annotating it
+   * `HTMLElement` — the element `within` was handed — does not compile: `tsc`
+   * then rejects every `.getByRole` call, and `build` is the type gate here.)
+   */
+  const rowOf = (text: string): ReturnType<typeof within> =>
+    within(screen.getByText(text).closest('[role="button"]') as HTMLElement);
+
   it("a stored row offers an Archive hover action that archives it", async () => {
     render(<SpacesList />);
     // `h1`'s title is "Refactor the parser" (its first user message).
@@ -1748,14 +1781,133 @@ describe("SpacesList (archive, ADR 0016)", () => {
     expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith("h1", true);
   });
 
-  it("a live row offers no hover action (the pause concept is gone — the time slot is always shown)", () => {
+  it("a live in-turn row offers Stop and Archive, and Stop cancels the turn", async () => {
+    // The fixture's live `s1` is IN A TURN (`inTurn: { s1: true }`), so Stop
+    // must CANCEL the turn — the Worker is kept, the row stays live.
     render(<SpacesList />);
-    // `s1` is live: no hover action at all (the Pause button is gone —
-    // the session is simply never paused from the UI).
-    expect(screen.queryByRole("button", { name: /Pause/ })).toBeNull();
+    const stop = rowOf("Fix the login bug").getByRole("button", {
+      name: "Stop Fix the login bug",
+    });
+    // The tooltip promises the turn-level meaning, and it reads the SAME field
+    // the store branches on — a row whose hover said "Stop this session" while
+    // cancelling a turn would be a promise the click breaks. (No `toHaveAttribute`
+    // here: this repo's vitest setup carries no jest-dom.)
+    expect(stop.getAttribute("title")).toBe("Stop this turn");
+    fireEvent.click(stop);
+    await waitFor(() => expect(cancelSession).toHaveBeenCalledWith("s1"));
+    expect(closeSession).not.toHaveBeenCalled();
+  });
+
+  it("a live idle row's Stop closes the Session", async () => {
+    // Same button, different turn state: with nothing in flight there is no
+    // turn to cancel, so Stop reaps the Worker (`closeSession`). The branch is
+    // read at CLICK time inside `stopSession`, which is why the `setState` below
+    // needs no re-render of the row to take effect.
+    render(<SpacesList />);
+    act(() => useSessions.setState({ inTurn: {} }));
+    const stop = rowOf("Fix the login bug").getByRole("button", {
+      name: "Stop Fix the login bug",
+    });
+    // …and the tooltip follows the turn state down to the session-level wording.
+    expect(stop.getAttribute("title")).toBe("Stop this session");
+    fireEvent.click(stop);
+    await waitFor(() => expect(closeSession).toHaveBeenCalledWith("s1"));
+    expect(cancelSession).not.toHaveBeenCalled();
+  });
+
+  it("Archive on a live row sets the flag then closes the Session", async () => {
+    // The ORDER is the design, not a detail: the flag commits and the row moves
+    // BEFORE the close, so when `session-closed` lands the store's sticky guard
+    // files the row under `archivedSessions` instead of flickering it through
+    // the Space group. Close-first would race that async event.
+    render(<SpacesList />);
+    fireEvent.click(
+      rowOf("Fix the login bug").getByRole("button", {
+        name: "Archive Fix the login bug",
+      }),
+    );
+    await waitFor(() => expect(closeSession).toHaveBeenCalledWith("s1"));
+    expect(setSessionArchived).toHaveBeenCalledWith("s1", true);
+    const flagCall = vi
+      .mocked(setSessionArchived)
+      .mock.calls.findIndex(([id]) => id === "s1");
+    const closeCall = vi
+      .mocked(closeSession)
+      .mock.calls.findIndex(([id]) => id === "s1");
+    expect(flagCall).toBeGreaterThanOrEqual(0);
+    expect(closeCall).toBeGreaterThanOrEqual(0);
     expect(
-      screen.queryByRole("button", { name: "Archive Fix the login bug" }),
-    ).toBeNull();
+      vi.mocked(setSessionArchived).mock.invocationCallOrder[flagCall]!,
+    ).toBeLessThan(
+      vi.mocked(closeSession).mock.invocationCallOrder[closeCall]!,
+    );
+    // …and the row landed where Archive puts it.
+    await waitFor(() => {
+      const { archivedSessions } = useSessions.getState();
+      expect(archivedSessions.some((s) => s.sessionId === "s1")).toBe(true);
+    });
+  });
+
+  it("a stored row offers no Stop button", () => {
+    // Stop is a LIVE-row action: a stored Session has no Worker to stop, so
+    // `stopSession` would no-op and the button would be a lie. Scoping to the
+    // row is what makes this assertion mean anything — `s1` is live in the same
+    // render and DOES have a Stop, so a document-wide query finds one either
+    // way.
+    render(<SpacesList />);
+    const row = rowOf("Refactor the parser");
+    expect(row.queryByRole("button", { name: /^Stop / })).toBeNull();
+    expect(
+      row.getByRole("button", { name: "Archive Refactor the parser" }),
+    ).toBeTruthy();
+  });
+
+  it("a live row offers Stop and Archive, and still no Pause (the pause concept is gone)", () => {
+    // The INVERTED assertion of the test this replaces. Live rows used to render
+    // the time with no swap at all — Pause was deleted and nothing took its
+    // place, so a running Session could not be stopped or put away without
+    // opening it. It now swaps like every other row does; the pause concept
+    // stays gone, which is the half of the old test still worth pinning.
+    render(<SpacesList />);
+    const row = rowOf("Fix the login bug");
+    expect(row.queryByRole("button", { name: /Pause/ })).toBeNull();
+    expect(
+      row.getByRole("button", { name: "Stop Fix the login bug" }),
+    ).toBeTruthy();
+    expect(
+      row.getByRole("button", { name: "Archive Fix the login bug" }),
+    ).toBeTruthy();
+    // The time is still what the row shows at rest (the buttons are hover-only —
+    // and jsdom applies no CSS, so "present in the DOM" is not proof of that;
+    // what this pins is that the swap keeps the time node in the row).
+    expect(row.getByText("now")).toBeTruthy();
+  });
+
+  it("Stop and Archive swallow the row's own click-to-open", () => {
+    // Both buttons sit INSIDE the row, and the row's click is "open this
+    // Session". Without `stopPropagation` a click on Stop would also open the
+    // Session it just stopped (and Archive would open the row it just filed
+    // away) — the sidebar would fight the command the user just gave.
+    //
+    // The probe is `activeSessionId`, which ONLY the row's own `onOpen`
+    // (`openSession`) writes, and it is deliberately parked on `h2` — a id
+    // neither button belongs to. Left at the seed's `s1`, a leaked click on `s1`'s
+    // Stop would re-select `s1` and the assertion would pass for the wrong
+    // reason.
+    useSessions.setState({ activeSessionId: "h2" });
+    render(<SpacesList />);
+    fireEvent.click(
+      rowOf("Refactor the parser").getByRole("button", {
+        name: "Archive Refactor the parser",
+      }),
+    );
+    expect(useSessions.getState().activeSessionId).toBe("h2");
+    fireEvent.click(
+      rowOf("Fix the login bug").getByRole("button", {
+        name: "Stop Fix the login bug",
+      }),
+    );
+    expect(useSessions.getState().activeSessionId).toBe("h2");
   });
 
   it("the Archived section is collapsed by default and lists archived sessions", () => {

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { ImageRef } from "../lib/chatAttachments";
 import {
+  cancelSession as cancelSessionCommand,
   closeSession as closeSessionCommand,
   deleteSession as deleteSessionCommand,
   deleteSpace as deleteSpaceCommand,
@@ -272,10 +273,60 @@ interface SessionsState {
    * `archiveSession` / `unarchiveSession` (which call the backend).
    */
   archivedSessions: SessionInfo[];
-  /** Archive a stored session (`historySessions` → `archivedSessions` + `set_session_archived`). */
+  /**
+   * Archive a Session (`set_session_archived(id, true)` + the id lands in
+   * `archivedSessions`). Works on a STORED row and on a LIVE one: a live id is
+   * additionally closed AFTER the flag and the move, so the row ends up in the
+   * Archived section alone (see the action for why that order is load-bearing).
+   */
   archiveSession: (sessionId: string) => Promise<void>;
   /** Unarchive a session (`archivedSessions` → `historySessions` + `set_session_archived`). */
   unarchiveSession: (sessionId: string) => Promise<void>;
+  /**
+   * Stop ONE Session (the sidebar row's Stop button). TWO effects, decided here
+   * at CLICK time from `inTurn` — never from a render-time status, because paint
+   * and click are not the same tick:
+   *  - a turn in flight → `cancelSession`: the Worker is kept, so the Session is
+   *    immediately re-promptable. A Session parked on a gate is HERE too (a gate
+   *    is held INSIDE a tool execution, so `inTurn` is set), and reaping a Worker
+   *    mid-tool is a harsher act than the button appears to be;
+   *  - live and idle → `closeSession`: the Worker is reaped and `session-closed`
+   *    drops the row to stored (the transcript survives — a close is a pause).
+   * The race is harmless in both directions, which is what makes ONE button
+   * honest: a turn that ended in between makes the cancel a documented no-op
+   * (`cancel_session`'s abort does nothing when no turn is in flight) and a
+   * second click closes; a turn that started in between is cancelled regardless,
+   * because `close_session` sets `cancel_requested` before the Worker detach. No
+   * branch of Stop can leave a turn running.
+   *
+   * A THIRD state exists beyond those two arms and takes the harsher one: a
+   * hand-triggered `/compact` runs on the loop's CONTROL channel while the loop is
+   * IDLE (see `compact_session`'s doc — it is always an idle action) and
+   * deliberately never calls `beginTurn`, so `inTurn` is false and Stop CLOSES the
+   * Session. The Esc chord additionally gates on `compacting` (see `ChatStream`)
+   * and only ever cancels, so Stop is harsher there. That asymmetry is ACCEPTED,
+   * not an oversight: a close ends the Worker and `handleSessionClosed` already
+   * clears `compacting`, so nothing pins the composer. (A threshold/overflow
+   * compaction runs INSIDE a turn, so it takes the cancel arm.) Adding a
+   * `compacting` branch here is a decision to make, not a tidy-up to do.
+   *
+   * A FOURTH state reaches this action and stops nothing: a STALLED Session (its
+   * Worker crashed) is still a live row. `handle_crash`
+   * (`src-tauri/src/agent/session/router.rs`) marks it stalled and emits
+   * `session-stalled`, but removes no `live` entry and emits no `session-closed` —
+   * only the expected-exit teardown does that, and a crash's `Exited` is terminal,
+   * so it never runs; `markStalled` touches only `stalled` / `compacting`, so the
+   * id stays in `sessions`. Whichever arm Stop takes there is no Worker behind it:
+   * `cancel_session` writes an `Abort` nobody is left to read (the result is
+   * discarded), and `close_session` passes the `live` guard, reaps nothing
+   * and answers `Ok(())` — so Stop RESOLVES HAVING STOPPED NOTHING and the row does
+   * not move. The banner's Resume is the way out of a stalled Session. Repairing
+   * that row's liveness bookkeeping is its own decision, not a tidy-up to fold in
+   * here.
+   *
+   * A no-op for a non-live id. Rejections propagate — the row logs them.
+   */
+  stopSession: (sessionId: string) => Promise<void>;
   /**
    * Record a generated title on the session's row (the `session-titled`
    * push): `title` is set on whichever of the three lists holds the id, so
@@ -809,14 +860,24 @@ export const useSessions = create<SessionsState>((set, get) => ({
     }),
 
   archiveSession: async (sessionId) => {
-    // No-op when the entry is not a stored (flag-off) session — the UI
-    // only offers archive there. (Re-checked inside `set` below as well —
-    // the entry may have been deleted or moved mid-await, and a double
-    // click may have landed the move already.)
-    const entry = get().historySessions.find(
-      (s) => s.sessionId === sessionId,
-    );
+    // No-op when the id is in NONE of the lists — a Session this app run has
+    // never heard of gets no flag and no close. A LIVE id IS accepted (the
+    // sidebar offers Archive on a live row too): the stored row is what
+    // `historySessions` holds, but the live row is the same Session, and the
+    // backend flag does not care which list the id came from. (Re-checked
+    // inside `set` below as well — the entry may have been deleted or moved
+    // mid-await, and a double click may have landed the move already.)
+    const before = get();
+    const entry =
+      before.historySessions.find((s) => s.sessionId === sessionId) ??
+      before.sessions.find((s) => s.sessionId === sessionId);
     if (!entry) return;
+    // Captured BEFORE the `await`, deliberately: this is the question "was the
+    // row I clicked on live at CLICK time?", and the sticky-live race below
+    // turns on the answer. A resume that wins the mid-await race makes the id
+    // live by the time the `set` runs, but the user clicked a STORED row — that
+    // Session stays live and archived, and nobody asked to close it.
+    const wasLive = before.sessions.some((s) => s.sessionId === sessionId);
     await setSessionArchivedCommand(sessionId, true);
     set((state) => {
       // Re-validate against the CURRENT state: a concurrent delete (or a
@@ -825,7 +886,15 @@ export const useSessions = create<SessionsState>((set, get) => ({
       // Distinguish "gone" (in NEITHER list — deleted) from "live" (in
       // `sessions` — a resume landed mid-await and removed the id from
       // `historySessions`): the DB flag is now `true`, so a live id must
-      // land in `archivedSessions` (the sticky semantics) — not no-op.
+      // land in `archivedSessions` (the sticky semantics) — not no-op. The row
+      // appended is `entry` — a snapshot taken at CLICK time, from whichever
+      // list held the id then (the LIVE `SessionInfo`, or the click-time STORED
+      // copy) — so its `.archived` is only how that row last came to be:
+      // `false` on a fresh start, the STORED flag on a resume (the Rust
+      // `ResumeCtx` carries it), the boot-time read on a stored row. It is in
+      // general NOT a trustworthy copy of what this action just committed:
+      // these lists are read by MEMBERSHIP, which is the source of truth, and
+      // the `.archived` field on a moved row must not be read off them.
       const inHistory = state.historySessions.some(
         (s) => s.sessionId === sessionId,
       );
@@ -848,6 +917,25 @@ export const useSessions = create<SessionsState>((set, get) => ({
         ],
       };
     });
+    if (wasLive) {
+      // Archive means "put this away", and a live Session is not away while its
+      // Worker runs. The order is the whole design: the flag is committed and the
+      // lists moved FIRST, so when `session-closed` lands, `handleSessionClosed`'s
+      // sticky guard (it refuses to file a closing archived Session under
+      // `historySessions`) is what lands the row in `archivedSessions` alone.
+      // Close-first would race the async event against the store move and flicker
+      // the row through the Space group.
+      // Best-effort like `closeSpace`: a mid-await delete makes this
+      // `UnknownSession`, and the DB flag has already done Archive's one durable
+      // job — hiding it from the next boot — so a failure is logged, not thrown,
+      // and the flag is NOT rolled back. A STALLED Session's close no-ops the same
+      // way `stopSession`'s does — silently and successfully, no Worker and no
+      // `session-closed` — so the flag lands while the row stays visible in its Space
+      // group until the next boot.
+      await closeSessionCommand(sessionId).catch((err) => {
+        console.error(`failed to close the archived session ${sessionId}:`, err);
+      });
+    }
   },
 
   unarchiveSession: async (sessionId) => {
@@ -894,6 +982,24 @@ export const useSessions = create<SessionsState>((set, get) => ({
             ],
       };
     });
+  },
+
+  stopSession: async (sessionId) => {
+    // The whole decision is a CLICK-time read of `inTurn` (see the
+    // declaration): a render-time status would be a tick stale by the time the
+    // button's handler runs, and the two commands are not interchangeable. A
+    // non-live id — stored or archived — has no Worker to stop, so it gets
+    // neither command.
+    const state = get();
+    if (!state.sessions.some((s) => s.sessionId === sessionId)) return;
+    if (state.inTurn[sessionId]) {
+      await cancelSessionCommand(sessionId);
+      return;
+    }
+    // Unlike `archiveSession`'s best-effort close, these rejections PROPAGATE:
+    // Stop has no durable effect behind it, so a Stop that reported success
+    // while the Worker kept running would be a lie the row cannot correct.
+    await closeSessionCommand(sessionId);
   },
 
   titleSession: (sessionId, title) =>
