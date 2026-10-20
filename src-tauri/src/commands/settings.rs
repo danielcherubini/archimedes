@@ -408,12 +408,46 @@ mod tests {
         );
     }
 
+    /// `PERPLEXITY_API_KEY` restore guard (the `test_support` `ENV_LOCK`
+    /// pattern — copy of the private `RestoreEnv` in `agent/web/config.rs`'s
+    /// test module; the restore happens even when an assertion panics).
+    struct RestoreEnv(&'static str, Option<std::ffi::OsString>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            match self.1.take() {
+                // SAFETY: the `ENV_LOCK` is still held at drop time (this
+                // guard is declared after the `_lock` guard and outlives it
+                // in reverse); no other thread mutates the env concurrently.
+                Some(v) => unsafe { std::env::set_var(self.0, v) },
+                None => unsafe { std::env::remove_var(self.0) },
+            }
+        }
+    }
+
+    /// Unset `key` for the rest of the test, returning the guard that puts
+    /// the previous value back. Caller must hold `env_lock()`.
+    fn remove_env(key: &'static str) -> RestoreEnv {
+        let prev = std::env::var_os(key);
+        // SAFETY: `ENV_LOCK` is held by caller.
+        unsafe { std::env::remove_var(key) };
+        RestoreEnv(key, prev)
+    }
+
+    // The `ENV_LOCK` (`std::sync::Mutex`) is held across this test's `await`
+    // point INTENTIONALLY: `test_search_provider` reads
+    // `PERPLEXITY_API_KEY` through `WebConfig::from_web_settings`
+    // (`agent/web/config.rs:60`), so the env must stay cleared for the whole
+    // call — and a sibling test's read of that var mid-mutation would see
+    // the wrong value (the `test_support` `ENV_LOCK` pattern).
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_search_provider_unconfigured_provider_is_err() {
-        // Temporarily clear any env vars that could configure perplexity
-        let prev = std::env::var("PERPLEXITY_API_KEY").ok();
-        // SAFETY: test-only env manipulation
-        unsafe { std::env::remove_var("PERPLEXITY_API_KEY") };
+        // Temporarily clear any env vars that could configure perplexity —
+        // UNDER the env lock, because this is an unlocked-writer race against
+        // the `agent::web::config` tests, which read and write the same
+        // `PERPLEXITY_API_KEY` while holding it.
+        let _lock = crate::test_support::env_lock();
+        let _restore = remove_env("PERPLEXITY_API_KEY");
         let result = test_search_provider(
             "perplexity".into(),
             serde_json::json!({
@@ -423,10 +457,6 @@ mod tests {
             }),
         )
         .await;
-        if let Some(val) = prev {
-            // SAFETY: test-only env manipulation
-            unsafe { std::env::set_var("PERPLEXITY_API_KEY", val) };
-        }
         let err = result.expect_err("unconfigured provider must fail");
         assert_eq!(
             err.to_string(),
