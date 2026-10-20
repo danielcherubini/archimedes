@@ -40,5 +40,11 @@ export default defineConfig(() => ({
   test: {
     environment: "jsdom",
     globals: true,
+    // Measured: the slowest test in the suite (a `SettingsPage` font-family row,
+    // no per-test override) took 4997 ms of this 5000 ms budget on a full run
+    // under CPU contention — cold Vite transform plus runner load is enough to
+    // cross it. The 15s/10s per-test overrides already in the suite are the
+    // precedent for raising the shared default rather than adding more of those.
+    testTimeout: 20_000,
   },
 }));
