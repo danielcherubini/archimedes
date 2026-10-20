@@ -16,6 +16,7 @@ import {
   MessageCirclePlusIcon,
   MoreHorizontalIcon,
   SparklesIcon,
+  SquareIcon,
   Trash2Icon,
 } from "lucide-react";
 import {
@@ -801,9 +802,12 @@ export default function SpacesList() {
  * (applied to the text ITSELF — background-agnostic, so it works over
  * `bg-frame` / `bg-selected` / `bg-surface-hover` alike; the text is NOT
  * `truncate`-ellipsized, it overflows under the fade), and the right slot: the
- * relative time of last activity — ALWAYS the time. Hover swaps it for an
- * Archive button (stored sessions, reversible — no confirm; live rows have no
- * hover action — the pause concept is gone).
+ * relative time of last activity — ALWAYS the time. Hover swaps it for the
+ * row's actions: EVERY row swaps, live or stored. A live row offers Stop then
+ * Archive (`inTurn` → cancel the turn, else close the Session), a stored row
+ * offers Archive alone (reversible — no confirm). The live row used to have no
+ * hover action at all: the Pause button was deleted and nothing replaced it, so
+ * a running Session could not be stopped or put away without opening it first.
  *
  * THE TRAILING "Waiting" PILL IS GONE, and the `?` in the leading slot is why.
  * The pill and the rail's dot were the same fact drawn twice in two shapes,
@@ -846,6 +850,11 @@ function SessionRow({
   // The row's mark (spinner / `?` / ring) comes from the SAME rule the
   // collapsed rail and the tab use — see `useSessionStatus`.
   const status = useSessionStatus(sessionId);
+  // The SAME field `stopSession` reads at click time — so the tooltip's promise
+  // and the action's effect cannot disagree just because a render happened in
+  // between.
+  const inTurn = useSessions((s) => !!s.inTurn[sessionId]);
+  const stopSession = useSessions((s) => s.stopSession);
   const time = relativeTimeFor(messages);
   const title = titleFor(messages, spaceName, storedTitle);
 
@@ -899,33 +908,43 @@ function SessionRow({
       >
         {title}
       </span>
-      {isLive ? (
-        // Live row: NO hover action (the pause concept is gone — the
-        // session is never paused from the UI). The time slot is
-        // always shown.
-        rightSlot
-      ) : (
-        // Stored row: the time slot swaps for an Archive hover
-        // button (archive is reversible, so it needs no confirm). The
-        // slot still renders when NOT hovering.
-        <>
-          <span className="group-hover:hidden">{rightSlot}</span>
-          <button
-            type="button"
-            title="Archive"
-            aria-label={`Archive ${title}`}
-            onClick={(e) => {
-              e.stopPropagation();
-              void archiveSession(sessionId).catch((err) => {
-                console.error("Failed to archive session:", err);
-              });
-            }}
-            className="hidden size-6 items-center justify-center rounded-md group-hover:flex hover:bg-surface-hover"
-          >
-            <ArchiveIcon className="size-4" />
-          </button>
-        </>
+      {/* Every row — live or stored — swaps the time for its actions at hover. The
+          live row used to render the time with no swap at all: the Pause button
+          was deleted and nothing replaced it, so a running Session had no way to
+          be stopped or put away without opening it first. */}
+      <span className="group-hover:hidden">{rightSlot}</span>
+      {isLive && (
+        // Stop before Archive: the more consequential action sits innermost, the
+        // same order the Archived row draws for Unarchive-then-Delete.
+        <button
+          type="button"
+          title={inTurn ? "Stop this turn" : "Stop this session"}
+          aria-label={`Stop ${title}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            void stopSession(sessionId).catch((err) => {
+              console.error("Failed to stop session:", err);
+            });
+          }}
+          className="hidden size-6 items-center justify-center rounded-md group-hover:flex hover:bg-surface-hover"
+        >
+          <SquareIcon className="size-4" />
+        </button>
       )}
+      <button
+        type="button"
+        title="Archive"
+        aria-label={`Archive ${title}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          void archiveSession(sessionId).catch((err) => {
+            console.error("Failed to archive session:", err);
+          });
+        }}
+        className="hidden size-6 items-center justify-center rounded-md group-hover:flex hover:bg-surface-hover"
+      >
+        <ArchiveIcon className="size-4" />
+      </button>
     </div>
   );
 }
