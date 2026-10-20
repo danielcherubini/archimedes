@@ -1,75 +1,24 @@
-import { useMemo } from "react";
 import { Check } from "lucide-react";
 import { Progress } from "./ui/progress";
 import { useInteractive, type TodoItem } from "../store/interactive";
-import { useSessions } from "../store/sessions";
 import { useSubagentSelection } from "../store/subagentSelection";
 import { useTodoBoards, type TodoBoard } from "../hooks/useTodoBoards";
+
+const EMPTY_TODOS: TodoItem[] = [];
 
 /**
  * The main column's todo derivation (extracted so the `SidePane`'s collapsed-rail
  * overview and the panel's checklist consume the SAME derivation and can never
  * disagree):
  *
- * - Interactive todos (the session's `todos_update` board) win.
- * - `rawInput` fallback for non-interactive agents: when the interactive
- *   channel delivered no board for THIS session, the latest
- *   `manage_todo_list` `rawInput` (from the ACP `tool_call` frame, via the
- *   `sessions` store) seeds it. The `title` is the reliable discriminator
- *   (the `name` field is unstable in ACP 1.7).
- *
- * The PARENT's list only — a child never gets this fallback, because it walks
- * the transcript of the session it was called for (`useTodoBoards`' rule 7).
+ * Reads session state only (`useInteractive.todos[sessionId]`).
  */
 export function useMainTodoItems(sessionId: string | null): TodoItem[] {
-  // The selector returns the store's OWN slice — a fresh object (`?? {}`)
-  // here would be a new reference on every read and re-render forever.
-  const board = useInteractive((state) =>
-    sessionId ? state.todos[sessionId] : undefined,
+  return (
+    useInteractive((state) =>
+      sessionId ? state.todos[sessionId] : undefined,
+    ) ?? EMPTY_TODOS
   );
-  const messages = useSessions((state) =>
-    sessionId ? state.messages[sessionId] : undefined,
-  );
-
-  // The latest `manage_todo_list` `rawInput` (written ops only). Derived
-  // outside the selector (the selector returns stable references only, or
-  // Zustand re-renders forever).
-  const rawTodos = useMemo<TodoItem[] | undefined>(() => {
-    if (!messages) return undefined;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const message = messages[i];
-      if (
-        message.kind !== "tool-call" ||
-        message.title !== "manage_todo_list"
-      ) {
-        continue;
-      }
-      const raw = message.rawInput as
-        { operation?: string; todoList?: unknown } | undefined;
-      if (!raw || raw.operation === "read" || !Array.isArray(raw.todoList)) {
-        continue;
-      }
-      const items = (raw.todoList as Array<Record<string, unknown>>)
-        .filter(
-          (t) => typeof t.content === "string" && typeof t.status === "string",
-        )
-        .map((t) => ({
-          content: t.content as string,
-          status: t.status as TodoItem["status"],
-          description:
-            typeof t.description === "string" ? t.description : undefined,
-        }));
-      if (items.length > 0) return items;
-    }
-    return undefined;
-  }, [messages]);
-
-  // Interactive todos win; the `rawInput` seeds the board only when the
-  // interactive channel delivered no board for this session (an absent
-  // slice — never an empty array, which is why `applyTodoClear` deletes the
-  // key instead of writing one; both halves of that consequence, and the
-  // render half, are pinned in `TodoBoardPanel.test.tsx`).
-  return board ?? rawTodos ?? [];
 }
 
 /**
@@ -394,8 +343,6 @@ function ChildBoard({ board, full }: { board: TodoBoard; full: boolean }) {
  *   a screen reader still hears the checklist, while the block's own `div` stays
  *   the MOUSE target for the pointer (see `ChildBoard`). A child's list is FULL
  *   when it is the only board, one row once a second appears.
- * - `rawInput` fallback for non-interactive agents (via `useMainTodoItems`) —
- *   the PARENT's transcript only; a child never gets it.
  * - The `SidePane` frame owns when it APPEARS, and only that: it EXPANDS on the
  *   0 → >0 edge of this same count and NEVER collapses itself (ADR 0042) — the
  *   pane's own toggle is the only thing that closes the frame. So a board

@@ -40,6 +40,7 @@ export default defineConfig(() => ({
   test: {
     environment: "jsdom",
     globals: true,
+    setupFiles: ["./src/test/setup.tsx"],
     // Measured: the slowest test in the suite (a `SettingsPage` font-family row,
     // no per-test override) took 4997 ms of this 5000 ms budget on a full run
     // under CPU contention — cold Vite transform plus runner load is enough to

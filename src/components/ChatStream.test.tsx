@@ -184,7 +184,7 @@ vi.mock("../lib/tauri", async () => {
     // on the rejection landing in `send()`'s `catch` rather than on the
     // interception. `true` = "the frame was written" (the live answer).
     compactSession: vi.fn().mockResolvedValue(true),
-    loadHistory: vi.fn().mockResolvedValue([]),
+    loadHistory: vi.fn().mockResolvedValue({ rows: [], hasMore: false, todos: null }),
     listSkills: vi.fn().mockResolvedValue([
       {
         name: "debug",
@@ -6341,6 +6341,37 @@ describe("ChatStream (a child gate scrolls into view)", () => {
     // parent), and it renders nowhere in the transcript.
     expect(screen.queryByText("Run this command with sudo?")).toBeNull();
     expect(scroll.writes()).toBe(0);
+  });
+
+  it("renders an inline child gate card in the transcript when messages are seeded (Virtuoso branch)", () => {
+    seedLiveSession();
+    useSessions.setState({
+      messages: {
+        s1: [{ kind: "user", text: "hello from user", at: 1 }],
+      },
+    });
+    render(<ChatStream />);
+    act(() => {
+      useSubagents.getState().addSession({
+        sessionId: "sub1",
+        parentSessionId: "s1",
+        agentName: "reviewer",
+        task: "review the diff",
+        status: "running",
+      });
+      useInteractive.getState().addRequest("sub1", {
+        requestId: "r1",
+        method: "ask",
+        source: "subagent:reviewer",
+        params: {
+          questions: [
+            { id: "q1", question: "Which color?", options: [{ label: "Red" }] },
+          ],
+        },
+      });
+    });
+    expect(screen.getByText("hello from user")).toBeTruthy();
+    expect(screen.getByText("Which color?")).toBeTruthy();
   });
 });
 

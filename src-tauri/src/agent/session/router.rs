@@ -33,6 +33,11 @@ impl SessionManager {
                 }
             }
             WorkerInboundEvent::SinkFrame { event, payload } => {
+                if !is_subagent && event == "interactive-event" {
+                    if let Some(p) = self.persister.get() {
+                        p.apply_interactive_event(session_id, &payload);
+                    }
+                }
                 // The ENTIRE UI contract — re-emitted VERBATIM (the same event name +
                 // payload; the frontend is unchanged).
                 if let Some(sink) = self.sink.get() {
@@ -777,5 +782,129 @@ mod tests {
             "a pid with no matching log must not borrow another Worker's crash, \
              and must not pick a non-crash file that merely ends `worker-1.log`"
         );
+    }
+
+    #[test]
+    fn sink_frame_interactive_event_todos_update_persists_for_main_not_subagent() {
+        let dir = std::env::temp_dir().join(format!("router-todos-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Arc::new(crate::storage::Db::open(&dir.join("t.db")).unwrap());
+
+        let mut manager = SessionManager::new(dir.clone());
+        manager.attach_db(db.clone());
+
+        struct LocalTestSink {
+            emitted: Arc<StdMutex<Vec<(String, serde_json::Value)>>>,
+        }
+        impl crate::agent::events::EventSink for LocalTestSink {
+            fn emit(&self, event: &str, payload: serde_json::Value) {
+                self.emitted
+                    .lock()
+                    .unwrap()
+                    .push((event.to_string(), payload));
+            }
+        }
+        let emitted = Arc::new(StdMutex::new(Vec::new()));
+        manager.set_sink(Arc::new(LocalTestSink {
+            emitted: emitted.clone(),
+        }));
+
+        let main_sid = "main-session";
+        let sub_sid = "sub-session";
+
+        db.record_session(&crate::agent::SessionInfo {
+            session_id: main_sid.to_string(),
+            cwd: dir.clone(),
+            capabilities: serde_json::Value::Null,
+            config_options: None,
+            archived: false,
+            title: None,
+            context_usage: None,
+            is_subagent: false,
+        })
+        .unwrap();
+
+        db.record_session(&crate::agent::SessionInfo {
+            session_id: sub_sid.to_string(),
+            cwd: dir.clone(),
+            capabilities: serde_json::Value::Null,
+            config_options: None,
+            archived: false,
+            title: None,
+            context_usage: None,
+            is_subagent: true,
+        })
+        .unwrap();
+
+        let todos_payload = serde_json::json!({
+            "sessionId": main_sid,
+            "seq": 0,
+            "event": "todos_update",
+            "payload": {
+                "source": "native",
+                "todos": [
+                    { "content": "do laundry", "status": "pending" }
+                ]
+            }
+        });
+
+        // (a) Main session (is_subagent: false):
+        // receiving SinkFrame writes todos_json in db AND re-emits to sink.
+        manager.route_event(
+            main_sid,
+            false,
+            WorkerInboundEvent::SinkFrame {
+                event: "interactive-event".to_string(),
+                payload: todos_payload.clone(),
+            },
+        );
+
+        let stored = db
+            .session_todos(main_sid)
+            .unwrap()
+            .expect("main session todos should be stored");
+        assert!(stored.contains("do laundry"));
+        {
+            let frames = emitted.lock().unwrap();
+            assert_eq!(frames.len(), 1);
+            assert_eq!(frames[0].0, "interactive-event");
+            assert_eq!(frames[0].1, todos_payload);
+        }
+
+        // (b) Subagent session (is_subagent: true):
+        // receiving the same frame does NOT touch db.session_todos(sub_sid)
+        let sub_payload = serde_json::json!({
+            "sessionId": sub_sid,
+            "seq": 0,
+            "event": "todos_update",
+            "payload": {
+                "source": "native",
+                "todos": [
+                    { "content": "subagent work", "status": "pending" }
+                ]
+            }
+        });
+        manager.route_event(
+            sub_sid,
+            true,
+            WorkerInboundEvent::SinkFrame {
+                event: "interactive-event".to_string(),
+                payload: sub_payload.clone(),
+            },
+        );
+
+        assert_eq!(
+            db.session_todos(sub_sid).unwrap(),
+            None,
+            "subagent todos must not be written to db"
+        );
+        {
+            let frames = emitted.lock().unwrap();
+            assert_eq!(frames.len(), 2, "sink frame is still re-emitted to UI");
+            assert_eq!(frames[1].0, "interactive-event");
+            assert_eq!(frames[1].1, sub_payload);
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

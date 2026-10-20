@@ -140,58 +140,7 @@ describe("TodoBoardPanel", () => {
     expect(container.textContent).not.toContain("native");
   });
 
-  it("renders the board from the `rawInput` seed when NO `todos_update` frame arrived", () => {
-    // A non-interactive agent: the transcript carries the
-    // `manage_todo_list` call, the interactive store has no slice for the
-    // session at all, and the seed still draws the whole board (header and
-    // count included — the panel used to be able to miss it entirely).
-    useSessions.getState().applySessionUpdate("main1", {
-      sessionUpdate: "tool_call",
-      toolCallId: "t1",
-      title: "manage_todo_list",
-      status: "in_progress",
-      rawInput: {
-        operation: "write",
-        todoList: [
-          { content: "raw one", status: "pending" },
-          { content: "raw two", status: "completed" },
-        ],
-      },
-    });
-    const { container } = render(<TodoBoardPanel sessionId="main1" />);
-    expect(screen.getByText("Todos")).toBeTruthy();
-    expect(screen.getByText("1/2")).toBeTruthy();
-    expect(screen.getByText("raw one")).toBeTruthy();
-    expect(screen.getByText("raw two")).toBeTruthy();
-    expect(container.textContent).not.toContain("native");
-  });
-
-  /**
-   * The render half of `applyTodoClear`'s documented consequence
-   * (`src/store/interactive.ts`): a clear DELETES the session's key instead of
-   * writing `[]`, and `useMainTodoItems` reads `board ?? rawTodos ?? []` — so
-   * ONLY an absent slice lets the transcript-derived `rawInput` seed back
-   * through. A store test cannot pin this half (`"s1" in todos` and an
-   * empty-array write both read as "no board" to `toBeUndefined`), and without
-   * it the one line that turns a clear into a re-seed is unchecked: writing
-   * `[]` would silently blank the board instead.
-   */
-  it("a clear UNMASKS the session's `rawInput` seed (the key goes, so the transcript's list renders again)", () => {
-    // The seed: a `manage_todo_list` call in the transcript.
-    useSessions.getState().applySessionUpdate("main1", {
-      sessionUpdate: "tool_call",
-      toolCallId: "t1",
-      title: "manage_todo_list",
-      status: "in_progress",
-      rawInput: {
-        operation: "write",
-        todoList: [
-          { content: "raw one", status: "pending" },
-          { content: "raw two", status: "completed" },
-        ],
-      },
-    });
-    // The live board wins while it exists — that is what the clear removes.
+  it("a clear deletes the session's board from useInteractive", () => {
     useInteractive.getState().applyTodoUpdate("main1", {
       source: "native",
       todos: [
@@ -199,27 +148,18 @@ describe("TodoBoardPanel", () => {
         { content: "live two", status: "pending" },
       ],
     });
-    const { rerender } = render(<TodoBoardPanel sessionId="main1" />);
+    const { rerender, container } = render(<TodoBoardPanel sessionId="main1" />);
     expect(screen.getByText("live one")).toBeTruthy();
     expect(screen.getByText("live two")).toBeTruthy();
-    expect(screen.queryByText("raw one")).toBeNull();
-    expect(screen.getByText("0/2")).toBeTruthy();
 
     act(() => {
       useInteractive.getState().applyTodoClear("main1");
     });
     rerender(<TodoBoardPanel sessionId="main1" />);
 
-    // The seed is what the transcript actually shows, so it renders again —
-    // rows AND the header's count, which now counts the seeded list.
-    expect(screen.getByText("raw one")).toBeTruthy();
-    expect(screen.getByText("raw two")).toBeTruthy();
-    expect(screen.getByText("1/2")).toBeTruthy();
     expect(screen.queryByText("live one")).toBeNull();
     expect(screen.queryByText("live two")).toBeNull();
-    // And it is genuinely the ABSENCE of a slice, not an empty board that
-    // happens to render nothing (the store test asserts the same fact from the
-    // other side).
+    expect(container.firstChild).toBeNull();
     expect("main1" in useInteractive.getState().todos).toBe(false);
   });
 
@@ -250,9 +190,7 @@ describe("TodoBoardPanel", () => {
     expect(result.current).toBe(0);
   });
 
-  it("useMainTodoItems returns the rawInput fallback when the interactive column is absent", () => {
-    // A non-interactive agent: no `todos_update` column, only a
-    // `manage_todo_list` tool-call in the session's transcript.
+  it("yields an empty list when manage_todo_list is in messages but no board in useInteractive.todos", () => {
     useSessions.getState().applySessionUpdate("main1", {
       sessionUpdate: "tool_call",
       toolCallId: "t1",
@@ -267,10 +205,7 @@ describe("TodoBoardPanel", () => {
       },
     });
     const { result } = renderHook(() => useMainTodoItems("main1"));
-    expect(result.current.map((t) => t.content)).toEqual([
-      "raw one",
-      "raw two",
-    ]);
+    expect(result.current).toEqual([]);
   });
 
   // -- Child boards: one labelled block per running child of THIS session --

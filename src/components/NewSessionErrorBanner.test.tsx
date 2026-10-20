@@ -17,7 +17,7 @@ vi.mock("../lib/tauri", async () => {
       capabilities: {},
       archived: false,
     }),
-    loadHistory: vi.fn().mockResolvedValue([]),
+    loadHistory: vi.fn().mockResolvedValue({ rows: [], hasMore: false, todos: null }),
   };
 });
 

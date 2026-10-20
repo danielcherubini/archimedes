@@ -28,6 +28,7 @@ import {
   listAgentConfig,
   listCompletionEntries,
   listSpaceFiles,
+  loadHistory,
   type AgentConfigDto,
   type WindowFrameState,
 } from "./tauri";
@@ -351,6 +352,38 @@ describe("getWindowState / listenWindowState (the Linux window tiling IPC bounda
   });
 });
 
+describe("loadHistory (the paged history IPC boundary, ADR 0066)", () => {
+  beforeEach(() => {
+    mockedInvoke.mockReset();
+  });
+
+  it("invokes load_history with nulls when opts are omitted", async () => {
+    const payload = { rows: [], hasMore: false, todos: null };
+    mockedInvoke.mockResolvedValue(payload);
+
+    const result = await loadHistory("sess-1");
+    expect(mockedInvoke).toHaveBeenCalledWith("load_history", {
+      sessionId: "sess-1",
+      limit: null,
+      beforeId: null,
+    });
+    expect(result).toEqual(payload);
+  });
+
+  it("passes limit and beforeId when provided", async () => {
+    const payload = { rows: [], hasMore: true, todos: null };
+    mockedInvoke.mockResolvedValue(payload);
+
+    const result = await loadHistory("sess-1", { limit: 500, beforeId: 42 });
+    expect(mockedInvoke).toHaveBeenCalledWith("load_history", {
+      sessionId: "sess-1",
+      limit: 500,
+      beforeId: 42,
+    });
+    expect(result).toEqual(payload);
+  });
+});
+
 describe("listAgentConfig (the sidebar Agents modal's IPC boundary, ADR 0068)", () => {
   beforeEach(() => {
     mockedInvoke.mockReset();
@@ -425,3 +458,4 @@ describe("listAgentConfig (the sidebar Agents modal's IPC boundary, ADR 0068)", 
     expect(out.shadowed).toHaveLength(1);
   });
 });
+

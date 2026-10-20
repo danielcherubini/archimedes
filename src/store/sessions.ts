@@ -27,6 +27,10 @@ import {
   rowToMessages,
 } from "../lib/transcript/reducer";
 import { useSubagents } from "./subagents";
+import { useInteractive, type TodoItem } from "./interactive";
+
+export const INITIAL_HISTORY_PAGE = 500;
+export const OLDER_HISTORY_PAGE = 200;
 
 export {
   applySessionUpdate,
@@ -54,7 +58,7 @@ export type Message =
       title: string;
       status: ToolCallUiStatus;
       diff?: DiffRef;
-      /** The ACP `rawInput` (the tool's raw input) — kept for the todo board's `rawInput` fallback (the latest `manage_todo_list` input). */
+      /** The ACP `rawInput` (the tool's raw input). */
       rawInput?: unknown;
       /** The ACP rawOutput (the tool's result — the RPC AgentToolResult, live-partial while running). */
       rawOutput?: unknown;
@@ -321,6 +325,19 @@ interface SessionsState {
    * `isStaleCompactionStart`, or the lock would come straight back.
    */
   compacting: Record<string, string | undefined>;
+  /** History pagination window state per session id (ADR 0066). */
+  history: Record<
+    string,
+    {
+      oldestRowId: number | null;
+      hasMore: boolean;
+      loadingMore: boolean;
+      generation: number;
+      epoch: number;
+    }
+  >;
+  /** Load older history rows for a session (prepends to transcript). */
+  loadOlderHistory: (sessionId: string) => Promise<void>;
   /** Whether a prompt turn is in flight for a session. */
   inTurn: Record<string, boolean>;
   /** Last stop reason reported for a session's turn. */
@@ -517,6 +534,7 @@ export const useSessions = create<SessionsState>((set, get) => ({
   spaces: [],
   closeReasons: {},
   messages: {},
+  history: {},
   configOptions: {},
   contextUsage: {},
   compacting: {},
@@ -924,12 +942,35 @@ export const useSessions = create<SessionsState>((set, get) => ({
     if (state.messages[sessionId]) return; // already loaded
     void (async () => {
       try {
-        const rows = await loadHistory(sessionId);
+        const page = await loadHistory(sessionId, { limit: INITIAL_HISTORY_PAGE });
         // The user may have switched away while the fetch was in flight.
         if (get().activeSessionId !== sessionId) return;
-        const messages = rows.flatMap(rowToMessages);
+        // Seed the board FIRST, then write the transcript (ADR 0042 no-pop rule)
+        if (
+          Array.isArray(page.todos) &&
+          page.todos.length > 0 &&
+          !(sessionId in useInteractive.getState().todos)
+        ) {
+          useInteractive
+            .getState()
+            .applyTodoUpdate(sessionId, { todos: page.todos as TodoItem[] });
+        }
+        const messages = page.rows.flatMap(rowToMessages);
+        const prevHist = get().history[sessionId];
+        const prevGen = prevHist?.generation ?? 0;
+        const prevEpoch = prevHist?.epoch ?? 0;
         set((state) => ({
           messages: { ...state.messages, [sessionId]: messages },
+          history: {
+            ...state.history,
+            [sessionId]: {
+              oldestRowId: page.rows[0]?.id ?? null,
+              hasMore: page.hasMore,
+              loadingMore: false,
+              generation: prevGen + 1,
+              epoch: prevEpoch,
+            },
+          },
         }));
       } catch (err) {
         console.error(`failed to load history for ${sessionId}`, err);
@@ -939,8 +980,10 @@ export const useSessions = create<SessionsState>((set, get) => ({
 
   deleteSession: async (sessionId) => {
     await deleteSessionCommand(sessionId);
+    useInteractive.getState().applyTodoClear(sessionId);
     set((state) => {
       const { [sessionId]: _gone, ...rest } = state.messages;
+      const { [sessionId]: _goneHist, ...restHist } = state.history;
       return {
         sessions: state.sessions.filter((s) => s.sessionId !== sessionId),
         historySessions: state.historySessions.filter(
@@ -952,6 +995,7 @@ export const useSessions = create<SessionsState>((set, get) => ({
         activeSessionId:
           state.activeSessionId === sessionId ? null : state.activeSessionId,
         messages: rest,
+        history: restHist,
       };
     });
   },
@@ -991,6 +1035,28 @@ export const useSessions = create<SessionsState>((set, get) => ({
     // the persisted history so the pane shows the conversation on resume.
     void (async () => {
       try {
+        // Invalidate in-flight older-page loads at the start of resume
+        // without bumping `generation` (Virtuoso remount key).
+        // Keep `loadingMore: true` while the resume reload is pending so
+        // subsequent `loadOlderHistory` calls refuse to start.
+        set((st) => {
+          const prev = st.history[sessionId];
+          const prevEpoch = prev?.epoch ?? 0;
+          return {
+            history: {
+              ...st.history,
+              [sessionId]: prev
+                ? { ...prev, epoch: prevEpoch + 1, loadingMore: true }
+                : {
+                    oldestRowId: null,
+                    hasMore: false,
+                    loadingMore: true,
+                    generation: 0,
+                    epoch: 1,
+                  },
+            },
+          };
+        });
         // The reload is fire-and-forget (NOT awaited by the caller): a
         // `send()` on the resumed session adds the user message to
         // `messages[sessionId]` WHILE the reload is in flight. Applying the
@@ -1000,10 +1066,22 @@ export const useSessions = create<SessionsState>((set, get) => ({
         // instead: the reloaded rows, then any messages added after the
         // reload started, appended after.
         const prior = get().messages[sessionId] ?? [];
-        const rows = await loadHistory(sessionId);
+        const page = await loadHistory(sessionId, { limit: INITIAL_HISTORY_PAGE });
         // The user may have switched away while the fetch was in flight.
-        if (get().activeSessionId !== sessionId) return;
-        const reloaded = rows.flatMap(rowToMessages);
+        if (get().activeSessionId !== sessionId) {
+          set((st) => {
+            const entry = st.history[sessionId];
+            if (!entry) return st;
+            return {
+              history: {
+                ...st.history,
+                [sessionId]: { ...entry, loadingMore: false },
+              },
+            };
+          });
+          return;
+        }
+        const reloaded = page.rows.flatMap(rowToMessages);
         // WHAT ARRIVED WHILE WE WERE LOADING — selected by IDENTITY, never by
         // position (ADR 0050). `slice(prior.length)` assumed the array could
         // only grow across the await; a Retraction (ADR 0048) REMOVES a
@@ -1104,14 +1182,121 @@ export const useSessions = create<SessionsState>((set, get) => ({
           }
           return !reloadedKeys.has(key);
         });
-        set((st) => ({
-          messages: { ...st.messages, [sessionId]: [...reloaded, ...fresh] },
-        }));
+        if (
+          Array.isArray(page.todos) &&
+          page.todos.length > 0 &&
+          !(sessionId in useInteractive.getState().todos)
+        ) {
+          useInteractive
+            .getState()
+            .applyTodoUpdate(sessionId, { todos: page.todos as TodoItem[] });
+        }
+        set((st) => {
+          const prevHist = st.history[sessionId];
+          const prevGen = prevHist?.generation ?? 0;
+          const currentEpoch = prevHist?.epoch ?? 0;
+          return {
+            messages: { ...st.messages, [sessionId]: [...reloaded, ...fresh] },
+            history: {
+              ...st.history,
+              [sessionId]: {
+                oldestRowId: page.rows[0]?.id ?? null,
+                hasMore: page.hasMore,
+                loadingMore: false,
+                generation: prevGen + 1,
+                epoch: currentEpoch,
+              },
+            },
+          };
+        });
       } catch (err) {
         console.error(`failed to load history for ${sessionId}`, err);
+        set((st) => {
+          const entry = st.history[sessionId];
+          if (!entry) return st;
+          return {
+            history: {
+              ...st.history,
+              [sessionId]: { ...entry, loadingMore: false },
+            },
+          };
+        });
       }
     })();
     return info;
+  },
+
+  loadOlderHistory: async (sessionId: string) => {
+    const sessionHistory = get().history[sessionId];
+    if (
+      !sessionHistory ||
+      !sessionHistory.hasMore ||
+      sessionHistory.loadingMore ||
+      sessionHistory.oldestRowId === null
+    ) {
+      return;
+    }
+    const gen = sessionHistory.generation;
+    const ep = sessionHistory.epoch;
+    set((state) => ({
+      history: {
+        ...state.history,
+        [sessionId]: { ...state.history[sessionId]!, loadingMore: true },
+      },
+    }));
+    try {
+      const page = await loadHistory(sessionId, {
+        limit: OLDER_HISTORY_PAGE,
+        beforeId: sessionHistory.oldestRowId,
+      });
+      set((state) => {
+        // Bail if session resumed (generation or epoch bumped) or deleted in the interim
+        const current = state.history[sessionId];
+        if (
+          !current ||
+          current.generation !== gen ||
+          current.epoch !== ep
+        ) {
+          return state;
+        }
+        const currentMessages = state.messages[sessionId] ?? [];
+        const prepended = page.rows.flatMap(rowToMessages);
+        return {
+          messages: {
+            ...state.messages,
+            [sessionId]: [...prepended, ...currentMessages],
+          },
+          history: {
+            ...state.history,
+            [sessionId]: {
+              oldestRowId: page.rows[0]?.id ?? sessionHistory.oldestRowId,
+              hasMore: page.hasMore,
+              loadingMore: false,
+              generation: gen,
+              epoch: ep,
+            },
+          },
+        };
+      });
+    } catch (err) {
+      console.error(`failed to load older history for ${sessionId}`, err);
+      set((state) => {
+        const current = state.history[sessionId];
+        if (
+          !current ||
+          current.generation !== gen ||
+          current.epoch !== ep
+        ) {
+          return state;
+        }
+        return {
+          history: {
+            ...state.history,
+            [sessionId]: { ...current, loadingMore: false },
+          },
+        };
+      });
+    }
   },
 
   addUserMessage: (sessionId, text, images) =>

@@ -6,7 +6,7 @@ import { useInteractive } from "../store/interactive";
 import { useSessions } from "../store/sessions";
 import type { Message } from "../store/sessions";
 import { usePermissions } from "../store/permissions";
-import { setSessionConfigOption } from "../lib/tauri";
+import { loadHistory, setSessionConfigOption } from "../lib/tauri";
 import { getSidePaneCollapsed, setSidePaneCollapsed, SIDE_PANE_RAIL } from "../lib/sidePaneState";
 
 // Mock the Tauri IPC layer; everything else (stores) is the real code.
@@ -22,6 +22,9 @@ vi.mock("../lib/tauri", async () => {
     // rejection instead of the call. Resolves to a fresh option list (what the
     // command returns) so `applyConfigOptions` has something to apply.
     setSessionConfigOption: vi.fn().mockResolvedValue([]),
+    loadHistory: vi
+      .fn()
+      .mockResolvedValue({ rows: [], hasMore: false, todos: null }),
   };
 });
 
@@ -85,6 +88,7 @@ beforeEach(() => {
   // a live session into the pane's own cases — which read the store for the
   // title, the boards AND (now) the config block.
   vi.mocked(setSessionConfigOption).mockClear();
+  vi.mocked(loadHistory).mockClear();
   useSessions.setState({
     messages: {},
     activeSessionId: null,
@@ -566,18 +570,21 @@ describe("SidePane (the status panel)", () => {
     ).not.toBeNull();
   });
 
-  it("does NOT auto-expand when the session it SWITCHED TO hydrates a board that was already in its transcript (the openSession → loadHistory gap)", () => {
+  it("does NOT auto-expand when the session it SWITCHED TO hydrates a board that was already in its transcript (the openSession → loadHistory gap)", async () => {
     // The round-2 finding: the switch suppression did not survive HYDRATION.
     // `useSessions.openSession` flips `activeSessionId` SYNCHRONOUSLY and loads
     // the transcript LATER (`void (async () => loadHistory(sessionId))`), so on
     // landing on a not-yet-loaded stored session `visible` is `false` AT the
     // switch, and the board starts existing only when the transcript lands —
-    // `useInteractive.todos` is never persisted, so a stored session's parent
-    // board comes ONLY from the `rawInput` seed (`useMainTodoItems`). That moves
-    // `visible` `false → true` INSIDE the now-active session, one tick after the
-    // switch: a textbook open edge for a board the user never saw appear. The
-    // app already names this window in `chat/MessageList.tsx` ("the window
-    // between `openSession` and `loadHistory` hydration").
+    // `useInteractive.todos` is seeded from `loadHistory`'s `todos` property.
+    // That moves `visible` `false → true` INSIDE the now-active session, one
+    // tick after the switch: a textbook open edge for a board the user never saw
+    // appear.
+    vi.mocked(loadHistory).mockResolvedValueOnce({
+      rows: [],
+      hasMore: false,
+      todos: [{ content: "written before the switch", status: "pending" }],
+    });
     useSessions.setState({
       activeSessionId: "main1",
       messages: {
@@ -593,45 +600,18 @@ describe("SidePane (the status panel)", () => {
     // The switch itself (what `openSession` does before its await): `main2` has
     // NO `messages` entry at all, so its board is not knowable yet.
     act(() => {
-      useSessions.setState({ activeSessionId: "main2" });
+      useSessions.getState().openSession("main2");
     });
     expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
-    // …then hydration lands (`loadHistory` resolves and writes the transcript).
-    // The `manage_todo_list` call that stored session already had in its
-    // database seeds the board, so `visible` goes `false → true` right here.
-    act(() => {
-      useSessions.setState({
-        messages: {
-          main1: [
-            { kind: "user", text: "the session you were on", at: 1 },
-          ],
-          main2: [
-            { kind: "user", text: "the session you switched to", at: 2 },
-            {
-              kind: "tool-call",
-              id: "t1",
-              title: "manage_todo_list",
-              status: "completed",
-              at: 3,
-              rawInput: {
-                operation: "write",
-                todoList: [
-                  { content: "written before the switch", status: "pending" },
-                ],
-              },
-            },
-          ],
-        },
-      });
+    // …then hydration lands (`loadHistory` resolves and seeds the board via openSession).
+    await waitFor(() => {
+      expect(screen.getByText("written before the switch")).toBeTruthy();
     });
     // Landing the transcript is NOT a board appearing in front of the user: the
     // board was in that session the whole time, only unreadable. The switch
     // stays a non-edge until the session it switched TO is knowable.
     expect(frame.style.width).toBe(`${SIDE_PANE_RAIL}px`);
     expect(getSidePaneCollapsed()).toBe(true);
-    // The board really did arrive (so this is not a test of an empty session):
-    // the hydrated seed is what the clipped pane now holds.
-    expect(screen.getByText("written before the switch")).toBeTruthy();
   });
 
   it("stops suppressing the moment the session it SWITCHED TO is hydrated (a board written AFTER the transcript lands still opens the frame)", () => {
