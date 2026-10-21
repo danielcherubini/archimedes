@@ -142,6 +142,21 @@
    * reading accepts. A PENDING call keeps `animated-gradient-text` instead:
    * this is the SETTLED reading. */
   --color-row-verb: var(--color-foreground-subtlest);
+  /* THE FILM GLYPH (ADR 0071) — the colour the Transcript's empty-state film
+   * paints its ASCII glyphs with. OPAQUE ON PURPOSE, and not as a preference:
+   * the film draws tens of thousands of glyphs per frame whose BRIGHTNESS IS THE
+   * DATA (luminance picks both the glyph and its intensity), so the luminance
+   * bands are the ONLY dimming mechanism allowed. A token carrying alpha would
+   * stack a second multiplicative dimmer on a glyph that is already dimmed and
+   * compress the whole dynamic range into the bottom few percent. So do NOT
+   * "fix" this by aliasing it onto `--color-foreground-subtlest`, which is what
+   * the caption it replaced used: that token is `color-mix(… 40%, transparent)`
+   * and is tuned for text on a solid pane — ADR 0071 rejected it for exactly
+   * that reason, and `themeTokens.test.ts` pins this value per layer so the
+   * re-anchor fails by name. It is its own token rather than a text token so a
+   * Palette can re-hue the film without moving prose readability. This is the
+   * LIGHT reading (a light page needs dark glyphs); `.dark` carries the other. */
+  --color-film-glyph: var(--color-neutral-500);
   /* The context bar's TRACK (`ComposerRow`'s progressbar background). Its own
    * token because it is a FILL whose job is to contrast with the bar's band
    * colours, while `--color-foreground-subtlest` is TEXT whose job is to be
@@ -343,6 +358,13 @@
   /* SIBLING of `--color-row-icon` above; the settled verb, the pending call
    * keeps `animated-gradient-text`. ADR 0062. */
   --color-row-verb: var(--color-foreground-subtlest);
+  /* The film glyph (ADR 0071) — see `@theme` for why it is OPAQUE on purpose
+   * (the luminance bands are the film's only dimming mechanism) and for why it
+   * is NOT aliased onto `--color-foreground-subtlest`. This is the DARK reading:
+   * light-grey glyphs on the dark pane, the headroom the demo's `rgb(v,v,v)`
+   * ramp had. Aliased to a scale token rather than a literal so a palette owner
+   * can move it, which is the whole point of ADR 0062's pattern. */
+  --color-film-glyph: var(--color-neutral-400);
   --color-context-track: var(--color-foreground-subtlest); /* see @theme */
   --color-foreground-inverse: var(--color-white);
   --color-success: var(--color-green-500);
@@ -517,6 +539,14 @@
   /* SIBLING of `--color-row-icon` above; the settled verb (a pending tool call
    * keeps `animated-gradient-text`). ADR 0062. */
   --color-row-verb: var(--color-foreground-subtlest);
+  /* The film glyph (ADR 0071) — OPAQUE on purpose, the luminance bands are the
+   * film's only dimmer; see `@theme` for the full rationale and for why
+   * `--color-foreground-subtlest` was rejected. Aliased to the `@theme` reading
+   * (the row family does exactly this) so this palette renders byte-identically.
+   * It DOES belong here even though the ramp tokens deliberately do not:
+   * `.theme-zai-light` renders with no `.dark` class, so it must state every
+   * token its surfaces paint. */
+  --color-film-glyph: var(--color-neutral-500);
   --color-context-track: var(--color-foreground-subtlest); /* see @theme */
   --color-foreground-inverse: #ffffff;
   --color-success: #1e8a3e;
@@ -672,6 +702,12 @@
   /* SIBLING of `--color-row-icon` above; the settled verb — a pending call keeps
    * `animated-gradient-text`, which is the "this call is working" cue. ADR 0062. */
   --color-row-verb: var(--color-foreground-subtlest);
+  /* The film glyph (ADR 0071) — OPAQUE on purpose (the luminance bands are the
+   * film's only dimming mechanism), aliased to the `.dark` reading, which is
+   * what both zai dark and any `.dark`-only surface already read, so zai renders
+   * byte-identically. See `@theme` for the rejected `--color-foreground-subtlest`
+   * and `themeTokens.test.ts` for the per-layer gate that keeps it. */
+  --color-film-glyph: var(--color-neutral-400);
   --color-context-track: var(--color-foreground-subtlest); /* see @theme */
   --color-foreground-inverse: #000000;
   --color-success: #46bf72;

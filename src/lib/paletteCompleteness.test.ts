@@ -445,15 +445,18 @@ describe("the .theme-dracula palette block (ADR 0027 completeness)", () => {
 
   it("declares every structural .dark token the INHERITED set does not cover", () => {
     // Derived, not hard-coded: `.dark` minus INHERITED is the palette-owned
-    // surface/border/text/accent/status/interaction/terminal set (83) plus the
+    // surface/border/text/accent/status/interaction/terminal set (89) plus the
     // ramp (6). A token added to `.dark` therefore has to be classified here too.
+    // (89 since ADR 0071's `--color-film-glyph` joined `.dark`; 88 before it, and
+    // 83 before ADR 0062's row pair — this assertion is derived, so only the
+    // prose has to be kept honest.)
     expect(diff(DARK, new Set(INHERITED)).filter((n) => !DRACULA.has(n))).toEqual([]);
   });
 
-  it("is 119 declarations: 88 structural + 25 descriptors + 6 ramp", () => {
-    // The arithmetic that proves nothing was double-counted: 88 structural + 6
-    // ramp = the 94 tokens `.dark` declares once INHERITED is removed, plus the
-    // 25 descriptors `.dark` never declares at all = 119. The REGION RENAME
+  it("is 120 declarations: 89 structural + 25 descriptors + 6 ramp", () => {
+    // The arithmetic that proves nothing was double-counted: 89 structural + 6
+    // ramp = the 95 tokens `.dark` declares once INHERITED is removed, plus the
+    // 25 descriptors `.dark` never declares at all = 120. The REGION RENAME
     // (`sidebar`->`frame`, `background-alt`->`chat`) is count-neutral, and the
     // two NEW tokens `--color-inspector` / `--color-composer` are declared in
     // EVERY layer (aliased in the four non-dracula ones, so zai renders
@@ -472,9 +475,20 @@ describe("the .theme-dracula palette block (ADR 0027 completeness)", () => {
     // A partial edit — the addition without the deletion, or the reverse —
     // breaks that line loudly rather than passing quietly, which is exactly what
     // a completeness gate is for.
-    expect([...DRACULA].length).toBe(119);
-    expect(diff(DARK, new Set(INHERITED)).length).toBe(94);
-    expect(ZAI_DARK.size).toBe(167);
+    //
+    // ADR 0071's `--color-film-glyph` moves three of the four again, and it is
+    // the simplest possible version of that pattern: ONE token added to EVERY
+    // layer, nothing deleted. So Dracula gains one (+1 = 120), `diff(DARK,
+    // INHERITED)` gains one (+1 = 95) and `ZAI_DARK` gains one (+1 = 168).
+    // `INHERITED` is UNCHANGED at 54 — that list means "in zai dark but NOT in
+    // Dracula", and the film token is declared in Dracula too — so the 48 == 48
+    // cross-check below is count-neutral and stays exactly where ADR 0062 left
+    // it. Leaving any one of these three stale fails here; the fourth number
+    // this block's own sibling gate reads lives further down in the
+    // `DRACULA_VALUES` count, which has to move with it.
+    expect([...DRACULA].length).toBe(120);
+    expect(diff(DARK, new Set(INHERITED)).length).toBe(95);
+    expect(ZAI_DARK.size).toBe(168);
     // And the two directions of the difference add up the same way: zai dark
     // withholds 54 from Dracula, Dracula adds the 6 ramp tokens zai dark
     // leaves to `.dark`, so the block sizes differ by 54 − 6.
@@ -636,9 +650,13 @@ describe("the .theme-dracula block follows the official Dracula spec", () => {
       ),
     );
     expect(offSpec.length).toBe(24);
-    // And the gate really does look at the block: it sees 119 declarations, not
+    // And the gate really does look at the block: it sees 120 declarations, not
     // zero. (A parser that returned {} would pass the offender scan outright.)
-    expect(Object.keys(DRACULA_VALUES).length).toBe(119);
+    // This is the FOURTH count ADR 0071's `--color-film-glyph` moves — it sits
+    // in a different `it` from the three in the completeness test above, so it
+    // is the easy one to miss: that block's `DRACULA` set and this block's
+    // `DRACULA_VALUES` map are parsed independently and must agree.
+    expect(Object.keys(DRACULA_VALUES).length).toBe(120);
   });
 
   it.each([

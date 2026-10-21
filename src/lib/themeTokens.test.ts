@@ -231,6 +231,11 @@ const MEANINGFUL_TOKENS = [
   // other later without failing by name.
   "color-row-icon",
   "color-row-verb",
+  // The film token (ADR 0071). `--color-film-glyph` is OPAQUE by decision, so it
+  // shares a hex with nothing today. It is here so the film's colour and the
+  // thinking ramp cannot later be collapsed onto one hex without failing by name
+  // — the same reason the row pair above is listed.
+  "color-film-glyph",
   "color-border",
 ];
 
@@ -935,6 +940,70 @@ describe("the row token family (--color-row-icon / --color-row-verb, ADR 0062)",
     // `paletteCompleteness.test.ts` needs no new allow-list entry.
     for (const hex of [DRACULA[ROW_ICON]!, DRACULA[ROW_VERB]!]) {
       expect(hex.toLowerCase()).toMatch(/^#[0-9a-f]{6}$/);
+    }
+  });
+});
+
+/**
+ * `--color-film-glyph` — the colour the Transcript's empty-state FILM paints its
+ * glyphs with (ADR 0071). The film's brightness IS its data: luminance picks
+ * both the glyph and its intensity, so the token must be OPAQUE. This is the
+ * gate ADR 0071's second Consequence asks for, in the shape of the row-family
+ * gate above: a palette that omits the token fails BY NAME instead of silently
+ * inheriting a grey, and a palette that re-anchors it onto a text token fails
+ * the same way.
+ */
+const FILM_GLYPH = "color-film-glyph";
+const FILM_LIGHT = "var(--color-neutral-500)";
+const FILM_DARK = "var(--color-neutral-400)";
+
+/** Per-layer readings, pinned BY VALUE for the same reason `ROW_READINGS` is:
+ *  "contains `var(`" would still pass if somebody aliased the glyph onto
+ *  `--color-foreground-subtlest`, which is the exact trap ADR 0071 exists to
+ *  avoid — that token carries alpha 0.4, and the film cannot afford a second
+ *  dimmer. `.theme-zai-light` / `.theme-zai-dark` alias to the `@theme` / `.dark`
+ *  readings (the row family does exactly this) so every zai surface renders
+ *  byte-identically; `.theme-dracula` is the only layer with its own value. */
+const FILM_READINGS: Record<string, string> = {
+  "@theme": FILM_LIGHT,
+  ".dark": FILM_DARK,
+  ".theme-zai-light": FILM_LIGHT,
+  ".theme-zai-dark": FILM_DARK,
+  ".theme-dracula": "#6272a4",
+};
+
+describe("the film token (--color-film-glyph, ADR 0071)", () => {
+  it.each(LAYER_NAMES)("%s declares the film glyph token", (name) => {
+    // All five layers, or the film inherits `@theme`'s dark light-grey onto a
+    // dark pane. `it.each` so the failure names the layer that dropped it.
+    const tokens = ALL_LAYERS.find((l) => l.name === name)!.tokens;
+    expect(tokens[FILM_GLYPH], `${FILM_GLYPH} missing from ${name}`).toBeTruthy();
+  });
+
+  it.each(LAYER_NAMES)("%s carries exactly the ADR's reading for the film glyph", (name) => {
+    // The WHOLE value, not `contains("var(")`: that is what stops a re-anchor
+    // onto a different token — ADR 0071 rejected `--color-foreground-subtlest`
+    // because its alpha multiplies with the film's own luminance bands.
+    const tokens = ALL_LAYERS.find((l) => l.name === name)!.tokens;
+    expect(tokens[FILM_GLYPH]?.toLowerCase(), `${FILM_GLYPH} in ${name}`).toBe(
+      FILM_READINGS[name]!,
+    );
+  });
+
+  it("keeps the token opaque in every layer, because the luminance bands are the only dimmer", () => {
+    // The one property ADR 0071 was written to protect, asserted directly so it
+    // cannot be reintroduced by a value that LOOKS right. `color-mix(… transparent)`
+    // or an `/ alpha` suffix would stack a second multiplicative dimmer on a
+    // glyph whose brightness is already the data, flattening the whole dynamic
+    // range into the bottom few percent.
+    for (const layer of ALL_LAYERS) {
+      const value = layer.tokens[FILM_GLYPH] ?? "";
+      // Assert presence FIRST: `not.toMatch` passes on `""`, so a token that is
+      // simply missing would otherwise make this gate green for the wrong reason.
+      expect(value, `${FILM_GLYPH} missing from ${layer.name}`).toBeTruthy();
+      expect(value, `${FILM_GLYPH} in ${layer.name} must not carry alpha`).not.toMatch(
+        /transparent|\/\s*[\d.]+\s*%?/,
+      );
     }
   });
 });

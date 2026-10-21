@@ -433,6 +433,22 @@
    * the ask-foreground reading above, and still only the SETTLED verb: a pending
    * call keeps `animated-gradient-text`. */
   --color-row-verb: #8be9fd; /* Cyan */
+  /* THE FILM GLYPH (ADR 0071) — the colour the Transcript's empty-state film
+   * paints its ASCII glyphs with, and the ONE layer with its own reading; the
+   * other four alias to a neutral so zai renders byte-identically. OPAQUE ON
+   * PURPOSE and not as a preference: the film's glyph BRIGHTNESS IS THE DATA
+   * (luminance picks both the glyph and its intensity), so the luminance bands
+   * must be the only dimming mechanism. Do NOT "fix" this by aliasing it onto
+   * `--color-foreground-subtlest` — that token is a `color-mix(… transparent)`
+   * text colour, and multiplying it with the film's own dimming flattens the
+   * chiaroscuro that makes the film readable; ADR 0071 rejected it for exactly
+   * that. Comment (`#6272a4`) is this palette's quiet grey and the same value
+   * `--color-border` carries, so it is spec-published and the spec gate needs no
+   * new allow-list entry. Unlike the row family it collides with NOTHING: it
+   * matches no thinking-level hex, so `themeTokens.test.ts`'s status gate stays
+   * green — and adding it to `MEANINGFUL_TOKENS` keeps the ramp from later
+   * landing on it. */
+  --color-film-glyph: #6272a4; /* Comment == Current Line */
   /* AnsiBrightRed, not Red — departure 1's rule again, and for the SAME reason
    * `diff-removed` already takes it. This token is overwhelmingly TEXT
    * (`text-destructive`: 31 uses against 12 `bg-destructive` in
