@@ -41,6 +41,7 @@ import {
 } from "../lib/chatAttachments";
 import { inferAttachmentMimeType, shouldPreferSpreadsheetClipboardText } from "../lib/chatAttachmentMetadata";
 import { useSessions } from "../store/sessions";
+import { useQueuedPrompts } from "../store/queuedPrompts";
 import { usePermissions } from "../store/permissions";
 import { useInteractive } from "../store/interactive";
 import { useSettings } from "../store/settings";
@@ -1047,11 +1048,52 @@ export default function ChatStream() {
     // regressed would ship the SENTENCE "here is [image #1]" to an agent that
     // receives no image at all, which is worse than the empty prompt this guard
     // exists to block. Real prose is unaffected (still sent text-only).
-    if (
-      (!hasImages && (rawText === "" || draftIsMarkerOnly(rawText))) ||
-      composerLocked
-    )
+    //
+    // SPLIT (ADR 0069): the emptiness check and the LOCK check are no longer one
+    // condition. Empty stays a silent no-op — there is nothing to queue — but a
+    // non-empty draft while the composer is locked now has somewhere to go: the
+    // **Prompt queue**. The lock itself is unchanged (`composerLocked`, and
+    // `ComposerRow`'s `disabled` props): the harness is still one-turn-at-a-time
+    // and a queued prompt is NEVER dispatched here — the **Flush** sends it later
+    // as an ordinary `send_prompt`.
+    if (!hasImages && (rawText === "" || draftIsMarkerOnly(rawText))) return;
+    // ── The fork. It sits BEFORE `sendingSessionsRef` and before the `try`, so a
+    // queueing press never occupies the double-send slot (and, because it returns
+    // ahead of the `try`, it must not rely on the `finally` for cleanup — and it
+    // needs none: `setDraft`/`setAttachments` are its only effects).
+    if (composerLocked) {
+      // A **Composer command** is NEVER queued, and the two contracts are why:
+      // ADR 0044's defining act is that `/compact` is CONSUMED (nothing sent, no
+      // user row), while a queue entry's whole contract is "becomes an ordinary
+      // `send_prompt`". Queuing it would deliver the literal text `/compact` to
+      // the model. It gets a VISIBLE line instead of today's dead key — and the
+      // draft is left alone, so the same Enter works once the turn ends.
+      const command = parseComposerCommand(rawText);
+      if (command) {
+        addSystemLine(
+          targetSessionId,
+          `/${command.name} runs when this turn ends — try again then.`,
+        );
+        return;
+      }
+      // The URLs MOVE with the text: never revoke here, or the queue row's
+      // preview and the later send both lose the file. The `[image #N]` markers
+      // travel UNTOUCHED for the same reason-in-reverse: the numbering is
+      // per-message, message-ness is preserved by the move, so there is nothing
+      // to renumber. Nor is the text expanded — ADR 0069 stores the RAW draft so
+      // expansion runs at send, against the catalog of THAT moment.
+      const moved = attachmentsRef.current;
+      attachmentsRef.current = [];
+      setAttachments([]);
+      useQueuedPrompts.getState().enqueue(targetSessionId, {
+        id: crypto.randomUUID(),
+        text: rawText,
+        attachments: moved,
+        state: "queued",
+      });
+      setDraft("");
       return;
+    }
     if (sendingSessionsRef.current.has(targetSessionId)) return; // guard: see the ref's comment above
     sendingSessionsRef.current.add(targetSessionId);
     try {

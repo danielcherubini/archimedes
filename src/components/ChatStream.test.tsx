@@ -21,6 +21,7 @@ import { open as openFilePicker } from "@tauri-apps/plugin-dialog";
 import { clearSkillCatalogCache } from "../hooks/useSkillCatalog";
 import { clearMentionCatalogsCache } from "../hooks/useMentionCatalogs";
 import { useSessions } from "../store/sessions";
+import { useQueuedPrompts } from "../store/queuedPrompts";
 import { useInteractive } from "../store/interactive";
 import { usePermissions } from "../store/permissions";
 import { useSubagents } from "../store/subagents";
@@ -424,6 +425,13 @@ beforeEach(() => {
   vi.useRealTimers();
   setSidePaneCollapsed(false);
   localStorage.clear();
+  // The prompt queue is a module singleton too — drop every entry so a queue
+  // left by the previous test cannot satisfy a "nothing was queued" assertion.
+  // BEFORE `clearAllMocks` so the URL releases this cleanup performs are not
+  // counted against the revocation assertions in the queue tests.
+  for (const id of Object.keys(useQueuedPrompts.getState().bySession)) {
+    useQueuedPrompts.getState().clearSession(id);
+  }
   // `clearAllMocks` clears the call history (the `URL` stub implementations
   // from `beforeAll` survive — `mockClear` semantics, not `mockReset`).
   vi.clearAllMocks();
@@ -6950,5 +6958,236 @@ describe("ChatStream — the failed-send attachment restore", () => {
       // The draft's number still names the surviving picture: `late.png` is
       // position 8 of the restored list.
       expect(composerValue()).toBe("[image #8]");
+    });
+});
+
+// ── The **Prompt queue** (ADR 0069): `send()` forks to the queue while locked ─
+//
+// Today a locked composer is a dead key: `send()` returns on `composerLocked`
+// and the words typed during inference have nowhere to go. The fork keeps the
+// lock (the harness is still one-turn-at-a-time — nothing is DISPATCHED) and
+// gives the draft somewhere to land: the per-Session queue, which a later
+// **Flush** sends as an ordinary `send_prompt`.
+//
+// Three carve-outs are the feature, not incidental: an empty/marker-only draft
+// is still a silent no-op (nothing to queue), a **Composer command** is NEVER
+// queued (ADR 0044's defining act is that it is CONSUMED, and a queue entry's
+// whole contract is "becomes an ordinary prompt" — so it gets a visible line
+// instead of the dead key), and the attachments MOVE into the entry (their
+// object URLs are kept, never revoked and recreated) so the preview survives
+// the trip.
+describe("ChatStream — send() forks to the prompt queue while the composer is locked", () => {
+  /** The composer's current draft text. */
+  function composerValue(): string {
+    return (screen.getByRole("textbox") as HTMLTextAreaElement).value;
+  }
+
+  /** The composer strip's thumbnail file names (an EMPTY strip is the point). */
+  function composerThumbs(): string[] {
+    const composer = document.querySelector('[data-testid="composer-island"]')!;
+    return Array.from(composer.querySelectorAll("img")).map(
+      (el) => el.getAttribute("alt") ?? "",
+    );
+  }
+
+  function queue(sessionId = "s1") {
+    return useQueuedPrompts.getState().bySession[sessionId] ?? [];
+  }
+
+  const png = (name: string, byte: number): File =>
+    new File([new Uint8Array([byte, byte + 1, byte + 2])], name, {
+      type: "image/png",
+    });
+
+  it("Enter while inTurn queues the draft instead of sending it", async () => {
+    seedLiveSession();
+    render(<ChatStream />);
+    // Lock the composer the way a real turn does — `inTurn` (the store's
+    // ground truth), NOT a disabled textarea (which stays editable on purpose).
+    await act(async () => {
+      useSessions.getState().beginTurn("s1");
+    });
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "check the tests " },
+    });
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    // NOTHING was dispatched: the harness is still one-turn-at-a-time.
+    expect(sendPrompt).not.toHaveBeenCalled();
+    // The draft has somewhere to go now: one entry, carrying what was typed.
+    const entries = queue();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ text: "check the tests", state: "queued" });
+    // The composer is empty afterwards — the draft MOVED, it was not copied
+    // (leaving it would queue it twice on the next Enter).
+    expect(composerValue()).toBe("");
+    // And no turn was opened, no user row written: queueing is not sending.
+    expect(useSessions.getState().inTurn["s1"]).toBe(true);
+    expect(
+      (useSessions.getState().messages["s1"] ?? []).some((m) => m.kind === "user"),
+    ).toBe(false);
+  });
+
+  it("queues a mention-bearing draft RAW (expansion runs at send, per ADR 0069)",
+    async () => {
+      seedLiveSession();
+      render(<ChatStream />);
+      await waitForCatalog();
+      await act(async () => {
+        useSessions.getState().beginTurn("s1");
+      });
+      fireEvent.change(screen.getByRole("textbox"), {
+        target: { value: "fix $debug " },
+      });
+      fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+      expect(sendPrompt).not.toHaveBeenCalled();
+      // The RAW draft — NOT the `<skill>` block form. Expansion at enqueue time
+      // would bake a catalog snapshot into a prompt that sends later.
+      expect(queue()[0]?.text).toBe("fix $debug");
+    });
+
+  it("an empty draft while locked stays a silent no-op (nothing to queue)", () => {
+    seedLiveSession();
+    useSessions.getState().beginTurn("s1");
+    render(<ChatStream />);
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(queue()).toHaveLength(0);
+    // And no feedback line — an empty Enter is a slip, not a refused request.
+    expect(useSessions.getState().messages["s1"] ?? []).toHaveLength(0);
+  });
+
+  it("a marker-only draft with no attachments while locked queues nothing", () => {
+    // The image-capable session, so the marker is not itself the reason for a
+    // no-op: with no staged attachment there is nothing to send and nothing
+    // worth queueing (`draftIsMarkerOnly`, the same rule the unlocked path uses).
+    seedLiveSessionWithImages();
+    useSessions.getState().beginTurn("s1");
+    render(<ChatStream />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "[image #1]" } });
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(queue()).toHaveLength(0);
+  });
+
+  it("a Composer command while locked is NOT queued — it answers with a line",
+    async () => {
+      seedLiveSession();
+      useSessions.getState().beginTurn("s1");
+      render(<ChatStream />);
+      // The TRAILING SPACE matters: a bare `/compact` leaves the `/` picker open
+      // with the caret on the token, and Enter is then the PICKER's key (it
+      // inserts `/compact `, pre-existing behavior pinned at `:6402`) — never a
+      // send. The space closes the token, so Enter reaches `send()`. (Clicking
+      // Send is not an option here: the button is disabled while locked.)
+      fireEvent.change(screen.getByRole("textbox"), {
+        target: { value: "/compact " },
+      });
+      fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+      await flush();
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(compactSession).not.toHaveBeenCalled();
+      // A queue entry's contract is "becomes an ordinary `send_prompt`", so a
+      // command can NEVER live in the queue — it would be consumed as a prompt.
+      expect(queue()).toHaveLength(0);
+      // Visible feedback replaces today's dead key. `addSystemLine` routes
+      // through `applySessionUpdate`'s `agent_message_chunk` arm, so the row's
+      // kind is `agent-text` (`src/store/sessions.ts:1476-1481`) — NOT `system`.
+      const messages = useSessions.getState().messages["s1"] ?? [];
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({
+        kind: "agent-text",
+        text: "/compact runs when this turn ends — try again then.",
+      });
+      // The draft is left ALONE — the command was never attempted, so the user
+      // can simply press Enter again when the turn ends.
+      expect(composerValue()).toBe("/compact ");
+    });
+
+  it("a locked send MOVES the staged attachment into the entry (no revoke, empty strip)",
+    () => {
+      seedLiveSessionWithImages();
+      useSessions.getState().beginTurn("s1");
+      render(<ChatStream />);
+      pasteToComposer([png("s.png", 1)]);
+      expect(composerThumbs()).toEqual(["s.png"]);
+      fireEvent.change(screen.getByRole("textbox"), {
+        target: { value: "look at [image #1]" },
+      });
+      fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+      expect(sendPrompt).not.toHaveBeenCalled();
+      const entry = queue()[0];
+      expect(entry).toBeTruthy();
+      // The attachment travelled WITH the text, and the marker numbering is
+      // untouched: `#1` still names the first attachment of THAT message, and
+      // message-ness survives the move, so there is nothing to renumber.
+      expect(entry!.text).toBe("look at [image #1]");
+      expect(entry!.attachments.map((a) => a.filename)).toEqual(["s.png"]);
+      expect(entry!.attachments[0]!.objectUrl).toBe("blob:mock-s.png");
+      // The URL was MOVED, not revoked-and-recreated — revoking here would kill
+      // both the queue row's preview and the later send's file.
+      expect(URL.revokeObjectURL).not.toHaveBeenCalledWith("blob:mock-s.png");
+      // The composer's strip is empty (the attachment left with the entry).
+      expect(composerThumbs()).toEqual([]);
+      expect(composerValue()).toBe("");
+    });
+
+  it("a locked send queues on the `blocked` and `compacting` locks too (all three lock sources)",
+    async () => {
+      // `composerLocked` is `workingOrInTurn || agentState === "blocked" ||
+      // compacting !== undefined` and every one of them enqueues. A `blocked`
+      // Gate means the turn is unsettled, so no Flush can fire and the queue is
+      // honest about waiting; a compaction is serialised ahead of the next
+      // prompt by the harness itself.
+      seedLiveSession();
+      useInteractive.getState().applyState("s1", { state: "blocked" });
+      render(<ChatStream />);
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "queued while blocked" } });
+      fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(queue().map((p) => p.text)).toEqual(["queued while blocked"]);
+
+      // The compaction lock (a compaction is mid-flight: `compacting` is set —
+      // driven through the real `compaction_update` frame, not a store poke).
+      await act(async () => {
+        useInteractive.getState().dismissSession("s1");
+        useSessions.getState().applySessionUpdate("s1", {
+          sessionUpdate: "compaction_update",
+          active: true,
+          reason: "manual",
+        });
+      });
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "queued while compacting" } });
+      fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(queue().map((p) => p.text)).toEqual([
+        "queued while blocked",
+        "queued while compacting",
+      ]);
+    });
+
+  it("the queue survives an unlock: the turn ending does not send it early", () => {
+    // The fork is the ONLY thing this task adds — the **Flush** is Task 4's.
+    // Pinning that nothing sends on the busy→idle edge keeps the two tasks'
+    // contracts from blurring.
+    seedLiveSession();
+    render(<ChatStream />);
+    useSessions.getState().beginTurn("s1");
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "hold that" } });
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    act(() => {
+      useSessions.getState().turnCompleted("s1", "end_turn");
+    });
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(queue().map((p) => p.text)).toEqual(["hold that"]);
+  });
+
+  it("an unlocked send still dispatches and queues nothing (the regression pin)",
+    async () => {
+      seedLiveSession();
+      render(<ChatStream />);
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "hello" } });
+      fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+      await waitFor(() => expect(sendPrompt).toHaveBeenCalledWith("s1", "hello"));
+      expect(queue()).toHaveLength(0);
     });
 });
