@@ -43,6 +43,7 @@ import type {
   FileListDto,
 } from "../lib/tauri";
 import { setSidePaneCollapsed } from "../lib/sidePaneState";
+import * as chatAttachments from "../lib/chatAttachments";
 import { activeMentionToken, isOutsideSpaceQuery } from "../lib/skills";
 import { MAX_CHAT_ATTACHMENTS, type ChatComposerAttachment } from "../lib/chatAttachments";
 
@@ -7520,6 +7521,148 @@ describe("ChatStream — the Flush: the queue drains when the Session goes idle"
       await waitFor(() =>
         expect(sendPrompt).toHaveBeenCalledWith("s1", "queued with no session"),
       );
+    });
+
+  it("a Session switch away from a BUSY session does NOT flush the arrived-at Session's queue",
+    async () => {
+      // THE H1 PIN, at the component level. `useSessionIdleEdge` is handed ONE
+      // boolean — `composerLocked` of whoever is on screen — so clicking a tab
+      // from a mid-turn Session to an idle one moves that single value
+      // `true → false` in ONE render. The hook must not read a fall across two
+      // different Sessions, because `flushHead` reads
+      // `activeSessionIdRef.current` — ALREADY the Session just arrived at — so
+      // the tab click would dispatch that Session's queued head with no user
+      // gesture. Worse, `useMentionCatalogs` serves its empty constants until
+      // the new Session's Space fetch resolves, so a `$mention` in that entry
+      // would expand against an EMPTY catalog and ship verbatim.
+      //
+      // Two LIVE sessions, the way the tab bar holds them: `s2` is mid-turn and
+      // on screen, `s1` is idle and has a queued entry (which per ADR 0069's
+      // Visible-Session-only rule must hold until `s1` goes idle WHILE on
+      // screen).
+      useSessions.setState({
+        activeSessionId: "s2",
+        sessions: [
+          { sessionId: "s1", cwd: "/home/u/proj", capabilities: {}, archived: false },
+          { sessionId: "s2", cwd: "/home/u/proj", capabilities: {}, archived: false },
+        ],
+        spaces: [{ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1, trusted: false }],
+        historySessions: [],
+        messages: { s1: [], s2: [] },
+        inTurn: {},
+        stopReasons: {},
+        closeReasons: {},
+        configOptions: {},
+        compacting: {},
+      });
+      render(<ChatStream />);
+      // `s2` — the visible one — is mid-turn: `composerLocked` is true.
+      act(() => {
+        useSessions.getState().beginTurn("s2");
+      });
+      expect(useSessions.getState().inTurn["s2"]).toBe(true);
+      // `s1` (hidden, idle) has a prompt waiting. Queued directly rather than
+      // through the composer, which is locked and belongs to `s2`.
+      act(() => {
+        useQueuedPrompts.getState().enqueue("s1", {
+          id: "q-switch",
+          text: "hold until s1 settles on screen",
+          attachments: [],
+          state: "queued",
+        });
+      });
+      // THE TAB CLICK: `activeSessionId` moves to the idle `s1`, so
+      // `composerLocked` falls in the same render that changes the SUBJECT.
+      await act(async () => {
+        useSessions.setState({ activeSessionId: "s1" });
+      });
+      await flush();
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      // NOTHING dispatched — not to `s1` (the arrived-at session, whose head a
+      // buggy edge would take) and not to `s2` either.
+      expect(sendPrompt).not.toHaveBeenCalled();
+      // `s1`'s entry is still LIVE and queued: a switch neither sends it nor
+      // marks it `leaving`.
+      expect(queue("s1").map((p) => p.id)).toEqual(["q-switch"]);
+      expect(queue("s1")[0]?.leaving).toBeUndefined();
+      // And the hook is now ARMED on `s1`: a fall it actually observes while
+      // `s1` is on screen does flush — declining the switch is not declining
+      // the Session.
+      act(() => {
+        useSessions.getState().beginTurn("s1");
+      });
+      act(() => {
+        useSessions.getState().turnCompleted("s1", "end_turn");
+      });
+      await waitFor(() =>
+        expect(sendPrompt).toHaveBeenCalledWith(
+          "s1",
+          "hold until s1 settles on screen",
+        ),
+      );
+    });
+
+  it("a Flush whose attachment READ fails settles NO turn and keeps the previous stop reason",
+    async () => {
+      // THE M4 PIN. `send()`'s attachment-read arm returns WITHOUT settling —
+      // nothing was dispatched, so there is no turn to close. `flushHead` shares
+      // ONE catch for both halves of its body, so a `FileReader` failure (which
+      // happens BEFORE `sendText`, hence before `beginTurn`) used to run
+      // `turnCompleted(sessionId, "end_turn")` on a turn that was never opened:
+      // that overwrites the PREVIOUS turn's stop reason and hides the footer's
+      // "Turn ended: …" line, for a prompt that never went anywhere.
+      //
+      // The trigger here is an IDLE COMPACTION rather than a turn, precisely
+      // because a turn's own `turnCompleted` would have written `end_turn`
+      // anyway — compaction leaves the previous turn's stop reason standing.
+      const readSpy = vi
+        .spyOn(chatAttachments, "readAttachmentAsBase64")
+        .mockRejectedValueOnce(new Error("the picture vanished"));
+      seedLiveSessionWithImages(); // image-capable, so the read is attempted
+      act(() => {
+        useSessions.setState({ stopReasons: { s1: "max_tokens" } });
+      });
+      render(<ChatStream />);
+      await act(async () => {
+        useSessions.getState().applySessionUpdate("s1", {
+          sessionUpdate: "compaction_update",
+          active: true,
+          reason: "manual",
+        });
+      });
+      enqueue("look at [image #1]", {
+        id: "q-readfail",
+        attachments: [queuedAttachment("broken.png", "blob:mock-broken.png")],
+      });
+      // The compaction ends → the falling edge → the Flush → the read rejects.
+      await act(async () => {
+        useSessions.getState().applySessionUpdate("s1", {
+          sessionUpdate: "compaction_update",
+          active: false,
+          reason: "manual",
+        });
+      });
+      await waitFor(() =>
+        expect(screen.getByText("the picture vanished")).toBeTruthy(),
+      );
+      // The READ is what failed: nothing reached the wire.
+      expect(sendPrompt).not.toHaveBeenCalled();
+      // NO turn was opened and none was settled — so the previous turn's stop
+      // reason is still the store's answer…
+      expect(useSessions.getState().stopReasons["s1"]).toBe("max_tokens");
+      // … and the footer's line is still on screen (`inTurn` is false and the
+      // reason is not `end_turn`, which is exactly what the overwrite killed).
+      expect(screen.getByText("Turn ended: max_tokens")).toBeTruthy();
+      // The prompt still stays visible, live and marked — the failure is
+      // reported, not swallowed, and only saving an edit retries it.
+      expect(queue("s1")[0]).toMatchObject({ id: "q-readfail", failed: true });
+      expect(queue("s1")[0]?.leaving).toBeUndefined();
+      // And its attachment survives — the send path never owned these URLs, so
+      // nothing here may revoke them (the preview has to still render).
+      expect(URL.revokeObjectURL).not.toHaveBeenCalledWith("blob:mock-broken.png");
+      readSpy.mockRestore();
     });
 
   it("the stack renders between the transcript island and the composer island", () => {

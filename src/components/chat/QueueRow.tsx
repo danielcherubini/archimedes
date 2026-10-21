@@ -115,6 +115,17 @@ export default function QueueRow({
  * the user is rewriting, so a row-local `useState` could not express it — the
  * Flush would send the text from the LAST Save out from under the caret. Only
  * the editor's TEXT is local (`QueueRowEditor`).
+ *
+ * WHILE `prompt.leaving` IS SET THE ROW IS NOT A CONTROL: no Edit, no Delete,
+ * and a body that is a plain `<span>` instead of a button. `AnimatePresence
+ * mode="popLayout"` keeps an exiting row mounted AND hit-testable for the whole
+ * exit (~300 ms), so without this the affordances still answer during that
+ * window — the trash overwrites `leaving: "sent"` with `"deleted"` (wrong exit
+ * direction, and `forget` then releases the object URLs the SEND path owns), and
+ * the body opens an editor whose Save `forget` later destroys. The store now
+ * refuses both mutations too; this is the affordance half of the same rule, so
+ * the UI never offers a gesture that silently does nothing. The TEXT stays
+ * rendered — the exit has to read correctly while it plays.
  */
 function QueueRowBody({
   sessionId,
@@ -129,65 +140,93 @@ function QueueRowBody({
 }) {
   if (prompt.state === "editing") return <QueueRowEditor sessionId={sessionId} prompt={prompt} />;
 
+  // The row's content, in BOTH variants: the exiting row wears a `<span>` (no
+  // button semantics, no click), a live row a `<button>` whose whole surface is
+  // the edit affordance. Same children, so the swap cannot change what the row
+  // says.
+  const content = (
+    <>
+      {/* Its OWN element — never `"Queued: " + text`, or selecting the
+          prompt's text drags the label along with it. */}
+      <span className="shrink-0 text-ui-xs text-foreground-subtlest">Queued</span>
+      {/* A failed Flush is LIVE state the user has to see: nothing will ever
+          send this entry but saving an edit of it. `text-destructive` is an
+          existing status colour, so no new token enters the Palette. */}
+      {prompt.failed && <span className="shrink-0 text-ui-xs text-destructive">Failed</span>}
+      {prompt.attachments.length > 0 && (
+        // `role="img"` + `aria-label` so the clip is not a nameless glyph in
+        // the button's accessible name; `aria-hidden` on the icon itself, the
+        // `AttachmentStrip` badge's reasoning.
+        <span
+          role="img"
+          aria-label={`${prompt.attachments.length} image attachments`}
+          className="flex shrink-0 items-center gap-0.5 text-ui-xs text-foreground-subtle"
+        >
+          {/* A count, not thumbnails: this row is one line high and the
+              thumbnails belong to the editor. */}
+          <PaperclipIcon aria-hidden="true" className="size-3" />
+          <span aria-hidden="true">{prompt.attachments.length}</span>
+        </span>
+      )}
+      <span className="truncate text-ui-sm text-foreground">{prompt.text}</span>
+    </>
+  );
+  const contentClasses = "flex min-w-0 flex-1 items-center gap-1.5 text-left";
+
   return (
     <div className="flex items-center gap-2">
       {/* The WHOLE row body is the edit affordance — a thin row has no dead
           space worth reserving, and the pencil is there for the pointer that
-          looks for it. */}
-      <button
-        type="button"
-        data-testid="queue-row-body"
-        onClick={onEdit}
-        className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-      >
-        {/* Its OWN element — never `"Queued: " + text`, or selecting the
-            prompt's text drags the label along with it. */}
-        <span className="shrink-0 text-ui-xs text-foreground-subtlest">Queued</span>
-        {/* A failed Flush is LIVE state the user has to see: nothing will ever
-            send this entry but saving an edit of it. `text-destructive` is an
-            existing status colour, so no new token enters the Palette. */}
-        {prompt.failed && (
-          <span className="shrink-0 text-ui-xs text-destructive">Failed</span>
-        )}
-        {prompt.attachments.length > 0 && (
-          // `role="img"` + `aria-label` so the clip is not a nameless glyph in
-          // the button's accessible name; `aria-hidden` on the icon itself, the
-          // `AttachmentStrip` badge's reasoning.
-          <span
-            role="img"
-            aria-label={`${prompt.attachments.length} image attachments`}
-            className="flex shrink-0 items-center gap-0.5 text-ui-xs text-foreground-subtle"
-          >
-            {/* A count, not thumbnails: this row is one line high and the
-                thumbnails belong to the editor. */}
-            <PaperclipIcon aria-hidden="true" className="size-3" />
-            <span aria-hidden="true">{prompt.attachments.length}</span>
-          </span>
-        )}
-        <span className="truncate text-ui-sm text-foreground">{prompt.text}</span>
-      </button>
+          looks for it. While `leaving`, the SAME box is a `<span>`. */}
+      {prompt.leaving ? (
+        <span
+          data-testid="queue-row-body"
+          aria-disabled="true"
+          className={contentClasses}
+        >
+          {content}
+        </span>
+      ) : (
+        <button
+          type="button"
+          data-testid="queue-row-body"
+          onClick={onEdit}
+          className={contentClasses}
+        >
+          {content}
+        </button>
+      )}
       {/* `shrink-0` is `WorkingIndicator`'s lesson: at the default 800px window
           the island's content box is ~108px, and an unshrinkable sibling would
           squeeze these 24px hit targets to nothing. ALWAYS visible — a queue
           row is a control, not a Transcript row, so nothing here is
-          hover-revealed (and a touch/keyboard user has no hover). */}
-      <div className="ml-auto flex shrink-0 items-center gap-1">
-        <Button type="button" variant="ghost" size="icon-sm" aria-label="Edit queued prompt" onClick={onEdit}>
-          {/* The svg carries its own `size-3.5`, so the button variant's
-              `[&_svg:not([class*='size-'])]:size-3` rule leaves it alone — the
-              idiom at `settings/McpSection.tsx:165-172`. */}
-          <PencilIcon className="size-3.5" />
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Delete queued prompt"
-          onClick={onDelete}
-        >
-          <TrashIcon className="size-3.5" />
-        </Button>
-      </div>
+          hover-revealed (and a touch/keyboard user has no hover). Gone ENTIRELY
+          once the row is leaving, because there is nothing left to do to it. */}
+      {!prompt.leaving && (
+        <div className="ml-auto flex shrink-0 items-center gap-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Edit queued prompt"
+            onClick={onEdit}
+          >
+            {/* The svg carries its own `size-3.5`, so the button variant's
+                `[&_svg:not([class*='size-'])]:size-3` rule leaves it alone — the
+                idiom at `settings/McpSection.tsx:165-172`. */}
+            <PencilIcon className="size-3.5" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Delete queued prompt"
+            onClick={onDelete}
+          >
+            <TrashIcon className="size-3.5" />
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

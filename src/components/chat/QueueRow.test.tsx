@@ -280,6 +280,38 @@ describe("QueueRow inline editor", () => {
 });
 
 describe("QueueRow exit paths", () => {
+  it("offers NO Edit or Delete affordance while its row is leaving, and its body is not clickable",
+    () => {
+      // `AnimatePresence mode="popLayout"` keeps an exiting row mounted AND
+      // hit-testable for the whole exit (~300 ms), so without this the trash and
+      // the body-click still answer during that window: the trash overwrites
+      // `leaving: "sent"` (wrong exit direction, and `forget` then releases the
+      // object URLs the send path owns), and the body opens an editor whose Save
+      // `forget` destroys. The row is animating out — it is no longer a control.
+      seed(prompt({ leaving: "sent" }));
+      render(<Harness sessionId={SESSION} />);
+      expect(screen.queryByRole("button", { name: "Edit queued prompt" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Delete queued prompt" })).toBeNull();
+      // The TEXT survives — the exit has to read correctly while it plays.
+      expect(screen.getByText("fix the flaky test")).toBeTruthy();
+      // The body is not clickable, and clicking where it used to be changes
+      // nothing (the store is untouched, so no editor mounts either).
+      fireEvent.click(screen.getByTestId("queue-row-body"));
+      expect(screen.queryByRole("textbox")).toBeNull();
+      expect(entry()?.state).toBe("queued");
+      expect(entry()?.leaving).toBe("sent");
+    });
+
+  it("is equally inert while leaving as deleted", () => {
+    seed(prompt({ leaving: "deleted" }));
+    render(<Harness sessionId={SESSION} />);
+    expect(screen.queryByRole("button", { name: "Edit queued prompt" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete queued prompt" })).toBeNull();
+    fireEvent.click(screen.getByTestId("queue-row-body"));
+    expect(entry()?.leaving).toBe("deleted");
+    expect(entry()?.state).toBe("queued");
+  });
+
   it("calls forget when the exit animation completes", async () => {
     seed(prompt({ leaving: "deleted" }));
     render(<Harness sessionId={SESSION} />);

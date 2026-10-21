@@ -31,20 +31,28 @@ import { useEffect, useRef } from "react";
  * The **Flush** covers the VISIBLE **Session** only, because `sendText` expands
  * **Mentions** through catalogs keyed on the ACTIVE **Session**'s Space — a
  * background **Session**'s prompt would expand against the wrong **Space**. This
- * hook is therefore one boolean about one Session, and `seen` is per-component:
+ * hook is therefore one boolean about one Session (plus the identity that
+ * boolean belongs to), and `seen` is per-component:
  *
- * - A **Session** switch is NOT itself an edge. Switching to a **Session** that
- *   settled while it was hidden does **not** flush — its queue holds until it
- *   goes idle again while on screen. That is the honest behaviour of an edge
- *   detector: a fall nobody observed is not an edge, and reconstructing one from
- *   a level comparison across a switch would send a prompt the user has no
- *   reason to expect at the moment they click a tab.
+ * - A **Session** switch is NOT itself an edge, and the `key` option is what
+ *   makes the hook able to say so. One boolean cannot tell "this Session fell"
+ *   apart from "the Session changed, and the new one is idle": leaving a busy
+ *   **Session** for an idle one moves `busy` `true → false` in a single render,
+ *   and a **Flush** measured across two different **Session**s would dispatch
+ *   the ARRIVED-AT **Session**'s head the moment the user clicks a tab — with no
+ *   user gesture, and against the not-yet-loaded **Space** catalogs. So the hook
+ *   is also given the identity `busy` describes: a change to `key` RE-SEEDS
+ *   `seen` and returns, and can therefore NEVER fire. Switching to a
+ *   **Session** that settled while it was hidden still does not flush — its
+ *   queue holds until it goes idle again while on screen, which is the honest
+ *   behaviour of an edge detector: a fall nobody observed is not an edge.
  * - `ChatStream`'s remount (the Settings view unmounts it wholesale,
- *   `App.tsx:424-425`) is likewise not an edge: the ref reset re-seeds from the
- *   CURRENT `busy`, so an already-idle Session starts idle. Per-component
- *   seeding is correct precisely because there is no cross-Session memory to
- *   preserve — no module-level map is needed, and adding one would resurrect
- *   the hidden-Session flush the bullet above just declined to invent.
+ *   `App.tsx:424-425`) is likewise not an edge: the ref reset re-seeds BOTH
+ *   fields from the CURRENT `key` and `busy`, so an already-idle Session starts
+ *   idle. Per-component seeding is correct precisely because there is no
+ *   cross-Session memory to preserve — no module-level map is needed, and adding
+ *   one would resurrect the hidden-Session flush the bullet above just declined
+ *   to invent.
  *
  * ## One known non-flush, accepted
  *
@@ -60,21 +68,28 @@ import { useEffect, useRef } from "react";
 export function useSessionIdleEdge(opts: {
   /** The composite busy flag — pass `composerLocked` verbatim. */
   busy: boolean;
+  /** Identity of the Session `busy` describes. A change to this is NEVER an edge. */
+  key: string;
   onIdle: () => void;
 }): void {
   // Assigned DURING RENDER (see the doc comment): the edge fires the current
   // closure, so the caller never has to memoize one.
   const cb = useRef(opts.onIdle);
   cb.current = opts.onIdle;
-  // Seeded with the value AT MOUNT, so the first render of an already-idle
-  // Session is not an edge and neither is a remount of one.
-  const seen = useRef<boolean>(opts.busy);
+  // Seed BOTH at mount, so neither the first render of an already-idle Session
+  // nor a remount is an edge.
+  const seen = useRef({ key: opts.key, busy: opts.busy });
 
   useEffect(() => {
     const was = seen.current;
-    seen.current = opts.busy;
+    seen.current = { key: opts.key, busy: opts.busy };
+    // A switch is a change of SUBJECT, not a change of state: the previous
+    // Session's busy level says nothing about this one, so a fall measured
+    // across the two is not an edge. Re-seed and wait for a fall we actually
+    // observe while this Session is on screen.
+    if (was.key !== opts.key) return;
     // ONLY the fall. A rise is a turn starting; a level (busy staying false
     // across unrelated re-renders) is not an edge and must not re-Flush.
-    if (was === true && !opts.busy) cb.current();
-  }, [opts.busy]);
+    if (was.busy === true && !opts.busy) cb.current();
+  }, [opts.key, opts.busy]);
 }

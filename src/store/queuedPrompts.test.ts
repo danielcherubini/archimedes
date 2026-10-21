@@ -139,6 +139,25 @@ describe("requeueHead", () => {
     expect(list()?.[0]?.failed).toBe(true);
     expect(revokeCalls()).toEqual([]);
   });
+
+  test("inserts NOTHING for a session whose key no longer exists (a closed Session stays clean)", () => {
+    // THE ORPHAN PIN. `closeSession` / delete call `clearSession` (ADR 0069: a
+    // reopened Session must not offer a Flush whose turn can never arrive) —
+    // but a Flush already in flight doesn't know that. Its `sendPrompt` then
+    // rejects with unknown-session and the catch requeues: an unconditional
+    // insert would re-create the key nobody will ever clear again, permanently
+    // orphaning an entry that holds a `File` and previews that were already
+    // revoked. So a missing key means "this Session's queue is gone", and the
+    // requeue is dropped.
+    useQueuedPrompts.getState().enqueue(S1, prompt("p1"));
+    const taken = useQueuedPrompts.getState().takeHead(S1)!;
+    useQueuedPrompts.getState().clearSession(S1);
+    useQueuedPrompts.getState().requeueHead(S1, { ...taken, failed: true });
+    expect("s1" in useQueuedPrompts.getState().bySession).toBe(false);
+    // And the dropped requeue released nothing — nobody owns those URLs any
+    // more than this function does, and `clearSession` already released them.
+    expect(revokeCalls()).toEqual([]);
+  });
 });
 
 describe("markLeaving", () => {
@@ -158,6 +177,40 @@ describe("markLeaving", () => {
     useQueuedPrompts.getState().markLeaving(S1, "p1", "deleted");
     expect(revokeCalls()).toEqual([]);
   });
+
+  test("is a NO-OP for an entry that is already leaving (one entry, one exit owner)", () => {
+    // The trash is still clickable during a `"sent"` row's ~300 ms exit
+    // (`AnimatePresence mode="popLayout"` keeps an exiting row mounted AND
+    // hit-testable). Overwriting `"sent"` with `"deleted"` would fly the row
+    // right instead of up AND make `forget` release the object URLs the SEND
+    // path owns — a double revoke under the sender's feet. And if that flush
+    // then fails, `requeueHead` resurrects a row the user just deleted, with a
+    // revoked preview.
+    useQueuedPrompts.getState().enqueue(
+      S1,
+      prompt("p1", { leaving: "sent", attachments: [attachment("a1")] }),
+    );
+    useQueuedPrompts.getState().markLeaving(S1, "p1", "deleted");
+    expect(list()?.[0]?.leaving).toBe("sent");
+    expect(revokeCalls()).toEqual([]);
+  });
+
+  test("is a NO-OP for an entry already leaving as deleted (the exit is not re-triggered)",
+    () => {
+      // The same rule seen from the other side, and stated for the reason type
+      // the API actually accepts (`markLeaving`'s ONLY reason is `"deleted"` —
+      // `"sent"` is written by `takeHead`, which is exactly why a row can never
+      // be re-armed with a new cause from the UI). A second trash click during
+      // the exit changes nothing, so the animation is never restarted and the
+      // entry is never handed to a second remover.
+      useQueuedPrompts.getState().enqueue(
+        S1,
+        prompt("p1", { leaving: "deleted", attachments: [attachment("a1")] }),
+      );
+      useQueuedPrompts.getState().markLeaving(S1, "p1", "deleted");
+      expect(list()?.map((p) => p.leaving)).toEqual(["deleted"]);
+      expect(revokeCalls()).toEqual([]);
+    });
 });
 
 describe("updateText", () => {
@@ -197,6 +250,18 @@ describe("setEditing", () => {
     useQueuedPrompts.getState().setEditing(S1, "p1", false);
     expect(list()?.[0]).toMatchObject({ state: "queued", failed: true });
   });
+
+  test("is a NO-OP for an entry that is already leaving (a row animating out is not a control)",
+    () => {
+      // The row body is the edit affordance and stays hit-testable through the
+      // exit, so a click can land on a `"sent"` entry mid-animation. Putting it
+      // into `editing` opens an editor whose Save is later destroyed by
+      // `forget` — a silently lost edit — and an entry that is `editing` is no
+      // longer what the exit was for. One entry, one owner: `leaving` wins.
+      useQueuedPrompts.getState().enqueue(S1, prompt("p1", { leaving: "sent" }));
+      useQueuedPrompts.getState().setEditing(S1, "p1", true);
+      expect(list()?.[0]).toMatchObject({ state: "queued", leaving: "sent" });
+    });
 });
 
 describe("removeAttachment", () => {

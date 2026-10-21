@@ -69,7 +69,21 @@ export const useQueuedPrompts = create<QueuedPromptsState>((set, get) => ({
 
   requeueHead: (sessionId, prompt) =>
     set((state) => {
-      const rest = (state.bySession[sessionId] ?? []).filter((p) => p.id !== prompt.id);
+      // A CLOSED or DELETED Session has no key: `closeSession` / delete call
+      // `clearSession` (ADR 0069 — a reopened Session must not offer a **Flush**
+      // whose turn can never arrive), but a **Flush** already in flight doesn't
+      // know that. Its `sendPrompt` then rejects with unknown-session and this
+      // catch-path requeue runs: inserting unconditionally would re-create a key
+      // nobody will ever clear again, orphaning an entry that holds a `File` and
+      // previews that were already revoked. A MISSING key therefore means "this
+      // Session's queue is gone" — drop the requeue.
+      //
+      // This CANNOT affect the normal failure path: `takeHead` MARKS the head
+      // (`leaving: "sent"`) rather than removing it, so the entry is still in the
+      // list and the key is still present whenever a live Session's send fails.
+      const current = state.bySession[sessionId];
+      if (!current) return state;
+      const rest = current.filter((p) => p.id !== prompt.id);
       return {
         bySession: {
           ...state.bySession,
@@ -108,9 +122,17 @@ export const useQueuedPrompts = create<QueuedPromptsState>((set, get) => ({
         bySession: {
           ...state.bySession,
           // `failed` survives: opening the editor is not a request to retry.
-          [sessionId]: list.map((p) =>
-            p.id === id ? { ...p, state: editing ? "editing" : "queued" } : p,
-          ),
+          [sessionId]: list.map((p) => {
+            if (p.id !== id) return p;
+            // ONE ENTRY, ONE EXIT OWNER (the same rule `markLeaving` states): a
+            // body click still lands on a row whose exit is animating, because
+            // `AnimatePresence mode="popLayout"` keeps it mounted AND
+            // hit-testable. Putting a `leaving` entry into `editing` opens an
+            // editor whose Save is later destroyed by `forget` — a silently lost
+            // edit — and an entry mid-exit is not something to re-open.
+            if (p.leaving) return p;
+            return { ...p, state: editing ? "editing" : "queued" };
+          }),
         },
       };
     }),
@@ -177,7 +199,22 @@ export const useQueuedPrompts = create<QueuedPromptsState>((set, get) => ({
       return {
         bySession: {
           ...state.bySession,
-          [sessionId]: list.map((p) => (p.id === id ? { ...p, leaving: reason } : p)),
+          [sessionId]: list.map((p) => {
+            if (p.id !== id) return p;
+            // ONE ENTRY, ONE EXIT OWNER. `AnimatePresence mode="popLayout"`
+            // keeps an exiting row mounted AND hit-testable for the whole exit
+            // (~300 ms), so the trash can still be clicked while a row is
+            // flying out. Re-opening a `leaving` row here would hand its
+            // attachments to a remover that no longer owns them: overwriting
+            // `"sent"` with `"deleted"` flips the exit direction AND makes
+            // `forget` release the object URLs the SEND path owns (a
+            // double-revoke under the sender's feet), and if that flush then
+            // fails `requeueHead` resurrects a row the user just deleted, with
+            // previews that were already revoked. So the FIRST cause of the
+            // exit is the one that plays.
+            if (p.leaving) return p;
+            return { ...p, leaving: reason };
+          }),
         },
       };
     }),

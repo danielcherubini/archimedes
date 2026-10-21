@@ -870,7 +870,19 @@ export default function ChatStream() {
   // conditional hook call. `composerLocked` is in scope above, and the Flush's
   // real body lives below next to `sendText`, reached through this ref.
   const flushRef = useRef<() => void>(() => {});
-  useSessionIdleEdge({ busy: composerLocked, onIdle: () => flushRef.current() });
+  // `key` is the identity `composerLocked` describes: `composerLocked` is
+  // derived from the ACTIVE Session's `inTurn` / `agentState` / `compacting`, so
+  // a tab switch can move it `true → false` in one render, and without the key
+  // the hook would read that as a fall and **Flush** the ARRIVED-AT Session's
+  // head — from `activeSessionIdRef.current`, already re-synced, with no user
+  // gesture, and against the new Session's not-yet-resolved **Space** catalogs.
+  // `""` for the no-session frame: stable, and idle-on-both-sides can never be a
+  // fall either.
+  useSessionIdleEdge({
+    busy: composerLocked,
+    key: activeSessionId ?? "",
+    onIdle: () => flushRef.current(),
+  });
 
   if (!activeSessionId) {
     return (
@@ -1361,6 +1373,18 @@ export default function ChatStream() {
     // entries behind them, so an all-skipped list simply has nothing to send.
     if (!entry) return;
     sendingSessionsRef.current.add(sessionId);
+    // Did this Flush reach the send tail at all? `sendText` is the only thing
+    // here that calls `beginTurn`, so the flag is set immediately before that ONE
+    // call — the last point before a turn can be opened. The catch needs it
+    // because it is SHARED by two very different failures: a rejection from
+    // `sendText` left a live turn that must be settled, while a `FileReader`
+    // failure during the attachment read happened BEFORE any turn was opened —
+    // settling that one would overwrite the previous turn's stop reason and hide
+    // the footer's "Turn ended: …" line, for a prompt that never went anywhere.
+    // `send()` handles the same asymmetry by `return`ing from its read arm
+    // before its catch can see it; this body has one `try`, so the flag carries
+    // the distinction instead.
+    let dispatched = false;
     try {
       // Fail-closed on capability exactly as `send()` does. `imageCapable` is
       // the render-derived value and `flushHead` is a fresh closure every
@@ -1386,11 +1410,12 @@ export default function ChatStream() {
       // composer when it was queued. It stays a REQUIRED argument (making it
       // optional would add a branch to `sendText` for a caller that has nothing
       // to commit).
+      //
+      // Set IMMEDIATELY before the call: everything above this line can fail
+      // without a turn having been opened, everything below it failed after one
+      // was. See the flag's comment.
+      dispatched = true;
       const stopReason = await sendText(sessionId, entry.text, images, () => {});
-      // The dispatch path owns these URLs: Task 1's `forget` refuses to release
-      // a "sent" entry precisely because the sender does. Nothing after this
-      // point can put them back in a row.
-      entry.attachments.forEach(releaseAttachment);
       // UNREACHABLE from this caller and deliberately UNTESTED: `sendText` only
       // returns `null` from its images-empty-with-no-text arm, which needs
       // `images === []`, and this caller passes `undefined` or a NON-EMPTY array.
@@ -1398,19 +1423,37 @@ export default function ChatStream() {
       // `turnCompleted` below — but read it as a type branch, not as covered
       // behaviour.
       if (stopReason === null) return;
+      // The dispatch path owns these URLs: Task 1's `forget` refuses to release
+      // a "sent" entry precisely because the sender does. Nothing after this
+      // point can put them back in a row.
+      //
+      // AFTER the `null` guard, which is where the OWNERSHIP rule reads the way
+      // it actually holds: these URLs are released when a send HAPPENED, not
+      // merely when `sendText` came back. `null` means nothing was dispatched, so
+      // on that arm the entry's previews would have been revoked while its row
+      // was requeued by the failure paths — reachable only if a caller ever
+      // passes `images === []`, which this one does not (see the guard above), but
+      // the order must not state the rule backwards.
+      entry.attachments.forEach(releaseAttachment);
       turnCompleted(sessionId, stopReason);
     } catch (err) {
-      // `sendText` ran `beginTurn` before it threw, so the turn bookkeeping has
-      // to be settled here exactly as `send()`'s `catch` does. Settle FIRST,
-      // then requeue: both are synchronous and the hook's edge cannot run until
-      // React re-renders, so `takeHead` sees the entry already marked `failed`
-      // — but the ordering is what makes that reasoning one-line obvious at the
-      // point where the self-inflicted edge is produced.
-      turnCompleted(sessionId, "end_turn");
+      // ONLY settle a turn that was opened. A `sendText` rejection came after
+      // `beginTurn`, so the bookkeeping has to be closed here exactly as
+      // `send()`'s `catch` does; a `FileReader` failure came BEFORE it, and
+      // settling THAT would overwrite the previous turn's stop reason and erase
+      // the footer's "Turn ended: …" line for a prompt that never shipped. See
+      // the `dispatched` flag's comment for why one shared catch needs the flag.
+      // Settle FIRST, then requeue: both are synchronous and the hook's edge
+      // cannot run until React re-renders, so `takeHead` sees the entry already
+      // marked `failed` — but the ordering is what makes that reasoning
+      // one-line obvious at the point where the self-inflicted edge is produced.
+      if (dispatched) turnCompleted(sessionId, "end_turn");
       // Restore the head AND mark it failed. `leaving` clears so its row stops
       // animating out, its object URLs were never revoked so the preview is
       // still valid, and `failed` is what stops the idle edge `turnCompleted`
-      // just caused from re-sending it.
+      // just caused from re-sending it (and on the undispatched arm there was no
+      // edge at all — the entry stays put either way, which is the point: the
+      // prompt must remain VISIBLE whatever failed).
       //
       // WHY A MARKER AND NOT A "FLUSH IN PROGRESS" REF: that edge fires AFTER
       // this function's `finally` has cleared any such ref, so the guard would
