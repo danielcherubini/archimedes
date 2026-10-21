@@ -1622,8 +1622,20 @@ export default function ChatStream() {
     }
   };
 
+  // Staging attachments is allowed DURING A TURN on all three paths — paste,
+  // drop and the `+` picker. The turn (`composerLocked`) is not a capability
+  // check, and the three routes used to disagree about it: paste staged mid-turn
+  // while drop and the picker refused, so a screenshot pasted mid-turn and a
+  // prompt queued with Enter left the image stranded in the composer while the
+  // words travelled to the queue row. `imageCapable` is the gate here and it is
+  // fail-closed — an agent that does not advertise `promptCapabilities.image`
+  // still takes no image on ANY route.
+  // The invariant this keeps: a locked composer STAGES, it does not DISPATCH.
+  // Enter while locked reaches `send()`, which moves the whole staged set (with
+  // its object URLs) into the queue entry alongside the text — so a dropped file
+  // never waits in the composer for the turn to end.
   const handleDrop = (e: React.DragEvent) => {
-    if (composerLocked || !imageCapable) return;
+    if (!imageCapable) return;
     e.preventDefault();
     stageFiles(Array.from(e.dataTransfer.files));
   };
@@ -1635,8 +1647,14 @@ export default function ChatStream() {
   // rebuilt into `File`s (the MIME inferred from the extension), and
   // staged through the SAME `stageFiles` path as a paste / drop (the
   // capability gate + the attachment caps apply identically).
+  //
+  // NO `composerLocked` term, on purpose: the picker stages, it does not
+  // dispatch — see `handleDrop`'s comment for the invariant (staging is allowed
+  // during a turn on all three paths; a locked Enter moves the staged set into
+  // the queue row). `composerEnabled` DOES stay: a session that cannot be sent
+  // to must not accumulate images.
   const handleAttachClick = async () => {
-    if (!composerEnabled || composerLocked || !imageCapable) return;
+    if (!composerEnabled || !imageCapable) return;
     let raw: string | string[] | null;
     try {
       raw = await openFileDialog({

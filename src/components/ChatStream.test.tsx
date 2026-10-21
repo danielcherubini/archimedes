@@ -1580,12 +1580,14 @@ describe("ChatStream", () => {
     expect(button.hasAttribute("disabled")).toBe(true);
   });
 
-  it("the `+` button is disabled while a turn is in flight (the composer is locked)", () => {
+  it("the `+` button STAYS enabled while a turn is in flight (staging is allowed; only Send locks)", () => {
     seedLiveSessionWithImages();
     useSessions.setState({ inTurn: { s1: true } });
     render(<ChatStream />);
     const button = screen.getByRole("button", { name: "Attach files" });
-    expect(button.hasAttribute("disabled")).toBe(true);
+    // Mid-turn staging is allowed — the turn is not a capability check. The
+    // `+` shares the paste/drop rule; only Send (which DISPATCHES) locks.
+    expect(button.hasAttribute("disabled")).toBe(false);
   });
 
   it("clicking `+` opens the file picker and stages the picked image", async () => {
@@ -1854,16 +1856,17 @@ describe("ChatStream", () => {
     expect(screen.getByAltText("d.png")).toBeTruthy();
   });
 
-  it("drop is ignored while locked", () => {
+  it("drop STAGES while locked", () => {
     seedLiveSessionWithImages();
-    // `inTurn` set BEFORE `render` (the store is global) → the textarea is
-    // `disabled` on first render and the drop is swallowed.
+    // `inTurn` set BEFORE `render` (the store is global) → the composer is
+    // locked on first render. Staging is still allowed: the textarea stays
+    // editable on purpose and the drop reaches `stageFiles`.
     useSessions.setState({ inTurn: { s1: true } });
     render(<ChatStream />);
     dropOnComposer([
       new File([new Uint8Array([1])], "d.png", { type: "image/png" }),
     ]);
-    expect(screen.queryByAltText("d.png")).toBeNull();
+    expect(screen.queryByAltText("d.png")).not.toBeNull();
   });
 
   it("window-level drop backstop prevents navigation (drop outside the composer)", () => {
@@ -7543,4 +7546,136 @@ describe("ChatStream — the Flush: the queue drains when the Session goes idle"
     // the composer.
     expect(screen.queryByTestId("queue-rows")).toBeNull();
   });
+});
+
+// ── Staging attachments WHILE a turn is in flight ───────────────────────────
+//
+// Clipboard paste has NEVER checked `composerLocked`: mid-turn it stages. Drag
+// -and-drop and the `+` picker both refused, so the three routes disagreed —
+// and the queue makes the disagreement a defect: a user who pastes a screenshot
+// mid-turn and then queues a text prompt leaves the image stranded in the
+// composer while the words travel. Un-gating the two paths makes every route
+// stage, which is what makes "attachments queue with the text" TRUE.
+//
+// `imageCapable` is NOT part of this change: it stays the fail-closed
+// CAPABILITY gate on all three paths, and `composerEnabled` stays on the picker
+// (a session that cannot be sent to must not accumulate images). Send stays
+// disabled — Enter reaches `send()`, which enqueues.
+describe("ChatStream — staging attachments is allowed while a turn is in flight", () => {
+  /** The composer strip's thumbnail file names (an EMPTY strip is the point). */
+  function composerThumbs(): string[] {
+    const composer = document.querySelector('[data-testid="composer-island"]')!;
+    return Array.from(composer.querySelectorAll("img")).map(
+      (el) => el.getAttribute("alt") ?? "",
+    );
+  }
+
+  function queue(sessionId = "s1") {
+    return useQueuedPrompts.getState().bySession[sessionId] ?? [];
+  }
+
+  const png = (name: string, byte: number): File =>
+    new File([new Uint8Array([byte, byte + 1, byte + 2])], name, {
+      type: "image/png",
+    });
+
+  /** Lock the composer the way a real turn does (`inTurn`, the store's ground
+   * truth) — NOT a disabled textarea, which stays editable on purpose. */
+  async function lockWithTurn(): Promise<void> {
+    await act(async () => {
+      useSessions.getState().beginTurn("s1");
+    });
+  }
+
+  it("a drop STAGES while the composer is locked (the turn is not a capability check)",
+    async () => {
+      seedLiveSessionWithImages();
+      render(<ChatStream />);
+      await lockWithTurn();
+      // The lock really is engaged — the store's ground truth, and the reason
+      // `handleDrop` used to swallow this drop.
+      expect(useSessions.getState().inTurn["s1"]).toBe(true);
+      expect(
+        (screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).hasAttribute(
+          "disabled",
+        ),
+      ).toBe(true);
+      dropOnComposer([png("d.png", 1)]);
+      expect(screen.queryByAltText("d.png")).toBeTruthy();
+    });
+
+  it("the `+` picker STAGES while the composer is locked (dialog opens, thumbnail appears)",
+    async () => {
+      seedLiveSessionWithImages();
+      render(<ChatStream />);
+      await lockWithTurn();
+      vi.mocked(openFilePicker).mockResolvedValueOnce(["/home/u/pics/shot.png"]);
+      vi.mocked(readFileBytes).mockResolvedValueOnce([
+        0x89, 0x50, 0x4e, 0x47, 1, 2, 3,
+      ]);
+      fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+      // The dialog opened — the button is NOT disabled mid-turn.
+      expect(vi.mocked(openFilePicker)).toHaveBeenCalledTimes(1);
+      // And the picked image reached the strip through the SAME `stageFiles`
+      // funnel as the paste / drop.
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "Remove image attachment" }),
+        ).toBeTruthy(),
+      );
+      expect(screen.getByAltText("shot.png")).toBeTruthy();
+      // Send is STILL disabled mid-turn: staging is allowed, dispatching is not.
+      expect(
+        (screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).hasAttribute(
+          "disabled",
+        ),
+      ).toBe(true);
+    });
+
+  it("an image dropped mid-turn queues WITH the next prompt instead of stranding",
+    async () => {
+      seedLiveSessionWithImages();
+      render(<ChatStream />);
+      await lockWithTurn();
+      // Mid-turn staging (the drop, the route this task un-gates).
+      dropOnComposer([png("d.png", 1)]);
+      expect(composerThumbs()).toEqual(["d.png"]);
+      // Plain prose (no marker) — the attachment travels with the entry
+      // regardless of whether the draft names it.
+      fireEvent.change(screen.getByRole("textbox"), {
+        target: { value: "check the screenshot" },
+      });
+      fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+      // Not dispatched — the lock still holds the wire.
+      expect(sendPrompt).not.toHaveBeenCalled();
+      const entry = queue()[0];
+      expect(entry).toBeTruthy();
+      expect(entry!.text).toBe("check the screenshot");
+      // THE POINT OF THE TASK: the image went with the words.
+      expect(entry!.attachments.map((a) => a.filename)).toEqual(["d.png"]);
+      expect(entry!.attachments[0]!.objectUrl).toBe("blob:mock-d.png");
+      // The object URL MOVED (never revoked-and-recreated — revoking here would
+      // kill both the queue row's preview and the later send's file).
+      expect(URL.revokeObjectURL).not.toHaveBeenCalledWith("blob:mock-d.png");
+      // The composer's strip is EMPTY — nothing stranded behind.
+      expect(composerThumbs()).toEqual([]);
+      expect(
+        (screen.getByRole("textbox") as HTMLTextAreaElement).value,
+      ).toBe("");
+    });
+
+  it("`!imageCapable` still blocks the drop and the `+` picker mid-turn (fail-closed)",
+    async () => {
+      seedLiveSession(); // capabilities: {} — NOT image-capable
+      render(<ChatStream />);
+      await lockWithTurn();
+      dropOnComposer([png("d.png", 1)]);
+      expect(screen.queryByAltText("d.png")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+      await flush();
+      // The capability gate — not the turn — is what refuses: the dialog never
+      // opened and nothing was staged.
+      expect(vi.mocked(openFilePicker)).not.toHaveBeenCalled();
+      expect(composerThumbs()).toEqual([]);
+    });
 });
