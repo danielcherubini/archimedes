@@ -1398,6 +1398,50 @@ describe("addSystemLine (a Client-local line in the transcript, ADR 0044)", () =
   });
 });
 
+describe("a **Flush** interleaving a streaming answer (the prompt-queue race)", () => {
+  const chunk = (messageId: string, text: string): AcpSessionUpdate =>
+    ({
+      sessionUpdate: "agent_message_chunk",
+      messageId,
+      content: { type: "text", text },
+    }) as AcpSessionUpdate;
+
+  // `useSessions` is a module singleton and this file has no global reset, so
+  // the block cleans up AFTER itself as well as before: leaving `s1` populated
+  // here leaks into the attachment tests below (each pins `messages.s1` length
+  // as its own first assertion).
+  const isolated = () => useSessions.setState({ messages: {}, inTurn: {} });
+  beforeEach(isolated);
+  afterEach(isolated);
+
+  it("keeps the answer in ONE band when the queue's user row lands mid-stream", () => {
+    // The exact sequence the queue produces: turn 1 is settling, its last chunk
+    // is still in flight, and the settle edge fires a **Flush**, whose
+    // `addUserMessage` lands BEFORE that chunk is applied.
+    useSessions.setState({ messages: { s1: [] } });
+    const s = () => useSessions.getState();
+    s().applySessionUpdate("s1", chunk("m1", "Point me at the real thing — "));
+    s().beginTurn("s1");
+    s().turnCompleted("s1", "end_turn");
+    // the **Flush**'s user row:
+    s().addUserMessage("s1", "dogs!!!!");
+    // …then the tail of the answer that just settled arrives:
+    s().applySessionUpdate("s1", chunk("m1", "a file, or the ADR for the film"));
+
+    const rows = s().messages["s1"];
+    // ONE agent band, not two. The second one wore `bg-composer` and read as a
+    // prompt the user never typed.
+    expect(rows.map((m) => m.kind)).toEqual(["agent-text", "user"]);
+    expect(rows[0]).toMatchObject({ kind: "agent-text", messageId: "m1" });
+    expect((rows[0] as { text: string }).text).toBe(
+      "Point me at the real thing — a file, or the ADR for the film",
+    );
+    // The user's own prompt keeps its place — the transcript never reorders a
+    // prompt backwards to accommodate a late chunk.
+    expect(rows[1]).toMatchObject({ kind: "user", text: "dogs!!!!" });
+  });
+});
+
 describe("user message with image attachments", () => {
   it("(a) stores a user message with image attachments", () => {
     useSessions.getState().addUserMessage("s1", "hi", [{ name: "a.png", mimeType: "image/png", sizeBytes: 3, data: "QUJD" }]);

@@ -79,6 +79,100 @@ describe("src/lib/transcript", () => {
       });
     });
 
+    // THE FLUSH RACE (the bug the prompt queue exposed). A **Flush** inserts its
+    // `user` row through `addUserMessage` — a SEPARATE action, not a harness
+    // frame, and it fires from an effect on the settle edge, a microtask on a
+    // DIFFERENT channel from the streamed updates. So the last chunk of the
+    // answer that just settled can land AFTER that row. A `messageId` identifies
+    // ONE agent message: letting the intervening client-authored row split it
+    // rendered the tail as a second band, and `MessageBubble` gives an agent band
+    // the composer's own token — so a truncated answer read as a prompt the user
+    // never sent. The rows below are built as the STORE leaves them, because
+    // `applySessionUpdate` has no `user` arm to inject them through.
+    it("appends to the message with the same messageId across an intervening user row", () => {
+      const messages: Message[] = [
+        { kind: "agent-text", messageId: "m3", text: "Point me at the real thing — ", at: 100 },
+        { kind: "user", text: "dogs!!!!", at: 150 },
+      ];
+
+      const next = applySessionUpdate(
+        messages,
+        {
+          sessionUpdate: "agent_message_chunk",
+          messageId: "m3",
+          content: { type: "text", text: "a file or the ADR for the empty state)?" },
+        } as AcpSessionUpdate,
+        200,
+      );
+
+      // ONE band, back in its ORIGINAL slot, with the user row still after it —
+      // the message is whole and the queue's row keeps its place in the transcript.
+      expect(next.map((m) => m.kind)).toEqual(["agent-text", "user"]);
+      expect(next[0]).toMatchObject({ kind: "agent-text", messageId: "m3", at: 100 });
+      expect((next[0] as { text: string }).text).toBe(
+        "Point me at the real thing — a file or the ADR for the empty state)?",
+      );
+    });
+
+    // The widening is scoped to `user` rows ONLY. A tool-call / thought / diff is
+    // part of the AGENT's own stream and remains a segmentation signal, and the
+    // synthesized `"default"` id must keep the trailing-only rule — un-ided
+    // chunks would otherwise merge across a whole session into one message.
+    it("still starts a new message across an intervening tool-call", () => {
+      let messages: Message[] = [];
+      messages = applySessionUpdate(
+        messages,
+        {
+          sessionUpdate: "agent_message_chunk",
+          messageId: "m1",
+          content: { type: "text", text: "before" },
+        } as AcpSessionUpdate,
+        100,
+      );
+      messages = applySessionUpdate(
+        messages,
+        {
+          sessionUpdate: "tool_call",
+          toolCallId: "call_1",
+          title: "Reading",
+          status: "in_progress",
+          rawInput: {},
+        } as AcpSessionUpdate,
+        150,
+      );
+      messages = applySessionUpdate(
+        messages,
+        {
+          sessionUpdate: "agent_message_chunk",
+          messageId: "m1",
+          content: { type: "text", text: "after" },
+        } as AcpSessionUpdate,
+        200,
+      );
+
+      expect(messages.map((m) => m.kind)).toEqual(["agent-text", "tool-call", "agent-text"]);
+    });
+
+    it("keeps the trailing-only rule for the synthesized `default` messageId", () => {
+      const messages: Message[] = [
+        { kind: "agent-text", messageId: "default", text: "first", at: 100 },
+        { kind: "user", text: "a prompt", at: 150 },
+      ];
+
+      const next = applySessionUpdate(
+        messages,
+        {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "second" },
+        } as AcpSessionUpdate,
+        200,
+      );
+
+      // Un-ided chunks carry no identity to merge on — widening them across a
+      // `user` row would fuse a whole session into one message. Two stay two.
+      expect(next.map((m) => m.kind)).toEqual(["agent-text", "user", "agent-text"]);
+    });
+
     it("creates a new message when messageId changes", () => {
       let messages: Message[] = [];
       messages = applySessionUpdate(
