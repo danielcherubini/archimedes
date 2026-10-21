@@ -76,7 +76,7 @@ describe("QueueRows", () => {
     const { container } = render(<QueueRows sessionId={SESSION} />);
     // A row's exit is the `leaving` field on `animate`, and `forget` runs from
     // `onAnimationComplete` — so a row has to STAY MOUNTED to finish leaving.
-    // Gating on `livePrompts` here would unmount exactly these rows, their
+    // Gating on a live-only count here would unmount exactly these rows, their
     // animation would never run, `forget` would never be called, and the
     // entries would sit `leaving` in `bySession` until `clearSession`.
     expect(rowTexts()).toHaveLength(2);
@@ -139,9 +139,9 @@ describe("QueueRows", () => {
     seed([prompt("head"), prompt("going", { leaving: "sent" })]);
     render(<QueueRows sessionId={SESSION} />);
     const texts = rowTexts();
-    // The leaving entry is rendered from `raw`, NOT from `livePrompts` — it is
-    // the row currently animating out, and dropping it to "hide" it is exactly
-    // what the `leaving` field exists to avoid.
+    // The leaving entry is rendered from the raw list, NOT from a live-only
+    // view — it is the row currently animating out, and dropping it to "hide"
+    // it is exactly what the `leaving` field exists to avoid.
     expect(texts).toHaveLength(2);
     expect(texts[1]).toContain("prompt going");
     expect(texts[0]).toContain("prompt head");

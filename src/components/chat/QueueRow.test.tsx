@@ -295,7 +295,7 @@ describe("QueueRow exit paths", () => {
     fireEvent.click(screen.getByRole("button", { name: "Delete queued prompt" }));
     // NO await: with the animation suppressed there is no completion to wait
     // for, so anything but a same-tick `forget` strands this entry `leaving`
-    // forever — hidden from `livePrompts`, skipped by `takeHead`, and the only
+    // forever — invisible to the reader, skipped by `takeHead`, and the only
     // remover never called.
     expect(useQueuedPrompts.getState().bySession[SESSION]).toBeUndefined();
   });

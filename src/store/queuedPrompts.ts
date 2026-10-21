@@ -46,17 +46,16 @@ interface QueuedPromptsState {
 }
 
 /**
- * The ONLY read path for the UI (row count, "render anything?", row list).
- * A `failed` entry is LIVE — the user must see it and be able to fix it.
+ * NO `livePrompts`-style filter is exported, deliberately. The live-versus-
+ * `leaving` rule is decided ONCE, inside `takeHead`, together with the `failed`
+ * and `editing` skips — so there is exactly one place that answers "may this
+ * entry send?", and no second filter to drift from it.
  *
- * There is deliberately no `flushablePrompts` sibling: the failed-and-live
- * rule is applied once, inside `takeHead`, and a second exported filter would
- * be a second place for it to drift from the one that decides what sends.
+ * The stack deliberately does NOT want a live-only view either: a row must stay
+ * MOUNTED to play its exit, so `QueueRows` renders the raw list and gates on its
+ * TOTAL length. An earlier `livePrompts` helper invited the stack to gate on it,
+ * which strands every animating row — see the comment at that gate.
  */
-export function livePrompts(list: QueuedPrompt[] | undefined): QueuedPrompt[] {
-  return (list ?? []).filter((p) => !p.leaving);
-}
-
 export const useQueuedPrompts = create<QueuedPromptsState>((set, get) => ({
   bySession: {},
 

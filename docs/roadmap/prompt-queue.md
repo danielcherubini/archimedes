@@ -85,14 +85,16 @@ interface QueuedPromptsState {
   forget: (sessionId: string, id: string) => void;
   clearSession: (sessionId: string) => void;
 }
-
-/** The ONLY read path for the UI (row count, "render anything?", row list).
- * A `failed` entry is LIVE — the user must see it and be able to fix it. */
-export function livePrompts(list: QueuedPrompt[] | undefined): QueuedPrompt[] {
-  return (list ?? []).filter((p) => !p.leaving);
-}
 ```
-There is deliberately **no** `flushablePrompts` helper: the failed-and-live rule is applied once, inside `takeHead`, and a second exported filter would be a second place the rule can drift from the one that decides what actually sends.
+
+There is deliberately **no** exported live-only filter (`livePrompts` or
+`flushablePrompts`): the failed-and-live rule is applied once, inside `takeHead`,
+and a second exported filter would be a second place the rule can drift from the
+one that decides what actually sends. The UI reads `bySession[sessionId]`
+directly — it must render the RAW list, because a `leaving` row has to stay
+mounted to play its exit (see Task 4's gate). *(A `livePrompts` helper did exist
+mid-plan; the corrected gate left it with no production caller, so it was
+removed rather than kept as a second home for the rule.)*
 
 Rules, each answering a hazard that already exists in this codebase:
 
@@ -108,7 +110,7 @@ Rules, each answering a hazard that already exists in this codebase:
 Do NOT add: reordering, an `updateAll`, a persistence layer, a `Record` keyed by prompt id (the array order IS the send order), or any `useSessions` import (the store must not know what a turn is).
 
 **Steps:**
-- [ ] Write `src/store/queuedPrompts.test.ts` covering: `enqueue` appends and preserves order; `takeHead` returns the first LIVE entry and marks it `leaving: "sent"`; a second `takeHead` skips that entry and returns the next; `takeHead` on an empty or all-leaving list returns `undefined`; `requeueHead` puts an entry back at the FRONT with `leaving` cleared and does NOT release its attachments; `takeHead` skips a `failed` entry and returns `undefined` when every live entry is failed, while `livePrompts` still lists it; `takeHead` skips an entry whose `state` is `"editing"` and returns the one behind it, and returns `undefined` when the only live entry is being edited; `updateText` on a failed entry clears `failed`; `livePrompts` excludes leaving entries; `markLeaving(id,"deleted")` hides an entry from `livePrompts` and `takeHead`; `forget` removes it and deletes the key when the list empties; `forget` on a `deleted` entry calls `URL.revokeObjectURL` for each attachment and on a `sent` entry does not; `clearSession` releases and deletes the key; `updateText`/`setEditing`/`removeAttachment` mutate only their own field; two sessions' queues never interfere.
+- [ ] Write `src/store/queuedPrompts.test.ts` covering: `enqueue` appends and preserves order; `takeHead` returns the first LIVE entry and marks it `leaving: "sent"`; a second `takeHead` skips that entry and returns the next; `takeHead` on an empty or all-leaving list returns `undefined`; `requeueHead` puts an entry back at the FRONT with `leaving` cleared and does NOT release its attachments; `takeHead` skips a `failed` entry and returns `undefined` when every live entry is failed, while the entry stays live (not `leaving`) in `bySession`; `takeHead` skips an entry whose `state` is `"editing"` and returns the one behind it, and returns `undefined` when the only live entry is being edited; `updateText` on a failed entry clears `failed`; a `leaving` entry stays in `bySession` (rendered for its exit) while `takeHead` skips it; `markLeaving(id,"deleted")` keeps the entry in the list but hides it from `takeHead`; `forget` removes it and deletes the key when the list empties; `forget` on a `deleted` entry calls `URL.revokeObjectURL` for each attachment and on a `sent` entry does not; `clearSession` releases and deletes the key; `updateText`/`setEditing`/`removeAttachment` mutate only their own field; two sessions' queues never interfere.
   - Follow the suite's existing URL idiom (`src/lib/chatAttachments.test.ts:5-8`): in a `beforeAll`, `URL.createObjectURL = vi.fn((file: File) => \`blob:mock-${file.name}\`)` and `URL.revokeObjectURL = vi.fn()`, then assert on `(URL.revokeObjectURL as Mock).calls`. Do NOT rely on `vi.spyOn(URL, ...)` — both assignment and the spy work under this jsdom version, but the assignment form is what every existing attachment test uses, and a fixture that diverges from the suite's idiom reads as intentional. Build attachments as literal `ChatComposerAttachment` objects (`{ id, file: new File([...], "a.png", { type: "image/png" }), filename, mimeType, sizeBytes, objectUrl: "blob:mock-a.png" }`) rather than through `createChatComposerAttachment`, so a store test cannot fail because of the attachment factory.
 - [ ] Run `pnpm test src/store/queuedPrompts.test.ts`
   - Did it fail to resolve `./queuedPrompts`? If it passed, the file already exists — stop and investigate.
@@ -120,7 +122,7 @@ Do NOT add: reordering, an `updateAll`, a persistence layer, a `Record` keyed by
 
 **Acceptance criteria:**
 - [ ] `pnpm test src/store/queuedPrompts.test.ts` is green.
-- [ ] `livePrompts` is exported and is the only way the UI reads the list; the failed-entry rule lives ONLY in `takeHead`.
+- [ ] No exported live-only filter exists; `takeHead` is the only place the failed/live/editing rule is decided, and the UI reads `bySession[sessionId]` directly.
 - [ ] No file other than the two above is created or modified.
 
 ---
@@ -323,7 +325,7 @@ export default function QueueRows({ sessionId }: { sessionId: string }) { /* ...
 ```
 Infer the return type — no component in `src/components/` annotates one (`TranscriptFooter.tsx:30` is the house shape), and `JSX.Element` needs a namespace import here for nothing.
 - Read the list with `const raw = useQueuedPrompts((s) => s.bySession[sessionId]);` — the selector returns the array or `undefined`, never a fresh `[]` (a selector whose result is a new reference every call makes Zustand re-render forever; the rule is stated at `ChatStream.tsx:80-81` and in `useSessionStatus.ts:82`).
-- Render `null` when `(raw?.length ?? 0) === 0` — the gate is the TOTAL entry count, not `livePrompts(raw)`. A row's exit is the `leaving` field on `animate` plus `forget()` in `onAnimationComplete`, so a row must stay MOUNTED to finish leaving; gating on the live count flips the stack to `null` on the same render `markLeaving`/`takeHead` lands for the last live row, cancelling its animation and never calling `forget` (a stranded `leaving` entry then repaints as an invisible band when a later `enqueue` re-mounts the stack). `livePrompts` stays the UI read for COUNTING queued prompts — it is simply not the unmount gate; the stack collapses on its own because `forget` deletes the `bySession` key when the last entry is removed.
+- Render `null` when `(raw?.length ?? 0) === 0` — the gate is the TOTAL entry count, not `livePrompts(raw)`. A row's exit is the `leaving` field on `animate` plus `forget()` in `onAnimationComplete`, so a row must stay MOUNTED to finish leaving; gating on the live count flips the stack to `null` on the same render `markLeaving`/`takeHead` lands for the last live row, cancelling its animation and never calling `forget` (a stranded `leaving` entry then repaints as an invisible band when a later `enqueue` re-mounts the stack). no exported live-only filter exists — the UI reads `bySession[sessionId]` directly, and it must render the raw list for exactly this reason; the stack collapses on its own because `forget` deletes the `bySession` key when the last entry is removed.
 - Otherwise `<AnimatePresence initial={false} mode="popLayout">` around one `QueueRow` per entry of `raw` (ALL entries, including leaving ones — they are the ones animating out), keyed by `prompt.id`, in array order: head first (top, nearest the transcript), newest last (bottom, nearest the composer).
 
 `QueueRow.tsx`

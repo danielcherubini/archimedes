@@ -1,6 +1,6 @@
 import { beforeEach, beforeAll, describe, expect, test, vi, type Mock } from "vitest";
 import type { ChatComposerAttachment } from "../lib/chatAttachments";
-import { livePrompts, useQueuedPrompts, type QueuedPrompt } from "./queuedPrompts";
+import { useQueuedPrompts, type QueuedPrompt } from "./queuedPrompts";
 
 const S1 = "s1";
 const S2 = "s2";
@@ -94,8 +94,12 @@ describe("takeHead", () => {
   test("skips a failed entry and returns undefined when every live entry failed", () => {
     useQueuedPrompts.getState().enqueue(S1, prompt("p1", { failed: true }));
     expect(useQueuedPrompts.getState().takeHead(S1)).toBeUndefined();
-    // ... yet the failed entry stays LIVE: the user must see it and fix it.
-    expect(livePrompts(list()).map((p) => p.id)).toEqual(["p1"]);
+    // ... yet the failed entry stays LIVE — not `leaving` — so the row keeps
+    // rendering it and the user can fix it. `failed` hides an entry from
+    // `takeHead` ONLY; it is `leaving` that removes it from view.
+    expect(list()?.map((p) => p.id)).toEqual(["p1"]);
+    expect(list()?.[0]?.leaving).toBeUndefined();
+    expect(list()?.[0]?.failed).toBe(true);
   });
 
   test("a failed entry ahead of a healthy one yields the turn to the one behind it", () => {
@@ -137,28 +141,15 @@ describe("requeueHead", () => {
   });
 });
 
-describe("livePrompts", () => {
-  test("excludes leaving entries and keeps live ones (including failed)", () => {
-    const enqueue = useQueuedPrompts.getState().enqueue;
-    enqueue(S1, prompt("p1"));
-    enqueue(S1, prompt("p2", { leaving: "sent" }));
-    enqueue(S1, prompt("p3", { leaving: "deleted" }));
-    enqueue(S1, prompt("p4", { failed: true }));
-    expect(livePrompts(list()).map((p) => p.id)).toEqual(["p1", "p4"]);
-  });
-
-  test("tolerates an undefined list (the key is deleted once the queue empties)", () => {
-    expect(livePrompts(undefined)).toEqual([]);
-  });
-});
-
 describe("markLeaving", () => {
-  test("hides an entry from livePrompts and from takeHead while keeping it mounted", () => {
+  test("hides an entry from takeHead while keeping it in the list, mounted for its exit", () => {
     useQueuedPrompts.getState().enqueue(S1, prompt("p1"));
     useQueuedPrompts.getState().enqueue(S1, prompt("p2"));
     useQueuedPrompts.getState().markLeaving(S1, "p1", "deleted");
-    expect(livePrompts(list()).map((p) => p.id)).toEqual(["p2"]);
+    // Still in the list — `QueueRows` renders the raw array so the row can play
+    // its exit and call `forget`. `takeHead` is what skips it.
     expect(list()?.map((p) => p.id)).toEqual(["p1", "p2"]);
+    expect(list()?.[0]?.leaving).toBe("deleted");
     expect(useQueuedPrompts.getState().takeHead(S1)?.id).toBe("p2");
   });
 

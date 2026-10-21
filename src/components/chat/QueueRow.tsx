@@ -63,7 +63,7 @@ export default function QueueRow({
 
   // Reduced motion has no exit animation to wait for, so `onAnimationComplete`
   // never arrives — without this effect the entry would sit `leaving` forever
-  // (`livePrompts` hides it, `takeHead` skips it, and `forget` is the only
+  // (invisible to the reader, skipped by `takeHead`, and `forget` is the only
   // remover). Same tick as the render, so the stack never strands a row.
   useEffect(() => {
     if (reducedMotion && prompt.leaving) forget(sessionId, prompt.id);
