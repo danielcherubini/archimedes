@@ -40,15 +40,76 @@ export function extractDiffs(content: ToolCallContent[] | undefined): DiffRef[] 
 }
 
 /**
+ * Fold a text chunk into the transcript: append it to the agent-text /
+ * agent-thought row that carries `messageId`, or start a new row.
+ *
+ * THE FLUSH RACE this replaces (the defect the **Prompt queue** exposed): the
+ * old rule appended ONLY when the LAST row was that same message. A **Flush**
+ * inserts its `user` row through `addUserMessage` — a separate action, fired
+ * from an effect on the settle edge, i.e. a microtask on a DIFFERENT channel
+ * from the streamed updates — so the final chunk of the answer that just
+ * settled can arrive after that row. The last row was then the `user` row, the
+ * append failed, and the tail opened a SECOND row carrying the same `messageId`.
+ * `MessageBubble` deliberately gives an agent band the composer's own token
+ * (`bg-composer`, "the composer's text coming back"), so a truncated answer was
+ * pixel-identical to a prompt the user never typed.
+ *
+ * A `messageId` names ONE agent message, so IDENTITY — not adjacency — decides
+ * where a chunk belongs. The scan walks back over CLIENT-authored rows only
+ * (`user`): a tool-call, diff or thought is part of the agent's own stream and
+ * remains a segmentation boundary, exactly as `applySessionUpdate`'s contract
+ * below has always said. The synthesized `"default"` id is excluded from the
+ * widening — it is the ABSENCE of an identity, and merging it backwards would
+ * fuse a whole session into one message, so un-ided chunks keep the trailing-only
+ * rule.
+ *
+ * An append that lands anywhere other than the end RE-BACKS the message into its
+ * original slot and leaves the `user` rows after it in the order the user sent
+ * them; the transcript never reorders a prompt to suit a late chunk.
+ */
+function appendToMessage(
+  messages: Message[],
+  messageId: string,
+  kind: "agent-text" | "agent-thought",
+  text: string,
+  at: number,
+): Message[] {
+  let idx = -1;
+  let hit: Extract<Message, { kind: typeof kind }> | undefined;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const row = messages[i];
+    if (row.kind === kind) {
+      if (row.messageId === messageId) {
+        idx = i;
+        hit = row;
+      }
+      break;
+    }
+    if (messageId === "default" || row.kind !== "user") break;
+  }
+
+  if (idx === -1 || !hit) return [...messages, { kind, messageId, text, at }];
+
+  const merged: Message = { ...hit, text: hit.text + text };
+  if (idx === messages.length - 1) {
+    // The ordinary streaming case: the row IS the tail, so this is byte-for-byte
+    // the old `slice(0, -1)` spread — kept as its own branch because it is the
+    // hot path and the shape every existing test pins.
+    return [...messages.slice(0, -1), merged];
+  }
+  return [...messages.slice(0, idx), merged, ...messages.slice(idx + 1)];
+}
+
+/**
  * Pure reducer for `session-update` events: returns a NEW message array.
  *
- * - `agent_message_chunk`: appended to the trailing agent-text message with
- *   the same `messageId`; a new `messageId` (or an intervening non-text
- *   message) starts a new message — real agents emit several messages per
- *   turn, so we never just "append to the last agent-text".
- * - `agent_thought_chunk`: appended to the trailing agent-thought message with
- *   the same `messageId`; a new `messageId` (or an intervening non-thought
- *   message) starts a new message — same segmentation rules as agent-text.
+ * - `agent_message_chunk`: appended to the agent-text message with the same
+ *   `messageId`, scanning back over intervening `user` rows (a **Flush** can
+ *   interleave one — see `appendToMessage`); a different `messageId`, or an
+ *   intervening message from the AGENT's own stream, starts a new message —
+ *   real agents emit several messages per turn, so we never just "append to the
+ *   last agent-text". Identity picks the row, not adjacency.
+ * - `agent_thought_chunk`: same rule over agent-thought messages.
  * - `tool_call` / `tool_call_update`: create/update the tool-call message;
  *   diffs inside the content are extracted into standalone diff messages
  *   (there is no dedicated file-edit update type).
@@ -71,11 +132,7 @@ export function applySessionUpdate(
       const text = content.text;
       if (text === "") return messages;
       const messageId = update.messageId ?? "default";
-      const last = messages[messages.length - 1];
-      if (last && last.kind === "agent-text" && last.messageId === messageId) {
-        return [...messages.slice(0, -1), { ...last, text: last.text + text }];
-      }
-      return [...messages, { kind: "agent-text", messageId, text, at }];
+      return appendToMessage(messages, messageId, "agent-text", text, at);
     }
 
     case "agent_thought_chunk": {
@@ -86,11 +143,7 @@ export function applySessionUpdate(
       const text = content.text;
       if (text === "") return messages;
       const messageId = update.messageId ?? "default";
-      const last = messages[messages.length - 1];
-      if (last && last.kind === "agent-thought" && last.messageId === messageId) {
-        return [...messages.slice(0, -1), { ...last, text: last.text + text }];
-      }
-      return [...messages, { kind: "agent-thought", messageId, text, at }];
+      return appendToMessage(messages, messageId, "agent-thought", text, at);
     }
 
     case "message_retracted": {

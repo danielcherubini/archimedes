@@ -293,14 +293,17 @@ export default function ComposerRow({
         />
         <div className="ml-auto flex shrink-0 flex-wrap items-center gap-2">
           {/* The `+` attach button (the native file picker — the same
-              staging path as a paste / drop; disabled while the composer
-              is locked or the agent doesn't advertise image support,
-              fail-closed). */}
+              staging path as a paste / drop; disabled while the agent doesn't
+              advertise image support, fail-closed, and while the composer is
+              disabled for the session. NOT disabled by the turn lock: staging
+              is allowed mid-turn on all three paths — paste, drop and here —
+              and a locked Enter moves the staged set into the queue row. Only
+              Send locks, because Send DISPATCHES. */}
           <Button
             variant="ghost"
             size="icon-sm"
             aria-label="Attach files"
-            disabled={!composerEnabled || composerLocked || !imageCapable}
+            disabled={!composerEnabled || !imageCapable}
             title={
               imageCapable
                 ? "Attach an image (file picker)"

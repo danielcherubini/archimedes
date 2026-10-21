@@ -29,6 +29,7 @@ import {
 } from "../lib/transcript/reducer";
 import { useSubagents } from "./subagents";
 import { useInteractive, type TodoItem } from "./interactive";
+import { useQueuedPrompts } from "./queuedPrompts";
 
 export const INITIAL_HISTORY_PAGE = 500;
 export const OLDER_HISTORY_PAGE = 200;
@@ -1132,6 +1133,11 @@ export const useSessions = create<SessionsState>((set, get) => ({
   deleteSession: async (sessionId) => {
     await deleteSessionCommand(sessionId);
     useInteractive.getState().applyTodoClear(sessionId);
+    // A DELETE has no `onSessionClosed` to fan out through, so the queue is
+    // dropped here: the Session is unreachable, its rows never render, `forget`
+    // never runs, and without this its queued attachments' object URLs are held
+    // by nothing but released by nothing for the process lifetime (ADR 0069).
+    useQueuedPrompts.getState().clearSession(sessionId);
     set((state) => {
       const { [sessionId]: _gone, ...rest } = state.messages;
       const { [sessionId]: _goneHist, ...restHist } = state.history;
