@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import QueueRows from "./QueueRows";
 import { useQueuedPrompts, type QueuedPrompt } from "../../store/queuedPrompts";
 
@@ -71,12 +71,58 @@ describe("QueueRows", () => {
     expect(container.textContent).toBe("");
   });
 
-  it("renders nothing when every entry is mid-exit, so the stack collapses", () => {
+  it("renders a list whose every entry is mid-exit — those rows are the ones animating out", () => {
     seed([prompt("p1", { leaving: "sent" }), prompt("p2", { leaving: "deleted" })]);
     const { container } = render(<QueueRows sessionId={SESSION} />);
-    // The `livePrompts` gate — a list holding only leaving rows must not keep a
-    // container alive that can never drain.
+    // A row's exit is the `leaving` field on `animate`, and `forget` runs from
+    // `onAnimationComplete` — so a row has to STAY MOUNTED to finish leaving.
+    // Gating on `livePrompts` here would unmount exactly these rows, their
+    // animation would never run, `forget` would never be called, and the
+    // entries would sit `leaving` in `bySession` until `clearSession`.
+    expect(rowTexts()).toHaveLength(2);
+    expect(container.textContent).toContain("prompt p1");
+    expect(container.textContent).toContain("prompt p2");
+    // No drain awaited here, deliberately: an entry SEEDED already-`leaving`
+    // mounts straight onto its exit target, so motion reports no animation and
+    // therefore no completion (measured). That state is the stranded phantom
+    // this gate exists to prevent, not a production shape — the two cases below
+    // drive a real live→leaving edge, which DOES change `animate` and DOES reach
+    // `forget` and empty the store.
+  });
+
+  it("keeps the LAST live row mounted when it is deleted, then drains to nothing", async () => {
+    seed([prompt("only")]);
+    const { container } = render(<QueueRows sessionId={SESSION} />);
+    fireEvent.click(screen.getByRole("button", { name: "Delete queued prompt" }));
+    // THE DEFECT THIS PINS: `markLeaving` and the unmount gate used to land on
+    // the same render, so the row vanished instead of flying right. It must
+    // still be in the DOM on the tick the delete lands.
+    expect(screen.queryAllByTestId("queue-row")).toHaveLength(1);
+    expect(container.textContent).toContain("prompt only");
+    // And once its exit animation ends, the entry is gone from the store and
+    // the stack collapses — no phantom, no band above the composer.
+    await waitFor(() =>
+      expect(useQueuedPrompts.getState().bySession[SESSION]).toBeUndefined(),
+    );
+    expect(screen.queryAllByTestId("queue-row")).toHaveLength(0);
     expect(container.textContent).toBe("");
+  });
+
+  it("drains a row taken by Flush to the transcript instead of stranding it", async () => {
+    seed([prompt("head"), prompt("tail")]);
+    const { container } = render(<QueueRows sessionId={SESSION} />);
+    // `takeHead` MARKS the entry `leaving: "sent"` (it does not remove it), so
+    // this is the other exit path the gate has to keep mounted.
+    act(() => useQueuedPrompts.getState().takeHead(SESSION));
+    expect(screen.queryAllByTestId("queue-row")).toHaveLength(2);
+    await waitFor(() =>
+      expect(
+        useQueuedPrompts
+          .getState()
+          .bySession[SESSION]?.map((p) => p.id),
+      ).toEqual(["tail"]),
+    );
+    expect(container.textContent).toContain("prompt tail");
   });
 
   it("renders one row per entry, head first (nearest the transcript)", () => {

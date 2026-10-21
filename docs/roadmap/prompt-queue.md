@@ -323,7 +323,7 @@ export default function QueueRows({ sessionId }: { sessionId: string }) { /* ...
 ```
 Infer the return type — no component in `src/components/` annotates one (`TranscriptFooter.tsx:30` is the house shape), and `JSX.Element` needs a namespace import here for nothing.
 - Read the list with `const raw = useQueuedPrompts((s) => s.bySession[sessionId]);` — the selector returns the array or `undefined`, never a fresh `[]` (a selector whose result is a new reference every call makes Zustand re-render forever; the rule is stated at `ChatStream.tsx:80-81` and in `useSessionStatus.ts:82`).
-- Render `null` when `livePrompts(raw).length === 0`, so a list holding only mid-exit rows collapses without stranding the stack.
+- Render `null` when `(raw?.length ?? 0) === 0` — the gate is the TOTAL entry count, not `livePrompts(raw)`. A row's exit is the `leaving` field on `animate` plus `forget()` in `onAnimationComplete`, so a row must stay MOUNTED to finish leaving; gating on the live count flips the stack to `null` on the same render `markLeaving`/`takeHead` lands for the last live row, cancelling its animation and never calling `forget` (a stranded `leaving` entry then repaints as an invisible band when a later `enqueue` re-mounts the stack). `livePrompts` stays the UI read for COUNTING queued prompts — it is simply not the unmount gate; the stack collapses on its own because `forget` deletes the `bySession` key when the last entry is removed.
 - Otherwise `<AnimatePresence initial={false} mode="popLayout">` around one `QueueRow` per entry of `raw` (ALL entries, including leaving ones — they are the ones animating out), keyed by `prompt.id`, in array order: head first (top, nearest the transcript), newest last (bottom, nearest the composer).
 
 `QueueRow.tsx`
