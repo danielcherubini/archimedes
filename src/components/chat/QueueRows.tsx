@@ -43,11 +43,29 @@ export default function QueueRows({ sessionId }: { sessionId: string }) {
   // read for COUNTING queued prompts — it is simply not the unmount gate.)
   if ((raw?.length ?? 0) === 0) return null;
 
+  // THE WRAPPER IS THE STACK's element (`data-testid="queue-rows"` — the handle
+  // the DOM-order test uses to prove the stack sits between the transcript
+  // island and the composer). It is a `flex-col` so the rows stay the vertical
+  // stack their `m-1` + `shrink-0` were written for: in a plain BLOCK container
+  // adjacent vertical margins collapse, which would thin the gap between rows
+  // and let their outer margins punch through the wrapper.
+  //
+  // `relative` is load-bearing for the exit, not decoration: `mode="popLayout"`
+  // measures a leaving row against its `offsetParent` and then re-places it with
+  // `position: absolute` + `top`/`left`. Those coordinates are resolved against
+  // the row's nearest POSITIONED ancestor, so the two frames have to be the same
+  // element — without `relative` here the popped row is measured against one
+  // box and re-positioned against another, and the exit visibly jumps.
   return (
-    <AnimatePresence initial={false} mode="popLayout">
-      {(raw ?? []).map((prompt) => (
-        <QueueRow key={prompt.id} sessionId={sessionId} prompt={prompt} />
-      ))}
-    </AnimatePresence>
+    <div
+      data-testid="queue-rows"
+      className="relative flex shrink-0 flex-col"
+    >
+      <AnimatePresence initial={false} mode="popLayout">
+        {(raw ?? []).map((prompt) => (
+          <QueueRow key={prompt.id} sessionId={sessionId} prompt={prompt} />
+        ))}
+      </AnimatePresence>
+    </div>
   );
 }

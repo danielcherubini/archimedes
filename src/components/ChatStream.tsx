@@ -46,6 +46,7 @@ import { usePermissions } from "../store/permissions";
 import { useInteractive } from "../store/interactive";
 import { useSettings } from "../store/settings";
 import { useHasPendingRequest } from "../hooks/useHasPendingRequest";
+import { useSessionIdleEdge } from "../hooks/useSessionIdleEdge";
 import { useActiveSpaceCwd } from "../hooks/useActiveSpaceCwd";
 import { useChildGates } from "../hooks/useChildGates";
 import { useSpinQuip } from "../hooks/useSpinQuip";
@@ -55,6 +56,7 @@ import SessionStalledBanner from "./SessionStalledBanner";
 import MessageList from "./chat/MessageList";
 import ComposerRow from "./chat/ComposerRow";
 import ComposerModals from "./chat/ComposerModals";
+import QueueRows from "./chat/QueueRows";
 import type { MentionRow } from "./chat/ComposerMentions";
 
 /**
@@ -862,6 +864,14 @@ export default function ChatStream() {
   const loadingMore = history?.loadingMore ?? false;
   const generation = history?.generation ?? 0;
 
+  // ── The **Flush** trigger (part 1 of two — part 2 is the ref assignment below
+  // `flushHead`) ──────────────────────────────────────────────────────────────
+  // BEFORE the `!activeSessionId` early return: a hook after it is a
+  // conditional hook call. `composerLocked` is in scope above, and the Flush's
+  // real body lives below next to `sendText`, reached through this ref.
+  const flushRef = useRef<() => void>(() => {});
+  useSessionIdleEdge({ busy: composerLocked, onIdle: () => flushRef.current() });
+
   if (!activeSessionId) {
     return (
       <main className="m-1 flex min-w-0 min-h-0 flex-1 items-center justify-center rounded-xl bg-chat">
@@ -1328,6 +1338,107 @@ export default function ChatStream() {
     }
   };
 
+  // ── The **Flush** (ADR 0069) ───────────────────────────────────────────────
+  // Sends the queue's head as an ordinary prompt. Declared AFTER `sendText` so
+  // it closes over it — and a plain `const`, NOT a hook or a `useCallback`: this
+  // is a fresh closure every render, which is exactly what makes the values it
+  // reads (`imageCapable`, the store actions, `sendText`) current. It is reached
+  // only through `flushRef` above, which the idle edge calls.
+  const flushHead = async () => {
+    // VISIBLE **Session** only, and that is a correctness rule rather than a
+    // scope choice: `sendText` expands **Mentions** through catalogs keyed on
+    // the ACTIVE **Session**'s Space (`spacePath`), so a background **Session**'s
+    // prompt would expand against the WRONG **Space**.
+    const sessionId = activeSessionIdRef.current;
+    // `sendingSessionsRef` is the same double-send slot `send()` uses: a manual
+    // send already in flight owns this session, and a **Flush** must not race it
+    // into a second `send_prompt` (the harness's `pending_turn` claim is atomic
+    // and refuses the loser).
+    if (!sessionId || sendingSessionsRef.current.has(sessionId)) return;
+    const entry = useQueuedPrompts.getState().takeHead(sessionId);
+    // `undefined` covers an empty queue AND a queue whose every live entry is
+    // `failed` or under edit — `takeHead` skips those rather than blocking the
+    // entries behind them, so an all-skipped list simply has nothing to send.
+    if (!entry) return;
+    sendingSessionsRef.current.add(sessionId);
+    try {
+      // Fail-closed on capability exactly as `send()` does. `imageCapable` is
+      // the render-derived value and `flushHead` is a fresh closure every
+      // render, so it is current — `send()`'s post-resume re-derivation exists
+      // only because a resume can happen MID-send, and the Flush never resumes
+      // anything (a **Queue** entry only ever exists on a session you could
+      // already send to).
+      const images: SendTextImages | undefined =
+        entry.attachments.length > 0 && imageCapable
+          ? await Promise.all(
+              entry.attachments.map(async (att) => ({
+                id: att.id,
+                name: att.filename,
+                mimeType: att.mimeType,
+                sizeBytes: att.sizeBytes,
+                data: await readAttachmentAsBase64(att),
+              })),
+            )
+          : undefined;
+      // The Flush has NO composer, so `onCommitted` — the hook where `send()`
+      // wipes the draft and moves the held thumbnails out of the strip — is an
+      // empty function: the entry's text and attachments already left the
+      // composer when it was queued. It stays a REQUIRED argument (making it
+      // optional would add a branch to `sendText` for a caller that has nothing
+      // to commit).
+      const stopReason = await sendText(sessionId, entry.text, images, () => {});
+      // The dispatch path owns these URLs: Task 1's `forget` refuses to release
+      // a "sent" entry precisely because the sender does. Nothing after this
+      // point can put them back in a row.
+      entry.attachments.forEach(releaseAttachment);
+      // UNREACHABLE from this caller and deliberately UNTESTED: `sendText` only
+      // returns `null` from its images-empty-with-no-text arm, which needs
+      // `images === []`, and this caller passes `undefined` or a NON-EMPTY array.
+      // Keep it — it is what makes the `StopReason | null` union exhaustive for
+      // `turnCompleted` below — but read it as a type branch, not as covered
+      // behaviour.
+      if (stopReason === null) return;
+      turnCompleted(sessionId, stopReason);
+    } catch (err) {
+      // `sendText` ran `beginTurn` before it threw, so the turn bookkeeping has
+      // to be settled here exactly as `send()`'s `catch` does. Settle FIRST,
+      // then requeue: both are synchronous and the hook's edge cannot run until
+      // React re-renders, so `takeHead` sees the entry already marked `failed`
+      // — but the ordering is what makes that reasoning one-line obvious at the
+      // point where the self-inflicted edge is produced.
+      turnCompleted(sessionId, "end_turn");
+      // Restore the head AND mark it failed. `leaving` clears so its row stops
+      // animating out, its object URLs were never revoked so the preview is
+      // still valid, and `failed` is what stops the idle edge `turnCompleted`
+      // just caused from re-sending it.
+      //
+      // WHY A MARKER AND NOT A "FLUSH IN PROGRESS" REF: that edge fires AFTER
+      // this function's `finally` has cleared any such ref, so the guard would
+      // already have lapsed by the time the hook read it — the retry loop would
+      // survive the fix. `failed` is durable state instead of a timing window,
+      // and it buys the right user behaviour for free: the prompt stays visibly
+      // queued and becomes sendable again only when the user saves an edit of it
+      // (`updateText` clears the flag). One consequence worth knowing: the edge
+      // a failure causes moves on to the NEXT non-failed entry, so one broken
+      // prompt never stalls the ones queued behind it.
+      useQueuedPrompts.getState().requeueHead(sessionId, { ...entry, leaving: undefined, failed: true });
+      if (activeSessionIdRef.current === sessionId) setError(describeIpcError(err));
+    } finally {
+      sendingSessionsRef.current.delete(sessionId);
+    }
+  };
+
+  // Part 2 of the trigger: a plain assignment (NOT a hook — the hook already ran
+  // above the early return), the same render-phase ref mirror this file uses for
+  // `attachmentsRef`, `activeSessionIdRef` and `draftRef`. A discarded concurrent
+  // render can leave ITS closure in the ref and the next render re-assigns it —
+  // harmless here (`flushHead` re-reads every value from the stores and the refs
+  // when it runs) and worth saying, because it is the one thing a reader of a
+  // render-phase write worries about.
+  flushRef.current = () => {
+    void flushHead();
+  };
+
   const resume = async (): Promise<boolean> => {
     if (!activeSessionId || resuming) return false;
     setResuming(true);
@@ -1722,6 +1833,13 @@ export default function ChatStream() {
         </p>
       )}
       </main>
+      {/* The **Prompt queue** stack: the THIRD island of the center column
+          (transcript above, composer below). `QueueRows` is `null` while nothing
+          is queued, so this costs nothing in the common case; when it renders it
+          is a `shrink-0` SIBLING in normal flow, so `main`'s load-bearing
+          `min-h-0` is untouched and a row can never float over a **Gate** card or
+          the streaming answer. */}
+      <QueueRows sessionId={activeSessionId} />
       {/* The composer island (see the column comment): a SIBLING of the
           transcript, not its child. It stays LAST in DOM order, so tab order
           and the "composer is at the bottom" reading order are unchanged. */}
