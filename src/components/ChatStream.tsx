@@ -11,6 +11,7 @@ import {
   readFileBytes,
   sendPrompt,
   compactSession,
+  type StopReason,
 } from "../lib/tauri";
 import { basenameOfPath } from "../lib/paths";
 import { describeIpcError } from "../lib/ipcError";
@@ -36,6 +37,7 @@ import {
   renumberImageMarkers,
   shiftImageMarkers,
   type ChatComposerAttachment,
+  type ImageRef,
 } from "../lib/chatAttachments";
 import { inferAttachmentMimeType, shouldPreferSpreadsheetClipboardText } from "../lib/chatAttachmentMetadata";
 import { useSessions } from "../store/sessions";
@@ -80,6 +82,16 @@ import type { MentionRow } from "./chat/ComposerMentions";
  * rows memo for the same reasoning at the point of the missing slice.
  */
 const MAX_PICKER_ROWS = 10;
+
+/** The reconciled attachment payload `sendText` takes (id-bearing, unlike the
+ * `ImageRef` that goes on the wire). Exported because Task 5's Flush builds one. */
+export type SendTextImages = {
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  data: string;
+}[];
 
 export default function ChatStream() {
   const activeSessionId = useSessions((s) => s.activeSessionId);
@@ -870,6 +882,161 @@ export default function ChatStream() {
   // capabilities (not the saved ones) decide whether images ship.
   let hasImages = attachments.length > 0 && imageCapable;
 
+  /** The shared send tail: expand → normalise → the user row → beginTurn →
+   * sendPrompt. `rawText` is the RAW draft and `images` is the CALLER's already
+   * reconciled attachment list (id-bearing); the caller owns composer STATE, so
+   * this never calls `setDraft` / `setAttachments` and never calls `turnCompleted`.
+   *
+   * `onCommitted(sentIds)` fires immediately BEFORE `addUserMessage` — that is
+   * where `send()`'s `setDraft("")` and its held-attachment move sit today, and
+   * `sentIds` is what the move filters on.
+   *
+   * Resolves `null` for "NOTHING was dispatched — bail silently, do NOT settle":
+   * it can only come from the every-attachment-removed-with-no-text arm below,
+   * which runs BEFORE `addUserMessage`, so on that path no user row exists,
+   * `onCommitted` never fired, `beginTurn` never ran and there is no turn to
+   * settle. `null` therefore means the caller's draft was NEVER wiped — which is
+   * exactly what today's `return` at `:1074` guarantees, and the reason the draft
+   * wipe had to move inside this function. */
+  const sendText = async (
+    sessionId: string,
+    rawText: string,
+    images: SendTextImages | undefined,
+    onCommitted: (sentIds: Set<string>) => void,
+  ): Promise<StopReason | null> => {
+    // EXPANSION: expand `$` / `@` / `#` mentions into their block forms
+    // BEFORE both `addUserMessage` and `sendPrompt` (the REFINEMENT — the
+    // live bubble, the persisted record, and the agent's input must all
+    // carry the SAME text, so the content-based dedupe key in
+    // `mergeDedupeKey` matches across a resume reload). Declared HERE
+    // (immediately after the caller's stale-draft guard, BEFORE the images-empty
+    // block below which still references `text`) — the placement is
+    // load-bearing (a TDZ trap: a later declaration would make the
+    // unchanged `if (!text)` a "used before its declaration" error;
+    // semantically it's safe — expansion maps `""`→`""`, so `!text` is
+    // identical to `!rawText`).
+    // The `#` gate (see the `mcpMentionsEnabled` note above): an EMPTY MCP
+    // catalog means a `#` token matches nothing, so the text stays
+    // BYTE-IDENTICAL — the existing verbatim path, not a special case.
+    //
+    // THE MASK, and why it is not cosmetic: `[image #3]` IS a `#` mention
+    // token — `MCP_MENTION_RE` is `/(^|\s)#([a-z0-9]+(?:-[a-z0-9]+)*)/g`, the
+    // `#` has its leading space and a digit is in the class. It survives today
+    // only because no catalog entry happens to be named `3`, and that is not a
+    // guarantee: the Rust picker predicate `is_mentionable_name` accepts
+    // digits (its own tests use `"0"` as a positive case), so an MCP server
+    // literally named `3` would get an `<mcp name="3">` block appended to a
+    // prompt the user never asked for. So the markers are lifted out BEFORE
+    // the expansion and put back byte-exact AFTER it: `expandMentions` sees no
+    // `#` token from a marker at all, and the marker text is stashed rather
+    // than re-derived, so the round trip is exact.
+    //
+    // THE SENTINEL IS PASTABLE, and that is what the collision guard below is
+    // for. `\uE000` is a Private Use Area codepoint: no keyboard produces it —
+    // TRUE — but a PASTE carries arbitrary codepoints, and pasted logs, data
+    // dumps and mojibake are exactly where PUA characters live. So the mask is
+    // NOT structurally un-obtainable and the round trip is not automatically a
+    // bijection: a draft can arrive at the un-mask holding a sentinel that no
+    // marker put there. What makes the design safe is the guard, not the
+    // choice of codepoint.
+    const marks: string[] = [];
+    const masked = rawText.replace(/\[image #(\d+)\]/g, (marker) => {
+      marks.push(marker);
+      return "\uE000";
+    });
+    // A PASTED sentinel sitting in a draft that also has a marker: the un-mask
+    // cannot tell the user's stray byte from one of our placeholders, so the
+    // round trip could hand a marker's text to the wrong position. Such a
+    // draft is pathological (nothing the composer produces writes a PUA
+    // character), and the two ways out are not equal: sending the user's own
+    // text UNEXPANDED costs one send its `<mcp>` / `<skill>` blocks, while
+    // continuing would CORRUPT the prompt the model reads. Degrading is the
+    // safe side, so that is what this does.
+    //
+    // A sentinel in a draft with NO marker needs no guard: nothing was masked,
+    // so nothing can be mis-restored — the bounded replacer below just lets the
+    // user's byte pass through, and expansion runs normally.
+    let text: string;
+    if (marks.length > 0 && rawText.includes("\uE000")) {
+      text = rawText;
+    } else {
+      const expanded = expandMentions(masked, {
+        skills,
+        agents,
+        mcpServers: mcpMentionsEnabled ? mcpServers : [],
+      });
+      let markIndex = 0;
+      // BOUNDED on purpose, and it is not defensive noise: an unbounded
+      // `marks[markIndex++]` returns `undefined` once the stashes run out, and
+      // `String.prototype.replace` STRINGIFIES what a replacer returns — so a
+      // pasted sentinel would ship the literal word "undefined" to the model in
+      // place of the user's character. Returning the sentinel itself keeps the
+      // text byte-identical to what the user had.
+      text = expanded.replace(
+        /\uE000/g,
+        () => (markIndex < marks.length ? marks[markIndex++] : "\uE000"),
+      );
+    }
+    // Every staged image was removed during the read (the composer isn't
+    // locked until `beginTurn`, so a thumbnail can be removed during the
+    // read): with no text there's nothing meaningful left to send; with
+    // text, normalize to `undefined` so the 2-arg `sendPrompt` path is taken
+    // (an empty `[]` is truthy and would take the 3-arg path, sending an
+    // empty images array).
+    if (images !== undefined && images.length === 0) {
+      // THE ONLY ROUTE TO `null` — and it is narrower than it looks. Simply
+      // removing a thumbnail during the read does NOT reach it: `removeAttachment`
+      // renumbers the draft, which drops the `[image #N]` marker text, so the
+      // CALLER's stale-draft guard (`draftRef.current.trim() !== rawText`)
+      // aborts first — `ChatStream.test.tsx:2368-2377` documents exactly that
+      // (its own comment: "the STALE-DRAFT GUARD ... fires before the
+      // images-empty block below, which no longer sees an empty text to
+      // reject"). To land here a send must arrive with the reconcile yielding
+      // `images === []` AND `text === ""`: stage attachments, delete the
+      // `[image #N]` marker text BY HAND so the draft is already empty when the
+      // read lands (the stale-draft guard then passes, because empty == empty),
+      // and remove every thumbnail during the `FileReader` await.
+      //
+      // Returning `null` here — and NOT calling `onCommitted` first — is what
+      // keeps the user's draft intact: nothing was dispatched, no user row
+      // exists, `beginTurn` never ran, so there is no turn to settle and the
+      // composer must not be wiped.
+      if (!text) return null;
+      images = undefined;
+    }
+    // `sentIds` is derived from what was ACTUALLY sent (the reconciled
+    // `images`), not the stale closure list: on success, release/clear ONLY
+    // these. Anything staged after the read — e.g. a drop during the
+    // FileReader `await`, or attachments staged in ANOTHER session while
+    // this turn was running — must survive.
+    const sentIds = new Set(images?.map((i) => i.id) ?? []);
+    // `ImageRef` has no `id` field — built field-by-field rather than by
+    // discarding `id` in a destructure, because `noUnusedLocals` is ON and an
+    // underscore does NOT exempt a destructured binding from being "unused".
+    const imageRefs: ImageRef[] | undefined = images?.map((i) => ({
+      name: i.name,
+      mimeType: i.mimeType,
+      sizeBytes: i.sizeBytes,
+      data: i.data,
+    }));
+    onCommitted(sentIds);
+    addUserMessage(sessionId, text, imageRefs); // EXPANDED
+    beginTurn(sessionId);
+    // Pass the third arg ONLY when there are images: a text-only send (and
+    // an all-images-removed send, normalized above) calls
+    // `sendPrompt(id, text)` — the pre-existing 2-arg call the existing tests
+    // assert (`toHaveBeenCalledWith("s1", "hello")`; vitest compares arg
+    // arrays by length, so an explicit `undefined` third arg would break it).
+    const stopReason = imageRefs
+      ? await sendPrompt(sessionId, text, imageRefs) // EXPANDED
+      : await sendPrompt(sessionId, text); // EXPANDED
+    // NOTE: no `turnCompleted` here. The success path releases `heldForSendRef`
+    // BEFORE settling and the `catch` settles BEFORE `setError` + the
+    // attachment restore (one React 19 batch), so moving the settle in here
+    // would invert both orders — each caller owns its own settle.
+    return stopReason;
+  };
+
   const send = async () => {
     const targetSessionId = activeSessionId;
     if (!targetSessionId) return;
@@ -955,9 +1122,7 @@ export default function ChatStream() {
         // no prose: the same fail-closed posture, unchanged for real text.
         if (!hasImages && (rawText === "" || draftIsMarkerOnly(rawText))) return;
       }
-      let images:
-        | { id: string; name: string; mimeType: string; sizeBytes: number; data: string }[]
-        | undefined;
+      let images: SendTextImages | undefined;
       if (hasImages) {
         try {
           const read = await Promise.all(
@@ -991,123 +1156,48 @@ export default function ChatStream() {
       // compares the RAW text (expansion is re-derived from the FRESH draft
       // below, so comparing expanded texts would be wrong).
       if (draftRef.current.trim() !== rawText) return;
-      // EXPANSION: expand `$` / `@` / `#` mentions into their block forms
-      // BEFORE both `addUserMessage` and `sendPrompt` (the REFINEMENT — the
-      // live bubble, the persisted record, and the agent's input must all
-      // carry the SAME text, so the content-based dedupe key in
-      // `mergeDedupeKey` matches across a resume reload). Declared HERE
-      // (immediately after the stale-draft guard, BEFORE the images-empty
-      // block below which still references `text`) — the placement is
-      // load-bearing (a TDZ trap: a later declaration would make the
-      // unchanged `if (!text)` a "used before its declaration" error;
-      // semantically it's safe — expansion maps `""`→`""`, so `!text` is
-      // identical to `!rawText`).
-      // The `#` gate (see the `mcpMentionsEnabled` note above): an EMPTY MCP
-      // catalog means a `#` token matches nothing, so the text stays
-      // BYTE-IDENTICAL — the existing verbatim path, not a special case.
+      // The send tail — expansion, the images-empty normalisation, the user
+      // row, `beginTurn`, `sendPrompt` — now lives in `sendText` so the prompt
+      // queue's Flush runs the SAME code a typed prompt does (a queued Mention
+      // must never expand differently from a typed one). `images` is passed
+      // RECONCILED (the `liveIds` filter above already ran) because `sendText`
+      // derives `sentIds` from what is actually going on the wire.
       //
-      // THE MASK, and why it is not cosmetic: `[image #3]` IS a `#` mention
-      // token — `MCP_MENTION_RE` is `/(^|\s)#([a-z0-9]+(?:-[a-z0-9]+)*)/g`, the
-      // `#` has its leading space and a digit is in the class. It survives today
-      // only because no catalog entry happens to be named `3`, and that is not a
-      // guarantee: the Rust picker predicate `is_mentionable_name` accepts
-      // digits (its own tests use `"0"` as a positive case), so an MCP server
-      // literally named `3` would get an `<mcp name="3">` block appended to a
-      // prompt the user never asked for. So the markers are lifted out BEFORE
-      // the expansion and put back byte-exact AFTER it: `expandMentions` sees no
-      // `#` token from a marker at all, and the marker text is stashed rather
-      // than re-derived, so the round trip is exact.
-      //
-      // THE SENTINEL IS PASTABLE, and that is what the collision guard below is
-      // for. `\uE000` is a Private Use Area codepoint: no keyboard produces it —
-      // TRUE — but a PASTE carries arbitrary codepoints, and pasted logs, data
-      // dumps and mojibake are exactly where PUA characters live. So the mask is
-      // NOT structurally un-obtainable and the round trip is not automatically a
-      // bijection: a draft can arrive at the un-mask holding a sentinel that no
-      // marker put there. What makes the design safe is the guard, not the
-      // choice of codepoint.
-      const marks: string[] = [];
-      const masked = rawText.replace(/\[image #(\d+)\]/g, (marker) => {
-        marks.push(marker);
-        return "\uE000";
-      });
-      // A PASTED sentinel sitting in a draft that also has a marker: the un-mask
-      // cannot tell the user's stray byte from one of our placeholders, so the
-      // round trip could hand a marker's text to the wrong position. Such a
-      // draft is pathological (nothing the composer produces writes a PUA
-      // character), and the two ways out are not equal: sending the user's own
-      // text UNEXPANDED costs one send its `<mcp>` / `<skill>` blocks, while
-      // continuing would CORRUPT the prompt the model reads. Degrading is the
-      // safe side, so that is what this does.
-      //
-      // A sentinel in a draft with NO marker needs no guard: nothing was masked,
-      // so nothing can be mis-restored — the bounded replacer below just lets the
-      // user's byte pass through, and expansion runs normally.
-      let text: string;
-      if (marks.length > 0 && rawText.includes("\uE000")) {
-        text = rawText;
-      } else {
-        const expanded = expandMentions(masked, {
-          skills,
-          agents,
-          mcpServers: mcpMentionsEnabled ? mcpServers : [],
-        });
-        let markIndex = 0;
-        // BOUNDED on purpose, and it is not defensive noise: an unbounded
-        // `marks[markIndex++]` returns `undefined` once the stashes run out, and
-        // `String.prototype.replace` STRINGIFIES what a replacer returns — so a
-        // pasted sentinel would ship the literal word "undefined" to the model in
-        // place of the user's character. Returning the sentinel itself keeps the
-        // text byte-identical to what the user had.
-        text = expanded.replace(
-          /\uE000/g,
-          () => (markIndex < marks.length ? marks[markIndex++] : "\uE000"),
-        );
-      }
-      // Every staged image was removed during the read (the composer isn't
-      // locked until `beginTurn`, so a thumbnail can be removed during the
-      // read): with no text there's nothing meaningful left to send; with
-      // text, normalize to `undefined` so the 2-arg `sendPrompt` path is taken
-      // (an empty `[]` is truthy and would take the 3-arg path, sending an
-      // empty images array).
-      if (images !== undefined && images.length === 0) {
-        if (!text) return;
-        images = undefined;
-      }
-      // `sentIds` is derived from what was ACTUALLY sent (the reconciled
-      // `images`), not the stale closure list: on success, release/clear ONLY
-      // these. Anything staged after the read — e.g. a drop during the
-      // FileReader `await`, or attachments staged in ANOTHER session while
-      // this turn was running — must survive.
-      const sentIds = new Set(images?.map((i) => i.id) ?? []);
-      // `ImageRef` has no `id` field — strip it before use.
-      const imageRefs = images?.map(({ id, ...ref }) => ref); // ImageRef[] | undefined
-      setDraft("");
-      addUserMessage(targetSessionId, text, imageRefs); // EXPANDED
-      // The staged `File`/object-URL pair has NO remaining job once the
-      // base64 copies are on the user message: hold exactly the sent
-      // attachments OUT of `attachments` so their thumbnails leave the
-      // composer NOW instead of sitting there for the whole turn. They are
-      // held, not released — the `catch` below puts them back on a failed
-      // send, and the success path releases them when the turn settles.
-      // `activeSessionIdRef` guard: a send whose session was switched away
-      // during the read never touches the (now other session's) composer state.
-      if (sentIds.size > 0 && activeSessionIdRef.current === targetSessionId) {
-        const held = attachmentsRef.current.filter((a) => sentIds.has(a.id));
-        heldForSendRef.current.set(targetSessionId, held);
-        const staged = attachmentsRef.current.filter((a) => !sentIds.has(a.id));
-        attachmentsRef.current = staged;
-        setAttachments(staged);
-      }
-      beginTurn(targetSessionId);
-      // Pass the third arg ONLY when there are images: a text-only send (and
-      // an all-images-removed send, normalized above) calls
-      // `sendPrompt(id, text)` — the pre-existing 2-arg call the existing tests
-      // assert (`toHaveBeenCalledWith("s1", "hello")`; vitest compares arg
-      // arrays by length, so an explicit `undefined` third arg would break it).
-      const stopReason = imageRefs
-        ? await sendPrompt(targetSessionId, text, imageRefs) // EXPANDED
-        : await sendPrompt(targetSessionId, text); // EXPANDED
+      // `onCommitted` is where `setDraft("")` and the held-attachment move used
+      // to sit, merged into ONE callback: today the held block ran three
+      // statements after `setDraft("")` with **no `await` between them**, and
+      // both are synchronous ref/state writes that React 19 batches into the
+      // same commit — so firing them together at `setDraft`'s old position is
+      // observationally identical, not a reordering a user or a test can see.
+      const stopReason = await sendText(
+        targetSessionId,
+        rawText,
+        images,
+        (sentIds) => {
+          setDraft("");
+          // The staged `File`/object-URL pair has NO remaining job once the
+          // base64 copies are on the user message: hold exactly the sent
+          // attachments OUT of `attachments` so their thumbnails leave the
+          // composer NOW instead of sitting there for the whole turn. They are
+          // held, not released — the `catch` below puts them back on a failed
+          // send, and the success path releases them when the turn settles.
+          // `activeSessionIdRef` guard: a send whose session was switched away
+          // during the read never touches the (now other session's) composer state.
+          if (sentIds.size > 0 && activeSessionIdRef.current === targetSessionId) {
+            const held = attachmentsRef.current.filter((a) => sentIds.has(a.id));
+            heldForSendRef.current.set(targetSessionId, held);
+            const staged = attachmentsRef.current.filter((a) => !sentIds.has(a.id));
+            attachmentsRef.current = staged;
+            setAttachments(staged);
+          }
+        },
+      );
+      // NOTHING was dispatched (every attachment removed with no text): bail
+      // silently, do NOT settle — no user row exists and `beginTurn` never ran.
+      // This `return` sits AFTER the `sendText` await and so still runs the
+      // `finally` below, releasing the double-send slot — exactly what today's
+      // in-line `return` did.
+      if (stopReason === null) return;
       // Success: the turn settled, so the held attachments have no job left —
       // release them for good and drop the map entry. Released from the HELD
       // list (they left `attachments` at send), NOT by re-filtering the staged
