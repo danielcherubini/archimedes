@@ -1430,6 +1430,13 @@ mod tests {
             "\"defaultThinkingLevels\"",
             "\"agentOverrides\"",
             "\"spinnerStyle\"",
+            // Kept beside its sibling on purpose: this list pins the serialized
+            // DOCUMENT shape (the key set a settings.json carries), while
+            // `empty_state_animation_defaults_to_none_and_round_trips` pins the
+            // field's defaulting and value round-trip. Different claims — a
+            // field that still parses but stops being serialized is caught ONLY
+            // here, so it has to be enumerated here too.
+            "\"emptyStateAnimation\"",
             "\"filePolicy\"",
             "\"web\"",
             "\"mcpMentionsEnabled\"",
