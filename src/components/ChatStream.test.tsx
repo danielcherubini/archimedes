@@ -7825,3 +7825,79 @@ describe("ChatStream — staging attachments is allowed while a turn is in fligh
       expect(composerThumbs()).toEqual([]);
     });
 });
+
+// ── The empty-state film and the prompt queue, in the same pane ──────────────
+//
+// The film was written before the queue existed. `EmptyStateFilm`'s layer is an
+// `absolute inset-0` box on the transcript's scroll container, and the queue
+// stack sits BELOW that container as a sibling island — so the two are meant to
+// be independent. That independence is exactly the kind of thing a merge
+// silently breaks (moving the stack inside `<main>`, or keying the film on
+// something the queue changes, would both collide), so it is pinned here rather
+// than left to reading the layout.
+describe("ChatStream — the empty-state film beside a non-empty prompt queue", () => {
+  it("keeps the empty-state cue and the queue rows both rendered and separate", () => {
+    seedLiveSession();
+    render(<ChatStream />);
+    // A `failed` entry is the state where BOTH are legitimately on screen: the
+    // session is IDLE (so the film's three-term condition holds and the
+    // transcript is still empty), yet `takeHead` skips the failed entry, so
+    // nothing sends and the row stays visible. An ordinary queued entry cannot
+    // probe this — the idle edge Flushes it, which adds a user row and takes the
+    // transcript out of the empty branch.
+    act(() => {
+      useQueuedPrompts.getState().enqueue("s1", {
+        id: "q-film",
+        text: "queued while the film plays",
+        attachments: [],
+        state: "queued",
+      });
+    });
+    act(() => {
+      const [entry] = useQueuedPrompts.getState().bySession["s1"];
+      useQueuedPrompts.getState().requeueHead("s1", { ...entry, failed: true });
+    });
+    const cue = screen.getByText("Send a prompt to start");
+    const rows = screen.getByTestId("queue-rows");
+    expect(rows.textContent).toContain("queued while the film plays");
+    // STRUCTURAL separation: the film belongs to the transcript island, the
+    // stack is outside it. If the stack ever moves inside `<main>`, the film's
+    // `absolute inset-0` layer would cover it.
+    const main = document.querySelector("main")!;
+    expect(main.contains(cue)).toBe(true);
+    expect(main.contains(rows)).toBe(false);
+    expect(main.nextElementSibling).toBe(rows);
+    // The film's own layer is bounded by the transcript island: the scroll
+    // container it renders into is `relative`, so the canvas variant's
+    // `absolute inset-0` (pinned in `EmptyStateFilm.test.tsx`) resolves against
+    // THAT box — inside `<main>` — and can never overlay a row in the stack.
+    // Under jsdom there is no WebGL, so what is on screen here is the film's
+    // FALLBACK text line; its parent is the scroll container itself.
+    const scroll = screen.getByTestId("transcript-scroll");
+    expect(scroll.className).toContain("relative");
+    expect(main.contains(scroll)).toBe(true);
+    expect(scroll.contains(cue)).toBe(true);
+    expect(scroll.contains(rows)).toBe(false);
+    expect(cue.closest('[data-testid="queue-rows"]')).toBeNull();
+  });
+
+  it("does not render the film while a turn is in flight (the queue's own state)", () => {
+    seedLiveSession();
+    render(<ChatStream />);
+    act(() => {
+      useSessions.getState().beginTurn("s1");
+    });
+    act(() => {
+      useQueuedPrompts.getState().enqueue("s1", {
+        id: "q-film-busy",
+        text: "queued",
+        attachments: [],
+        state: "queued",
+      });
+    });
+    // The three-term empty-branch condition is UNCHANGED by the film work, and
+    // a busy session fails it — so no film, and no fight with the queue.
+    expect(screen.queryByText("Send a prompt to start")).toBeNull();
+    expect(screen.getByTestId("queue-rows")).toBeTruthy();
+  });
+});
