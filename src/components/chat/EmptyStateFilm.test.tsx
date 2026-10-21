@@ -598,6 +598,63 @@ describe("EmptyStateFilm", () => {
     expect(engine.resize).toHaveBeenCalledWith(box.width, box.height, cappedDpr(), TOP_TIER);
   });
 
+  /**
+   * The film is CENTRED in the transcript area — that is what the design says, and
+   * what the markup it replaces (`MessageList.tsx`'s old hint) did with
+   * `flex h-full items-center justify-center`.
+   *
+   * The canvas's CSS size is the CONTAIN box (aspect 1.16, never stretched), so it
+   * is narrower or shorter than the pane whenever the pane's aspect differs. With
+   * no alignment on the wrapper the canvas anchored to the wrapper's top-left
+   * corner, and on a wide pane the film visibly hugged the left edge.
+   *
+   * jsdom lays out nothing, so it cannot report where the canvas ended up; this
+   * asserts the CLASS CONTRACT that produces the centring — the thing jsdom CAN
+   * see. The geometry it produces was verified separately in a real headless
+   * browser: in a 1000×600 pane the canvas measures 696×600 with
+   * `getBoundingClientRect().left` ≈ 152 (centred) instead of 0, and in a 420×900
+   * pane it measures 420×362 with `.top` ≈ 269 instead of 0.
+   *
+   * The tail of this test pins the two things the centring must NOT disturb: the
+   * wrapper's own box (`absolute inset-0`, which is what the IntersectionObserver
+   * watches — shrinking the wrapper to its content would change when the film
+   * counts as off-screen) and the ResizeObserver's target (the wrapper's PARENT —
+   * the wrapper's box is derived from that ancestor, so observing the wrapper
+   * would observe a consequence and miss the cause).
+   */
+  it("centres the canvas in the pane without moving either observed box", async () => {
+    installCanvasStub("present");
+    const engine = makeFakeEngine(litGrid());
+    await mount({ setting: null, createEngine: async () => engine });
+
+    const canvas = canvasOrNull();
+    if (canvas === null) throw new Error("no canvas");
+    const wrapper = canvas.parentElement;
+    if (wrapper === null) throw new Error("canvas has no wrapper");
+
+    const classes = new Set(wrapper.classList);
+    // The centring: the contain box is letterboxed inside the pane, so the canvas
+    // has to be pushed to the middle of it on both axes.
+    expect(classes.has("flex")).toBe(true);
+    expect(classes.has("items-center")).toBe(true);
+    expect(classes.has("justify-center")).toBe(true);
+    // The wrapper's geometry is UNCHANGED — still the full pane. Centring is done
+    // to the child, never by resizing the wrapper.
+    expect(classes.has("absolute")).toBe(true);
+    expect(classes.has("inset-0")).toBe(true);
+    expect(classes.has("pointer-events-none")).toBe(true);
+    // Nothing was added that would give the canvas a say in the parent's size.
+    expect(wrapper.parentElement).not.toBeNull();
+
+    // The observers still watch exactly what they watched before.
+    const resize = resizeObservers[0];
+    if (resize === undefined) throw new Error("the component never built a ResizeObserver");
+    expect(resize.observed).toEqual([wrapper.parentElement]);
+    expect(resize.observed[0]).not.toBe(wrapper);
+    expect(intersectionObservers.length).toBeGreaterThan(0);
+    expect(engine.frame).toHaveBeenCalled();
+  });
+
   it("coalesces resize through rAF and re-measures the font only when the tier changes", async () => {
     installCanvasStub("present");
     const engine = makeFakeEngine(litGrid());

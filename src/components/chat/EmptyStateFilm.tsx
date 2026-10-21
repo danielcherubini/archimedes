@@ -733,8 +733,22 @@ export default function EmptyStateFilm(props: EmptyStateFilmProps): ReactElement
   // (wrapper and inner element both `aria-hidden`) so the film is out of the
   // accessibility tree at every level. No label, no role, no caption, no click
   // handler: clicking the empty pane stays inert.
+  //
+  // The wrapper stays a full-pane `absolute inset-0` box: the ResizeObserver
+  // watches this element's PARENT (the pane — this box is derived from it), and
+  // the IntersectionObserver watches THIS box, so shrinking it to its content
+  // would move both the measurement source and the off-screen threshold. The
+  // canvas is sized to the CONTAIN box, which is smaller than the pane on one
+  // axis whenever the pane's aspect differs from the film's, so it is centred
+  // here — the same placement the text line this replaced had
+  // (`flex h-full items-center justify-center`). Without it the canvas anchored
+  // to the top-left and the film hugged the pane's left edge on a wide pane.
   return (
-    <div ref={wrapperRef} className="absolute inset-0 pointer-events-none" aria-hidden="true">
+    <div
+      ref={wrapperRef}
+      className="absolute inset-0 pointer-events-none flex items-center justify-center"
+      aria-hidden="true"
+    >
       <canvas ref={canvasRef} aria-hidden="true" />
     </div>
   );
