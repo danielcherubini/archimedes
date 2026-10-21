@@ -60,6 +60,7 @@ function settingsFixture(overrides: Partial<AppSettings> = {}): AppSettings {
     defaultThinkingLevels: {},
     agentOverrides: {},
     spinnerStyle: null,
+    emptyStateAnimation: null,
     filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
     web: {
       braveApiKey: "",
@@ -157,6 +158,7 @@ describe("loadAndApplySettings", () => {
       defaultThinkingLevels: {},
       agentOverrides: {},
       spinnerStyle: null,
+      emptyStateAnimation: null,
       filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
       web: {
         braveApiKey: "",

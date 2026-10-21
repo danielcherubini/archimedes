@@ -36,6 +36,7 @@ const FULL_SETTINGS: AppSettings = {
   defaultThinkingLevels: {},
   agentOverrides: {},
   spinnerStyle: null,
+  emptyStateAnimation: null,
   filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
   web: {
     braveApiKey: "",
@@ -78,7 +79,11 @@ describe("useSettings store", () => {
   });
 
   it("setSettings overwrites the current settings (the settings UI's optimistic write)", () => {
-    const next: AppSettings = { ...FULL_SETTINGS, spinnerStyle: "pendulum" };
+    const next: AppSettings = {
+      ...FULL_SETTINGS,
+      spinnerStyle: "pendulum",
+      emptyStateAnimation: null,
+    };
 
     useSettings.getState().setSettings(next);
 

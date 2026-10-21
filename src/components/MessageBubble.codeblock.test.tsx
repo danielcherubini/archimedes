@@ -48,6 +48,7 @@ const SETTINGS_FIXTURE: AppSettings = {
   defaultThinkingLevels: {},
   agentOverrides: {},
   spinnerStyle: null,
+  emptyStateAnimation: null,
   filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
   web: {
     braveApiKey: "",

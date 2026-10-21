@@ -72,6 +72,7 @@ const SETTINGS_FIXTURE: AppSettings = {
   defaultThinkingLevels: {},
   agentOverrides: {},
   spinnerStyle: null,
+  emptyStateAnimation: null,
   filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
   web: {
     braveApiKey: "",
@@ -770,6 +771,7 @@ describe("ChatStream", () => {
     useSettings.getState().setSettings({
       ...SETTINGS_FIXTURE,
       spinnerStyle: "pendulum",
+      emptyStateAnimation: null,
     });
     const { container } = render(<ChatStream />);
     const span = container.querySelector(
@@ -842,6 +844,7 @@ describe("ChatStream", () => {
     useSettings.getState().setSettings({
       ...SETTINGS_FIXTURE,
       spinnerStyle: "pendulum",
+      emptyStateAnimation: null,
     });
     // BOTH a turn in flight AND a compaction: the pulse still wins (the
     // compaction branch sits above the spinner+quip branch).

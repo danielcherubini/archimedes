@@ -272,6 +272,13 @@ pub struct Settings {
     /// migration).
     #[serde(default)]
     pub spinner_style: Option<String>,
+    /// The **Transcript**'s empty-state animation: `"off"` / `"static"` /
+    /// `"animated"`. `None` = the frontend's `"animated"` default (a
+    /// pre-feature file — `#[serde(default)]`, no migration). `prefers-reduced-motion`
+    /// can pin `"animated"` to `"static"` but can never un-`off` a deliberate
+    /// `"off"` (ADR 0070).
+    #[serde(default)]
+    pub empty_state_animation: Option<String>,
     /// Session naming (ported from pi-archimedes' `session-name`): the master
     /// switch for the post-first-exchange title request. `#[serde(default =
     /// "default_true")]` — pi ships naming ON, so a pre-feature file reads as
@@ -341,6 +348,7 @@ impl Default for Settings {
             subagent_models: HashMap::new(),
             agent_overrides: HashMap::new(),
             spinner_style: None,
+            empty_state_animation: None,
             session_naming_enabled: true,
             session_naming_model: None,
             session_naming_reasoning: None,
@@ -907,6 +915,28 @@ mod tests {
     }
 
     #[test]
+    fn empty_state_animation_defaults_to_none_and_round_trips() {
+        // A pre-feature file (no `emptyStateAnimation`) parses to `None` (the
+        // frontend falls back to `"animated"`); an explicit choice survives a
+        // round trip in camelCase.
+        assert_eq!(Settings::default().empty_state_animation, None);
+        let settings = Settings {
+            empty_state_animation: Some("static".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(
+            json.contains("\"emptyStateAnimation\""),
+            "missing emptyStateAnimation in {json}"
+        );
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.empty_state_animation, Some("static".to_string()));
+        // Absent-key input reads as the default, not as an error.
+        let file: Settings = serde_json::from_str(r#"{ "theme": "dark" }"#).unwrap();
+        assert_eq!(file.empty_state_animation, None);
+    }
+
+    #[test]
     fn palette_defaults_to_none_and_round_trips() {
         // (ADR 0027) A pre-feature file (no `palette`) parses to `None` (the
         // frontend falls back to the `zai` scheme); an explicit choice
@@ -1364,6 +1394,7 @@ mod tests {
                 },
             )]),
             spinner_style: Some("marquee".to_string()),
+            empty_state_animation: Some("static".to_string()),
             session_naming_enabled: false,
             session_naming_model: Some("tama/m-1:xhigh".to_string()),
             session_naming_reasoning: Some("minimal".to_string()),

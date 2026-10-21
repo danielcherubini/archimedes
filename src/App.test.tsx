@@ -86,6 +86,7 @@ vi.mock("./lib/tauri", async () => {
       defaultThinkingLevels: {},
       agentOverrides: {},
       spinnerStyle: null,
+      emptyStateAnimation: null,
       filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
       web: {
         braveApiKey: "",
