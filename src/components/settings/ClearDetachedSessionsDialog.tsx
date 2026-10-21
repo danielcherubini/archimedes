@@ -19,6 +19,12 @@ import { Button } from "@/components/ui/button";
  * lists the folders themselves — the title is the number you read, the list is
  * the evidence that this is the sweep you meant.
  *
+ * The list carries FULL PATHS, not base names: two different folders can share
+ * a base name (`/home/alice/proj` and `/mnt/backup/proj`), and a list that
+ * collapsed them into one entry would both understate the count and hide which
+ * of the two was about to be swept — the same reason the section's rows show
+ * the full `cwd`. `truncate` keeps a long path inside the dialog's width.
+ *
  * Same shape as `DeleteSessionDialog`: `ui/dialog` with `showCloseButton={false}`
  * (no X — Cancel/Escape are the only exits) + a `destructive` confirm button.
  *
@@ -27,14 +33,14 @@ import { Button } from "@/components/ui/button";
  */
 export default function ClearDetachedSessionsDialog({
   count,
-  folderNames,
+  folders,
   onConfirm,
   onClose,
 }: {
   /** How many stored sessions are about to be deleted. */
   count: number;
-  /** The DISTINCT folder names those sessions belong to. */
-  folderNames: string[];
+  /** The DISTINCT folder PATHS those sessions belong to. */
+  folders: string[];
   onConfirm: () => void;
   onClose: () => void;
 }): ReactElement {
@@ -49,7 +55,8 @@ export default function ClearDetachedSessionsDialog({
       <DialogContent showCloseButton={false} className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>
-            Delete {count} detached sessions from {folderNames.length} folders?
+            Delete {count} detached session{count === 1 ? "" : "s"} from{" "}
+            {folders.length} folder{folders.length === 1 ? "" : "s"}?
           </DialogTitle>
         </DialogHeader>
         {/* `DialogContent` sets no `max-h` and no `overflow-y-auto`, so a body
@@ -57,7 +64,7 @@ export default function ClearDetachedSessionsDialog({
             the viewport (DeleteSessionDialog escapes that only because its body
             is one line). The list scrolls; the buttons stay reachable. */}
         <div className="max-h-40 space-y-0.5 overflow-y-auto">
-          {[...folderNames].sort().map((folder) => (
+          {[...folders].sort().map((folder) => (
             <div
               key={folder}
               className="truncate text-ui-sm text-foreground-subtle"
@@ -76,7 +83,7 @@ export default function ClearDetachedSessionsDialog({
             Cancel
           </Button>
           <Button variant="destructive" onClick={onConfirm}>
-            Delete {count} sessions
+            Delete {count} session{count === 1 ? "" : "s"}
           </Button>
         </DialogFooter>
       </DialogContent>

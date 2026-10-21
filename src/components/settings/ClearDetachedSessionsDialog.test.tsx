@@ -16,7 +16,7 @@ afterEach(() => {
 function renderDialog(
   props: Partial<{
     count: number;
-    folderNames: string[];
+    folders: string[];
     onConfirm: () => void;
     onClose: () => void;
   }> = {},
@@ -26,7 +26,7 @@ function renderDialog(
   render(
     <ClearDetachedSessionsDialog
       count={3}
-      folderNames={["/tmp/beta", "/tmp/gamma", "/tmp/delta"]}
+      folders={["/tmp/beta", "/tmp/gamma", "/tmp/delta"]}
       onConfirm={onConfirm}
       onClose={onClose}
       {...props}
@@ -57,12 +57,54 @@ describe("ClearDetachedSessionsDialog", () => {
     // The caller may hand these over in store order; the dialog's own text is
     // deterministic so the confirm reads the same every time.
     const { dialog } = renderDialog({
-      folderNames: ["/tmp/zeta", "/tmp/alpha", "/tmp/mid"],
+      folders: ["/tmp/zeta", "/tmp/alpha", "/tmp/mid"],
     });
     const listed = within(dialog)
       .getAllByText(/^\/tmp\//)
       .map((node) => node.textContent);
     expect(listed).toEqual(["/tmp/alpha", "/tmp/mid", "/tmp/zeta"]);
+  });
+
+  it("lists FULL paths, so two folders sharing a base name both appear", () => {
+    // The dialog is the evidence that this is the sweep you meant: `/proj` and
+    // `/mnt/backup/proj` must read as two entries, not as `proj` once.
+    const { dialog } = renderDialog({
+      count: 2,
+      folders: ["/home/alice/proj", "/mnt/backup/proj"],
+    });
+    expect(
+      within(dialog).getByText("/home/alice/proj"),
+    ).toBeTruthy();
+    expect(
+      within(dialog).getByText("/mnt/backup/proj"),
+    ).toBeTruthy();
+    expect(
+      within(dialog).getByText("Delete 2 detached sessions from 2 folders?"),
+    ).toBeTruthy();
+  });
+
+  it("singularizes BOTH nouns when one session in one folder is at stake", () => {
+    // Grammar the count must not break: "Delete 1 detached session from 1
+    // folder?" — the wording is otherwise identical.
+    const { dialog } = renderDialog({ count: 1, folders: ["/tmp/beta"] });
+    expect(
+      within(dialog).getByText("Delete 1 detached session from 1 folder?"),
+    ).toBeTruthy();
+    expect(
+      within(dialog).getByRole("button", { name: "Delete 1 session" }),
+    ).toBeTruthy();
+  });
+
+  it("pluralizes both nouns once either count passes one", () => {
+    // ONE session spread over TWO folders still reads "2 folders" — each noun
+    // agrees with its OWN number.
+    const { dialog } = renderDialog({
+      count: 1,
+      folders: ["/tmp/beta", "/tmp/gamma"],
+    });
+    expect(
+      within(dialog).getByText("Delete 1 detached session from 2 folders?"),
+    ).toBeTruthy();
   });
 
   it("labels the destructive button with the count", () => {

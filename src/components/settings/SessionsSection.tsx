@@ -43,7 +43,7 @@ function relativeTimeFor(
  * `SettingsRow` is a label/control grid for a preference, and this is a list of
  * data. The full path is on the row because this section is cross-Space — the
  * path is the one thing that says which folder a row came from (the confirm
- * dialog, which only asks how wide the sweep is, gets the folder names).
+ * dialog, which only asks how wide the sweep is, gets those same full paths).
  */
 function DetachedSessionRow({
   row,
@@ -145,10 +145,16 @@ export default function SessionsSection({
     [spaces, historySessions, archivedSessions, sessions],
   );
 
-  /** DISTINCT folder names for the confirm (the rows show full paths; the
-   * dialog counts folders). */
-  const folderNames = useMemo(
-    () => [...new Set(detached.map((row) => basenameOfPath(row.cwd)))],
+  /**
+   * The DISTINCT folder PATHS of the detached rows, for the confirm dialog.
+   * Full paths and NOT base names on purpose: two different folders can share
+   * a base name (`/home/alice/proj` and `/mnt/backup/proj`), and deduping by
+   * base name would collapse them into one entry — undercounting the very
+   * number this dialog exists to state. The rows keep showing `basenameOfPath`
+   * for their title/space-name; only the dialog's list carries the path.
+   */
+  const folders = useMemo(
+    () => [...new Set(detached.map((row) => row.cwd))],
     [detached],
   );
 
@@ -211,7 +217,7 @@ export default function SessionsSection({
       {clearOpen && (
         <ClearDetachedSessionsDialog
           count={detached.length}
-          folderNames={folderNames}
+          folders={folders}
           onConfirm={() => void clearAll()}
           onClose={() => setClearOpen(false)}
         />

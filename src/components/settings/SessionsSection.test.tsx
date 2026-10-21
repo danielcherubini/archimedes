@@ -106,6 +106,10 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  // RESTORE THE CLOCK HERE, not at the end of a test body: an assertion that
+  // throws would otherwise skip the restore and leak fake time into every
+  // remaining test in the file (the relative-time test pins `Date.now()`).
+  vi.useRealTimers();
 });
 
 describe("SessionsSection (Settings → Detached sessions)", () => {
@@ -122,6 +126,40 @@ describe("SessionsSection (Settings → Detached sessions)", () => {
     // The integration pin: `detachedSessions` excludes `/tmp/alpha`'s rows.
     expect(screen.queryByText("alpha")).toBeNull();
     expect(screen.queryByText("/tmp/alpha")).toBeNull();
+  });
+
+  it("passes the store's LIVE slice as `detachedSessions`' 4th argument, so a live row of a closed Space stays out", () => {
+    // THE 4th-ARGUMENT WIRING PIN (ADR 0043's Close-anyway path). `seed()`
+    // passes an empty live list by default, so this section would stay green
+    // even if the call site dropped the live ids and handed `[]` as
+    // `detachedSessions`' 4th argument. The mutation is only visible when a row
+    // is BOTH stored AND live — the shape Close-anyway leaves behind (an
+    // archived Session that is resumed stays in `archivedSessions` while it is
+    // live), and where the Space tab is closed. ONLY the live-id subtraction
+    // keeps `/tmp/gamma` out of this list; the space-path filter cannot, because
+    // no Space row carries that path.
+    seed({
+      archivedSessions: [row("live-gamma", "/tmp/gamma", true)],
+      sessions: [row("live-gamma", "/tmp/gamma")],
+    });
+    render(<SessionsSection onBack={vi.fn()} />);
+    // The live row is absent by title AND by path text.
+    expect(screen.queryByText("gamma")).toBeNull();
+    expect(screen.queryByText("/tmp/gamma")).toBeNull();
+    // The still-detached stored rows are unaffected — one folder, one session.
+    expect(screen.getByText("beta")).toBeTruthy();
+    expect(screen.getByText("/tmp/beta")).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "Clear all" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Clear all" }));
+    const dialog = screen.getByRole("dialog");
+    // The live row is neither listed nor counted in the blast radius.
+    expect(
+      within(dialog).getByText("Delete 1 detached session from 1 folder?"),
+    ).toBeTruthy();
+    expect(within(dialog).queryByText("/tmp/gamma")).toBeNull();
   });
 
   it("offers Reopen Space and Delete per row", () => {
@@ -163,7 +201,8 @@ describe("SessionsSection (Settings → Detached sessions)", () => {
     expect(
       within(rowRootFor("/tmp/gamma")).queryByText(/^(now|\d+m|\d+h)$/),
     ).toBeNull();
-    vi.useRealTimers();
+    // The clock is restored by the file's `afterEach`, so a throw above cannot
+    // leak fake time into the tests that follow.
   });
 
   it("shows the empty state and disables Clear all when nothing is detached", () => {
@@ -188,6 +227,35 @@ describe("SessionsSection (Settings → Detached sessions)", () => {
       (screen.getByRole("button", { name: "Clear all" }) as HTMLButtonElement)
         .disabled,
     ).toBe(false);
+  });
+
+  it("counts two folders that share a base name as TWO folders, and lists both paths", () => {
+    // The confirm's whole job is to name the blast radius. `/home/alice/proj`
+    // and `/mnt/backup/proj` are DIFFERENT folders that share a base name, so
+    // deduping by base name would read "…from 1 folders?" and list `proj` once
+    // — an understated count on the app's widest destructive action.
+    seed({
+      historySessions: [
+        row("h-alpha", "/tmp/alpha"),
+        row("h-alice-proj", "/home/alice/proj"),
+        row("h-backup-proj", "/mnt/backup/proj"),
+      ],
+      archivedSessions: [],
+    });
+    render(<SessionsSection onBack={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Clear all" }));
+    const dialog = screen.getByRole("dialog");
+    expect(
+      within(dialog).getByText("Delete 2 detached sessions from 2 folders?"),
+    ).toBeTruthy();
+    // Both FULL paths are listed (sorted), not one collapsed base name.
+    expect(
+      within(dialog)
+        .getAllByText(/\//)
+        .filter((node) => node.textContent?.endsWith("proj"))
+        .map((node) => node.textContent),
+    ).toEqual(["/home/alice/proj", "/mnt/backup/proj"]);
+    expect(within(dialog).queryByText("proj")).toBeNull();
   });
 
   it("Clear all confirms with both counts, then deletes every listed row and closes", async () => {
