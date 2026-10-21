@@ -339,6 +339,13 @@ function seed(): void {
       { sessionId: "h1", cwd: "/tmp/alpha", capabilities: {}, archived: false },
       { sessionId: "h2", cwd: "/tmp/beta", capabilities: {}, archived: false },
     ],
+    // Reset ALONGSIDE the other lists. `seedArchivedElsewhere` APPENDS archived
+    // rows (it is the file's first appending seed), so without this line a test's
+    // `/tmp/beta` rows leak into every later test — and because the Archived
+    // section now filters by the active Space, a leaked row of another Space is
+    // filtered OUT rather than surfacing as a stray row, so the leak would be
+    // invisible exactly when it starts to bite.
+    archivedSessions: [],
     activeSessionId: "s1",
     // The selected space (the top tabs' state): `alpha` — the active
     // session's space (the sidebar lists THIS space's sessions).
@@ -1918,13 +1925,111 @@ describe("SpacesList (archive, ADR 0016)", () => {
     // The header renders (with the count badge) even when collapsed…
     expect(screen.getByText("Archived")).toBeTruthy();
     expect(screen.getByText("1")).toBeTruthy();
-    // …and the row is NOT rendered while collapsed. (The row's title
-    // carries a `· alpha` suffix as a nested span, so match on a
-    // prefix, not the exact title text.)
+    // …and the row is NOT rendered while collapsed. (The prefix match is
+    // retained from when the title carried a `· alpha` suffix span; the span is
+    // gone now that the section is Space-scoped, but the assertion still reads.)
     expect(screen.queryByText(/^Archive the logs/)).toBeNull();
     // Expanding the section (clicking the header) reveals the row.
     fireEvent.click(screen.getByText("Archived"));
     expect(screen.getByText(/^Archive the logs/)).toBeTruthy();
+  });
+
+  /** One archived row of ANOTHER Space (`/tmp/beta`), appended to whatever the
+   * store already holds. A generated `title` so the row's text is queryable
+   * without seeding a transcript for it.
+   *
+   * APPENDS (it reads the store's current `archivedSessions` and adds to it), so
+   * it is order-sensitive relative to `seed()`: call it AFTER the seed (or after
+   * any other archived seeding) whose rows you mean to keep alongside, and note
+   * that `seed()` — called from the file's `beforeEach` — resets
+   * `archivedSessions` to `[]`, so nothing survives from an earlier test. */
+  function seedArchivedElsewhere(
+    id: string,
+    title: string,
+    cwd: string = "/tmp/beta",
+  ): void {
+    useSessions.setState((s) => ({
+      archivedSessions: [
+        ...s.archivedSessions,
+        { sessionId: id, cwd, capabilities: {}, archived: true, title },
+      ],
+    }));
+  }
+
+  it("lists ONLY the active Space's archived rows (another Space's row renders nowhere)", () => {
+    // The section is Space-scoped (ADR 0016, amended 2026-10-21): `beta` has an
+    // open tab but is NOT the selected Space, so its archived row renders in no
+    // group of this sidebar at all (a row of a Space with NO tab is in the same
+    // boat — it is **Detached** and lives in Settings → Detached sessions, and
+    // there is deliberately NO fallback listing here).
+    seedArchived("a1", {
+      messages: { text: "Archive the logs", at: Date.now() - 3_600_000 },
+    });
+    seedArchivedElsewhere("b1", "Beta archived work");
+    // A GENUINELY Detached row: `/tmp/detached` matches NO entry in the file's
+    // `spaces` fixture (seed() opens `/tmp/alpha` and `/tmp/beta` only), so this
+    // is the case the component's doc comment calls out — no tab, therefore no
+    // fallback listing anywhere in the sidebar.
+    seedArchivedElsewhere("d1", "Detached archived work", "/tmp/detached");
+    // `activeSpacePath` is `/tmp/alpha` (the file's `seed()` fixture).
+    render(<SpacesList />);
+    fireEvent.click(screen.getByText("Archived"));
+    // The active Space's row is there…
+    expect(screen.getByText(/^Archive the logs/)).toBeTruthy();
+    // …and the other Space's row is absent from the WHOLE document, not merely
+    // from the section (it must not be re-filed into a Space group either).
+    expect(screen.queryByText("Beta archived work")).toBeNull();
+    // …and so is the Detached row: with no Space of its own it is listed ONLY in
+    // Settings → Detached sessions.
+    expect(screen.queryByText("Detached archived work")).toBeNull();
+  });
+
+  it("the header count counts the active Space's rows only", () => {
+    // One `alpha` row + two `beta` rows: the badge reads 1, not 3 — the count is
+    // the SAME predicate the rows are filtered by, so the header cannot advertise
+    // rows the expanded section will not show.
+    //
+    // The `alpha` row carries a message so its label is queryable (an untitled,
+    // transcript-less row falls back to the SPACE name, which other rows render
+    // too and which would make the row-count assertion below ambiguous).
+    seedArchived("a1", {
+      messages: { text: "Trimming the archived logs", at: Date.now() - 3_600_000 },
+    });
+    seedArchivedElsewhere("b1", "Beta archived work one");
+    seedArchivedElsewhere("b2", "Beta archived work two");
+    render(<SpacesList />);
+    // Scoped to the header row (`rowOf`): a bare `getByText("1")` would match a
+    // count anywhere else in the pane.
+    expect(rowOf("Archived").getByText("1")).toBeTruthy();
+    expect(rowOf("Archived").queryByText("3")).toBeNull();
+    // THE JOINT PROPERTY, in ONE render: the badge's `1` is the number of rows
+    // the expanded section actually shows. Both derive from the same `visible`
+    // array today, so nothing here fails on the current code — this pins the
+    // refactor that SPLITS the two (a count computed before the filter, or a row
+    // list filtered differently from the badge) and would otherwise show a
+    // header advertising rows that never appear.
+    fireEvent.click(screen.getByText("Archived"));
+    // Exactly ONE rendered row for the active Space (length, not mere presence —
+    // a duplicated row would break the equality with the badge)…
+    expect(screen.getAllByText(/^Trimming the archived logs/)).toHaveLength(1);
+    // …and NEITHER of the two `beta` rows the badge refused to count is rendered.
+    expect(screen.queryByText("Beta archived work one")).toBeNull();
+    expect(screen.queryByText("Beta archived work two")).toBeNull();
+  });
+
+  it("renders the empty state with NO Space selected, even though archived rows exist", () => {
+    // `cwd === activeSpacePath` matches nothing when no Space is selected, which
+    // is honest: those rows are Detached (CONTEXT.md) and live in Settings →
+    // Detached sessions. The section still renders (header + empty state) rather
+    // than silently disappearing.
+    seedArchived("a1", {
+      messages: { text: "Archive the logs", at: Date.now() - 3_600_000 },
+    });
+    useSessions.setState({ activeSpacePath: null });
+    render(<SpacesList />);
+    fireEvent.click(screen.getByText("Archived"));
+    expect(screen.getByText("No archived sessions.")).toBeTruthy();
+    expect(screen.queryByText(/^Archive the logs/)).toBeNull();
   });
 
   it("unarchive moves the row back", async () => {
@@ -1975,7 +2080,9 @@ describe("SpacesList (archive, ADR 0016)", () => {
     fireEvent.click(screen.getByText("Archived"));
     // The row renders exactly ONCE — as the live row in its Space group
     // (the sticky live id is view-filtered out of the Archived section).
-    // Prefix match: the row's title carries a `· alpha` suffix span.
+    // Prefix match retained from when the row's title carried a `· alpha`
+    // suffix span (that span is gone — the section is Space-scoped now); the
+    // count is what this test pins.
     expect(screen.getAllByText(/^Both lists/)).toHaveLength(1);
   });
 
@@ -2550,17 +2657,23 @@ describe("SpacesList (the generated session title)", () => {
     expect(screen.queryByText("Fix the login bug")).toBeNull();
   });
 
-  it("shows the titled archived row as `{title} · {spaceName}` (the space cue stays for a GENERATED title)", () => {
-    // The suffix rule is about the SPACE CUE, not about the title's origin:
-    // the row sits inside the Archived section, where which Space it belongs
-    // to is the one thing the section itself does not say. A generated title
-    // is never the space name, so the cue still shows.
+  it("shows the titled archived row as the bare title (the Space cue is gone — the section is Space-scoped)", () => {
+    // The `· {spaceName}` suffix existed only because the section used to be a
+    // cross-space flat list, where which Space a row belonged to was the one
+    // thing the row could not omit. Scoped to the active Space, a row can never
+    // belong to another Space, so the suffix is dead weight and the title span
+    // holds the title ALONE.
+    //
+    // EXACT match (not the old `/^Archiving the log rotation/` prefix regex):
+    // the prefix form existed only because the suffix was a SECOND nested span.
+    // A prefix regex would let a re-added suffix throw on a multi-node match
+    // instead of failing the assertion below.
     seedArchivedTitled("Archiving the log rotation");
     render(<SpacesList />);
     fireEvent.click(screen.getByText("Archived"));
-    expect(screen.getByText(/^Archiving the log rotation/).textContent).toBe(
-      "Archiving the log rotation · alpha",
-    );
+    const title = screen.getByText("Archiving the log rotation");
+    expect(title.textContent).toBe("Archiving the log rotation");
+    expect(title.textContent).not.toContain("·");
   });
 
   it("names the delete-confirmation dialog by the generated title", () => {

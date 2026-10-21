@@ -19,6 +19,7 @@ import {
   type AppSettings,
 } from "@/lib/tauri";
 import { brailleLoaderVariants } from "@/lib/braille-loader";
+import { useSessions } from "@/store/sessions";
 import { getAppInfo } from "@/lib/version";
 import { humanizeVariant } from "./primitives";
 
@@ -1522,6 +1523,7 @@ describe("SettingsPage (the Updates section — ADR 0053)", () => {
       "Appearance",
       "Providers",
       "MCP",
+      "Detached sessions",
       "Web search",
       "Updates",
     ]);
@@ -1557,6 +1559,47 @@ describe("SettingsPage (the Updates section — ADR 0053)", () => {
         "Configure Search providers and proxy for web_search and fetch_content tools.",
       ),
     ).toBeTruthy();
+  });
+});
+
+describe("SettingsPage (the Detached sessions section — ADR 0016 amended)", () => {
+  // NOT routed through this file's `go` helper: its final `else` arm awaits the
+  // MCP section's `Add server` button, so a new member would fall through to it
+  // and time out. The nav button is clicked directly and this section's OWN
+  // text is awaited.
+  //
+  // The store is seeded IN THIS TEST's body: this file seeds `getSettings` but
+  // not `useSessions`, and several earlier tests call
+  // `useSessions.getState().loadSession()`, so the sessions store is NOT
+  // reliably empty by the time a later test runs.
+  it("selecting Detached sessions renders the section, and General still renders after going back", async () => {
+    useSessions.setState({
+      spaces: [],
+      sessions: [],
+      historySessions: [],
+      archivedSessions: [],
+      messages: {},
+    });
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    fireEvent.click(screen.getByRole("button", { name: "Detached sessions" }));
+    // The empty state (zero detached rows). `Clear all` is deliberately NOT
+    // asserted enabled here — it is disabled at zero rows (the behaviour is
+    // pinned in `SessionsSection.test.tsx`).
+    expect(
+      await screen.findByText(/^No detached sessions\./),
+    ).toBeTruthy();
+    // The previous section's content is gone (one arm renders at a time) — and
+    // Updates is still reachable, i.e. the new arm did not swallow it.
+    expect(screen.queryByText("Default model")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Updates" }));
+    expect(
+      await screen.findByRole("button", { name: "Check for updates" }),
+    ).toBeTruthy();
+    // And back out to General.
+    fireEvent.click(screen.getByRole("button", { name: "General" }));
+    expect(await screen.findByText("Default model")).toBeTruthy();
+    expect(screen.queryByText(/^No detached sessions\./)).toBeNull();
   });
 });
 

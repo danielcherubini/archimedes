@@ -3,6 +3,7 @@ import type { ReactElement } from "react";
 import {
   ArrowLeftIcon,
   DownloadIcon,
+  FolderXIcon,
   GlobeIcon,
   PackageIcon,
   PaletteIcon,
@@ -36,12 +37,22 @@ import ProviderSection from "./ProviderSection";
 import UpdateSection from "./UpdateSection";
 import McpSection, { type McpDraft } from "./McpSection";
 import WebSearchSection from "./WebSearchSection";
+import SessionsSection from "./SessionsSection";
 
+/**
+ * The section discriminator. `"sessions"` is the SHORT slug and it is never
+ * rendered — the nav label is `Detached sessions`, which is what the user reads
+ * (the section lists only sessions with no open Space, so a nav entry called
+ * `Sessions` would promise the full list and show a partial one; and a button
+ * whose text were exactly `Sessions` would collide with `App.test.tsx`'s pin
+ * that the workspace UNMOUNTS while Settings is open).
+ */
 type Section =
   | "general"
   | "appearance"
   | "providers"
   | "mcp"
+  | "sessions"
   | "web-search"
   | "updates";
 
@@ -405,6 +416,12 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
     <WebSearchSection settings={settings} onSave={update} />
   );
 
+  // The Detached sessions section takes only `onBack`: it reads the sessions
+  // store directly (no new command, no new fetch — `App` loads the stored rows
+  // at boot and `deleteSession` removes ids from all three lists). Reopen Space
+  // leaves Settings, so it needs the page's own exit.
+  const sessionsSection = <SessionsSection onBack={onBack} />;
+
   // The Updates section takes no props: its version row reads `getAppInfo`
   // itself and its state machine is entirely local (no settings document is
   // involved — an update is not a preference).
@@ -454,6 +471,12 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
                 onClick={() => setSection("mcp")}
               />
               <SettingsSidebarButton
+                icon={FolderXIcon}
+                label="Detached sessions"
+                active={section === "sessions"}
+                onClick={() => setSection("sessions")}
+              />
+              <SettingsSidebarButton
                 icon={GlobeIcon}
                 label="Web search"
                 active={section === "web-search"}
@@ -479,9 +502,11 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
                 ? providersSection
                 : section === "mcp"
                   ? mcpSection
-                  : section === "web-search"
-                    ? webSearchSection
-                    : updatesSection}
+                  : section === "sessions"
+                    ? sessionsSection
+                    : section === "web-search"
+                      ? webSearchSection
+                      : updatesSection}
         </div>
       </section>
     </div>

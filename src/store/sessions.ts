@@ -260,6 +260,51 @@ export function spaceViewFor(
   };
 }
 
+/**
+ * Every **Detached session** — a stored Session whose `cwd` matches no open
+ * **Space** row, so the sidebar (which files every row under a Space) cannot
+ * show it at all (CONTEXT.md; ADR 0016 amendment, 2026-10-21).
+ *
+ * This is a VIEW PROPERTY OF THE SIDEBAR, not of the Session: it changes when
+ * a Space tab is opened or closed, sets no flag, and touches no row —
+ * re-opening the folder makes the row an ordinary Space row again. Closing a
+ * tab *forgets* the Space and deletes nothing (ADR 0043 — `closeSpace` →
+ * `removeSpace` touches no `sessions` row), so these rows are normal, not
+ * corrupt. Archived and unarchived rows both qualify: an unarchived Session of
+ * a closed Space has always been equally invisible.
+ *
+ * The match is the same raw byte-for-byte string equality every other
+ * Space↔session join in this file uses (`liveSessionsInSpace`,
+ * `spaceViewFor`'s `storedSessionIds`/`archivedSessionIds` filters). Do NOT
+ * normalise or canonicalise the path here — a normalised key would silently
+ * disagree with those sites. It is also pure string equality with no
+ * filesystem access: a row whose folder was deleted from disk is simply
+ * another non-match.
+ *
+ * Live ids are excluded (`liveSessions` is the LIVE list, the store's `sessions`
+ * slice — not `historySessions`). Required, not defensive: `CloseSpaceDialog`'s
+ * Close-anyway path calls `closeSpace` with no `stopSessionIds` (ADR 0043), so
+ * a live session with no Space row is reachable.
+ *
+ * Order is the input order — `historySessions` first (stored rows in
+ * `list_sessions` order, most-recently-ACTIVE first), then `archivedSessions`.
+ * Do NOT "fix" this by sorting: `sortByActivity` needs loaded transcripts,
+ * which the consuming Settings section has none of, and `SessionInfo` carries
+ * no `createdAt` (see the ordering note above).
+ */
+export function detachedSessions(
+  spaces: { path: string }[],
+  historySessions: SessionInfo[],
+  archivedSessions: SessionInfo[],
+  liveSessions: SessionInfo[],
+): SessionInfo[] {
+  const spacePaths = new Set(spaces.map((space) => space.path));
+  const liveIds = new Set(liveSessions.map((s) => s.sessionId));
+  return [...historySessions, ...archivedSessions].filter(
+    (s) => !spacePaths.has(s.cwd) && !liveIds.has(s.sessionId),
+  );
+}
+
 interface SessionsState {
   /** Live (in-memory) sessions for this app run. */
   sessions: SessionInfo[];

@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import {
   applySessionUpdate,
   autoSelectActive,
+  detachedSessions,
   discardSessionMessages,
   finalizeSessionMessages,
   INITIAL_HISTORY_PAGE,
@@ -4056,5 +4057,99 @@ describe("history window and pagination (ADR 0066)", () => {
     ]);
     expect(errorSpy).toHaveBeenCalled();
     errorSpy.mockRestore();
+  });
+});
+
+describe("detachedSessions (sessions with no open Space — CONTEXT.md's Detached session)", () => {
+  const stored = (sessionId: string, cwd: string): SessionInfo => ({
+    sessionId,
+    cwd,
+    capabilities: {},
+    archived: false,
+  });
+  const archived = (sessionId: string, cwd: string): SessionInfo => ({
+    sessionId,
+    cwd,
+    capabilities: {},
+    archived: true,
+  });
+  const live = (sessionId: string, cwd: string): SessionInfo => ({
+    sessionId,
+    cwd,
+    capabilities: {},
+    archived: false,
+  });
+  const openSpaces = [{ path: "/tmp/alpha" }, { path: "/tmp/beta" }];
+
+  it("excludes a row whose cwd is an open Space", () => {
+    expect(
+      detachedSessions(openSpaces, [stored("h1", "/tmp/alpha")], [], []),
+    ).toEqual([]);
+    expect(
+      detachedSessions(openSpaces, [stored("h1", "/tmp/beta")], [], []),
+    ).toEqual([]);
+  });
+
+  it("returns a row whose cwd matches no Space path, archived or not", () => {
+    const rows = detachedSessions(
+      openSpaces,
+      [stored("h1", "/tmp/gamma")],
+      [archived("a1", "/tmp/delta")],
+      [],
+    );
+    expect(rows.map((r) => r.sessionId)).toEqual(["h1", "a1"]);
+    // The rows themselves are returned (not ids) — the Settings section
+    // renders cwd/title straight off them.
+    expect(rows[0]).toEqual(stored("h1", "/tmp/gamma"));
+    expect(rows[1]).toEqual(archived("a1", "/tmp/delta"));
+  });
+
+  it("excludes a live row even when its cwd matches no Space (the Close-anyway case)", () => {
+    // `closeSpace` removes the Space row and touches no session (ADR 0043),
+    // so a LIVE session with no Space row is reachable, not defensive.
+    const rows = detachedSessions(
+      openSpaces,
+      [stored("h1", "/tmp/gamma")],
+      [archived("a1", "/tmp/delta")],
+      [live("a1", "/tmp/delta")],
+    );
+    expect(rows.map((r) => r.sessionId)).toEqual(["h1"]);
+  });
+
+  it("returns a row whose folder no longer exists on disk (no filesystem access here)", () => {
+    // `/nonexistent/…` is a path that cannot exist — the derivation is pure
+    // string equality, so a deleted folder is just another non-match.
+    const rows = detachedSessions(
+      openSpaces,
+      [stored("gone", "/nonexistent/deleted-folder")],
+      [],
+      [],
+    );
+    expect(rows.map((r) => r.sessionId)).toEqual(["gone"]);
+  });
+
+  it("returns [] when every row belongs to an open Space", () => {
+    expect(
+      detachedSessions(
+        openSpaces,
+        [stored("h1", "/tmp/alpha"), stored("h2", "/tmp/beta")],
+        [archived("a1", "/tmp/alpha")],
+        [],
+      ),
+    ).toEqual([]);
+  });
+
+  it("keeps input order: stored rows first, then archived, neither re-sorted", () => {
+    // `sortByActivity` cannot be used (it needs loaded transcripts, which the
+    // consuming section has none of) and `SessionInfo` carries no `createdAt`,
+    // so the order IS `list_sessions` order for the stored rows followed by the
+    // archived rows in their input order.
+    const rows = detachedSessions(
+      openSpaces,
+      [stored("h2", "/tmp/gamma"), stored("h1", "/tmp/delta")],
+      [archived("a2", "/tmp/epsilon"), archived("a1", "/tmp/gamma")],
+      [],
+    );
+    expect(rows.map((r) => r.sessionId)).toEqual(["h2", "h1", "a2", "a1"]);
   });
 });
