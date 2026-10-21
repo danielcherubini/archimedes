@@ -192,6 +192,17 @@ export default function ChatStream() {
   const spinnerStyle = normalizeVariant(
     useSettings((s) => s.settings?.spinnerStyle ?? "typing"),
   );
+  // The empty-session film's setting (`emptyStateAnimation`): `"off"` /
+  // `"static"` / `"animated"`, with `null` meaning the app default
+  // (`"animated"`) — `EmptyStateFilm` resolves that, so the raw value is what
+  // travels. Read HERE rather than inside `MessageList` for the same reason
+  // `spinnerStyle` is: the transcript component subscribes to no store, so the
+  // film (and the scene chunk behind it) is only ever constructed by a caller
+  // that actually asked for it. `?? null` — not `?? "off"`: an unloaded settings
+  // document must not be reported as an explicit "the user turned it off".
+  const emptyStateAnimation = useSettings(
+    (s) => s.settings?.emptyStateAnimation ?? null,
+  );
   /**
    * (ADR 0031's follow-up) Whether the `#` trigger names an MCP server. The
    * fail-safe default is OFF — `settings` is `null` until the first load
@@ -1883,6 +1894,7 @@ export default function ChatStream() {
         hasMore={hasMore}
         loadingMore={loadingMore}
         generation={generation}
+        emptyStateAnimation={emptyStateAnimation}
         onStartReached={() => {
           if (activeSessionId) void loadOlder(activeSessionId);
         }}

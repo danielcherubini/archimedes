@@ -120,6 +120,71 @@ export function SpinnerStylePicker({
 }
 
 /**
+ * The film's CLOSED vocabulary, in display order — the single source for both
+ * the picker's cells and `AppearanceSection`'s `closedSelectValue` membership
+ * check, so the two can never disagree about what is a legal stored value.
+ * `null` is deliberately absent: it is the stored DEFAULT, not an option, and
+ * it resolves to `animated` (the app default) rather than being its own cell.
+ */
+export const EMPTY_STATE_ANIMATION_OPTIONS = [
+  { value: "off", label: "Off" },
+  { value: "static", label: "Static" },
+  { value: "animated", label: "Animated" },
+] as const;
+
+/**
+ * The empty-session-animation picker (the `Appearance` section): the three
+ * states of the transcript's empty-state film as a 3-column radiogroup.
+ *
+ * The cells are TEXT, not previews: the film is a WebGL scene that only exists
+ * in the transcript, so a live preview would mean running the renderer inside
+ * Settings — the opposite of what this control exists to make possible (the
+ * user asking for it to stop). The button styling is `SpinnerStylePicker`'s.
+ *
+ * `value` is the RESOLVED selection (`closedSelectValue` semantics, applied by
+ * the caller): the stored default is `null` and it renders as `animated`, and a
+ * value outside the vocabulary also renders as the default rather than leaving
+ * nothing checked — an unchecked radiogroup would misreport what is on screen.
+ * Every click writes a real vocabulary value, so a page that is only opened
+ * never rewrites the file.
+ */
+export function EmptyStateAnimationPicker({
+  value,
+  onChange,
+  ariaLabel = "Empty-session animation",
+}: {
+  value: string | null;
+  onChange: (setting: "off" | "static" | "animated") => void;
+  ariaLabel?: string;
+}): ReactElement {
+  return (
+    <div role="radiogroup" aria-label={ariaLabel} className="grid grid-cols-3 gap-1.5">
+      {EMPTY_STATE_ANIMATION_OPTIONS.map((option) => {
+        const selected = value === option.value;
+        return (
+          <button
+            key={option.value}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            aria-label={option.label}
+            onClick={() => onChange(option.value)}
+            className={cn(
+              "flex items-center justify-center rounded-md border px-2 py-1.5 text-[10px] leading-none transition-colors",
+              selected
+                ? "border-primary bg-primary/10"
+                : "border-border hover:bg-muted",
+            )}
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
  * A provider text field (immediate save): a local draft that commits on
  * blur/Enter ONLY when the value actually changed (a no-change blur saves
  * nothing and re-runs no discovery).

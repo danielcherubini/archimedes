@@ -2149,6 +2149,133 @@ describe("Appearance: thinking spinner", () => {
   });
 });
 
+describe("Appearance: empty-session animation", () => {
+  // The film's control (WCAG 2.2.2: motion that runs on its own needs a way to
+  // be stopped, so the setting has to be reachable without editing a file). It
+  // is a THREE-cell radiogroup beside the spinner picker, and its vocabulary is
+  // closed (`"off"` / `"static"` / `"animated"`) with `null` as the stored
+  // default — so `null` reads back as Animated, exactly as `closedSelectValue`
+  // renders an off-list value as the default rather than re-saving it.
+  /** The three cells of the film's radiogroup, scoped — the spinner picker
+   * above also answers to `role="radio"`, so an unscoped query is ambiguous. */
+  function filmRadios(): Record<"Off" | "Static" | "Animated", HTMLButtonElement> {
+    const group = screen.getByRole("radiogroup", {
+      name: "Empty-session animation",
+    });
+    return {
+      Off: within(group).getByRole("radio", {
+        name: "Off",
+      }) as HTMLButtonElement,
+      Static: within(group).getByRole("radio", {
+        name: "Static",
+      }) as HTMLButtonElement,
+      Animated: within(group).getByRole("radio", {
+        name: "Animated",
+      }) as HTMLButtonElement,
+    };
+  }
+
+  it("renders the row with Animated selected while the setting is null", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    await go("Appearance");
+    expect(
+      screen.getByText("Empty-session animation"),
+    ).toBeTruthy();
+    const radios = filmRadios();
+    // `null` is the app default, which IS animated — so the cell that matches
+    // what is on screen is Animated, not Off.
+    expect(radios.Animated.getAttribute("aria-checked")).toBe("true");
+    expect(radios.Static.getAttribute("aria-checked")).toBe("false");
+    expect(radios.Off.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("selects the stored value for each of the three vocabulary values", async () => {
+    const expected = {
+      off: "Off",
+      static: "Static",
+      animated: "Animated",
+    } as const;
+    for (const [stored, selected] of Object.entries(expected) as [
+      string,
+      keyof ReturnType<typeof filmRadios>,
+    ][]) {
+      vi.mocked(getSettings).mockResolvedValueOnce({
+        ...baseSettings,
+        emptyStateAnimation: stored,
+      });
+      const { unmount } = render(<SettingsPage onBack={vi.fn()} />);
+      await loaded();
+      await go("Appearance");
+      const radios = filmRadios();
+      for (const key of ["Off", "Static", "Animated"] as const) {
+        expect(
+          radios[key].getAttribute("aria-checked"),
+          `emptyStateAnimation: ${stored} → ${key}`,
+        ).toBe(String(key === selected));
+      }
+      unmount();
+      cleanup();
+    }
+  });
+
+  it("renders Animated selected for a value outside the vocabulary, and saves nothing", async () => {
+    // A hand-edited `"spatial"` follows `closedSelectValue`'s convention: it is
+    // RENDERED as the default (Animated, which is what the film actually shows —
+    // `resolveFilmMode` treats anything unrecognised as the film), and merely
+    // opening the page must not rewrite the user's file.
+    vi.mocked(getSettings).mockResolvedValueOnce({
+      ...baseSettings,
+      emptyStateAnimation: "spatial",
+    });
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    await go("Appearance");
+    expect(filmRadios().Animated.getAttribute("aria-checked")).toBe("true");
+    expect(saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("saves `static` when Static is chosen (immediate save, complete document)", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    await go("Appearance");
+    fireEvent.click(filmRadios().Static);
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(1));
+    const saved = vi.mocked(saveSettings).mock.calls[0][0] as AppSettings;
+    expect(saved.emptyStateAnimation).toBe("static");
+    // Every other key of the document survives the patch.
+    expect(saved.theme).toBe(baseSettings.theme);
+    expect(saved.font).toEqual(baseSettings.font);
+    expect(saved.providers).toEqual(baseSettings.providers);
+    expect(saved.spinnerStyle).toBe(baseSettings.spinnerStyle);
+    expect(Object.keys(saved).sort()).toEqual(Object.keys(baseSettings).sort());
+  });
+
+  it("saves `off` when Off is chosen, and `animated` when Animated is chosen", async () => {
+    // Two directions in one render: starting from the `null` default, Animated is
+    // ALREADY selected, so Radix-style immediate-save controls fire nothing —
+    // Off has to be clicked first to make Animated a real change.
+    // Animated writes the STRING, not `null`: unlike `palette`, whose `null`
+    // keeps `settings.json` minimal, this default is genuinely animated and a
+    // user re-choosing it is an explicit choice worth persisting.
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    await go("Appearance");
+    fireEvent.click(filmRadios().Off);
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(1));
+    expect(
+      (vi.mocked(saveSettings).mock.calls[0][0] as AppSettings)
+        .emptyStateAnimation,
+    ).toBe("off");
+
+    fireEvent.click(filmRadios().Animated);
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(2));
+    const saved = vi.mocked(saveSettings).mock.calls[1][0] as AppSettings;
+    expect(saved.emptyStateAnimation).toBe("animated");
+    expect(saved.theme).toBe(baseSettings.theme);
+  });
+});
+
 describe("a stored value the option list does not offer", () => {
   // The settings document is user-editable and the backend round-trips
   // `palette` / `theme` / the font families UNVALIDATED, so any string can
