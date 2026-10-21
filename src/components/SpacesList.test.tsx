@@ -339,6 +339,13 @@ function seed(): void {
       { sessionId: "h1", cwd: "/tmp/alpha", capabilities: {}, archived: false },
       { sessionId: "h2", cwd: "/tmp/beta", capabilities: {}, archived: false },
     ],
+    // Reset ALONGSIDE the other lists. `seedArchivedElsewhere` APPENDS archived
+    // rows (it is the file's first appending seed), so without this line a test's
+    // `/tmp/beta` rows leak into every later test — and because the Archived
+    // section now filters by the active Space, a leaked row of another Space is
+    // filtered OUT rather than surfacing as a stray row, so the leak would be
+    // invisible exactly when it starts to bite.
+    archivedSessions: [],
     activeSessionId: "s1",
     // The selected space (the top tabs' state): `alpha` — the active
     // session's space (the sidebar lists THIS space's sessions).
@@ -1929,7 +1936,13 @@ describe("SpacesList (archive, ADR 0016)", () => {
 
   /** One archived row of ANOTHER Space (`/tmp/beta`), appended to whatever the
    * store already holds. A generated `title` so the row's text is queryable
-   * without seeding a transcript for it. */
+   * without seeding a transcript for it.
+   *
+   * APPENDS (it reads the store's current `archivedSessions` and adds to it), so
+   * it is order-sensitive relative to `seed()`: call it AFTER the seed (or after
+   * any other archived seeding) whose rows you mean to keep alongside, and note
+   * that `seed()` — called from the file's `beforeEach` — resets
+   * `archivedSessions` to `[]`, so nothing survives from an earlier test. */
   function seedArchivedElsewhere(
     id: string,
     title: string,
@@ -1953,6 +1966,11 @@ describe("SpacesList (archive, ADR 0016)", () => {
       messages: { text: "Archive the logs", at: Date.now() - 3_600_000 },
     });
     seedArchivedElsewhere("b1", "Beta archived work");
+    // A GENUINELY Detached row: `/tmp/detached` matches NO entry in the file's
+    // `spaces` fixture (seed() opens `/tmp/alpha` and `/tmp/beta` only), so this
+    // is the case the component's doc comment calls out — no tab, therefore no
+    // fallback listing anywhere in the sidebar.
+    seedArchivedElsewhere("d1", "Detached archived work", "/tmp/detached");
     // `activeSpacePath` is `/tmp/alpha` (the file's `seed()` fixture).
     render(<SpacesList />);
     fireEvent.click(screen.getByText("Archived"));
@@ -1961,13 +1979,22 @@ describe("SpacesList (archive, ADR 0016)", () => {
     // …and the other Space's row is absent from the WHOLE document, not merely
     // from the section (it must not be re-filed into a Space group either).
     expect(screen.queryByText("Beta archived work")).toBeNull();
+    // …and so is the Detached row: with no Space of its own it is listed ONLY in
+    // Settings → Detached sessions.
+    expect(screen.queryByText("Detached archived work")).toBeNull();
   });
 
   it("the header count counts the active Space's rows only", () => {
     // One `alpha` row + two `beta` rows: the badge reads 1, not 3 — the count is
     // the SAME predicate the rows are filtered by, so the header cannot advertise
     // rows the expanded section will not show.
-    seedArchived();
+    //
+    // The `alpha` row carries a message so its label is queryable (an untitled,
+    // transcript-less row falls back to the SPACE name, which other rows render
+    // too and which would make the row-count assertion below ambiguous).
+    seedArchived("a1", {
+      messages: { text: "Trimming the archived logs", at: Date.now() - 3_600_000 },
+    });
     seedArchivedElsewhere("b1", "Beta archived work one");
     seedArchivedElsewhere("b2", "Beta archived work two");
     render(<SpacesList />);
@@ -1975,6 +2002,19 @@ describe("SpacesList (archive, ADR 0016)", () => {
     // count anywhere else in the pane.
     expect(rowOf("Archived").getByText("1")).toBeTruthy();
     expect(rowOf("Archived").queryByText("3")).toBeNull();
+    // THE JOINT PROPERTY, in ONE render: the badge's `1` is the number of rows
+    // the expanded section actually shows. Both derive from the same `visible`
+    // array today, so nothing here fails on the current code — this pins the
+    // refactor that SPLITS the two (a count computed before the filter, or a row
+    // list filtered differently from the badge) and would otherwise show a
+    // header advertising rows that never appear.
+    fireEvent.click(screen.getByText("Archived"));
+    // Exactly ONE rendered row for the active Space (length, not mere presence —
+    // a duplicated row would break the equality with the badge)…
+    expect(screen.getAllByText(/^Trimming the archived logs/)).toHaveLength(1);
+    // …and NEITHER of the two `beta` rows the badge refused to count is rendered.
+    expect(screen.queryByText("Beta archived work one")).toBeNull();
+    expect(screen.queryByText("Beta archived work two")).toBeNull();
   });
 
   it("renders the empty state with NO Space selected, even though archived rows exist", () => {
