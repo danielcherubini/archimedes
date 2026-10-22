@@ -4,6 +4,7 @@ import MessageBubble from "../MessageBubble";
 import ChangesGroupCard from "../ChangesGroupCard";
 import AskQuestionCard from "../AskQuestionCard";
 import TranscriptFooter, { transcriptFooterIsEmpty } from "./TranscriptFooter";
+import EmptyStateFilm from "./EmptyStateFilm";
 import { Spinner } from "../ui/spinner";
 import type { RenderUnit } from "../../lib/toolGroups";
 import type { PermissionPromptData } from "../../store/permissions";
@@ -84,6 +85,27 @@ export interface MessageListProps {
   loadingMore: boolean;
   generation: number;
   onStartReached: () => void;
+  /**
+   * The empty-session film's setting (`AppSettings.emptyStateAnimation`),
+   * threaded by `ChatStream` from the settings store.
+   *
+   * OPTIONAL, defaulting to `"off"` — deliberately, and load-bearing. Every
+   * pre-existing render of this component in the suite (and every one that
+   * intends no film) omits it, and `"off"` makes `EmptyStateFilm` answer
+   * synchronously with the pre-feature text line: no WebGL probe, no dynamic
+   * `import()` of the scene chunk, no engine. A REQUIRED prop would have to be
+   * added to all of those call sites, and a `null` default would make "the app
+   * default, animated" the default of a component nobody asked for it in.
+   *
+   * Read as a prop and NEVER from the settings store: this component subscribes
+   * to nothing today, and a store subscription would construct the real film in
+   * every existing jsdom test that renders an empty transcript, pulling a WebGL
+   * render loop (and, one careless value import away, `three`) into the graph of
+   * tests that never intended to touch it. `ChatStream` already consumes the
+   * store for `spinnerStyle`, so the reactive path exists above and a Settings
+   * change still lands without a reload.
+   */
+  emptyStateAnimation?: string | null;
 }
 
 /**
@@ -112,6 +134,7 @@ export default function MessageList({
   loadingMore,
   generation,
   onStartReached,
+  emptyStateAnimation = "off",
 }: MessageListProps) {
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const emptyRef = useRef<HTMLDivElement>(null);
@@ -186,14 +209,18 @@ export default function MessageList({
       <div
         ref={emptyRef}
         data-testid="transcript-scroll"
-        className="flex-1 flex flex-col gap-3 overflow-y-auto overflow-x-hidden min-w-0 max-w-full p-4"
+        className="relative flex-1 flex flex-col gap-3 overflow-y-auto overflow-x-hidden min-w-0 max-w-full p-4"
       >
+        {/* The empty-session film, in the hint's old slot and under the hint's
+            old condition (UNCHANGED — these three terms are also what the 7
+            `queryByText("Send a prompt to start").toBeNull()` assertions cover,
+            and `TranscriptFooter` below must keep rendering so a permission or
+            `ask` gate stays visible in an empty session). `relative` on the
+            wrapper is what the film's `absolute inset-0` layer positions
+            against, so the film never adds content height to this `overflow-y-auto`
+            region and the `emptyRef` effect above still owns `scrollTop`. */}
         {!hasPendingRequest && !workingOrInTurn && agentState !== "blocked" && (
-          <div className="flex h-full items-center justify-center">
-            <p className="text-ui-base text-foreground-subtlest">
-              Send a prompt to start
-            </p>
-          </div>
+          <EmptyStateFilm setting={emptyStateAnimation} />
         )}
         <TranscriptFooter
           activeSessionId={activeSessionId}

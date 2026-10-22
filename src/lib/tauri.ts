@@ -571,6 +571,8 @@ export interface AppSettings {
   agentOverrides: AgentOverrides;
   /** The working-indicator spinner style (a `braille-loader` variant name, e.g. `"typing"` / `"pendulum"`); `null` = the `typing` default. */
   spinnerStyle: string | null;
+  /** The empty-state animation (`"off"` / `"static"` / `"animated"`); `null` = the `"animated"` default. `prefers-reduced-motion` may pin `"animated"` to `"static"`, never un-`off` a deliberate `"off"` (ADR 0070). */
+  emptyStateAnimation: string | null;
   /** (ADR 0030) The per-direction file-access policies. The backend ALWAYS emits it (`#[serde(default)]` fills all-`allow` for a pre-feature file), so it is required here; the UI still falls back to all-`allow` if the key is ever absent. */
   filePolicy: FilePolicy;
   /** The web tools' configuration (search API keys, proxy, default Search provider). */

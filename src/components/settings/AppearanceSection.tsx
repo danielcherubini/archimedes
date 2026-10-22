@@ -9,7 +9,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { SettingsGroupCard, SettingsRow, closedSelectValue, openSelectItems } from "./primitives";
-import { FontSizeInput, SpinnerStylePicker } from "./controls";
+import {
+  EMPTY_STATE_ANIMATION_OPTIONS,
+  EmptyStateAnimationPicker,
+  FontSizeInput,
+  SpinnerStylePicker,
+} from "./controls";
 
 /** The Theme picker's options — its CLOSED vocabulary (Radix renders no label
  * for a value outside it), and the single source for both the select's items
@@ -59,6 +64,14 @@ const CODE_FONT_OPTIONS = [
   { value: "Menlo", label: "Menlo" },
   { value: "Consolas", label: "Consolas" },
 ] as const;
+
+/** The Empty-session animation picker's CLOSED vocabulary, derived from the
+ * picker's own option list (`controls.tsx`) so the membership check and the
+ * cells are one document. `null` is not in it — it is the stored default, and it
+ * resolves to `"animated"` (ADR 0070's app default). */
+const FILM_ANIMATION_VALUES = EMPTY_STATE_ANIMATION_OPTIONS.map(
+  (option) => option.value,
+);
 
 /** The Appearance section's props (every piece of state stays in `SettingsPage`). */
 interface AppearanceSectionProps {
@@ -225,6 +238,28 @@ export default function AppearanceSection({
           <SpinnerStylePicker
             value={settings.spinnerStyle ?? "typing"}
             onChange={(spinnerStyle) => onSave({ spinnerStyle })}
+          />
+        }
+      />
+      <SettingsRow
+        label="Empty-session animation"
+        description="The animation the transcript shows when a session has no messages yet. Reduced-motion settings always stop it."
+        controlLayout="wide"
+        control={
+          // The vocabulary is CLOSED (`off` / `static` / `animated`) and the
+          // stored default is `null`, so `closedSelectValue`'s rule applies: an
+          // off-list value (a hand-edited `"spatial"`) reads back as the
+          // default — Animated, which is what `resolveFilmMode` actually shows —
+          // and is rendered, never re-saved. Each click writes a real value:
+          // unlike `palette`'s `null` sentinel, Animated writing `"animated"` is
+          // the user's explicit choice and this default is genuinely animated.
+          <EmptyStateAnimationPicker
+            value={closedSelectValue(
+              settings.emptyStateAnimation,
+              FILM_ANIMATION_VALUES,
+              "animated",
+            )}
+            onChange={(emptyStateAnimation) => onSave({ emptyStateAnimation })}
           />
         }
       />
