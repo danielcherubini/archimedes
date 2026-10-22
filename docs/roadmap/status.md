@@ -97,8 +97,9 @@ says otherwise. A task is not `done` until both commands are green.
 
 Plan status: **Phase A COMPLETE** (A0–A6 done). **Phase B planned and vetted** — B4a, B1, B2, B3 (order deliberately B4a first: it is the task that makes the others cheap to test). See `docs/roadmap/frontend-component-extraction.md` §Phase B.
 
-**Current suite size: 125 files / 2720 tests** (121/2650 at baseline; A0 +1/0, A1 +1/+10,
-A2 +1/+27, A3 +1/+7, A4 +0/+3, A5 +0/+2, A6 −1/−4 for the deleted `ids.test.ts`, B4a +1/+25).
+**Current suite size: 126 files / 2743 tests** (121/2650 at baseline; A0 +1/0, A1 +1/+10,
+A2 +1/+27, A3 +1/+7, A4 +0/+3, A5 +0/+2, A6 −1/−4 for the deleted `ids.test.ts`, B4a +1/+25,
+B1 +1/+23).
 `SubagentDelegatingCard.tsx` is now 424 code lines (was 696).
 
 **There is NO prettier/eslint/biome gate in this repo** — verified `package.json` and
@@ -126,7 +127,7 @@ every other task cheap to test, and B1's new tests want session fixtures that do
 | # | Task | Finding | Status |
 |---|------|---------|--------|
 | B4a | `src/test/fixtures/*` + `resetStores()` (+ `renderWithProviders` **only if need is proven**) | 9 | **`done`** `5131bda` |
-| B1 | `src/lib/sessionLookup.ts` → `sessionFieldOf` (plain fn, NOT a hook) | 8 | `todo` |
+| B1 | `src/lib/sessionLookup.ts` → `sessionFieldOf` (plain fn, NOT a hook) | 8 | **`done`** `58c52f9` |
 | B2 | `src/lib/ipc/events.ts` — event names (all 12 wrappers) + payload discriminants | 12b | `todo` |
 | B3 | `src/lib/sessionTypes.ts` + drop store re-export barrel + `verbatimModuleSyntax` | 13b | `todo` |
 
@@ -201,6 +202,18 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   a per-tab close button, and this UI is deliberately browser-style closable tabs. A tablist
   with sibling controls beats orphaned `role="tab"`s. Not to be "fixed" later by
   restructuring the pill or adopting Radix Tabs.
+- **2026-10-22 — B1: acceptance greps must be run TWICE, and one criterion was too strict.**
+  `historySessions.find` alone misses any walk written as a local `titleOf(rows)` helper — so the
+  criterion is that grep **plus** a `titleOf`-shaped check plus an `archivedSessions` review. Also:
+  "only the field declarations remain" for `archivedSessions` is unachievable and wrong — whole-list
+  reads (`s.archivedSessions` as an array, feeding the Archived section's rendering) are legitimate
+  and are not finding 8's duplication. The criterion is now "no per-id walk", not "no mentions".
+- **2026-10-22 — B1: what is NOT a three-list walk (do not fold these later).** The live-only
+  liveness tests (`SessionConfigBlock.tsx:83`, `SpacesList.tsx:809`, `useSessionStatus.ts:83`,
+  `ChatStream.tsx:110`) read only `sessions`; `ChatStream.tsx:1197` is a post-resume `getState()`
+  read of the *fresh live* row and must keep bypassing stored data; `attention.ts:445` takes a
+  caller-built `[...sessions, ...historySessions]` snapshot with no archived access and its own
+  documented contract. Folding any of these into `sessionFieldOf` would change behaviour.
 - **2026-10-22 — B4a: `renderWithProviders` is DEAD ON ARRIVAL, do not build it later.** The child
   disproved the need with evidence (no query/redux/swr/trpc/intl in `package.json`; only two
   contexts in `src/`, one deliberately rendering unmounted, the other owned by the compound
@@ -292,6 +305,11 @@ Record every autonomous decision here so a later iteration does not re-litigate 
 
 ## Changelog
 
+- `2026-10-22` — **B1 done** (`58c52f9`). 126 files / 2743 tests green; build green. Verified
+  independently: both greps at 0 hits, `git diff` removes 0 assertions, and `sessionFieldOf` is
+  typed to return the field, not the row. Child mutation-tested: dropping archived −5, reordering
+  −3, returning the row −16, synthesizing `[]` −3. Six walks folded (incl. the grep-invisible
+  `SpacesList.tsx:818`), three near-misses correctly left alone.
 - `2026-10-22` — **B4a done** (`5131bda`). 125 files / 2720 tests green; build green. Verified
   independently: `git diff | grep -c '^\-\s*expect('` is **0** (no assertion removed), and
   `resetStores` uses `getInitialState()` + `replace = true` rather than a hand-written shape.
