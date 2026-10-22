@@ -46,6 +46,8 @@ import { setSidePaneCollapsed } from "../lib/sidePaneState";
 import * as chatAttachments from "../lib/chatAttachments";
 import { activeMentionToken, isOutsideSpaceQuery } from "../lib/skills";
 import { MAX_CHAT_ATTACHMENTS, type ChatComposerAttachment } from "../lib/chatAttachments";
+import { makeSessionRow, makeSettings, makeSpaceRow } from "../test/fixtures";
+import { resetStores } from "../test/resetStores";
 
 /**
  * The monospace advance as a fraction of font size, used to turn a braille
@@ -57,38 +59,11 @@ import { MAX_CHAT_ATTACHMENTS, type ChatComposerAttachment } from "../lib/chatAt
  */
 const MONO_ADVANCE_EM = 0.6;
 
-/** A full settings fixture (the spinner-style tests seed the store with it). */
-const SETTINGS_FIXTURE: AppSettings = {
-  theme: "dark",
-  palette: null,
-  paneLayout: {},
-  defaultTrustNewSpaces: false,
-  defaultModel: null,
-  defaultThinkingLevel: null,
-  enabledTools: [],
-  providers: [],
-  mcpServers: {},
-  font: { sizePx: 14, uiFamily: null, codeFamily: null },
-  defaultThinkingLevels: {},
-  agentOverrides: {},
-  spinnerStyle: null,
-  emptyStateAnimation: null,
-  filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
-  web: {
-    braveApiKey: "",
-    tavilyApiKey: "",
-    perplexityApiKey: "",
-    searxngUrl: "",
-    defaultProvider: "auto",
-    proxy: "",
-  },
-  mcpMentionsEnabled: false,
-  sessionNamingEnabled: true,
-  sessionNamingModel: null,
-  sessionNamingReasoning: null,
-  attentionAlertsEnabled: true,
-  attentionAlertDelaySecs: 15,
-};
+/** A full settings fixture (the spinner-style tests seed the store with it).
+ *  The shared fixture — this file's 22-field literal was byte-identical to
+ *  `DEFAULT_SETTINGS`, which is the drift `src/test/fixtures/settings.ts`
+ *  exists to make a compile error instead of a silent copy. */
+const SETTINGS_FIXTURE: AppSettings = makeSettings();
 
 /**
  * Seed the settings store with the `#` MCP-mention trigger ENABLED.
@@ -252,14 +227,16 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 /**
  * Seed a live session (fresh transcript) in the sessions store.
+ *
+ * The rows and the Space come from `src/test/fixtures` (the rolling migration)
+ * — the literals they replace were byte-identical to the fixture defaults plus
+ * an override, so nothing about the seeded state changed.
  */
 function seedLiveSession(): void {
   useSessions.setState({
     activeSessionId: "s1",
-    sessions: [
-      { sessionId: "s1", cwd: "/home/u/proj", capabilities: {}, archived: false },
-    ],
-    spaces: [{ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1, trusted: false }],
+    sessions: [makeSessionRow({ sessionId: "s1", cwd: "/home/u/proj" })],
+    spaces: [makeSpaceRow({ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1 })],
     historySessions: [],
     messages: { s1: [] },
     inTurn: {},
@@ -281,9 +258,9 @@ function seedStoredSession(
   useSessions.setState({
     activeSessionId: "s1",
     sessions: [],
-    spaces: [{ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1, trusted: false }],
+    spaces: [makeSpaceRow({ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1 })],
     historySessions: [
-      { sessionId: "s1", cwd: "/home/u/proj", capabilities, archived: false },
+      makeSessionRow({ sessionId: "s1", cwd: "/home/u/proj", capabilities }),
     ],
     messages: { s1: [] },
     inTurn: {},
@@ -304,10 +281,15 @@ function seedArchivedSession(
   useSessions.setState({
     activeSessionId: "s9",
     sessions: [],
-    spaces: [{ path: "/home/u/arch", createdAt: 1, lastOpenedAt: 1, trusted: false }],
+    spaces: [makeSpaceRow({ path: "/home/u/arch", createdAt: 1, lastOpenedAt: 1 })],
     historySessions: [],
     archivedSessions: [
-      { sessionId: "s9", cwd: "/home/u/arch", capabilities, archived: true },
+      makeSessionRow({
+        sessionId: "s9",
+        cwd: "/home/u/arch",
+        capabilities,
+        archived: true,
+      }),
     ],
     messages: { s9: [] },
     inTurn: {},
@@ -325,14 +307,13 @@ function seedLiveSessionWithImages(): void {
   useSessions.setState({
     activeSessionId: "s1",
     sessions: [
-      {
+      makeSessionRow({
         sessionId: "s1",
         cwd: "/home/u/proj",
         capabilities: { promptCapabilities: { image: true } },
-        archived: false,
-      },
+      }),
     ],
-    spaces: [{ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1, trusted: false }],
+    spaces: [makeSpaceRow({ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1 })],
     historySessions: [],
     messages: { s1: [] },
     inTurn: {},
@@ -444,27 +425,17 @@ beforeEach(() => {
   // re-fetch).
   clearSkillCatalogCache();
   clearMentionCatalogsCache();
-  useSessions.setState({
-    activeSessionId: null,
-    sessions: [],
-    historySessions: [],
-    archivedSessions: [],
-    spaces: [],
-    messages: {},
-    inTurn: {},
-    stopReasons: {},
-    closeReasons: {},
-    configOptions: {},
-    compacting: {},
-  });
-  useInteractive.getState().dismissSession("s1");
-  usePermissions.getState().dismissSessionPrompts("s1");
-  for (const id of Object.keys(useSubagents.getState().entries)) {
-    useSubagents.getState().dismiss(id);
-  }
-  useInteractive.getState().dismissSession("sub1");
-  usePermissions.getState().dismissSessionPrompts("sub1");
-  useSettings.setState({ settings: null, loaded: false });
+  // Every store back to zustand's own captured initial state (the rolling
+  // migration). This replaces a hand-written 11-key `useSessions` reset — the
+  // store has SIXTEEN data fields, so `history`, `contextUsage`, `stalled`,
+  // `newSessionError` and friends used to leak from one test to the next — plus
+  // the per-id `dismiss*` calls (a whole-store replace already covers them) and
+  // the settings reset (whose values ARE the initial state).
+  //
+  // The queued-prompt loop ABOVE still runs first and is NOT redundant: its
+  // `clearSession` releases staged object URLs, a side effect a state replace
+  // cannot perform.
+  resetStores();
 });
 
 describe("ChatStream", () => {

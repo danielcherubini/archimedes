@@ -9,9 +9,12 @@ import type { Message } from "../store/sessions";
  * sidebar's rows, the close-confirm's list of open Sessions, …) — a label that
  * disagrees with the row it names is worse than no label, which is the same
  * reasoning that put the side pane's rail marks and its panel on one
- * derivation. (`SidePane`'s header still carries its own inline copy, reading
- * the title from all three session arrays; folding it in here is a separate
- * change, not one to slip in beside a tab bar's ✕.)
+ * derivation. (`SidePane`'s header and `SpacesList`'s row used to carry their
+ *  own inline copies of the TITLE LOOKUP; that walk now has one owner,
+ *  `sessionFieldOf` in `lib/sessionLookup.ts`, which they call from inside their
+ *  selectors. The two are still separate on purpose: this function owns the
+ *  LABEL (title → prompt truncation → folder name), the lookup owns WHERE the
+ *  title comes from.)
  *
  * `""` is no title (the backend never writes one; a generated title is cleaned
  * to a non-empty string or not written at all).

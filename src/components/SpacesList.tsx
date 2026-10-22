@@ -30,6 +30,7 @@ import {
   saveSettings,
 } from "../lib/tauri";
 import { basenameOfPath } from "../lib/paths";
+import { sessionFieldOf } from "../lib/sessionLookup";
 import {
   activityFromKey,
   activityKeyOf,
@@ -810,20 +811,13 @@ function SessionRow({
   // The row's generated title, read by id: `SessionRow` is given an id (by
   // design — its parent holds `liveSessionIds` / `storedSessionIds`, never the
   // rows), so no `SessionInfo` is threaded through `SpaceView` for it. The
-  // selector returns a PRIMITIVE over the three-list walk (a `sessions` /
-  // history / archived row): zustand v5 re-runs a selector that yields a
-  // fresh OBJECT on every snapshot read, so `{ … }` here would re-render the
-  // row forever — and it is the SAME walk the `cwd` lookups use.
-  const storedTitle = useSessions((s) => {
-    const titleOf = (rows: SessionInfo[]) =>
-      rows.find((x) => x.sessionId === sessionId)?.title;
-    return (
-      titleOf(s.sessions) ??
-      titleOf(s.historySessions) ??
-      titleOf(s.archivedSessions) ??
-      null
-    );
-  });
+  // selector returns a PRIMITIVE via the ONE three-list walk
+  // (`lib/sessionLookup.ts` — live / history / archived, live first): zustand
+  // v5 re-runs a selector that yields a fresh OBJECT on every snapshot read, so
+  // `{ … }` here would re-render the row forever.
+  const storedTitle = useSessions(
+    (s) => sessionFieldOf(s, sessionId, "title") ?? null,
+  );
   // The row's mark (spinner / `?` / ring) comes from the SAME rule the
   // collapsed rail and the tab use — see `useSessionStatus`.
   const status = useSessionStatus(sessionId);

@@ -2,25 +2,18 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { renderHook } from "@testing-library/react";
 import { useActiveSpaceCwd } from "./useActiveSpaceCwd";
 import { useSessions } from "../store/sessions";
-import type { SessionInfo } from "../lib/tauri";
+import { makeSessionRow } from "../test/fixtures";
+import { resetStores } from "../test/resetStores";
 
-const session = (sessionId: string, cwd: string): SessionInfo => ({
-  sessionId,
-  cwd,
-  capabilities: {},
-  archived: false,
-});
+/** A row from the shared fixture — a real `SessionInfo`, not a literal that
+ *  only compiles while the walk's row type stays narrow. */
+const session = (sessionId: string, cwd: string) =>
+  makeSessionRow({ sessionId, cwd });
 
-beforeEach(() => {
-  useSessions.setState({
-    sessions: [],
-    historySessions: [],
-    archivedSessions: [],
-    activeSessionId: null,
-    inTurn: {},
-    messages: {},
-  });
-});
+// The WHOLE store, not the six keys this file happened to remember: `setState`
+// shallow-merges, so a partial reset leaves `contextUsage`, `stopReasons`,
+// `spaces`, … standing from the previous case.
+beforeEach(resetStores);
 
 /**
  * The active **Space**'s folder is derived in ONE module, and BOTH consumers

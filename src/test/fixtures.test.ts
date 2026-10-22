@@ -283,8 +283,8 @@ describe("makeConfigSource (the three-list walk's input shape)", () => {
     expect(source.sessions).toEqual([live]);
     // The row landed in the list the caller named — which is the whole point of
     // the fixture for the three-list walk. Read `archived` off the ROW, not the
-    // list element: `SessionConfigSource`'s lists are typed as the narrow
-    // `SessionRow` (`sessionConfig.ts:8`), a `Pick` that has no `archived`.
+    // list element: the walk's lists are typed as `SessionRow`
+    // (`lib/sessionLookup.ts`), a `Pick` that still has no `archived`.
     expect(source.archivedSessions).toEqual([archived]);
     expect(source.archivedSessions[0]?.sessionId).toBe("s3");
     expect(archived.archived).toBe(true);

@@ -15,6 +15,7 @@ import {
 } from "../lib/tauri";
 import { basenameOfPath } from "../lib/paths";
 import { describeIpcError } from "../lib/ipcError";
+import { sessionFieldOf } from "../lib/sessionLookup";
 import { fuzzyMatch } from "../lib/fuzzy";
 import { composerCommands, parseComposerCommand } from "../lib/composerCommands";
 import {
@@ -109,18 +110,26 @@ export default function ChatStream() {
       ? s.sessions.find((x) => x.sessionId === s.activeSessionId)
       : undefined,
   );
-  // Searches BOTH stored lists: a session living ONLY in
-  // `archivedSessions` (opened from the Archived section) must still resolve
-  // here — otherwise it renders no banner, a disabled composer ("This session
-  // is closed"), and an unreachable `send()` auto-resume. One selector
-  // returning a `??` of two finds (stable-reference rule preserved).
-  const historySession = useSessions((s) =>
-    s.activeSessionId
-      ? (s.historySessions.find((x) => x.sessionId === s.activeSessionId) ??
-          s.archivedSessions.find(
-            (x) => x.sessionId === s.activeSessionId,
-          ))
-      : undefined,
+  // The active session's CAPABILITIES, over the ONE three-list walk
+  // (`lib/sessionLookup.ts`), which searches ALL THREE lists: a session living
+  // ONLY in `archivedSessions` (opened from the Archived section) must still
+  // resolve here — otherwise it renders no banner, a disabled composer ("This
+  // session is closed"), and an unreachable `send()` auto-resume. Live wins, so
+  // this is the same value the two row lookups it replaces produced
+  // (`liveSession?.capabilities ?? stored?.capabilities`).
+  //
+  // It reads the FIELD and not the row on purpose: a selector may return the
+  // stored row (a stable reference) but never a `{ … }` built per snapshot —
+  // zustand v5 re-runs those forever (the rule at `ChatStream.tsx:80-81`).
+  const activeCapabilities = useSessions((s) =>
+    sessionFieldOf(s, s.activeSessionId, "capabilities"),
+  );
+  // Whether ANY of the three lists knows the active id — the presence test the
+  // old stored-row lookup gave for free. `sessionId` is a required field, so a
+  // hit on it means a row exists; it is read as a primitive for the same reason
+  // above.
+  const activeSessionIsKnown = useSessions(
+    (s) => sessionFieldOf(s, s.activeSessionId, "sessionId") !== undefined,
   );
   const inTurn = useSessions((s) => (s.activeSessionId ? !!s.inTurn[s.activeSessionId] : false));
   const stopReason = useSessions((s) => (s.activeSessionId ? s.stopReasons[s.activeSessionId] : undefined));
@@ -337,9 +346,7 @@ export default function ChatStream() {
   draftRef.current = draft;
   // Capability gate (FAIL-CLOSED): the feature is inert unless the agent
   // advertises `promptCapabilities.image === true`.
-  const imageCapable = agentSupportsImages(
-    liveSession?.capabilities ?? historySession?.capabilities,
-  );
+  const imageCapable = agentSupportsImages(activeCapabilities);
   // Unmount cleanup: revoke the staged object URLs exactly once, on
   // unmount ONLY — revoking on every state change would leak/break live
   // previews (a revoked URL can no longer render the `img`). The held-for-send
@@ -857,10 +864,12 @@ export default function ChatStream() {
 
   // A stored (non-live) session: its transcript is read-only unless the
   // agent negotiated `loadSession`, in which case it can be resumed.
+  // `activeSessionIsKnown` is the presence half of the stored-row lookup this
+  // replaced: the id is known to a list but the session is NOT live, which is
+  // exactly what "stored" meant there.
   const isLive = !!liveSession;
-  const isHistoryOnly = !isLive && historySession !== undefined;
-  const canResume =
-    isHistoryOnly && historySession?.capabilities.loadSession === true;
+  const isHistoryOnly = !isLive && activeSessionIsKnown;
+  const canResume = isHistoryOnly && activeCapabilities?.loadSession === true;
   // The composer's SEND is enabled for a live session OR a RESUMABLE
   // stored session (a non-resumable stored session can't receive a prompt
   // — no agent process to deliver to, and the harness's `send_prompt`
