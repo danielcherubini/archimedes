@@ -126,12 +126,6 @@ export interface ContentBlock {
   [key: string]: unknown;
 }
 
-export interface ToolCallDiff {
-  path: string;
-  oldText?: string | null;
-  newText: string;
-}
-
 export type ToolCallContent =
   | { type: "content"; content: ContentBlock }
   | { type: "diff"; path: string; oldText?: string | null; newText: string };
@@ -211,13 +205,13 @@ export interface SessionClosedPayload {
 /**
  * The `session-stalled` event payload (a Worker crash, ADR 0025 Task 4 —
  * the `StalledInfo` shape + the session id, camelCase over the wire). The
- * frontend's banner reads it; the `getStalledInfo` command is the PULL
+ * frontend's banner reads it; the Rust `get_stalled_info` command is the PULL
  * form (the same `StalledInfo`, no `sessionId` — the command's parameter).
  */
 export interface StalledInfo {
   /** Unix milliseconds (the crash time). */
   at: number;
-  /** The crashed Worker's own `crash-<ts>-worker-<pid>.log` — selected by the pid of the child the Supervisor reaped, and FROZEN at crash time (the `session-stalled` push and `getStalledInfo` name the same path). `null` when the pid matched no log — never another Worker's crash. */
+  /** The crashed Worker's own `crash-<ts>-worker-<pid>.log` — selected by the pid of the child the Supervisor reaped, and FROZEN at crash time (the `session-stalled` push and the Rust `get_stalled_info` command name the same path). `null` when the pid matched no log — never another Worker's crash. */
   crashLog: string | null;
 }
 
@@ -955,11 +949,6 @@ export async function shellSandboxAvailable(): Promise<boolean> {
   return invoke<boolean>("shell_sandbox_available");
 }
 
-/** The user-level discovered agent definitions — the app-scope read of the same total discovery `listAgentDefinitionsForSpace` narrows per Space. It is NO LONGER the Settings page's Subagents' data source: that section is deleted (the sidebar **Agents** modal is the single Agent surface), and this wrapper stays as the one place a future app-scope surface reaches for the catalog. Unreferenced outside `tauri.test.ts` right now, and `noUnusedLocals` cannot flag an exported function, so it is kept on purpose. */
-export async function listAgentDefinitions(): Promise<AgentDefinitionDto[]> {
-  return invoke<AgentDefinitionDto[]>("list_agent_definitions");
-}
-
 /** Test ONE MCP server entry (the Settings page's Test action, ADR 0019): a one-shot bounded connect + `tools/list`. Resolves the tool count; rejects with the error text (a `needs-auth` / a network failure). */
 export async function testMcpServer(entry: McpServerEntry, name?: string): Promise<number> {
   return invoke("test_mcp_server", { name: name ?? null, entry });
@@ -1120,17 +1109,6 @@ export function listenSessionClosed(
   return listen<SessionClosedPayload>("session-closed", (event) =>
     callback(event.payload),
   );
-}
-
-/**
- * A session's stalled state (the `get_stalled_info` command — the PULL
- * form of the `session-stalled` push; `null` when the session is not
- * stalled / unknown).
- */
-export async function getStalledInfo(
-  sessionId: string,
-): Promise<StalledInfo | null> {
-  return invoke<StalledInfo | null>("get_stalled_info", { sessionId });
 }
 
 export function listenSessionStalled(

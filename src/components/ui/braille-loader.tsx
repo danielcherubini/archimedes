@@ -118,4 +118,4 @@ function BrailleLoader({
   );
 }
 
-export { BrailleLoader, type BrailleLoaderProps };
+export { BrailleLoader };
