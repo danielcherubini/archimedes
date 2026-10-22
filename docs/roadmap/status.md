@@ -88,14 +88,14 @@ says otherwise. A task is not `done` until both commands are green.
 
 Plan status: **IN PROGRESS** — A0 done; A1–A6 remaining. See `docs/roadmap/frontend-component-extraction.md` §Phase A.
 
-**Current suite size: 123 files / 2660 tests** (121/2650 at baseline; A0 +1 file/0 tests;
-A1 +1 file/+10 tests).
+**Current suite size: 124 files / 2687 tests** (121/2650 at baseline; A0 +1/0, A1 +1/+10,
+A2 +1/+27). `SubagentDelegatingCard.tsx` is now 424 code lines (was 696).
 
 | # | Task | Finding | Files (primary) | Status |
 |---|------|---------|-----------------|--------|
 | A0 | Re-point source-grep gates at the DOM | 1 | `themeTokens.test.ts`, `slabFloatSeparation.test.ts`, `paletteCompleteness.test.ts`, `subagentSheetLayout.test.ts`, + new `SpaceTabs.pill.test.tsx` | **`done`** `22ed787` |
 | A1 | `useCopyButton(text)` — 3 sites | 11a | `hooks/useCopyButton.ts` + `MessageBubble.tsx`, `ToolCallCardHeader.tsx` | **`done`** `ea6fe14` |
-| A2 | `lib/subagentActivity.ts` — 217 pure lines out | 14 | `lib/subagentActivity.ts` + `SubagentDelegatingCard.tsx` | `todo` |
+| A2 | `lib/subagentActivity.ts` — 217 pure lines out | 14 | `lib/subagentActivity.ts` + `SubagentDelegatingCard.tsx` | **`done`** `edc2c33` |
 | A3 | `lib/sessionTime.ts` + shared formatters | 10 | `lib/sessionTime.ts`, `SubagentTranscript.tsx` | `todo` |
 | A4 | User-visible copy + `source` label fixes | 16a | `MessageList.tsx`, `NewSpaceDialog.tsx`, `CloseSpaceDialog.tsx`, `GeneralSection.tsx`, `ChromeControls.tsx`, `ProviderSection.tsx`, `AskQuestionCard.tsx`, `McpSection.tsx` | `todo` |
 | A5 | `SpaceTabs` tablist ARIA (2 attributes) | 18 | `src/components/SpaceTabs.tsx` | `todo` |
@@ -201,6 +201,10 @@ Record every autonomous decision here so a later iteration does not re-litigate 
 
 ## Changelog
 
+- `2026-10-22` — **A2 done** (`edc2c33`). 124 files / 2687 tests green; build green. Verified independently:
+  the new module imports exactly the 3 sanctioned lines and holds no React/JSX; the card keeps no
+  moved symbol; `SubagentDelegatingCard.test.tsx` untouched (the behaviour proof). Card 696→424
+  code lines.
 - `2026-10-22` — **A1 done** (`ea6fe14`). 123 files / 2660 tests green; build green. Orchestrator
   re-ran both gates independently and re-checked the diff: only JS lines moved — no `aria-label`,
   `title` or `data-testid` line is touched — and `resetRef` is gone from `src/components/`
