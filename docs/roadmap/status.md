@@ -97,8 +97,8 @@ says otherwise. A task is not `done` until both commands are green.
 
 Plan status: **Phase A COMPLETE** (A0–A6 done). **Phase B planned and vetted** — B4a, B1, B2, B3 (order deliberately B4a first: it is the task that makes the others cheap to test). See `docs/roadmap/frontend-component-extraction.md` §Phase B.
 
-**Current suite size: 124 files / 2695 tests** (121/2650 at baseline; A0 +1/0, A1 +1/+10,
-A2 +1/+27, A3 +1/+7, A4 +0/+3, A5 +0/+2, A6 −1/−4 for the deleted `ids.test.ts`).
+**Current suite size: 125 files / 2720 tests** (121/2650 at baseline; A0 +1/0, A1 +1/+10,
+A2 +1/+27, A3 +1/+7, A4 +0/+3, A5 +0/+2, A6 −1/−4 for the deleted `ids.test.ts`, B4a +1/+25).
 `SubagentDelegatingCard.tsx` is now 424 code lines (was 696).
 
 **There is NO prettier/eslint/biome gate in this repo** — verified `package.json` and
@@ -125,7 +125,7 @@ every other task cheap to test, and B1's new tests want session fixtures that do
 
 | # | Task | Finding | Status |
 |---|------|---------|--------|
-| B4a | `src/test/fixtures/*` + `resetStores()` (+ `renderWithProviders` **only if need is proven**) | 9 | `todo` |
+| B4a | `src/test/fixtures/*` + `resetStores()` (+ `renderWithProviders` **only if need is proven**) | 9 | **`done`** `5131bda` |
 | B1 | `src/lib/sessionLookup.ts` → `sessionFieldOf` (plain fn, NOT a hook) | 8 | `todo` |
 | B2 | `src/lib/ipc/events.ts` — event names (all 12 wrappers) + payload discriminants | 12b | `todo` |
 | B3 | `src/lib/sessionTypes.ts` + drop store re-export barrel + `verbatimModuleSyntax` | 13b | `todo` |
@@ -201,6 +201,22 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   a per-tab close button, and this UI is deliberately browser-style closable tabs. A tablist
   with sibling controls beats orphaned `role="tab"`s. Not to be "fixed" later by
   restructuring the pill or adopting Radix Tabs.
+- **2026-10-22 — B4a: `renderWithProviders` is DEAD ON ARRIVAL, do not build it later.** The child
+  disproved the need with evidence (no query/redux/swr/trpc/intl in `package.json`; only two
+  contexts in `src/`, one deliberately rendering unmounted, the other owned by the compound
+  component under test; the only 3 wrapping tests also assert the no-provider case). Recorded in
+  `src/test/fixtures/index.ts`. **A later task must not re-add it.**
+- **2026-10-22 — B4a: `vi.stubGlobal` in setup does NOT survive `vi.unstubAllGlobals()`.**
+  Probe-verified: after the first call the global stub is gone permanently for that file. Four
+  files call it (`EmptyStateFilm.test.tsx`, `lib/theme.test.ts`, `archimedes-film/compositor.test.ts`,
+  `lib/settings.test.ts`), so **their per-file stubs stay** — they are the deletion checklist
+  documented in `setup.tsx`. Any future "clean up the redundant stubs" sweep must exclude them.
+- **2026-10-22 — ROLLING MIGRATION (from B4a, standing instruction for every later task).** When a
+  task touches a test file, it also migrates that file to `src/test/fixtures` + `resetStores()` and
+  deletes the now-redundant local stubs — except in the four `unstubAllGlobals` files above.
+  Remaining backlog: ~22 hand-rolled `vi.mock("../lib/tauri")` factories, 14 `matchMedia`,
+  11 `scrollIntoView`, 6 pointer-capture stubs. This is how the 833 lines go away without one
+  unreviewable commit.
 - **2026-10-22 — Phase B vetting: 2 parallel reviews, 4 more blocking errors in the plan.** All
   verified by the orchestrator against source, not taken on trust:
   (1) **B2's Rust-parity test was unsound** — only `todos_update` has a Rust emitter
@@ -276,6 +292,10 @@ Record every autonomous decision here so a later iteration does not re-litigate 
 
 ## Changelog
 
+- `2026-10-22` — **B4a done** (`5131bda`). 125 files / 2720 tests green; build green. Verified
+  independently: `git diff | grep -c '^\-\s*expect('` is **0** (no assertion removed), and
+  `resetStores` uses `getInitialState()` + `replace = true` rather than a hand-written shape.
+  Three files migrated, −112 lines. `renderWithProviders` correctly refused.
 - `2026-10-22` — **Phase B planned and vetted** (2 parallel scoped reviewers — the parallel rule
   paid for itself immediately). 4 blocking plan errors fixed, all verified against source first.
 - `2026-10-22` — **A6 done** (`287019f` deletions, `3718ffc` ADR 0072). 124 files / 2695 tests
