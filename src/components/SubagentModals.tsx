@@ -15,8 +15,7 @@ import {
 } from "../lib/subagentSheetLayout";
 import SudoConfirmModal from "./SudoConfirmModal";
 import SudoPasswordModal from "./SudoPasswordModal";
-import AskQuestionCard from "./AskQuestionCard";
-import PermissionPrompt from "./PermissionPrompt";
+import { InlineGateRow } from "./InlineGateRow";
 import { cn } from "./lib/utils";
 
 /**
@@ -375,29 +374,26 @@ export function SubagentModals({ sheetMounted = true }: { sheetMounted?: boolean
           )}
         >
           {cardGates.map((g) => (
+            // The card's own wrapper: `pointer-events-auto` re-arms the pointer
+            // for one card inside the click-transparent region (see the region
+            // comment above), so this box belongs HERE, not in the shared card.
+            // Keyed by `childGateKey` (child id + request id) — a child's
+            // `requestId` is the model's tool-call id, which some
+            // OpenAI-compatible gateways reuse per response, so a bare
+            // `requestId` collides across children and drops one card.
             <div key={childGateKey(g)} className="pointer-events-auto">
-              {/* The attribution chip lives HERE, not inside the card
-                  components: those stay parent/child-agnostic and are reused
-                  unchanged by the main chat. A child's `requestId` is the
-                  model's tool-call id, which some OpenAI-compatible gateways
-                  reuse per response, so the key is `childGateKey` (child id +
-                  request id) — a bare `requestId` collides across children and
-                  drops one card. */}
-              <p className="mb-1 text-ui-xs text-foreground-subtle">
-                ↳ {g.agentName}
-              </p>
-              {g.kind === "ask" ? (
-                <AskQuestionCard
-                  sessionId={g.childSessionId}
-                  requestId={g.requestId}
-                  autoFocus={false}
-                />
-              ) : (
-                <PermissionPrompt
-                  sessionId={g.childSessionId}
-                  requestId={g.requestId}
-                />
-              )}
+              {/* The shared card (`↳ {agentName}` chip + the `ask`/permission
+                  card) — the SAME component the transcript renders for a gate
+                  whose parent IS the active session. Which site draws which gate
+                  is the ONE-SITE-PER-GATE partition this component's doc and
+                  ADR 0040 state; the card itself decides nothing about kinds.
+                  `autoFocus` is not passed: the component's default is `false`,
+                  and a gate that appears while the user is typing must not take
+                  the caret. Escape is stopped by the REGION above, once — not
+                  per card: the region's padding and the gaps between cards are
+                  also "between a card and the window", which a card-level stop
+                  could not cover (see the Escape section on `InlineGateRow`). */}
+              <InlineGateRow gate={g} />
             </div>
           ))}
         </div>
