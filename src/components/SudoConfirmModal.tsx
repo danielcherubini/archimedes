@@ -10,6 +10,7 @@ import {
   DialogTitle,
 } from "./ui/dialog";
 import { Button } from "./ui/button";
+import { IpcErrorLine } from "./IpcErrorLine";
 
 /**
  * Modal for an interactive `confirm` request (the `sudo_exec` confirm gate):
@@ -60,7 +61,7 @@ export default function SudoConfirmModal({
         {params.reason && (
           <p className="text-ui-sm text-foreground-subtle">{params.reason}</p>
         )}
-        {error && <p className="text-ui-sm text-destructive">{error}</p>}
+        {error && <IpcErrorLine error={error} />}
         <DialogFooter>
           <Button
             variant="outline"
