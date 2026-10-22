@@ -1,7 +1,7 @@
 import { fireEvent, render } from "@testing-library/react";
-import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import MessageBubble, { safeUrlTransform } from "./MessageBubble";
-import { Message } from "../store/sessions";
+import type { Message } from "../store/sessions";
 import { SpaceCwdProvider } from "./SpaceCwd";
 import { externalOpen } from "../lib/tauri";
 
@@ -56,22 +56,6 @@ function markdownRoot(container: HTMLElement): HTMLElement {
 
 beforeEach(() => {
   vi.clearAllMocks();
-});
-
-beforeAll(() => {
-  Object.defineProperty(window, "matchMedia", {
-    writable: true,
-    value: vi.fn().mockImplementation((query) => ({
-      matches: false,
-      media: query,
-      onchange: null,
-      addListener: vi.fn(),
-      removeListener: vi.fn(),
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-      dispatchEvent: vi.fn(),
-    })),
-  });
 });
 
 describe("AgentMarkdown (the ZCode markdown scale)", () => {

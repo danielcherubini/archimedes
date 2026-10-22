@@ -1,8 +1,8 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
-import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import ReactMarkdown from "react-markdown";
 import MessageBubble from "./MessageBubble";
-import { Message } from "../store/sessions";
+import type { Message } from "../store/sessions";
 import { expandMentions, expandSkillMentions } from "../lib/skills";
 import type {
   AgentDefinitionDto,
@@ -10,6 +10,7 @@ import type {
   SkillInfo,
 } from "../lib/tauri";
 import { useSubagents } from "../store/subagents";
+import { resetStores } from "../test/resetStores";
 
 /** A full `SkillInfo` fixture (mirrors the `skills.test.ts` factory). */
 function makeSkill(overrides: Partial<SkillInfo> = {}): SkillInfo {
@@ -53,22 +54,6 @@ function makeMcp(overrides: Partial<McpServerInfo> = {}): McpServerInfo {
 // chunk arrives — the reducer only replaces the last message object).
 vi.mock("react-markdown", () => ({ default: vi.fn() }));
 const markdownSpy = ReactMarkdown as unknown as ReturnType<typeof vi.fn>;
-
-beforeAll(() => {
-  Object.defineProperty(window, "matchMedia", {
-    writable: true,
-    value: vi.fn().mockImplementation((query) => ({
-      matches: false,
-      media: query,
-      onchange: null,
-      addListener: vi.fn(),
-      removeListener: vi.fn(),
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-      dispatchEvent: vi.fn(),
-    })),
-  });
-});
 
 afterEach(() => {
   vi.useRealTimers();
@@ -436,11 +421,7 @@ describe("MessageBubble", () => {
   // --- `subagent` tool call: render the `SubagentDelegatingCard` (not the
   // plain `ToolCallCard`); every other tool is unchanged. ---
 
-  beforeEach(() => {
-    for (const id of Object.keys(useSubagents.getState().entries)) {
-      useSubagents.getState().dismiss(id);
-    }
-  });
+  beforeEach(() => resetStores());
 
   it("renders a subagent tool call as SubagentDelegatingCard (not the plain ToolCallCard)", () => {
     const message: Message = {

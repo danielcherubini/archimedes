@@ -1,4 +1,4 @@
-import type { Message } from "../store/sessions";
+import type { Message } from "./sessionTypes";
 
 /**
  * The relative time of a **Session**'s last activity — the ONE rule, previously

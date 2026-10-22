@@ -1,4 +1,4 @@
-import type { Message } from "../store/sessions";
+import type { Message } from "./sessionTypes";
 import type { SubagentFailureReason } from "./tauri";
 import { formatDuration, summarizeToolCall } from "./toolOutput";
 

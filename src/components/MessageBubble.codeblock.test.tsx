@@ -1,10 +1,11 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import MessageBubble, { shikiThemeFor } from "./MessageBubble";
-import { Message } from "../store/sessions";
+import type { Message } from "../store/sessions";
 import { useSettings } from "../store/settings";
 import type { AppSettings } from "../lib/tauri";
 import { makeSettings } from "../test/fixtures";
+import { resetStores } from "../test/resetStores";
 
 /**
  * The fenced-code block's header (the ZCode model: file-type glyph + hue +
@@ -52,8 +53,10 @@ afterEach(() => {
   // The palette tests seed the settings store; the OTHER tests in this file
   // assert the default (zai / `github-dark`) paper, so the store MUST go back
   // to "nothing loaded" between tests or they would inherit Dracula and pass
-  // for the wrong reason.
-  useSettings.setState({ settings: null, loaded: false });
+  // for the wrong reason. `resetStores()` installs each store's own captured
+  // initial state (settings: null, loaded: false) with replace=true, so the
+  // reset is not a list of keys this file has to remember.
+  resetStores();
 });
 
 describe("CodeBlock header (the ZCode code-block model)", () => {

@@ -1,4 +1,4 @@
-import type { Message } from "../store/sessions";
+import type { Message } from "./sessionTypes";
 
 /**
  * A **Session**'s label: its GENERATED **Title** (`SessionInfo.title`, written

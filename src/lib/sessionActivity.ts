@@ -1,4 +1,4 @@
-import type { Message } from "../store/sessions";
+import type { Message } from "./sessionTypes";
 
 /**
  * "When was this session last active?" — the one answer the session list

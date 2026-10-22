@@ -1,50 +1,34 @@
-import { describe, expect, it, vi, beforeAll, afterEach } from "vitest";
+import { describe, expect, it, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import SessionConfigSelect from "./SessionConfigSelect";
-import { SessionConfigOption } from "../lib/tauri";
+import { makeConfigOption } from "../test/fixtures";
 
-beforeAll(() => {
-  Element.prototype.scrollIntoView = vi.fn();
-  Element.prototype.hasPointerCapture = vi.fn(() => false);
-  Element.prototype.setPointerCapture = vi.fn();
-  Element.prototype.releasePointerCapture = vi.fn();
-  vi.stubGlobal("matchMedia", (q: string) => ({
-    matches: false,
-    media: q,
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
-    addListener: vi.fn(),
-    removeListener: vi.fn(),
-    dispatchEvent: vi.fn(),
-  }));
-});
+// The `matchMedia` + scroll + pointer-capture stubs this file used to install
+// in a `beforeAll` come from `src/test/setup.tsx` now (Task B4a's shared
+// environment) — same values, one owner.
 
 afterEach(() => {
   vi.useRealTimers();
 });
 
-const mockOption: SessionConfigOption = {
-  id: "model",
-  name: "Model",
-  type: "select",
+const mockOption = makeConfigOption({
   currentValue: "acme/alpha",
   options: [
     { value: "acme/alpha", name: "acme/Alpha" },
     { value: "acme/beta", name: "acme/Beta" },
   ],
-};
+});
 
-const thinkingOption: SessionConfigOption = {
+const thinkingOption = makeConfigOption({
   id: "thought_level",
   name: "Thinking",
   category: "thought_level",
-  type: "select",
   currentValue: "medium",
   options: [
     { value: "low", name: "Low" },
     { value: "medium", name: "Medium" },
   ],
-};
+});
 
 describe("SessionConfigSelect", () => {
   it("renders the current model's BARE id + the provider as a muted suffix (never the redundant `provider/id` prefix)", () => {
@@ -320,10 +304,7 @@ describe("SessionConfigSelect", () => {
   });
 
   it("the model picker dialog flattens grouped options (the value prefix is the provider cue)", async () => {
-    const groupedOption: SessionConfigOption = {
-      id: "model",
-      name: "Model",
-      type: "select",
+    const groupedOption = makeConfigOption({
       currentValue: "anthropic/claude",
       options: [
         {
@@ -335,7 +316,7 @@ describe("SessionConfigSelect", () => {
         },
         { value: "anthropic/claude", name: "Claude" },
       ],
-    };
+    });
     const onSet = vi.fn().mockResolvedValue(undefined);
     render(<SessionConfigSelect option={groupedOption} onSet={onSet} />);
 

@@ -5,15 +5,11 @@ import {
   lastActivityOf,
   sortByActivity,
 } from "./sessionActivity";
-import type { Message } from "../store/sessions";
+import { makeMessage } from "../test/fixtures";
 
-const user = (text: string, at: number): Message => ({ kind: "user", text, at });
-const agent = (text: string, at: number): Message => ({
-  kind: "agent-text",
-  messageId: "m1",
-  text,
-  at,
-});
+const user = (text: string, at: number) => makeMessage("user", { text, at });
+const agent = (text: string, at: number) =>
+  makeMessage("agent-text", { text, at });
 
 describe("lastActivityOf (a transcript's last activity, in ms)", () => {
   it("reads the LAST message's stamp", () => {

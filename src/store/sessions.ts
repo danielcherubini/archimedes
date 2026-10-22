@@ -21,6 +21,7 @@ import { basenameOfPath } from "../lib/paths";
 import { describeIpcError } from "../lib/ipcError";
 import { openNewSpaceDialog } from "../lib/newSpaceDialogState";
 import type { SessionUpdateBatchItem } from "../lib/batchSessionUpdates";
+import type { Message } from "../lib/sessionTypes";
 import { isStaleCompactionStart, mergeDedupeKey } from "../lib/transcript/identity";
 import {
   applySessionUpdate,
@@ -34,39 +35,18 @@ import { useQueuedPrompts } from "./queuedPrompts";
 export const INITIAL_HISTORY_PAGE = 500;
 export const OLDER_HISTORY_PAGE = 200;
 
-export {
-  applySessionUpdate,
-  finalizeSessionMessages,
-  rowToMessages,
-};
-
-export type { AcpSessionUpdate } from "../lib/tauri";
-export type { SessionConfigOption } from "../lib/tauri";
-
-export type ToolCallUiStatus = "pending" | "completed" | "failed";
-
-export interface DiffRef {
-  path: string;
-  patch: string;
-}
-
-export type Message =
-  | { kind: "user"; text: string; at: number; images?: ImageRef[] }
-  | { kind: "agent-text"; messageId: string; text: string; at: number }
-  | { kind: "agent-thought"; messageId: string; text: string; at: number }
-  | {
-      kind: "tool-call";
-      id: string;
-      title: string;
-      status: ToolCallUiStatus;
-      diff?: DiffRef;
-      /** The ACP `rawInput` (the tool's raw input). */
-      rawInput?: unknown;
-      /** The ACP rawOutput (the tool's result — the RPC AgentToolResult, live-partial while running). */
-      rawOutput?: unknown;
-      at: number;
-    }
-  | { kind: "diff"; path: string; patch: string; at: number };
+// The transcript types are DEFINED in `lib/sessionTypes.ts` (finding 13b) and
+// re-exported here only so the component layer keeps one import site. `lib/`
+// consumers import from `sessionTypes` directly — a `lib → store` type edge is
+// exactly the cycle this task exists to remove, and it survives if the store is
+// everyone's only route to these types.
+//
+// The former re-export barrel of `lib/transcript/reducer`'s values
+// (`applySessionUpdate` / `finalizeSessionMessages` / `rowToMessages`) and of
+// `lib/tauri`'s `AcpSessionUpdate` / `SessionConfigOption` is GONE: import
+// those from their own modules. (The store's own test file was the one
+// remaining importer and now imports them at source.)
+export type { DiffRef, Message, ToolCallUiStatus } from "../lib/sessionTypes";
 
 /**
  * Free a Subagent session's transcript from the store — delete it outright

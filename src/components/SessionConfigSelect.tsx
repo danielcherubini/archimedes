@@ -12,7 +12,7 @@ import {
 import ModelPicker from "./ModelPicker";
 import { modelItemsFromCatalog } from "./ModelPickerDialog";
 import { useSettings } from "../store/settings";
-import { SessionConfigOption } from "../lib/tauri";
+import type { SessionConfigOption } from "../lib/tauri";
 import { THINKING_GLYPHS } from "../lib/toolOutput";
 import { describeIpcError } from "../lib/ipcError";
 

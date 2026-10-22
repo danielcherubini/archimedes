@@ -6,7 +6,8 @@ import {
   getActivityDisplay,
   type ActivityRow,
 } from "./subagentActivity";
-import type { Message } from "../store/sessions";
+import type { ToolCallUiStatus } from "../lib/sessionTypes";
+import { makeMessage } from "../test/fixtures";
 
 /**
  * The four pure derivations that lived inline in `SubagentDelegatingCard.tsx`.
@@ -18,26 +19,18 @@ import type { Message } from "../store/sessions";
  * behaviour-preservation guard for the render path.
  */
 
-const user = (text: string, at = 0): Message => ({ kind: "user", text, at });
-const agentText = (text: string, at = 0): Message => ({
-  kind: "agent-text",
-  messageId: "m1",
-  text,
-  at,
-});
-const agentThought = (text: string, at = 0): Message => ({
-  kind: "agent-thought",
-  messageId: "m1",
-  text,
-  at,
-});
+const user = (text: string, at = 0) => makeMessage("user", { text, at });
+const agentText = (text: string, at = 0) =>
+  makeMessage("agent-text", { text, at });
+const agentThought = (text: string, at = 0) =>
+  makeMessage("agent-thought", { text, at });
 const toolCall = (
   title: string,
-  status: "pending" | "completed" | "failed",
+  status: ToolCallUiStatus,
   rawInput?: unknown,
   at = 0,
-): Message => ({ kind: "tool-call", id: `t-${title}`, title, status, rawInput, at });
-const diff = (patch: string, at = 0): Message => ({ kind: "diff", path: "a.ts", patch, at });
+) => makeMessage("tool-call", { id: `t-${title}`, title, status, rawInput, at });
+const diff = (patch: string, at = 0) => makeMessage("diff", { path: "a.ts", patch, at });
 
 describe("extractTargetInfo (the subagent tool call's task / session targets)", () => {
   it("reads a TASK LIST from rawInput.tasks, keeping the string and object forms", () => {

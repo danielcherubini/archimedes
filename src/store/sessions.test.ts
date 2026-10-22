@@ -1,20 +1,24 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  applySessionUpdate,
   autoSelectActive,
   detachedSessions,
   discardSessionMessages,
-  finalizeSessionMessages,
   INITIAL_HISTORY_PAGE,
   liveSessionsInSpace,
   mostRecentLiveInSpace,
   OLDER_HISTORY_PAGE,
-  rowToMessages,
   spaceViewFor,
   useSessions,
-  type AcpSessionUpdate,
   type Message,
 } from "./sessions";
+// The reducer helpers and the ACP frame type come from their OWN modules — the
+// store's re-export barrel is gone (finding 13b).
+import {
+  applySessionUpdate,
+  finalizeSessionMessages,
+  rowToMessages,
+} from "../lib/transcript/reducer";
+import type { AcpSessionUpdate } from "../lib/tauri";
 import { useInteractive } from "./interactive";
 import { useSubagents } from "./subagents";
 import { expandMentions } from "../lib/skills";

@@ -1,20 +1,16 @@
 import { describe, it, expect } from "vitest";
-import type { Message } from "../store/sessions";
+import type { ToolCallUiStatus } from "../lib/sessionTypes";
+import { makeMessage } from "../test/fixtures";
 import { groupConsecutiveFileWrites } from "./toolGroups";
 
 const tool = (
   id: string,
   title: string,
   at: number,
-  status: "pending" | "completed" | "failed" = "completed",
-): Message => ({ kind: "tool-call", id, title, status, at });
+  status: ToolCallUiStatus = "completed",
+) => makeMessage("tool-call", { id, title, status, at });
 
-const text = (at: number): Message => ({
-  kind: "agent-text",
-  messageId: "m1",
-  text: "x",
-  at,
-});
+const text = (at: number) => makeMessage("agent-text", { text: "x", at });
 
 describe("groupConsecutiveFileWrites", () => {
   it("a single write stays a single unit", () => {
