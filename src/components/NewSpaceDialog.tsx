@@ -18,6 +18,7 @@ import {
 } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
+import { IpcErrorLine } from "./IpcErrorLine";
 
 /**
  * Modal for starting a space: pick a working folder (directory picker via
@@ -130,12 +131,10 @@ export default function NewSpaceDialog({ onClose }: { onClose: () => void }) {
                 Browse…
               </Button>
             </div>
-            {folderError && (
-              <p className="text-ui-sm text-destructive">{folderError}</p>
-            )}
+            {folderError && <IpcErrorLine error={folderError} />}
           </label>
         </div>
-        {error && <p className="text-ui-sm text-destructive">{error}</p>}
+        {error && <IpcErrorLine error={error} />}
         <DialogFooter>
           <Button variant="destructive" onClick={onClose}>
             Cancel
