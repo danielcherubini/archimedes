@@ -5,7 +5,7 @@ import {
   type AskResponsePayload,
 } from "../lib/tauri";
 import { useInteractive } from "../store/interactive";
-import { describeIpcError } from "../lib/ipcError";
+import { useAsyncAction } from "../hooks/useAsyncAction";
 import { useSessions } from "../store/sessions";
 import { useSubagents } from "../store/subagents";
 import { Button } from "./ui/button";
@@ -162,8 +162,12 @@ export default function AskQuestionCard({
   const [queued, setQueued] = useState(
     () => !isSubagent && request?.toolCallId !== undefined,
   );
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // NO `guard`: this site has no `if (busy) return` today. Re-entrancy is held
+  // by the two keydown guards (`!busy` on Enter and on Esc) and the four
+  // `disabled={busy}` props below, all of which read this `busy` — the flag is
+  // still the same value from the same machine, so every one of them behaves as
+  // before. The `queued` pair and `drafts` are separate machines and stay here.
+  const { busy, error, run } = useAsyncAction();
   const [drafts, setDrafts] = useState<Record<string, QuestionDraft>>({});
 
   // Queued: the request arrived before its ACP `tool_call` frame — render a
@@ -265,9 +269,7 @@ export default function AskQuestionCard({
       return { ...d, other, selected };
     });
 
-  const respond = async (cancelled: boolean) => {
-    setBusy(true);
-    setError(null);
+  const respond = (cancelled: boolean) => {
     const payload: AskResponsePayload = cancelled
       ? { cancelled: true, results: [] }
       : {
@@ -283,14 +285,12 @@ export default function AskQuestionCard({
               : { id: q.id, selectedOptions: result.selectedOptions };
           }),
         };
-    try {
-      await respondInteractiveRequest(sessionId, requestId, payload);
-      removeRequest(sessionId, requestId);
-    } catch (err) {
-      setError(describeIpcError(err));
-    } finally {
-      setBusy(false);
-    }
+    return run(() =>
+      respondInteractiveRequest(sessionId, requestId, payload).then(() =>
+        // The card collapses on settle.
+        removeRequest(sessionId, requestId),
+      ),
+    );
   };
 
   // Queued: a bounded placeholder while the ACP `tool_call` frame is
