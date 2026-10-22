@@ -119,14 +119,16 @@ satisfy a tool CI does not run — it sweeps unrelated lines into the diff.
 
 ## Phase B — the substrate
 
-Plan status: **not yet planned**
+Plan status: **PLANNED + VETTED** (see `docs/roadmap/frontend-component-extraction.md` §Phase B).
+**Execution order is B4a → B1 → B2 → B3**, NOT the report's B1→B4: B4a is the task that makes
+every other task cheap to test, and B1's new tests want session fixtures that do not exist yet.
 
 | # | Task | Finding | Status |
 |---|------|---------|--------|
+| B4a | `src/test/fixtures/*` + `resetStores()` (+ `renderWithProviders` **only if need is proven**) | 9 | `todo` |
 | B1 | `src/lib/sessionLookup.ts` → `sessionFieldOf` (plain fn, NOT a hook) | 8 | `todo` |
-| B2 | `src/lib/ipc/events.ts` — event-name constants + payload discriminants | 12b | `todo` |
+| B2 | `src/lib/ipc/events.ts` — event names (all 12 wrappers) + payload discriminants | 12b | `todo` |
 | B3 | `src/lib/sessionTypes.ts` + drop store re-export barrel + `verbatimModuleSyntax` | 13b | `todo` |
-| B4 | `src/test/fixtures/` + `resetStores()` + `renderWithProviders()` | 9 | `todo` |
 
 ## Phase C — components and hooks
 
