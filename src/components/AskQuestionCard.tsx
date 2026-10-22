@@ -9,6 +9,7 @@ import { describeIpcError } from "../lib/ipcError";
 import { useSessions } from "../store/sessions";
 import { useSubagents } from "../store/subagents";
 import { Button } from "./ui/button";
+import { IpcErrorLine } from "./IpcErrorLine";
 
 const OTHER_OPTION = "Other (type your own)";
 const RECOMMENDED_TAG = " (Recommended)";
@@ -552,7 +553,7 @@ export default function AskQuestionCard({
           </Button>
         </div>
       </div>
-      {error && <p className="px-3 pb-2 text-ui-sm text-destructive">{error}</p>}
+      {error && <IpcErrorLine error={error} className="px-3 pb-2" />}
     </div>
   );
 }

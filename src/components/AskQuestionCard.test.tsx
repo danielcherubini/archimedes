@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import AskQuestionCard from "./AskQuestionCard";
 import { useInteractive } from "../store/interactive";
 import { useSubagents } from "../store/subagents";
+import { resetStores } from "../test/resetStores";
 
 // Mock the Tauri IPC layer; everything else (stores) is the real code.
 vi.mock("../lib/tauri", async () => {
@@ -35,11 +36,16 @@ const singleRequest = {
 const originalScrollIntoView = Element.prototype.scrollIntoView;
 
 beforeEach(() => {
-  useInteractive.getState().dismissSession("s1");
-  useInteractive.getState().dismissSession("child1");
-  useSubagents.getState().dismiss("child1");
+  // Every store back to its own initial state. The hand-written version named
+  // three sessions to dismiss (`s1`, `child1` twice); `resetStores` covers those
+  // plus every key this file never thought to clear.
+  resetStores();
   mockedRespond.mockReset();
   mockedRespond.mockResolvedValue(undefined);
+  // NOT the shared `setup.tsx` stub: this file asserts on the MOCK CONTEXTS of
+  // `scrollIntoView`, so each case needs a FRESH mock, and the `afterEach`
+  // below restores what was there at import. `src/test/setup.tsx`'s own
+  // deletion checklist names this file for exactly that reason.
   Element.prototype.scrollIntoView = vi.fn();
 });
 
@@ -494,5 +500,32 @@ describe("AskQuestionCard", () => {
       requestAnimationFrame(() => requestAnimationFrame(resolve)),
     );
     expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
+  });
+
+  it("announces a failed submit through role=\"alert\" with the pre-migration classes", async () => {
+    // Task C3 (finding 7): the failure line was a bare `<p>`, so a
+    // screen-reader user who submitted an answer into a dead IPC channel heard
+    // nothing at all.
+    useInteractive.getState().addRequest("s1", singleRequest);
+    mockedRespond.mockRejectedValueOnce("ask-response failed");
+    render(<AskQuestionCard sessionId="s1" requestId="r1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Red" }));
+    fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe("ask-response failed");
+    // Byte-identical to the hand-written `px-3 pb-2 text-ui-sm text-destructive`
+    // line this replaced, so the card's height and padding do not move.
+    expect(alert.getAttribute("class")).toBe(
+      "text-ui-sm text-destructive px-3 pb-2",
+    );
+    // And a failed answer keeps the card: the request is NOT removed, so the
+    // gate stays answerable (ADR 0040 — a gate rendered nowhere strands the run).
+    expect(useInteractive.getState().requests["s1"]).toHaveLength(1);
+  });
+
+  it("renders no alert region while nothing has failed", () => {
+    useInteractive.getState().addRequest("s1", singleRequest);
+    render(<AskQuestionCard sessionId="s1" requestId="r1" />);
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
