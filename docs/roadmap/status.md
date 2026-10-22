@@ -141,7 +141,7 @@ surfaces (`SpacesList` rows, the button sweep) last.
 |---|------|---------|--------|
 | C3 | `IpcErrorLine` with `role="alert"` — **9 sites, one per commit** | 7 | **`done`** `7418e95`→`fd31c7b` (7 commits) |
 | C2 | `CHROME_BUTTON` const + `SettingsDataRow` + badge `settings` variant | 6a–6c | **`done`** `45353b5` + `6144b17` |
-| C8 | `cn()` everywhere + `MutedCaption`/`EmptyListLine` + guard test | 15 | `todo` |
+| C8 | `cn()` everywhere + `MutedCaption`/`EmptyListLine` + guard test | 15 | **`done`** `8fe956e` + `3aa254c` |
 | C1 | `useAsyncAction()` + shared catalog cache (on `useCatalogRow`) | 11b, 11c | `todo` |
 | C5 | `InlineGateRow` — the card only | 5 | `todo` |
 | C6 | `CatalogSearchDialog` shell (excludes `McpDialog`) | 4 | `todo` |
@@ -204,6 +204,15 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   a per-tab close button, and this UI is deliberately browser-style closable tabs. A tablist
   with sibling controls beats orphaned `role="tab"`s. Not to be "fixed" later by
   restructuring the pill or adopting Radix Tabs.
+- **2026-10-22 — C8: `classNameConvention.test.ts` is the guard later tasks must obey.** New files
+  (`InlineGateRow`, the picker shell, `SessionListRow`/`RowButton`, C7's sweep) must use `cn()` from
+  their first commit. **Do not widen its allowlists** — it asserts set membership both ways, so an
+  allowlist entry whose site was converted also fails. Two allowlists exist for real reasons:
+  `HAND_ROLLED_COMPOSITION` (4 sites where `cn` changes rendering — a same-group conflict drops a
+  utility: `transition-transform` at `ChangesGroupCard:239`/`ToolCallCardHeader:157`, `cursor-pointer`
+  at `ModelPickerDialog:162`) and `STATIC_TERNARY_SECTIONS` (8 whole-expression ternaries where `cn`
+  is provably the identity). **The general rule: `cn` drops the loser of a same-tailwind-group
+  conflict. Check for that before converting, and measure rather than assume.**
 - **2026-10-22 — C2: finding 6c is CLOSED AS REJECTED, not implemented.** `badgeVariants` is the
   wrong home for `SettingsBadge`; measured with the real `cn()`, the base's `h-5`/`w-fit`/
   `rounded-full`/`overflow-hidden`/`[&>svg]:size-2.5!` survive a `settings` arm and change the box at
@@ -373,6 +382,12 @@ Record every autonomous decision here so a later iteration does not re-litigate 
 
 ## Changelog
 
+- `2026-10-22` — **C8 done** (`8fe956e` components, `3aa254c` conversions + guard). 132 files / 2828
+  tests green; build green. Verified independently with my own mutation: reverting `FileChip.tsx:39`
+  to a template literal reddens exactly one guard assertion and names the file; restored byte-exact.
+  41 of 45 conversions; 4 sites left hand-rolled on measurement with reasons; 8 ternaries exempt as a
+  listed set. Child corrected two of my numbers again (scope 45 not 40; `MutedCaption` exact-pair
+  duplication 10/7 not 25/10).
 - `2026-10-22` — **C2 done** (`45353b5` chrome buttons, `6144b17` settings rows + badge decision).
   129 files / 2804 tests green; build green. Verified independently: `SpaceTabs.tsx` diff is
   **comments only** (16 added, 0 removed), 0 removed assertions, `badge.tsx` changed in comments only.
