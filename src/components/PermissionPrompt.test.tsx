@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import PermissionPrompt from "./PermissionPrompt";
 import { usePermissions } from "../store/permissions";
+import { resetStores } from "../test/resetStores";
 
 // Mock the Tauri IPC layer; everything else (stores) is the real code.
 vi.mock("../lib/tauri", async () => {
@@ -26,7 +27,10 @@ const request = {
 
 describe("PermissionPrompt", () => {
   beforeEach(() => {
-    usePermissions.getState().dismissSessionPrompts("s1");
+    // Every store back to its own initial state. The hand-written version was
+    // `usePermissions.getState().dismissSessionPrompts("s1")`, which cleared ONE
+    // session's prompts and left every other store key standing.
+    resetStores();
     mockedRespond.mockReset();
     mockedRespond.mockResolvedValue(undefined);
   });
@@ -151,6 +155,33 @@ describe("PermissionPrompt", () => {
     await waitFor(() =>
       expect(usePermissions.getState().prompts["s1"]).toHaveLength(0),
     );
+  });
+
+  it("announces a failed answer through role=\"alert\" with the pre-migration classes", async () => {
+    // Task C3 (finding 7): the failure line used to be a bare `<p>` with
+    // `text-destructive`, so a screen-reader user clicked Allow and heard
+    // NOTHING when the answer was rejected. `IpcErrorLine` adds the live
+    // region; the class string must stay byte-identical so nothing about the
+    // card's spacing moves.
+    usePermissions.getState().addPrompt("s1", "r1", request);
+    mockedRespond.mockRejectedValueOnce("respond-permission failed");
+    render(<PermissionPrompt sessionId="s1" requestId="r1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Allow" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe("respond-permission failed");
+    // Byte-identical to the hand-written `px-3 pb-2 text-ui-sm text-destructive`
+    // line this replaced (`cn` reorders; it drops nothing).
+    expect(alert.getAttribute("class")).toBe(
+      "text-ui-sm text-destructive px-3 pb-2",
+    );
+    // And the prompt is NOT removed on failure — the card stays answerable.
+    expect(usePermissions.getState().prompts["s1"]).toHaveLength(1);
+  });
+
+  it("renders no alert region while nothing has failed", () => {
+    usePermissions.getState().addPrompt("s1", "r1", request);
+    render(<PermissionPrompt sessionId="s1" requestId="r1" />);
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("applies min-w-0 and [overflow-wrap:anywhere] to option buttons / container to handle long text gracefully", () => {

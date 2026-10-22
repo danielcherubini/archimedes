@@ -3,6 +3,7 @@ import { respondPermission, type PermissionOutcome } from "../lib/tauri";
 import { describeIpcError } from "../lib/ipcError";
 import { usePermissions } from "../store/permissions";
 import { Button } from "./ui/button";
+import { IpcErrorLine } from "./IpcErrorLine";
 
 /**
  * Inline card shown when a `permission-request` event arrives for the active
@@ -79,7 +80,7 @@ export default function PermissionPrompt({
         </Button>
       </div>
       {error && (
-        <p className="px-3 pb-2 text-ui-sm text-destructive">{error}</p>
+        <IpcErrorLine error={error} className="px-3 pb-2" />
       )}
     </div>
   );
