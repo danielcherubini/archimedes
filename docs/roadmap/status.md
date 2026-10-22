@@ -142,7 +142,7 @@ surfaces (`SpacesList` rows, the button sweep) last.
 | C3 | `IpcErrorLine` with `role="alert"` — **9 sites, one per commit** | 7 | **`done`** `7418e95`→`fd31c7b` (7 commits) |
 | C2 | `CHROME_BUTTON` const + `SettingsDataRow` + badge `settings` variant | 6a–6c | **`done`** `45353b5` + `6144b17` |
 | C8 | `cn()` everywhere + `MutedCaption`/`EmptyListLine` + guard test | 15 | **`done`** `8fe956e` + `3aa254c` |
-| C1 | `useAsyncAction()` + shared catalog cache (on `useCatalogRow`) | 11b, 11c | `todo` |
+| C1 | `useAsyncAction()` + shared catalog cache (on `useCatalogRow`) | 11b, 11c | **`done`** `a49c68f`→`e981c29` (7 commits) |
 | C5 | `InlineGateRow` — the card only | 5 | `todo` |
 | C6 | `CatalogSearchDialog` shell (excludes `McpDialog`) | 4 | `todo` |
 | C4 | `SessionListRow` + `RowButton` — highest-risk surface | 3 | `todo` |
@@ -204,6 +204,21 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   a per-tab close button, and this UI is deliberately browser-style closable tabs. A tablist
   with sibling controls beats orphaned `role="tab"`s. Not to be "fixed" later by
   restructuring the pill or adopting Radix Tabs.
+- **2026-10-22 — C1: `useAsyncAction`'s guard reads RENDERED state, not a ref — on purpose.** It is a
+  faithful copy of `if (busy) return`, so two `run` calls dispatched in one batch both pass. A test
+  pins this as a deliberate non-improvement: **upgrading to a ref is a behaviour change and must be its
+  own commit**, not folded into a refactor. Related: at `SudoConfirmModal` the `disabled={busy}`
+  attribute is the *only* re-entrancy protection — treat it as load-bearing.
+- **2026-10-22 — C1: `useCatalogRow.ts` is the single catalog-cache implementation; do NOT add
+  `useCatalogCache`.** A test asserts that file does not exist. `useCatalogRow` was lifted to its own
+  module rather than exported from `useMentionCatalogs` because that file imports `useSkillCatalog` —
+  exporting there re-creates the B3 module cycle. Each catalog keeps its **own** cache Map (logic is
+  shared, state is not); a test proves cross-eviction does not happen.
+- **2026-10-22 — ORCHESTRATOR SELF-NOTE: I added `Co-authored-by:` trailers to two commits that no
+  participant earned, then rewrote them out.** Never add attribution a human did not author. When
+  amending, use `git commit --amend` only on HEAD; to fix an older commit use `git reset --soft` +
+  path-scoped `git commit -F - -- <paths>`, because `git commit --amend HEAD~1` amends HEAD, not the
+  argument.
 - **2026-10-22 — C8: `classNameConvention.test.ts` is the guard later tasks must obey.** New files
   (`InlineGateRow`, the picker shell, `SessionListRow`/`RowButton`, C7's sweep) must use `cn()` from
   their first commit. **Do not widen its allowlists** — it asserts set membership both ways, so an
@@ -382,6 +397,12 @@ Record every autonomous decision here so a later iteration does not re-litigate 
 
 ## Changelog
 
+- `2026-10-22` — **C1 done** (7 commits, `a49c68f`..`e981c29`). 136 files / 2878 tests green; build
+  green. Verified independently: all three catalog guard test files byte-identical (`git diff --stat`
+  empty), no `useCatalogCache.ts`, 0 removed assertions. Child corrected my plan again —
+  `useSkillCatalog` **does** have a 231 L / 7-test guard, so the guard was two-sided, not one-sided.
+  `SudoConfirmModal` and `SudoPasswordModal` now have tests (30 characterisation tests), closing the
+  gap C3 flagged.
 - `2026-10-22` — **C8 done** (`8fe956e` components, `3aa254c` conversions + guard). 132 files / 2828
   tests green; build green. Verified independently with my own mutation: reverting `FileChip.tsx:39`
   to a template literal reddens exactly one guard assertion and names the file; restored byte-exact.
