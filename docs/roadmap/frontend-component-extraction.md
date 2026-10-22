@@ -658,7 +658,7 @@ Then make `App.tsx`'s handler **exhaustive over `InteractiveEventName`**: a `swi
 - [ ] The switch's default **logs and returns** — it does not throw.
 - [ ] No test asserts parity against Rust source text, and none was added.
 - [ ] `App.tsx`'s handler is exhaustive (`never`-narrowed default); adding a discriminant breaks the build.
-- [ ] The Rust-parity test exists and passes.
+- [ ] No test asserts parity against Rust source text, and none was added. (`tauri.test.ts` and `update.test.ts` keep pinning the event names as **literals** on purpose — that is what makes a wire-value change fail. Do not "deduplicate" them onto `IPC_EVENTS`, which would make both go green on any rename and destroy the guard.)
 - [ ] `pnpm test` and `pnpm build` green.
 
 ---

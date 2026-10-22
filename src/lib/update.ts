@@ -28,6 +28,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { IPC_EVENTS } from "./ipc/events";
 
 /** What `check_update` answers: current, or here is what is newer. */
 export type CheckOutcome =
@@ -70,11 +71,16 @@ export async function relaunchApp(): Promise<void> {
   return invoke<void>("relaunch_app");
 }
 
-/** Subscribe to install progress; returns the unlisten fn (the caller owns it). */
+/**
+ * Subscribe to install progress; returns the unlisten fn (the caller owns it).
+ * The event name lives in `ipc/events.ts` with every other name the renderer
+ * subscribes to — this module is the 12th `listen*` wrapper, and the only one
+ * outside `lib/tauri.ts`.
+ */
 export function listenUpdateProgress(
   callback: (payload: UpdateProgress) => void,
 ): Promise<UnlistenFn> {
-  return listen<UpdateProgress>("update://progress", (event) =>
+  return listen<UpdateProgress>(IPC_EVENTS.updateProgress, (event) =>
     callback(event.payload),
   );
 }

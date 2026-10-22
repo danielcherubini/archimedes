@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { ShadowedSkill, SkillInfo } from "../lib/tauri";
+import { IPC_EVENTS } from "../lib/ipc/events";
 import { isMentionableSkillName } from "../lib/skills";
 import {
   Dialog,
@@ -155,7 +156,7 @@ export default function SkillsDialog({
    */
   const insertSkill = (name: string) => {
     window.dispatchEvent(
-      new CustomEvent("archimedes:insert-skill", {
+      new CustomEvent(IPC_EVENTS.insertSkill, {
         detail: "$" + name.toLowerCase() + " ",
       }),
     );

@@ -14,6 +14,7 @@ import {
   listSpaces,
 } from "./lib/tauri";
 import { createBatchedSessionUpdate } from "./lib/batchSessionUpdates";
+import { INTERACTIVE_EVENTS } from "./lib/ipc/events";
 import { onSessionClosed } from "./lib/sessionLifecycle";
 import { discardSessionMessages, useSessions } from "./store/sessions";
 import { usePermissions } from "./store/permissions";
@@ -156,20 +157,46 @@ function App() {
     unlistenPromises.push(
       listenInteractiveEvent((payload) => {
         const s = useInteractive.getState();
-        // Wire names: the bus `COST_UPDATE` maps to `cost_update` (the
-        // `archimedes:`-prefix-strip lookup), NOT `cost`.
-        if (payload.event === "todos_update") {
-          s.applyTodoUpdate(payload.sessionId, payload.payload);
-        } else if (payload.event === "todos_clear") {
-          // One argument: a clear names a SESSION, and the payload's `source`
-          // is not consulted (ADR 0041).
-          s.applyTodoClear(payload.sessionId);
-        } else if (payload.event === "state") {
-          s.applyState(payload.sessionId, payload.payload);
-        } else if (payload.event === "cost_update") {
-          s.applyCost(payload.sessionId, payload.payload);
-        } else if (payload.event === "session") {
-          s.applySession(payload.sessionId, payload.payload);
+        // Exhaustive over `InteractiveEventName` (the discriminants now live in
+        // `ipc/events.ts`, and `InteractiveEventPayload.event` is typed as that
+        // union) — adding a name there without a case here is a compile error.
+        // The DEFAULT LOGS AND RETURNS: the worker builds these names with no
+        // Rust-side closed set, so an unlisted-but-real frame is possible, and
+        // throwing inside a listener would turn today's silent drop into a
+        // runtime exception. Wire note: the bus's `COST_UPDATE` arrives as
+        // `cost_update`, NOT `cost`.
+        switch (payload.event) {
+          case INTERACTIVE_EVENTS.todosUpdate:
+            s.applyTodoUpdate(payload.sessionId, payload.payload);
+            return;
+          case INTERACTIVE_EVENTS.todosClear:
+            // One argument: a clear names a SESSION, and the payload's `source`
+            // is not consulted (ADR 0041).
+            s.applyTodoClear(payload.sessionId);
+            return;
+          case INTERACTIVE_EVENTS.state:
+            s.applyState(payload.sessionId, payload.payload);
+            return;
+          case INTERACTIVE_EVENTS.costUpdate:
+            s.applyCost(payload.sessionId, payload.payload);
+            return;
+          case INTERACTIVE_EVENTS.session:
+            s.applySession(payload.sessionId, payload.payload);
+            return;
+          default: {
+            // Compile-time exhaustiveness WITHOUT a runtime throw: while every
+            // `InteractiveEventName` has a case above, `unhandled` narrows to
+            // `never`; add a discriminant without a handler and this line is a
+            // type error. The frame is then IGNORED VISIBLY (a throw inside a
+            // listener is a behaviour regression, and the worker has no
+            // Rust-side closed set, so an unlisted-but-real frame is possible).
+            const unhandled: never = payload.event;
+            console.warn(
+              `interactive-event: no handler for "${unhandled}"`,
+              payload.sessionId,
+            );
+            return;
+          }
         }
       }),
     );

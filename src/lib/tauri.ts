@@ -15,6 +15,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { ImageRef } from "./chatAttachments";
 import { describeIpcError } from "./ipcError";
+import { IPC_EVENTS, type InteractiveEventName } from "./ipc/events";
 
 // ---------------------------------------------------------------------------
 // Types mirroring the Rust side
@@ -277,15 +278,15 @@ export interface InteractiveRequestPayload {
 }
 
 /**
- * An `interactive-event` push (camelCase over the wire). `event` is the wire name
- * (`todos_update` / `todos_clear` / `cost_update` / `state` / `session` —
- * the bus `COST_UPDATE` maps to `cost_update`, NOT `cost`); `payload` is the
- * bus payload verbatim.
+ * An `interactive-event` push (camelCase over the wire). `event` is the wire
+ * name, typed as [`InteractiveEventName`](./ipc/events.ts) so a handler that
+ * forgets one discriminant is a compile error rather than a silently-dropped
+ * frame; `payload` is the bus payload verbatim.
  */
 export interface InteractiveEventPayload {
   sessionId: string;
   seq: number;
-  event: string;
+  event: InteractiveEventName;
   payload: unknown;
 }
 
@@ -1098,7 +1099,7 @@ export async function externalOpen(
 export function listenSessionUpdate(
   callback: (payload: SessionUpdatePayload) => void,
 ): Promise<UnlistenFn> {
-  return listen<SessionUpdatePayload>("session-update", (event) =>
+  return listen<SessionUpdatePayload>(IPC_EVENTS.sessionUpdate, (event) =>
     callback(event.payload),
   );
 }
@@ -1106,7 +1107,7 @@ export function listenSessionUpdate(
 export function listenSessionClosed(
   callback: (payload: SessionClosedPayload) => void,
 ): Promise<UnlistenFn> {
-  return listen<SessionClosedPayload>("session-closed", (event) =>
+  return listen<SessionClosedPayload>(IPC_EVENTS.sessionClosed, (event) =>
     callback(event.payload),
   );
 }
@@ -1114,7 +1115,7 @@ export function listenSessionClosed(
 export function listenSessionStalled(
   callback: (payload: StalledPayload) => void,
 ): Promise<UnlistenFn> {
-  return listen<StalledPayload>("session-stalled", (event) =>
+  return listen<StalledPayload>(IPC_EVENTS.sessionStalled, (event) =>
     callback(event.payload),
   );
 }
@@ -1133,7 +1134,7 @@ export interface SessionTitledPayload {
 export function listenSessionTitled(
   callback: (payload: SessionTitledPayload) => void,
 ): Promise<UnlistenFn> {
-  return listen<SessionTitledPayload>("session-titled", (event) =>
+  return listen<SessionTitledPayload>(IPC_EVENTS.sessionTitled, (event) =>
     callback(event.payload),
   );
 }
@@ -1141,7 +1142,7 @@ export function listenSessionTitled(
 export function listenPermissionRequest(
   callback: (payload: PermissionRequestPayload) => void,
 ): Promise<UnlistenFn> {
-  return listen<PermissionRequestPayload>("permission-request", (event) =>
+  return listen<PermissionRequestPayload>(IPC_EVENTS.permissionRequest, (event) =>
     callback(event.payload),
   );
 }
@@ -1149,7 +1150,7 @@ export function listenPermissionRequest(
 export function listenInteractiveRequest(
   callback: (payload: InteractiveRequestPayload) => void,
 ): Promise<UnlistenFn> {
-  return listen<InteractiveRequestPayload>("interactive-request", (event) =>
+  return listen<InteractiveRequestPayload>(IPC_EVENTS.interactiveRequest, (event) =>
     callback(event.payload),
   );
 }
@@ -1169,15 +1170,16 @@ export interface InteractiveRequestClosePayload {
 export function listenInteractiveRequestClose(
   callback: (payload: InteractiveRequestClosePayload) => void,
 ): Promise<UnlistenFn> {
-  return listen<InteractiveRequestClosePayload>("interactive-request-close", (event) =>
-    callback(event.payload),
+  return listen<InteractiveRequestClosePayload>(
+    IPC_EVENTS.interactiveRequestClose,
+    (event) => callback(event.payload),
   );
 }
 
 export function listenInteractiveEvent(
   callback: (payload: InteractiveEventPayload) => void,
 ): Promise<UnlistenFn> {
-  return listen<InteractiveEventPayload>("interactive-event", (event) =>
+  return listen<InteractiveEventPayload>(IPC_EVENTS.interactiveEvent, (event) =>
     callback(event.payload),
   );
 }
@@ -1186,7 +1188,7 @@ export function listenSubagentSessionStarted(
   callback: (payload: SubagentSessionStartedPayload) => void,
 ): Promise<UnlistenFn> {
   return listen<SubagentSessionStartedPayload>(
-    "subagent-session-started",
+    IPC_EVENTS.subagentSessionStarted,
     (event) => callback(event.payload),
   );
 }
@@ -1194,7 +1196,7 @@ export function listenSubagentSessionStarted(
 export function listenSubagentClosed(
   callback: (payload: SubagentClosedPayload) => void,
 ): Promise<UnlistenFn> {
-  return listen<SubagentClosedPayload>("subagent-closed", (event) =>
+  return listen<SubagentClosedPayload>(IPC_EVENTS.subagentClosed, (event) =>
     callback(event.payload),
   );
 }
@@ -1231,7 +1233,7 @@ export async function getWindowState(): Promise<WindowFrameState> {
 export async function listenWindowState(
   handler: (payload: WindowFrameState) => void,
 ): Promise<() => void> {
-  return listen<WindowFrameState>("window-state-changed", (event) =>
+  return listen<WindowFrameState>(IPC_EVENTS.windowStateChanged, (event) =>
     handler(event.payload),
   );
 }

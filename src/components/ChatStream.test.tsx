@@ -45,6 +45,7 @@ import type {
 import { setSidePaneCollapsed } from "../lib/sidePaneState";
 import * as chatAttachments from "../lib/chatAttachments";
 import { activeMentionToken, isOutsideSpaceQuery } from "../lib/skills";
+import { IPC_EVENTS } from "../lib/ipc/events";
 import { MAX_CHAT_ATTACHMENTS, type ChatComposerAttachment } from "../lib/chatAttachments";
 import { makeSessionRow, makeSettings, makeSpaceRow } from "../test/fixtures";
 import { resetStores } from "../test/resetStores";
@@ -99,35 +100,33 @@ const PERSISTED_MCP_MESSAGE =
   "\nand use its tools. (Server summary: npx -y x-mcp.)" +
   "\n</mcp>";
 
-// jsdom exposes a non-callable `window.matchMedia` (the `"matchMedia" in
-// window` guard in the `BrailleLoader`'s `usePrefersReducedMotion` passes,
-// then the call throws) — stub a full MediaQueryList so the working
-// indicator renders (the `braille-loader` test's full-stub pattern).
+// The environment stubs `src/test/setup.tsx` does NOT provide.
+//
+// DELETED here by the rolling B4a migration (this file was touched by B2 for the
+// `IPC_EVENTS.insertSkill` fold): the `matchMedia` `stubGlobal`, the four
+// `Element.prototype` pointer-capture/`scrollIntoView` stubs. All five are
+// byte-equivalent to what `setup.tsx`'s own `beforeAll` installs, and this file
+// calls no `vi.unstubAllGlobals()`, so the shared stubs survive for the whole
+// file (that call is the ONLY thing that strips a setup-file `stubGlobal` — see
+// the guard list in `setup.tsx`).
+//
+// KEPT, and neither is redundancy:
+//  - the object-URL pair: `setup.tsx` stubs no `URL` API, and staged
+//    attachments need a deterministic `blob:` URL (Node's global `URL` reaches
+//    jsdom but rejects web `Blob`s).
+//  - the THREE `HTMLElement.prototype` stubs: `setup.tsx` puts `scrollIntoView`
+//    on `Element.prototype` only, and two tests below read
+//    `HTMLElement.prototype.scrollIntoView` directly and inspect
+//    `mock.contexts` to learn WHICH picker row scrolled. Without this own-property
+//    override that read is `undefined` and the calls land on the inherited
+//    `Element` stub — so this is a dependency, not a duplicate.
 beforeAll(() => {
-  // Node's global `URL` leaks into jsdom but only accepts Node `Blob`s —
-  // stub the object-URL APIs so staged attachments get deterministic URLs.
   URL.createObjectURL = vi.fn((file: File) => `blob:mock-${file.name}`);
   URL.revokeObjectURL = vi.fn();
-  Element.prototype.scrollIntoView = vi.fn();
-  Element.prototype.hasPointerCapture = vi.fn(() => false);
-  Element.prototype.setPointerCapture = vi.fn();
-  Element.prototype.releasePointerCapture = vi.fn();
   HTMLElement.prototype.scrollIntoView = vi.fn();
   HTMLElement.prototype.hasPointerCapture = vi.fn(() => false);
   HTMLElement.prototype.setPointerCapture = vi.fn();
   HTMLElement.prototype.releasePointerCapture = vi.fn();
-  vi.stubGlobal(
-    "matchMedia",
-    (q: string) => ({
-      matches: false,
-      media: q,
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-      addListener: vi.fn(),
-      removeListener: vi.fn(),
-      dispatchEvent: vi.fn(),
-    }),
-  );
 });
 
 // Mock the Tauri IPC layer; everything else (stores) is the real code.
@@ -3040,7 +3039,7 @@ describe("ChatStream", () => {
     // a raw `dispatchEvent` does not flush React's state updates.
     await act(async () => {
       window.dispatchEvent(
-        new CustomEvent("archimedes:insert-skill", { detail: "$beta " }),
+        new CustomEvent(IPC_EVENTS.insertSkill, { detail: "$beta " }),
       );
     });
     // The stale picker is CLOSED (no lingering popup until the next
@@ -3066,7 +3065,7 @@ describe("ChatStream", () => {
     // of `listSkills`.
     await act(async () => {
       window.dispatchEvent(
-        new CustomEvent("archimedes:insert-skill", { detail: "$debug " }),
+        new CustomEvent(IPC_EVENTS.insertSkill, { detail: "$debug " }),
       );
     });
     expect(textarea.value).toBe("hello $debug ");

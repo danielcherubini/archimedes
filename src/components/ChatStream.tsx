@@ -15,6 +15,7 @@ import {
 } from "../lib/tauri";
 import { basenameOfPath } from "../lib/paths";
 import { describeIpcError } from "../lib/ipcError";
+import { IPC_EVENTS } from "../lib/ipc/events";
 import { sessionFieldOf } from "../lib/sessionLookup";
 import { fuzzyMatch } from "../lib/fuzzy";
 import { composerCommands, parseComposerCommand } from "../lib/composerCommands";
@@ -858,8 +859,9 @@ export default function ChatStream() {
         el.setSelectionRange(pos, pos);
       });
     };
-    window.addEventListener("archimedes:insert-skill", onInsertSkill);
-    return () => window.removeEventListener("archimedes:insert-skill", onInsertSkill);
+    window.addEventListener(IPC_EVENTS.insertSkill, onInsertSkill);
+    return () =>
+      window.removeEventListener(IPC_EVENTS.insertSkill, onInsertSkill);
   }, []);
 
   // A stored (non-live) session: its transcript is read-only unless the
