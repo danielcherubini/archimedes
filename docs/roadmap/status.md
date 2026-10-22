@@ -86,12 +86,15 @@ says otherwise. A task is not `done` until both commands are green.
 
 ## Phase A — unblock and take the free wins (no structural risk)
 
-Plan status: **PLANNED** (see `docs/roadmap/frontend-component-extraction.md` §Phase A)
+Plan status: **IN PROGRESS** — A0 done; A1–A6 remaining. See `docs/roadmap/frontend-component-extraction.md` §Phase A.
+
+**Current suite size: 123 files / 2660 tests** (121/2650 at baseline; A0 +1 file/0 tests;
+A1 +1 file/+10 tests).
 
 | # | Task | Finding | Files (primary) | Status |
 |---|------|---------|-----------------|--------|
-| A0 | Re-point source-grep gates at the DOM | 1 | `themeTokens.test.ts`, `slabFloatSeparation.test.ts`, `paletteCompleteness.test.ts`, `subagentSheetLayout.test.ts`, + new `SpaceTabs.pill.test.tsx` | `todo` |
-| A1 | `useCopyButton(text)` — 3 sites | 11a | `hooks/useCopyButton.ts` + `MessageBubble.tsx`, `ToolCallCardHeader.tsx` | `todo` |
+| A0 | Re-point source-grep gates at the DOM | 1 | `themeTokens.test.ts`, `slabFloatSeparation.test.ts`, `paletteCompleteness.test.ts`, `subagentSheetLayout.test.ts`, + new `SpaceTabs.pill.test.tsx` | **`done`** `22ed787` |
+| A1 | `useCopyButton(text)` — 3 sites | 11a | `hooks/useCopyButton.ts` + `MessageBubble.tsx`, `ToolCallCardHeader.tsx` | **`done`** `ea6fe14` |
 | A2 | `lib/subagentActivity.ts` — 217 pure lines out | 14 | `lib/subagentActivity.ts` + `SubagentDelegatingCard.tsx` | `todo` |
 | A3 | `lib/sessionTime.ts` + shared formatters | 10 | `lib/sessionTime.ts`, `SubagentTranscript.tsx` | `todo` |
 | A4 | User-visible copy + `source` label fixes | 16a | `MessageList.tsx`, `NewSpaceDialog.tsx`, `CloseSpaceDialog.tsx`, `GeneralSection.tsx`, `ChromeControls.tsx`, `ProviderSection.tsx`, `AskQuestionCard.tsx`, `McpSection.tsx` | `todo` |
@@ -180,6 +183,13 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   a per-tab close button, and this UI is deliberately browser-style closable tabs. A tablist
   with sibling controls beats orphaned `role="tab"`s. Not to be "fixed" later by
   restructuring the pill or adopting Radix Tabs.
+- **2026-10-22 — A0 accepted child decisions.** (a) The child applied `stripJsComments` to
+  `themeTokens`'s *presence* gate too, beyond the plan: mutation showed `toContain("text-row-verb")`
+  passed with the class deleted from markup, because a doc-comment names it — the prose-as-consumer
+  hazard that file already documents for its CSS gates. Accepted; it makes the gate non-vacuous.
+  (b) `paletteCompleteness`'s "exactly one `data-testid=\"chrome-bar\"`" guard binds to no file, so
+  the chrome bar may later move to its own component and stay green. Accepted as correct for a
+  file-agnostic gate — noted so a later phase does not read it as a placement pin.
 - **2026-10-22 — A6 touches no Rust.** `lib.rs:401,416,417` still register `get_stalled_info`
   and `list_agent_definitions*`; only the TS wrappers go (and the `tauri.ts:958` "kept on
   purpose" comment goes with them). Retiring the commands is a separate change with its own
@@ -191,6 +201,14 @@ Record every autonomous decision here so a later iteration does not re-litigate 
 
 ## Changelog
 
+- `2026-10-22` — **A1 done** (`ea6fe14`). 123 files / 2660 tests green; build green. Orchestrator
+  re-ran both gates independently and re-checked the diff: only JS lines moved — no `aria-label`,
+  `title` or `data-testid` line is touched — and `resetRef` is gone from `src/components/`
+  (was 12 occurrences). The timer render tests pass byte-identical, which is the real proof.
+- `2026-10-22` — **A0 done** (`22ed787`, tests-only). 122 files / 2650 tests green; build green.
+  Orchestrator re-ran the gate independently and re-confirmed the new gate bites: mutating
+  `h-8`→`h-9` in `SpaceTabs.tsx` reddens 2 pill tests, and the file was restored clean.
+  Two child decisions accepted and recorded below.
 - `2026-10-22` — Loop started. Branch `feature/frontend-component-extraction` created from
   `main` @ `3e355d8`. Baseline: `pnpm test` **121 files / 2650 tests green** (69.6 s),
   `pnpm build` green. Phase A planned at `docs/roadmap/frontend-component-extraction.md`,
