@@ -139,7 +139,7 @@ surfaces (`SpacesList` rows, the button sweep) last.
 
 | # | Task | Finding | Status |
 |---|------|---------|--------|
-| C3 | `IpcErrorLine` with `role="alert"` — **9 sites, one per commit** | 7 | `todo` |
+| C3 | `IpcErrorLine` with `role="alert"` — **9 sites, one per commit** | 7 | **`done`** `7418e95`→`fd31c7b` (7 commits) |
 | C2 | `CHROME_BUTTON` const + `SettingsDataRow` + badge `settings` variant | 6a–6c | `todo` |
 | C8 | `cn()` everywhere + `MutedCaption`/`EmptyListLine` + guard test | 15 | `todo` |
 | C1 | `useAsyncAction()` + shared catalog cache (on `useCatalogRow`) | 11b, 11c | `todo` |
@@ -204,6 +204,15 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   a per-tab close button, and this UI is deliberately browser-style closable tabs. A tablist
   with sibling controls beats orphaned `role="tab"`s. Not to be "fixed" later by
   restructuring the pill or adopting Radix Tabs.
+- **2026-10-22 — C3: `SudoConfirmModal.tsx` and `SudoPasswordModal.tsx` still have NO test file.**
+  They are the only error-bearing components without one; the child verified those two migrations by
+  DOM capture (before/after tag, class, role, siblings) rather than a test. **C1 touches the same
+  busy/error shape and should give them tests.**
+- **2026-10-22 — C3: `cn()` reorders conflicting classes; that is not a bug.** `UpdateSection`'s
+  `text-ui-base` override renders as `text-destructive text-ui-base` (attribute string reordered,
+  utility set identical). Any later task claiming "byte-identical class string" must mean the
+  *utility set*, not the attribute order. `IpcErrorLine` is a **named** export — C8 imports it; do
+  not create an `ErrorLine`.
 - **2026-10-22 — Phase C vetting: 6 parallel subagents, 5 audit/plan claims overturned.** Measured
   numbers now in the plan: **37** raw buttons in 19 files (the audit's 50 counted doc-comment prose);
   `useAgentCatalog.test.ts` **exists** (220 L / 8 tests) so the audit's C1 guard is already satisfied;
@@ -345,6 +354,10 @@ Record every autonomous decision here so a later iteration does not re-litigate 
 
 ## Changelog
 
+- `2026-10-22` — **C3 done** (7 commits, `7418e95`..`fd31c7b`). 128 files / 2783 tests green; build
+  green. Verified independently: 9 `<IpcErrorLine` call sites, zero scope violations against the 8
+  out-of-scope files, 0 removed assertions, no scratch files left. First **behaviour-changing** task
+  of the program (9 surfaces gain `role="alert"`), deliberately split one-site-per-commit.
 - `2026-10-22` — **B3 done** (`bd7710d`→`bd9701d`). 127 files / 2765 tests green; build green.
   Verified independently: `verbatimModuleSyntax: true` set, 13 `sessionTypes` consumers in `lib/`,
   0 removed assertions, and the sole surviving `lib → store` import is a value import. Net −85 lines.
