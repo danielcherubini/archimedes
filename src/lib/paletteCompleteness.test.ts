@@ -3,13 +3,32 @@ import { readResolvedIndexCss } from "./cssSource";
 
 // This app deliberately ships no `@types/node` (its globals stay DOM-only), so
 // Node's `fs` is reached through a COMPUTED specifier — an untyped `any`
-// import that `tsc` accepts without the Node type packages. Used for reading
-// `src/App.tsx` (the chrome-bar JSX gate); the CSS itself comes from
+// import that `tsc` accepts without the Node type packages. Used for the
+// chrome-bar JSX gate (which sweeps `src/**/*.tsx`); the CSS itself comes from
 // `cssSource.ts`.
 const NODE_FS = "node:" + "fs";
-const { readFileSync } = (await import(NODE_FS)) as {
+const { readFileSync, readdirSync } = (await import(NODE_FS)) as {
   readFileSync: (path: string, encoding: string) => string;
+  readdirSync: (path: string, options: { recursive: true; encoding: string }) => string[];
 };
+
+/**
+ * Every `.tsx` file under `src/`, paths prefixed with the directory because
+ * `readdirSync({ recursive: true })` returns names relative to it.
+ *
+ * The chrome-bar gate below sweeps this instead of reading one named file, so
+ * the invariant survives the element MOVING. The extension filter is not
+ * skipping real input today (`src/` holds `.ts`, `.tsx` and `.css` and nothing
+ * else — measured in `themeTokens.test.ts`), it is here so a later asset cannot
+ * turn the sweep into a binary read. Test files are deliberately NOT excluded:
+ * a `data-testid` inside a `querySelector('…')` string is not a JSX tag and
+ * cannot match the tag regex, and if one ever did, a second chrome bar in a
+ * fixture is exactly what the "exactly one" assertion should catch.
+ */
+const tsxSourceFiles = (): string[] =>
+  readdirSync("src", { recursive: true, encoding: "utf8" })
+    .filter((p) => /\.tsx$/.test(p))
+    .map((p) => `src/${p}`);
 
 /**
  * The RESOLVED stylesheet — `src/index.css` with its `src/styles/*.css`
@@ -753,18 +772,59 @@ describe("the .theme-dracula block follows the official Dracula spec", () => {
     // equal, so the invariant was enforced by a coincidence rather than by
     // construction.
     //
-    // It is now enforced structurally: `App.tsx`'s chrome bar reads
-    // `bg-frame`, the same token `SpacesList` reads, so the two CANNOT drift
-    // apart whatever the palette says. That is what the JSX half of this test
-    // pins, and it is why moving the chrome band to `#191a21` draws no seam.
-    const app = readFileSync("src/App.tsx", "utf8");
-    // Match the bar's OWN opening tag: its className sits on the line before
-    // `data-testid`, and `[^>]*` cannot cross the tag's closing `>`. A wider
-    // [\s\S] window reaches FORWARD past the bar into the settings branch's
-    // div and pins the wrong element — which is what this regex did first.
-    const chromeBar = app.match(/className="([^"]+)"[^>]*data-testid="chrome-bar"/);
-    expect(chromeBar, "chrome bar not found in App.tsx — update this test").toBeTruthy();
-    expect(chromeBar![1], "the titlebar must read the same token as the sidebar").toMatch(
+    // It is now enforced structurally: the chrome bar reads `bg-frame`, the same
+    // token `SpacesList` reads, so the two CANNOT drift apart whatever the palette
+    // says. That is what the JSX half of this test pins, and it is why moving the
+    // chrome band to `#191a21` draws no seam.
+    //
+    // SCANNED ACROSS `src/**/*.tsx`, NOT READ OUT OF ONE FILE. This used to be
+    // `readFileSync("src/App.tsx")` plus a regex tuned to that file's attribute
+    // ORDER (its `className` sits on the line BEFORE `data-testid`, and the
+    // comment here recorded that a wider `[\s\S]` window had once reached past the
+    // bar into the settings branch and pinned the WRONG ELEMENT). Pinning a
+    // palette invariant to one file's line layout is the failure mode Finding 1 is
+    // about: move the chrome bar into its own component — a change this program
+    // will make — and the gate fails with "chrome bar not found", which is a
+    // complaint about WHERE the element lives, not about what it wears.
+    //
+    // It stays TEXTUAL on purpose, and that is a considered limit rather than an
+    // unfinished job. This file is a CSS/token test that imports no React; the
+    // invariant it owns is "the element the app calls its chrome bar wears
+    // `bg-frame`", which is a class-string fact about one element. Mounting the
+    // app root to read the class off the DOM would pull the whole application
+    // graph — every store, the IPC layer, the dialogs — into a palette test, and
+    // would make a colour gate depend on `App`'s store wiring. The honest scope is
+    // file-AGNOSTIC and still textual.
+    //
+    // The tag is matched as ONE tag: `[^<>]` cannot cross a tag boundary, so the
+    // scan cannot walk off the bar into a sibling the way the old `[\s\S]` window
+    // did. `data-testid="chrome-bar"` is the element's identity — the same handle
+    // `App.test.tsx` queries it by.
+    const CHROME_BAR_TAG = /<[a-zA-Z][\w.-]*(?:\s[^<>]*?)?data-testid="chrome-bar"[^<>]*>/g;
+    const chromeBars = tsxSourceFiles()
+      .map((file) => ({
+        file,
+        tags: readFileSync(file, "utf8").match(CHROME_BAR_TAG) ?? [],
+      }))
+      .filter((found) => found.tags.length > 0);
+    // Exactly ONE. Zero means the bar moved somewhere the scan cannot see (a
+    // computed `data-testid`, or a renamed handle) — which is the moment this gate
+    // stops defending anything, so it fails loudly instead of quietly scanning
+    // nothing; two means the app has two chrome bars and "the titlebar is on the
+    // sidebar's plane" is a claim about an ambiguous element. Note that the
+    // message names the FILES, so the count assertion carries no file binding: the
+    // bar may leave `App.tsx` for its own component and this stays green, which is
+    // the whole point of dropping `readFileSync("src/App.tsx")` above.
+    expect(
+      chromeBars.map((found) => `${found.file} (${found.tags.length})`),
+      "expected exactly one element carrying data-testid=\"chrome-bar\" in src/**/*.tsx",
+    ).toHaveLength(1);
+    const chromeBar = chromeBars[0]!.tags[0]!;
+    // The bar's OWN `className` attribute — read out of the tag, so nothing
+    // outside the element can satisfy the class assertion.
+    const className = chromeBar.match(/className="([^"]*)"/)?.[1];
+    expect(className, "the chrome bar has no string className to read").toBeTruthy();
+    expect(className!, "the titlebar must read the same token as the sidebar").toMatch(
       /(^|\s)bg-frame(\s|$)/,
     );
 

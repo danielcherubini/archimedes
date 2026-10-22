@@ -91,27 +91,81 @@ describe("the Subagent sheet geometry has one home", () => {
   it("only the layout module carries a bracketed geometry class; both consumers interpolate", () => {
     // The whole point of moving the literals: a component that re-types its own
     // width is a second source of truth again, and it fails quietly — the sheet
-    // and the panel simply stop matching. So the components may not contain a
-    // bracketed width/offset class at all, in code or in a comment, and each must
-    // name the constant it interpolates instead.
+    // and the panel simply stop matching. So each consumer must name the constant
+    // it interpolates instead, and the bracketed form of THIS measurement may
+    // exist as a literal in exactly one file: the module that owns it.
+    //
+    // THE NEGATIVES ARE NOW SCOPED TO THE MEASUREMENT, not to whole files. The
+    // old version ran an unqualified "no bracketed pixel width" and "no bracketed
+    // pixel right-offset" regex over `SubagentDetailHost.tsx` and
+    // `SubagentModals.tsx` IN THEIR ENTIRETY, which asserted "no byte of these
+    // files may ever look like a bracketed pixel value" — so the first unrelated
+    // arbitrary-value utility anyone adds later (a fixed-width rail, an inset
+    // badge) fails a gate about THE SHEET'S WIDTH. That is the same source-grep
+    // over-reach Finding 1 retires elsewhere, in its negative form: a net wider
+    // than the invariant is not a stronger gate, it is an unrelated one. What is
+    // asserted instead is the drift the gate actually exists to catch — a consumer
+    // spelling out the sheet's own width or dodge offset instead of interpolating
+    // the constant — and both negatives are built FROM the constants, so they
+    // follow the number if it ever moves. (And note this file's own prose is
+    // subject to the comment-scan below, which is why the retired regexes are
+    // described here in words rather than re-typed.)
+    //
+    // The force this keeps, in order:
+    //   1. each consumer must NAME the constant(s) it interpolates — a component
+    //      that dropped the import for a hand-written literal fails here;
+    //   2. and must NOT contain the literal those constants hold — so "named the
+    //      constant but also wrote the number out" fails too;
+    //   3. the module is required to carry all three literals, so there is still
+    //      exactly one home for them;
+    //   4. the RENDERED pair is pinned in `SubagentModals.test.tsx`, which
+    //      compares both components' class lists against these constants — the
+    //      version a reader can check against a browser, and the one that sees a
+    //      literal that quietly replaced the interpolation in the class list;
+    //   5. the comment-scan and the variant-prefix scan below still sweep EVERY
+    //      file in `SOURCES` (UNCHANGED — including the two test files and this
+    //      one) plus the prose docs, so Tailwind-scannable comments cannot ship a
+    //      stray rule, and a bare dodge offset anywhere outside the module is
+    //      still an offender there.
+    //
+    // `SOURCES` itself is deliberately left intact for exactly that reason: the
+    // comment-scan iterates it, so dropping a file from the LIST to narrow the
+    // negative would have silently removed it from the prose gate as well.
     const layout = readFileSync(SOURCES[0], "utf8");
     expect(layout).toContain(SHEET_WIDTH_CLASS);
     expect(layout).toContain(GATE_PANEL_DODGE_OFFSET_CLASS);
     expect(layout).toContain(GATE_PANEL_DODGE_MAX_WIDTH_CLASS);
 
+    // The dodge's offset, spelled as a bare bracketed value. Built FROM the
+    // numeric constant rather than written as a literal, so the negative follows
+    // the measurement if it ever moves — and narrower than the retired
+    // "any bracketed pixel right-offset anywhere in the file", while still
+    // catching both the bare form and the variant-prefixed one.
+    const bareOffset = new RegExp(`right-\\[${SUBAGENT_SHEET_WIDTH}px\\]`);
+
     const sheet = readFileSync(SOURCES[1], "utf8");
-    expect(sheet).toContain("SHEET_WIDTH_CLASS");
-    expect(sheet).not.toMatch(/w-\[\d+px\]/);
-    expect(sheet).not.toMatch(/right-\[\d+px\]/);
+    expect(sheet, `${SOURCES[1]} no longer interpolates the sheet width`).toContain(
+      "SHEET_WIDTH_CLASS",
+    );
+    // The sheet's own width literal, spelled out instead of interpolated, is the
+    // second source of truth this file exists to forbid.
+    expect(sheet, `${SOURCES[1]} writes the sheet's width as a literal`).not.toContain(
+      SHEET_WIDTH_CLASS,
+    );
+    expect(sheet, `${SOURCES[1]} writes the dodge offset as a literal`).not.toMatch(bareOffset);
 
     const panel = readFileSync(SOURCES[2], "utf8");
-    expect(panel).toContain("SHEET_WIDTH_CLASS");
+    expect(panel, `${SOURCES[2]} no longer interpolates the sheet width`).toContain(
+      "SHEET_WIDTH_CLASS",
+    );
     // The pair travels together: an offset with no width cap hangs the panel off
     // the viewport's left edge on the default 800px window.
     expect(panel).toContain("GATE_PANEL_DODGE_OFFSET_CLASS");
     expect(panel).toContain("GATE_PANEL_DODGE_MAX_WIDTH_CLASS");
-    expect(panel).not.toMatch(/w-\[\d+px\]/);
-    expect(panel).not.toMatch(/right-\[\d+px\]/);
+    expect(panel, `${SOURCES[2]} writes the sheet's width as a literal`).not.toContain(
+      SHEET_WIDTH_CLASS,
+    );
+    expect(panel, `${SOURCES[2]} writes the dodge offset as a literal`).not.toMatch(bareOffset);
   });
 
   it("no comment in these files quotes a bracketed arbitrary-value utility (Tailwind scans comments)", () => {
