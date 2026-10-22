@@ -86,10 +86,11 @@ says otherwise. A task is not `done` until both commands are green.
 
 ## Phase A — unblock and take the free wins (no structural risk)
 
-Plan status: **IN PROGRESS** — A0 done; A1–A6 remaining. See `docs/roadmap/frontend-component-extraction.md` §Phase A.
+Plan status: **PHASE A COMPLETE** (A0–A6 all done). Phase B not yet planned — see `docs/roadmap/frontend-component-extraction.md`.
 
-**Current suite size: 125 files / 2699 tests** (121/2650 at baseline; A0 +1/0, A1 +1/+10,
-A2 +1/+27, A3 +1/+7, A4 +0/+3, A5 +0/+2). `SubagentDelegatingCard.tsx` is now 424 code lines (was 696).
+**Current suite size: 124 files / 2695 tests** (121/2650 at baseline; A0 +1/0, A1 +1/+10,
+A2 +1/+27, A3 +1/+7, A4 +0/+3, A5 +0/+2, A6 −1/−4 for the deleted `ids.test.ts`).
+`SubagentDelegatingCard.tsx` is now 424 code lines (was 696).
 
 **There is NO prettier/eslint/biome gate in this repo** — verified `package.json` and
 `.github/workflows/ci.yml` name no formatter. The frontend gates are `pnpm test` + `pnpm build`
@@ -105,7 +106,7 @@ satisfy a tool CI does not run — it sweeps unrelated lines into the diff.
 | A3 | `lib/sessionTime.ts` + shared formatters | 10 | `lib/sessionTime.ts`, `SubagentTranscript.tsx` | **`done`** `3886fae` |
 | A4 | User-visible copy + `source` label fixes | 16a | as planned | **`done`** `b5d0967` + `ff21d01` |
 | A5 | `SpaceTabs` tablist ARIA (2 attributes) | 18 | `src/components/SpaceTabs.tsx` | **`done`** `3b6ffb4` |
-| A6 | Dead-code deletion (orphans, dead IPC, tokens) | 17 | `ui/{badge,tabs,separator,dropdown-menu,card,select,dialog,kbd,input,progress,braille-loader}.tsx`, `lib/ids.ts`, `lib/tauri.ts`, + ADR 0072 | `todo` |
+| A6 | Dead-code deletion (orphans, dead IPC, tokens) | 17 | as planned | **`done`** `287019f` + `3718ffc` |
 
 ## Phase B — the substrate
 
@@ -189,6 +190,18 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   a per-tab close button, and this UI is deliberately browser-style closable tabs. A tablist
   with sibling controls beats orphaned `role="tab"`s. Not to be "fixed" later by
   restructuring the pill or adopting Radix Tabs.
+- **2026-10-22 — A6 accepted child decisions.** `DialogPortal` was not in the plan's table but has
+  an internal reader, so it was kept module-private under the same rule as `DialogOverlay`.
+  `StalledInfo` (the payload type) stays for D1, but its doc-comments were re-pointed at the Rust
+  command name so they no longer reference a deleted TS symbol. `inputVariants`/`InputProps`/
+  `ProgressSegment`/`BrailleLoaderProps` all turned out to have internal readers → kept private,
+  none deleted. **For the remaining phases: after any deletion, re-grep the touched file for every
+  symbol it imports** — orphaned imports are the recurring failure mode of this task type.
+- **2026-10-22 — ADR 0072's token figure is 88, and the METHOD is the point.** Static scans of
+  `--color-*` consumption return 138 / 163 / 91 / 88 depending on whether JS comments and CSS
+  `var()` aliasing are stripped. Any later phase that re-counts must reuse the ADR's method, not
+  invent a new grep. Tokens consumed via runtime-composed class names (`fileIcons.ts`) are invisible
+  to grep — do not delete a family on a grep verdict alone.
 - **2026-10-22 — A5 shipped as 2 attributes, not a wrapper.** Verified in the diff: exactly
   `role="tablist"` + `aria-orientation="horizontal"` are the only non-comment additions. The test
   asserts `tablist === getByTestId("space-tabs")`, so a future wrapper-based "fix" fails it. The
@@ -224,6 +237,12 @@ Record every autonomous decision here so a later iteration does not re-litigate 
 
 ## Changelog
 
+- `2026-10-22` — **A6 done** (`287019f` deletions, `3718ffc` ADR 0072). 124 files / 2695 tests
+  green; build green. Net **−472 lines**. Verified independently: `git status` shows **zero** files
+  under `src-tauri/` touched, `ui/badge.tsx` survives with its C2 note, and a leftover-symbol sweep
+  (`Separator`/`KbdGroup`/`CardHeader`/`DialogTrigger`/`SelectSeparator`/`listAgentDefinitions`/
+  `getStalledInfo`) returns 0 consumers each — the single remaining `Tabs` hit is prose in a comment.
+  **Phase A is complete.**
 - `2026-10-22` — **A5 done** (`3b6ffb4`). 125 files / 2699 tests green; build green. Verified the
   diff is 2 non-comment lines with zero deletions, so no className/drag-region/middle-click change.
 - `2026-10-22` — **A4 done** (`b5d0967` copy, `ff21d01` agent-name fix). 125 files / 2697 tests
