@@ -99,7 +99,7 @@ Plan status: **Phase A COMPLETE** (A0–A6 done). **Phase B planned and vetted**
 
 **Current suite size: 126 files / 2743 tests** (121/2650 at baseline; A0 +1/0, A1 +1/+10,
 A2 +1/+27, A3 +1/+7, A4 +0/+3, A5 +0/+2, A6 −1/−4 for the deleted `ids.test.ts`, B4a +1/+25,
-B1 +1/+23, B2 +1/+22).
+B1 +1/+23, B2 +1/+22, B3 +0/0).
 `SubagentDelegatingCard.tsx` is now 424 code lines (was 696).
 
 **There is NO prettier/eslint/biome gate in this repo** — verified `package.json` and
@@ -120,7 +120,7 @@ satisfy a tool CI does not run — it sweeps unrelated lines into the diff.
 
 ## Phase B — the substrate
 
-Plan status: **PLANNED + VETTED** (see `docs/roadmap/frontend-component-extraction.md` §Phase B).
+Plan status: **PHASE B COMPLETE** (B4a, B1, B2, B3 all done — see `docs/roadmap/frontend-component-extraction.md` §Phase B).
 **Execution order is B4a → B1 → B2 → B3**, NOT the report's B1→B4: B4a is the task that makes
 every other task cheap to test, and B1's new tests want session fixtures that do not exist yet.
 
@@ -129,7 +129,7 @@ every other task cheap to test, and B1's new tests want session fixtures that do
 | B4a | `src/test/fixtures/*` + `resetStores()` (+ `renderWithProviders` **only if need is proven**) | 9 | **`done`** `5131bda` |
 | B1 | `src/lib/sessionLookup.ts` → `sessionFieldOf` (plain fn, NOT a hook) | 8 | **`done`** `58c52f9` |
 | B2 | `src/lib/ipc/events.ts` — event names (all 12 wrappers) + payload discriminants | 12b | **`done`** `bc77cb8` |
-| B3 | `src/lib/sessionTypes.ts` + drop store re-export barrel + `verbatimModuleSyntax` | 13b | `todo` |
+| B3 | `src/lib/sessionTypes.ts` + drop store re-export barrel + `verbatimModuleSyntax` | 13b | **`done`** `bd9701d` |
 
 ## Phase C — components and hooks
 
@@ -202,6 +202,17 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   a per-tab close button, and this UI is deliberately browser-style closable tabs. A tablist
   with sibling controls beats orphaned `role="tab"`s. Not to be "fixed" later by
   restructuring the pill or adopting Radix Tabs.
+- **2026-10-22 — B3: `sessionTypes.ts` must have lib consumers, not just the store.** The full
+  option was taken deliberately: re-pointing the 9 production `lib/**` importers gives it 13 lib
+  consumers. A future task must NOT "simplify" this by having `lib/**` import the types back
+  through `store/sessions` — the store's re-export exists for the ~69 **component** call sites only,
+  and a comment at `store/sessions.ts` says so. Also: the only remaining `lib → store` import is
+  `sessionLifecycle.ts:4`, a **value** import of the store — a different edge, intentionally kept.
+- **2026-10-22 — B3: another premise of mine was wrong.** I had written that the `:37-41` barrel had
+  "zero importers"; `store/sessions.test.ts` imported three of the five symbols **through the store**,
+  so deleting it as written broke the build. The claim was true of external importers only.
+  **Pattern across this loop: my absolute claims ("zero", "exactly", "none") are the ones that break.
+  Qualify them or verify them at execution time.**
 - **2026-10-22 — B2: `tauri.test.ts` and `update.test.ts` pin event names as LITERALS ON PURPOSE.
   Do NOT "deduplicate" them onto `IPC_EVENTS` in a later task — reading the constant would make both
   go green on any rename and destroy the only wire guard that exists. Verified: changing a
@@ -314,6 +325,10 @@ Record every autonomous decision here so a later iteration does not re-litigate 
 
 ## Changelog
 
+- `2026-10-22` — **B3 done** (`bd7710d`→`bd9701d`). 127 files / 2765 tests green; build green.
+  Verified independently: `verbatimModuleSyntax: true` set, 13 `sessionTypes` consumers in `lib/`,
+  0 removed assertions, and the sole surviving `lib → store` import is a value import. Net −85 lines.
+  **PHASE B COMPLETE.**
 - `2026-10-22` — **B2 done** (`bc77cb8`). 127 files / 2765 tests green; build green. Verified
   independently: 0 bare event strings across all 12 `listen*` bodies, `App.tsx`'s default warns and
   returns (no throw), and no test reads Rust source. Child caught a self-contradiction in my plan.
