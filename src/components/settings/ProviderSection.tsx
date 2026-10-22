@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/select";
 import {
   SettingsBadge,
+  SettingsDataRow,
   SettingsGroupCard,
   closedSelectValue,
 } from "./primitives";
@@ -117,7 +118,7 @@ function ProviderRow({
       ? `${modelCount} models`
       : "unreachable";
   return (
-    <div className="border-t border-border px-4 py-3 first:border-t-0">
+    <SettingsDataRow>
       <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2">
         <Field label="Name">
           <TextField
@@ -241,7 +242,7 @@ function ProviderRow({
           </AlertDialog>
         </div>
       </div>
-    </div>
+    </SettingsDataRow>
   );
 }
 

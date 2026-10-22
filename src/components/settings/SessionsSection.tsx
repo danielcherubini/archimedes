@@ -10,7 +10,7 @@ import { relativeTimeFor } from "@/lib/sessionTime";
 import { detachedSessions, useSessions } from "@/store/sessions";
 import DeleteSessionDialog from "../DeleteSessionDialog";
 import ClearDetachedSessionsDialog from "./ClearDetachedSessionsDialog";
-import { SettingsBadge, SettingsGroupCard } from "./primitives";
+import { SettingsBadge, SettingsDataRow, SettingsGroupCard } from "./primitives";
 
 /**
  * One **Detached** row: the title (the one rule, `titleFor`), the FULL `cwd`,
@@ -18,8 +18,9 @@ import { SettingsBadge, SettingsGroupCard } from "./primitives";
  * empty slot), and the two actions — Reopen Space (non-destructive) then
  * Delete (the existing per-row confirm).
  *
- * The markup follows `McpSection`'s `McpRow` (a `border-t` row with a
- * `min-w-0 flex-1` text column and ghost icon buttons), NOT `SettingsRow`:
+ * The markup follows `McpSection`'s `McpRow` (a `SettingsDataRow` shell — the
+ * `border-t` divider row — with a `min-w-0 flex-1` text column and ghost icon
+ * buttons), NOT `SettingsRow`:
  * `SettingsRow` is a label/control grid for a preference, and this is a list of
  * data. The full path is on the row because this section is cross-Space — the
  * path is the one thing that says which folder a row came from (the confirm
@@ -38,7 +39,7 @@ function DetachedSessionRow({
   const title = titleFor(messages, basenameOfPath(row.cwd), row.title);
   const time = relativeTimeFor(messages);
   return (
-    <div className="border-t border-border px-4 py-3 first:border-t-0">
+    <SettingsDataRow>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
         <div className="min-w-0 flex-1">
           <div className="truncate text-ui-base font-medium text-foreground">
@@ -77,7 +78,7 @@ function DetachedSessionRow({
           <Trash2Icon className="size-3.5" />
         </Button>
       </div>
-    </div>
+    </SettingsDataRow>
   );
 }
 

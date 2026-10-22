@@ -70,6 +70,56 @@ export function SettingsRow({
   );
 }
 
+/**
+ * The shell of a settings LIST row — the divider + padding, and nothing else
+ * (the ZCode-port sibling of `SettingsRow`, Finding 6b).
+ *
+ * `SettingsRow` is a PREFERENCE row: it owns a `grid-cols-[minmax(0,1fr)_192px]`
+ * label/control grid and label + description markup. A settings section also
+ * lists DATA — a configured provider, an MCP server, a detached session — and
+ * those rows own their own layout (a `grid` of fields, a `flex flex-wrap` of
+ * text column + ghost icon buttons). Routing a data row through `SettingsRow`
+ * would give it a 192px control column it does not have and a label it does not
+ * want, which is exactly why the report says NOT to. So this primitive owns the
+ * one fact the data rows actually agree on — the shell — and the three call
+ * sites keep their own content:
+ *
+ *   `border-t border-border px-4 py-3 first:border-t-0`
+ *
+ * which `ProviderSection`'s provider row, `McpSection`'s `McpRow` and
+ * `SessionsSection`'s detached row each spelled by hand.
+ *
+ * `border-t` STAYS ON THE ROOT and the component adds no element of its own.
+ * Both are load-bearing, not stylistic: `SettingsPage.test.tsx:940,1352,1497`
+ * locate rows with `document.querySelectorAll(".border-t")` and
+ * `SessionsSection.test.tsx:93` with `getByText(path).closest('[class*="border-t"]')`
+ * — so the divider may not move to an inner wrapper, and a wrapper element would
+ * insert a DOM level between the row and the layout the section puts inside it.
+ * `primitives.test.tsx` pins both query shapes and the no-extra-DOM property.
+ *
+ * `className` merges through `cn()`, so a variant (the wider `px-4 py-3` of an
+ * empty-state row, say) can win a padding conflict the same way
+ * `IpcErrorLine`'s `className` does.
+ */
+export function SettingsDataRow({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className?: string;
+}): ReactElement {
+  return (
+    <div
+      className={cn(
+        "border-t border-border px-4 py-3 first:border-t-0",
+        className,
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
 /** A subtle inline badge (the ZCode `SettingsBadge` port; an optional
  * `title` for the error tooltips). */
 export function SettingsBadge({
