@@ -143,7 +143,7 @@ surfaces (`SpacesList` rows, the button sweep) last.
 | C2 | `CHROME_BUTTON` const + `SettingsDataRow` + badge `settings` variant | 6a–6c | **`done`** `45353b5` + `6144b17` |
 | C8 | `cn()` everywhere + `MutedCaption`/`EmptyListLine` + guard test | 15 | **`done`** `8fe956e` + `3aa254c` |
 | C1 | `useAsyncAction()` + shared catalog cache (on `useCatalogRow`) | 11b, 11c | **`done`** `a49c68f`→`e981c29` (7 commits) |
-| C5 | `InlineGateRow` — the card only | 5 | `todo` |
+| C5 | `InlineGateRow` — the card only | 5 | **`done`** `d02dd10`→`4c57551` (3 commits) |
 | C6 | `CatalogSearchDialog` shell (excludes `McpDialog`) | 4 | `todo` |
 | C4 | `SessionListRow` + `RowButton` — highest-risk surface | 3 | `todo` |
 | C7 | raw `<button>` → `<Button>`, one a11y group per commit | 6d | `todo` |
@@ -204,6 +204,19 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   a per-tab close button, and this UI is deliberately browser-style closable tabs. A tablist
   with sibling controls beats orphaned `role="tab"`s. Not to be "fixed" later by
   restructuring the pill or adopting Radix Tabs.
+- **2026-10-22 — C5: the per-row vs per-region Escape asymmetry is NOT a defect to tidy.**
+  `TranscriptFooter` stops Escape per-row, `SubagentModals` per-region, and `InlineGateRow` renders a
+  **fragment with no handler at all** — deliberately. The attribution chip is a *sibling* of the card,
+  and the region's `p-3` padding and `gap-3` inter-card gaps are reachable by a keypress
+  (`pointer-events-none` gates pointers, not keys), so a card-level stop would be strictly narrower and
+  would silently uncover three paths. **If a later task is tempted to "unify" the two handlers, that
+  test is the tripwire.** `SHEET_WIDTH_CLASS` also must stay in `SubagentModals.tsx` —
+  `subagentSheetLayout.test.ts` reads that file as source.
+- **2026-10-22 — C5: I corrected a false doc-comment the child wrote before committing.** It claimed
+  the card root had an `onKeyDown`; the handler belongs to `AskQuestionCard`'s own root (`:315`) and
+  `PermissionPrompt` has none (it is `<Button>`-based). **A confident comment describing code that does
+  not exist is a defect** — read the claim, don't accept the prose. Worth adding to the child's brief:
+  verify your own doc-comments name real code.
 - **2026-10-22 — C1: `useAsyncAction`'s guard reads RENDERED state, not a ref — on purpose.** It is a
   faithful copy of `if (busy) return`, so two `run` calls dispatched in one batch both pass. A test
   pins this as a deliberate non-improvement: **upgrading to a ref is a behaviour change and must be its
@@ -397,6 +410,10 @@ Record every autonomous decision here so a later iteration does not re-litigate 
 
 ## Changelog
 
+- `2026-10-22` — **C5 done** (3 commits, `d02dd10`..`4c57551`). 137 files / 2891 tests green; build
+  green. Verified independently: all six guard/adjacent test files byte-identical, `SHEET_WIDTH_CLASS`
+  still in `SubagentModals.tsx` (4 occurrences), tree clean. Found and fixed one false doc-comment
+  (above). Child proved DOM-neutrality by capturing `outerHTML` before/after for 4 trees.
 - `2026-10-22` — **C1 done** (7 commits, `a49c68f`..`e981c29`). 136 files / 2878 tests green; build
   green. Verified independently: all three catalog guard test files byte-identical (`git diff --stat`
   empty), no `useCatalogCache.ts`, 0 removed assertions. Child corrected my plan again —
