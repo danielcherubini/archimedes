@@ -1,5 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { MinusIcon, SquareIcon, XIcon } from "lucide-react";
+import { CHROME_BUTTON, CHROME_BUTTON_CLOSE } from "./chromeButton";
 
 /**
  * Frameless window controls. The window is created `decorations: false`
@@ -30,7 +31,7 @@ export default function WindowControls() {
         type="button"
         title="Minimize"
         onClick={() => void win.minimize()}
-        className="flex h-7 w-7 items-center justify-center rounded-md text-foreground-subtle transition-colors hover:bg-hover hover:text-foreground"
+        className={CHROME_BUTTON}
       >
         <MinusIcon size={14} aria-hidden />
       </button>
@@ -38,7 +39,7 @@ export default function WindowControls() {
         type="button"
         title="Maximize / Restore"
         onClick={() => void win.toggleMaximize()}
-        className="flex h-7 w-7 items-center justify-center rounded-md text-foreground-subtle transition-colors hover:bg-hover hover:text-foreground"
+        className={CHROME_BUTTON}
       >
         <SquareIcon size={12} aria-hidden />
       </button>
@@ -46,7 +47,7 @@ export default function WindowControls() {
         type="button"
         title="Close"
         onClick={() => void win.close()}
-        className="flex h-7 w-7 items-center justify-center rounded-md text-foreground-subtle transition-colors hover:bg-destructive/20 hover:text-destructive"
+        className={CHROME_BUTTON_CLOSE}
       >
         <XIcon size={14} aria-hidden />
       </button>

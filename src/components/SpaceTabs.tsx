@@ -316,6 +316,19 @@ export default function SpaceTabs() {
               aria-label={`Close ${name}`}
               title="Close tab"
               onClick={() => requestClose(s.path, name)}
+              // NOT `CHROME_BUTTON` (the chrome bar's shared button grammar,
+              // `./chromeButton.ts`) and NOT a shared component — deliberately.
+              // This ✕ and the `+` below are the SECOND chrome cluster, and per
+              // CONTEXT.md **Chrome controls** + ADR 0038 the two clusters differ
+              // ON PURPOSE: this is a 20px (`size-5`) square with `rounded` and an
+              // ALWAYS-ON `bg-surface-hover` fill, not the chrome bar's 28px
+              // (`h-7 w-7`) `rounded-md` button that fills `bg-hover` and
+              // colour-TRANSITIONS in (`transition-colors`). It also sits inside
+              // the drag region and inside the pill, so it is inset by `ml-1 mr-3`
+              // to match the label's own inset. Folding these two onto that
+              // constant would repaint the strip and pull the tab controls into
+              // the grammar ADR 0038 scopes to the top-right cluster — and
+              // `chromeButton.test.ts` reddens the import that would do it.
               // ALWAYS there — on the active tab and on every other one. The
               // first version drew it TRANSPARENT until the pointer reached the
               // pill, which made an un-hovered tab look un-closable (and left a
@@ -336,6 +349,9 @@ export default function SpaceTabs() {
         type="button"
         aria-label="New space"
         onClick={openNewSpaceDialog}
+        // The `+` is the other half of the SECOND chrome cluster — see the
+        // ✕'s comment above for why this is not `CHROME_BUTTON` (`size-8`,
+        // `bg-surface-hover`, no `transition-colors`).
         className="size-8 shrink-0 rounded-md text-foreground-subtle hover:bg-surface-hover"
       >
         <PlusIcon className="size-4" />

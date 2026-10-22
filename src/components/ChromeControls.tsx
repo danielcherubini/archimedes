@@ -15,6 +15,8 @@ import {
   subscribeSidePane,
 } from "../lib/sidePaneState";
 import { useHasPendingRequest } from "../hooks/useHasPendingRequest";
+import { CHROME_BUTTON } from "./chromeButton";
+import { cn } from "./lib/utils";
 
 /**
  * The chrome bar's app-control cluster — the Settings gear and the two pane
@@ -71,9 +73,12 @@ export default function ChromeControls({
   const hasPendingRequest = useHasPendingRequest();
 
   // The shared button grammar: `WindowControls`' box size (these sit in the
-  // same row, facing the same cursor) and its subtle-ink hover.
-  const BTN =
-    "relative flex h-7 w-7 items-center justify-center rounded-md text-foreground-subtle transition-colors hover:bg-hover hover:text-foreground";
+  // same row, facing the same cursor) and its subtle-ink hover, both hoisted to
+  // `./chromeButton` — see that file for why it is a CONSTANT and not a shared
+  // component, and why `relative` is added HERE rather than living in it (the
+  // pending dot below is `absolute`; `WindowControls` has no such child and must
+  // not gain a positioning context).
+  const BTN = cn("relative", CHROME_BUTTON);
 
   return (
     <div className="flex items-center gap-0.5 pr-1" data-testid="chrome-controls">

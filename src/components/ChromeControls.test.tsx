@@ -11,6 +11,9 @@ import {
   getSidePaneCollapsed,
   setSidePaneCollapsed,
 } from "../lib/sidePaneState";
+import { CHROME_BUTTON } from "./chromeButton";
+import { makeSessionRow } from "../test/fixtures";
+import { resetModuleFlags, resetStores } from "../test/resetStores";
 
 /**
  * The chrome bar's control cluster: the Settings gear and the two pane
@@ -22,18 +25,19 @@ import {
  * "behind a hidden pane".
  */
 
+/** The exact class string every control rendered BEFORE `CHROME_BUTTON`
+ *  existed — `WindowControls`' grammar plus this cluster's `relative` (the
+ *  pending dot is `absolute`, so the anchor is the caller's). A LITERAL, not a
+ *  `cn("relative", CHROME_BUTTON)` recomputation: comparing the render to an
+ *  expression built from the same constant would move both sides on a repaint. */
+const CONTROL_BUTTON =
+  "relative flex h-7 w-7 items-center justify-center rounded-md text-foreground-subtle transition-colors hover:bg-hover hover:text-foreground";
+
 /** Seed an ACTIVE session holding one permission prompt — the cheapest way to
  * make `useHasPendingRequest()` true, which is what the dot reads. */
 function seedPendingPrompt(): void {
   useSessions.setState({
-    sessions: [
-      {
-        sessionId: "s1",
-        cwd: "/tmp/alpha",
-        capabilities: {},
-        archived: false,
-      },
-    ],
+    sessions: [makeSessionRow({ sessionId: "s1", cwd: "/tmp/alpha" })],
     activeSessionId: "s1",
   });
   usePermissions.setState({
@@ -42,10 +46,13 @@ function seedPendingPrompt(): void {
 }
 
 beforeEach(() => {
-  setLeftPaneCollapsed(false);
-  setSidePaneCollapsed(false);
-  useSessions.setState({ sessions: [], activeSessionId: null });
-  usePermissions.setState({ prompts: {} });
+  // Every store back to its own initial state — the hand-written version named
+  // `useSessions.{sessions,activeSessionId}` + `usePermissions.prompts` and
+  // left the store's other fourteen data fields to leak between cases.
+  resetStores();
+  // The two pane flags are module-scope (and persist to localStorage), so they
+  // are `resetModuleFlags`' job, not the store's.
+  resetModuleFlags();
 });
 
 describe("ChromeControls", () => {
@@ -108,6 +115,25 @@ describe("ChromeControls", () => {
     // there is no second button to hand off to anywhere in the shell.
     expect(screen.getByTestId("left-pane-toggle")).toBe(left);
     expect(screen.getByTestId("right-pane-toggle")).toBe(right);
+  });
+
+  it("every control renders the shared CHROME_BUTTON grammar plus this cluster's `relative`", () => {
+    // Finding 6a: this cluster's `BTN` and `WindowControls`' two literals were
+    // the same string spelled three times. The render is compared to the
+    // PRE-EXTRACTION literal (so a repaint fails) and then to the constant with
+    // `relative` prepended (so the sharing is what is asserted). `relative`
+    // stays HERE, not in the constant: the pending dot is `absolute`, and
+    // `WindowControls`' three buttons must not gain a positioning context.
+    render(<ChromeControls onOpenSettings={() => {}} />);
+    const controls = [
+      screen.getByRole("button", { name: "Settings" }),
+      screen.getByTestId("left-pane-toggle"),
+      screen.getByTestId("right-pane-toggle"),
+    ];
+    for (const control of controls) {
+      expect(control.className).toBe(CONTROL_BUTTON);
+      expect(control.className).toBe(`relative ${CHROME_BUTTON}`);
+    }
   });
 
   it("holds no pending dot while BOTH panes are open, even with a pending prompt", () => {
