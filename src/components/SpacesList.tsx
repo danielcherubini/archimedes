@@ -36,6 +36,7 @@ import {
   sortByActivity,
 } from "../lib/sessionActivity";
 import { titleFor } from "../lib/sessionTitle";
+import { relativeTimeFor } from "../lib/sessionTime";
 import {
   getLeftPaneCollapsed,
   LEFT_PANE_RAIL,
@@ -43,11 +44,7 @@ import {
   subscribeLeftPane,
 } from "../lib/leftPaneState";
 import { openNewSpaceDialog } from "../lib/newSpaceDialogState";
-import {
-  useSessions,
-  spaceViewFor,
-  type Message,
-} from "../store/sessions";
+import { useSessions, spaceViewFor } from "../store/sessions";
 import { useSessionStatus } from "../hooks/useSessionStatus";
 import { useSessionStatuses } from "../hooks/useSessionStatus";
 import { useSkillCatalog } from "../hooks/useSkillCatalog";
@@ -69,26 +66,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
-
-/**
- * The relative time of a session's last activity, derived ONLY from the
- * latest message's `at` when the transcript is loaded this boot
- * (`useSessions.messages[sessionId]`): `<60s` → `now`, `<60m` → `Nm`,
- * else `Nh`. `SessionInfo` has NO `createdAt` field (the store's ordering
- * note says so explicitly), so a stored session not opened this boot has
- * no loaded messages → `null` (the row renders an empty slot).
- */
-function relativeTimeFor(
-  messages: Message[] | undefined,
-  now: number = Date.now(),
-): string | null {
-  const latest = messages?.[messages.length - 1];
-  if (!latest) return null;
-  const diff = now - latest.at;
-  if (diff < 60_000) return "now";
-  if (diff < 60 * 60_000) return `${Math.floor(diff / 60_000)}m`;
-  return `${Math.floor(diff / (60 * 60_000))}h`;
-}
 
 function spaceNameFor(cwd: string, spaces: { path: string }[]): string {
   const match = spaces.find((s) => s.path === cwd);

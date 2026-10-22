@@ -6,31 +6,11 @@ import { Button } from "@/components/ui/button";
 import type { SessionInfo } from "@/lib/tauri";
 import { basenameOfPath } from "@/lib/paths";
 import { titleFor } from "@/lib/sessionTitle";
-import { detachedSessions, useSessions, type Message } from "@/store/sessions";
+import { relativeTimeFor } from "@/lib/sessionTime";
+import { detachedSessions, useSessions } from "@/store/sessions";
 import DeleteSessionDialog from "../DeleteSessionDialog";
 import ClearDetachedSessionsDialog from "./ClearDetachedSessionsDialog";
 import { SettingsBadge, SettingsGroupCard } from "./primitives";
-
-/**
- * The relative time of a Session's last activity, derived ONLY from the latest
- * message's `at` when the transcript is loaded this boot
- * (`useSessions.messages[sessionId]`): `<60s` → `now`, `<60m` → `Nm`, else
- * `Nh`. Copied from `SpacesList`'s identical helper rather than exported from
- * there: `SessionInfo` has NO `createdAt` (the store's ordering note says so
- * explicitly), so a stored row that was never opened this boot has no loaded
- * messages and renders an empty slot instead.
- */
-function relativeTimeFor(
-  messages: Message[] | undefined,
-  now: number = Date.now(),
-): string | null {
-  const latest = messages?.[messages.length - 1];
-  if (!latest) return null;
-  const diff = now - latest.at;
-  if (diff < 60_000) return "now";
-  if (diff < 60 * 60_000) return `${Math.floor(diff / 60_000)}m`;
-  return `${Math.floor(diff / (60 * 60_000))}h`;
-}
 
 /**
  * One **Detached** row: the title (the one rule, `titleFor`), the FULL `cwd`,

@@ -69,7 +69,10 @@ describe("SubagentTranscript (the read-only session transcript, expanded inline 
     // stream is ALWAYS visible — the expansion IS the detail view) and the
     // metrics line appears.
     expect(screen.getByText("hello from the subagent")).toBeTruthy();
-    expect(screen.getByText(/100 ms/)).toBeTruthy();
+    // The metrics line now goes through the SHARED `formatDuration` (the rule
+    // every other surface uses), so 100 ms renders `0.1s` — not the raw
+    // `100 ms` this pin used to assert. Intentional user-visible change.
+    expect(screen.getByText(/0\.1s/)).toBeTruthy();
   });
 
   it("renders a closed entry's metrics line from useSubagents (surviving useInteractive.dismissSession)", () => {
@@ -83,7 +86,11 @@ describe("SubagentTranscript (the read-only session transcript, expanded inline 
     render(<SubagentTranscript sessionId="sub1" />);
     // The metrics line (the status word lives in the DIRECTORY row — the
     // transcript's header was dropped: the row IS the header).
-    expect(screen.getByText(/1234 ms/)).toBeTruthy();
+    // `formatDuration(1234)` → `1s`: the shared formatter's `ms >= 1000` path
+    // floors to whole seconds, so the raw `1234 ms` this pin used to assert is
+    // gone. Intentional user-visible change (and a zero cost no longer prints
+    // `$0.00` — `formatCost(0)` → `""`).
+    expect(screen.getByText(/1s/)).toBeTruthy();
     // What this pins: the metrics line reads the `subagent-closed` SNAPSHOT in
     // `useSubagents`, so it is immune to the interactive store dropping the id.
     // (`dismissSession` is NOT what drops it today — no `session-closed` ever
@@ -94,7 +101,7 @@ describe("SubagentTranscript (the read-only session transcript, expanded inline 
     act(() => {
       useInteractive.getState().dismissSession("sub1");
     });
-    expect(screen.getByText(/1234 ms/)).toBeTruthy();
+    expect(screen.getByText(/1s/)).toBeTruthy();
   });
 
   it("renders a failed entry's error", () => {
