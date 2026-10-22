@@ -15,6 +15,7 @@ import { useSettings } from "../store/settings";
 import type { SessionConfigOption } from "../lib/tauri";
 import { THINKING_GLYPHS } from "../lib/toolOutput";
 import { describeIpcError } from "../lib/ipcError";
+import { cn } from "./lib/utils";
 
 type OnSet = (optionId: string, value: string) => Promise<void>;
 
@@ -168,8 +169,12 @@ function SessionConfigSelect({
   // missing one leaves that one trigger content-sized inside a line that is
   // supposed to be full-width.
   const width = fullWidth ? FULL_WIDTH_TRIGGER : COMPOSER_TRIGGER_WIDTH;
-  const modelEdge = fullWidth ? "" : ` ${COMPOSER_MODEL_EDGE}`;
-  const thinkingEdge = fullWidth ? "" : ` ${COMPOSER_THINKING_EDGE}`;
+  // Task C8 dropped the LEADING SPACE each of the two edge constants used to
+  // carry: it existed only so the hand-written template literal joined cleanly,
+  // and all three consumers now go through `cn()`, which joins for free (and
+  // drops the `""` full-width arm entirely).
+  const modelEdge = fullWidth ? "" : COMPOSER_MODEL_EDGE;
+  const thinkingEdge = fullWidth ? "" : COMPOSER_THINKING_EDGE;
   // A `null` option is MODEL-ONLY (the props union below says so): render the
   // DISABLED model stub — the control's identity, no data, the config re-emits
   // on resume. Thinking has no stub at all: `SessionConfigBlock` gates the
@@ -185,7 +190,7 @@ function SessionConfigSelect({
           items={[]}
           onSelect={() => {}}
           variant="ghost"
-          triggerClassName={`${width}${modelEdge}`}
+          triggerClassName={cn(width, modelEdge)}
           disabled
           icon={
             <Bot
@@ -240,7 +245,7 @@ function SessionConfigSelect({
           items={modelItems}
           onSelect={(val) => void handleValueChange(val)}
           variant="ghost"
-          triggerClassName={`${width}${modelEdge}`}
+          triggerClassName={cn(width, modelEdge)}
           disabled={isDisabled}
           icon={
             <Bot
@@ -266,7 +271,20 @@ function SessionConfigSelect({
         <SelectTrigger
           variant="ghost"
           size="sm"
-          className={`${width}${thinkingEdge}`}
+          className={cn(
+            // The two constants are measured to merge to the same token set the
+            // concatenation produced (`thinkingEdge` used to carry a leading
+            // space purely so the two literals joined cleanly — `cn` joins for
+            // free, so it is gone from both arms). The seam-edge utility is a
+            // `pl-*`/`pr-*` and the trigger variant's own inset is `px-*`, which
+            // tailwind-merge keeps as separate groups, so
+            // `SessionConfigSelect.test.tsx`'s pins (`pl-1` present, `pl-2`
+            // absent; `w-full` present and `max-w-72` ABSENT at full width) all
+            // hold — that last one because `cn` is applied HERE to a string that
+            // already excludes the cap, exactly as before.
+            width,
+            thinkingEdge,
+          )}
           disabled={isDisabled}
           aria-label={option.name}
         >
@@ -275,7 +293,14 @@ function SessionConfigSelect({
               none) renders here. */}
           {isThinking && (
             <span
-              className={`text-ui-sm ${thinkingIndicator.className}`}
+              className={cn(
+                // Same reasoning as the trigger above: `thinkingIndicator.className`
+                // is a text COLOUR (`text-thinking-*`, or the fallback
+                // `text-foreground-subtle`) and `text-ui-sm` is a registered
+                // font-size group, so neither drops the other.
+                "text-ui-sm",
+                thinkingIndicator.className,
+              )}
               aria-hidden
               data-testid="thinking-level-icon"
             >

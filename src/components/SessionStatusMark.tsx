@@ -1,5 +1,6 @@
 import { CircleQuestionMarkIcon } from "lucide-react";
 import { Spinner } from "./ui/spinner";
+import { cn } from "./lib/utils";
 import type { SessionStatus } from "../hooks/useSessionStatus";
 
 /**
@@ -152,7 +153,14 @@ export function SessionStatusMark({
         // uses; that is `Spinner`'s call, not this one's.
         {...(announce ? {} : a11y)}
         style={box}
-        className={`animate-spin ${ink} ${className}`}
+        className={cn(
+          "animate-spin",
+          ink,
+          // See the ring branch below: `className` is geometry-only, and every
+          // production caller passes `""` (which `clsx` drops — the concatenation
+          // it replaces left a trailing space in the attribute).
+          className,
+        )}
       />
     );
   }
@@ -167,7 +175,7 @@ export function SessionStatusMark({
         // of 2 would render under a pixel, and the rail is the one surface with
         // no list behind it to fall back on.
         strokeWidth={questionStrokeWidth(size)}
-        className={`shrink-0 text-warning ${className}`}
+        className={cn("shrink-0 text-warning", className)}
         data-dot="waiting"
       />
     );
@@ -186,7 +194,19 @@ export function SessionStatusMark({
       data-dot={status}
       aria-hidden
       style={{ width: dotPx, height: dotPx }}
-      className={`shrink-0 rounded-full ${dot} ${slotNeeded ? "" : className}`}
+      className={cn(
+        // `className` is documented as GEOMETRY-only (the mark owns the ink), and
+        // `cn` now enforces that instead of leaving it to CSS source order: an
+        // ink utility in `className` would replace `dot`'s rather than ride
+        // beside it. Measured against the real call sites this changes nothing —
+        // neither the rail (`SessionRail.tsx`) nor the tab (`SpaceTabs.tsx`) nor
+        // the row (`SpacesList.tsx`) passes `className` at all. The one place
+        // that does is `SessionStatusMark.test.tsx:221`, which passes an ink
+        // class off-contract; its assertion (`toContain`) holds either way.
+        "shrink-0 rounded-full",
+        dot,
+        slotNeeded ? "" : className,
+      )}
     />
   );
 
@@ -204,7 +224,7 @@ export function SessionStatusMark({
     <span
       {...testProps}
       style={box}
-      className={`flex shrink-0 items-center justify-center ${className}`}
+      className={cn("flex shrink-0 items-center justify-center", className)}
     >
       {ring}
     </span>

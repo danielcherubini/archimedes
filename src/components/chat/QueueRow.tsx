@@ -2,6 +2,7 @@ import { useEffect, useState, type KeyboardEvent } from "react";
 import { motion } from "motion/react";
 import { PaperclipIcon, PencilIcon, TrashIcon } from "lucide-react";
 import { Button } from "../ui/button";
+import { MutedCaption } from "../MutedCaption";
 import AttachmentStrip from "./AttachmentStrip";
 import { draftIsMarkerOnly, renumberImageMarkers } from "../../lib/chatAttachments";
 import { useQueuedPrompts, type QueuedPrompt } from "../../store/queuedPrompts";
@@ -148,7 +149,7 @@ function QueueRowBody({
     <>
       {/* Its OWN element — never `"Queued: " + text`, or selecting the
           prompt's text drags the label along with it. */}
-      <span className="shrink-0 text-ui-xs text-foreground-subtlest">Queued</span>
+      <MutedCaption className="shrink-0">Queued</MutedCaption>
       {/* A failed Flush is LIVE state the user has to see: nothing will ever
           send this entry but saving an edit of it. `text-destructive` is an
           existing status colour, so no new token enters the Palette. */}

@@ -4,6 +4,7 @@ import {
   LoaderCircle,
 } from "lucide-react";
 import type { SubagentEntry } from "../store/subagents";
+import { cn } from "./lib/utils";
 
 export const STATUS_CHIP_STYLES: Record<SubagentEntry["status"], string> = {
   running: "text-warning",
@@ -17,12 +18,15 @@ export const STATUS_CHIP_STYLES: Record<SubagentEntry["status"], string> = {
  * alert circle.
  */
 export function StatusIcon({ status }: { status: SubagentEntry["status"] }) {
+  // `cn()` rather than a template literal: the ink is the LAST argument so it
+  // wins any text-colour conflict with what the caller passed, and `cn` drops
+  // the loser instead of leaving two inks to be settled by CSS source order.
   const className = "size-4 shrink-0";
   if (status === "running") {
-    return <LoaderCircle className={`${className} animate-spin text-warning`} />;
+    return <LoaderCircle className={cn(className, "animate-spin text-warning")} />;
   }
   if (status === "completed") {
-    return <CheckCircle2 className={`${className} text-success`} />;
+    return <CheckCircle2 className={cn(className, "text-success")} />;
   }
-  return <CircleAlert className={`${className} text-destructive`} />;
+  return <CircleAlert className={cn(className, "text-destructive")} />;
 }

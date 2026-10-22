@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { ComposerPrefix } from "../../lib/skills";
+import { cn } from "../lib/utils";
 
 /**
  * One row in the composer's picker (the floating row list above the
@@ -165,7 +166,10 @@ export default function ComposerMentions({
                 e.preventDefault();
                 onSelect(row);
               }}
-              className={`flex w-full flex-col gap-0.5 rounded-md px-2 py-1 text-left ${i === activeIndex ? "bg-surface-hover" : ""}`}
+              className={cn(
+                "flex w-full flex-col gap-0.5 rounded-md px-2 py-1 text-left",
+                i === activeIndex && "bg-surface-hover",
+              )}
             >
               <span className="flex items-baseline gap-1.5">
                 <span

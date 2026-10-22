@@ -12,6 +12,7 @@ import MessageBubble from "./MessageBubble";
 import ChangesGroupCard from "./ChangesGroupCard";
 import ToolCallCard from "./ToolCallCard";
 import DiffBlock from "./DiffBlock";
+import { MutedCaption } from "./MutedCaption";
 
 /**
  * Shared empty fallback (a STABLE reference — a `?? []` at the call site
@@ -165,7 +166,7 @@ export function SubagentTranscript({ sessionId }: { sessionId: string }) {
           — see the component doc. */}
       {/* The metrics line on close (see the component doc). */}
       {entry.status !== "running" && (entry.metrics || entry.error) && (
-        <p className="text-ui-xs text-foreground-subtlest">
+        <MutedCaption as="p">
           {entry.status === "failed" && entry.error && (
             <span className="text-destructive">{entry.error}</span>
           )}
@@ -190,7 +191,7 @@ export function SubagentTranscript({ sessionId }: { sessionId: string }) {
                 .join(" · ")}
             </span>
           )}
-        </p>
+        </MutedCaption>
       )}
     </div>
   );

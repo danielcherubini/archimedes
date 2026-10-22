@@ -18,6 +18,7 @@ import {
   getActivityDisplay,
 } from "../lib/subagentActivity";
 import { StatusIcon } from "./SubagentStatusIcon";
+import { cn } from "./lib/utils";
 import { ToolCallCardHeader } from "./ToolCallCardHeader";
 
 /**
@@ -455,7 +456,7 @@ export default function SubagentDelegatingCard({
 
                   {/* Line 3: Activity / Current Action */}
                   {activity && (
-                    <p className={`truncate text-ui-xs font-mono ${activity.colorClass}`}>
+                    <p className={cn("truncate text-ui-xs font-mono", activity.colorClass)}>
                       {activity.glyph && <span className="mr-1">{activity.glyph}</span>}
                       <span>{activity.text}</span>
                       {activity.duration && <span className="opacity-75">{activity.duration}</span>}

@@ -9,6 +9,8 @@ import {
   DialogTitle,
 } from "./ui/dialog";
 import { Input } from "./ui/input";
+import { EmptyListLine } from "./EmptyListLine";
+import { MutedCaption } from "./MutedCaption";
 
 /**
  * The `manual only` tooltip for a model-hidden row (ADR 0036). Two honesty
@@ -176,13 +178,9 @@ export default function SkillsDialog({
             placeholder="Search skills…"
           />
           {skills.length === 0 ? (
-            <p className="p-3 text-ui-sm text-foreground-subtlest">
-              No skills found.
-            </p>
+            <EmptyListLine>No skills found.</EmptyListLine>
           ) : filtered.length === 0 ? (
-            <p className="p-3 text-ui-sm text-foreground-subtlest">
-              No skills match "{query}".
-            </p>
+            <EmptyListLine>{`No skills match "${query}".`}</EmptyListLine>
           ) : (
             <div className="flex min-w-0 flex-col gap-0.5 overflow-y-auto pr-2">
               {filtered.map((skill) => (
@@ -205,17 +203,12 @@ export default function SkillsDialog({
                       {skill.name}
                     </span>
                     {skill.scope === "user" && (
-                      <span className="text-ui-xs text-foreground-subtlest">
-                        global
-                      </span>
+                      <MutedCaption>global</MutedCaption>
                     )}
                     {skill.disableModelInvocation && (
-                      <span
-                        className="text-ui-xs text-foreground-subtlest"
-                        title={manualOnlyTooltip(skill.name)}
-                      >
+                      <MutedCaption title={manualOnlyTooltip(skill.name)}>
                         manual only
-                      </span>
+                      </MutedCaption>
                     )}
                   </div>
                   {skill.description !== "" && (

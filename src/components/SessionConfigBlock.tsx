@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 import { Brain } from "lucide-react";
 import SessionConfigSelect from "./SessionConfigSelect";
+import { cn } from "./lib/utils";
 import {
   Tooltip,
   TooltipContent,
@@ -127,7 +128,7 @@ export default function SessionConfigBlock({ collapsed }: { collapsed: boolean }
     // (`ChromeControls`), so the block keeps ordinary padding.
     <div
       data-testid="session-config-block"
-      className={`shrink-0 px-3 pb-3 pt-2 ${collapsed ? "invisible" : ""}`}
+      className={cn("shrink-0 px-3 pb-3 pt-2", collapsed && "invisible")}
     >
       <div className="flex flex-col gap-1.5" data-testid="session-config-controls">
         {/* Model, then Reasoning, then Context: one control per line, each
@@ -211,7 +212,10 @@ export default function SessionConfigBlock({ collapsed }: { collapsed: boolean }
             className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-context-track"
           >
             <div
-              className={`h-full rounded-full transition-[width] duration-500 ${contextRamp.fill}`}
+              className={cn(
+                "h-full rounded-full transition-[width] duration-500",
+                contextRamp.fill,
+              )}
               style={{ width: `${contextPercent ?? 0}%` }}
             />
           </div>
@@ -230,7 +234,14 @@ export default function SessionConfigBlock({ collapsed }: { collapsed: boolean }
                     type="button"
                     data-testid="context-usage"
                     aria-label={countsLabel}
-                    className={`shrink-0 cursor-help appearance-none rounded-sm border-0 bg-transparent p-0 text-ui-sm tabular-nums focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${contextRamp.label}`}
+                    className={cn(
+                      // The ramp's `label` is a text COLOUR and the base spells
+                      // `text-ui-sm`, a font size: `mergeUiClasses` registers
+                      // `text-ui-*` as its own group precisely so these two do
+                      // not fight. Measured — both survive the merge.
+                      "shrink-0 cursor-help appearance-none rounded-sm border-0 bg-transparent p-0 text-ui-sm tabular-nums focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                      contextRamp.label,
+                    )}
                   >
                     {contextPercent}%
                   </button>

@@ -59,6 +59,8 @@ import AgentsDialog from "./AgentsDialog";
 import DeleteSessionDialog from "./DeleteSessionDialog";
 import SessionRail, { type SessionRailAction } from "./SessionRail";
 import { SessionStatusMark } from "./SessionStatusMark";
+import { EmptyListLine } from "./EmptyListLine";
+import { cn } from "./lib/utils";
 import { Kbd } from "./ui/kbd";
 import { Button } from "./ui/button";
 import {
@@ -580,7 +582,7 @@ export default function SpacesList() {
           the scroller and bled just the same. The session marks below are what
           shows instead. */}
       <div
-        className={`flex min-h-0 flex-1 flex-col ${collapsed ? "invisible" : ""}`}
+        className={cn("flex min-h-0 flex-1 flex-col", collapsed && "invisible")}
       >
       <div className="flex flex-col gap-2 p-3">
         <button
@@ -655,9 +657,7 @@ export default function SpacesList() {
           hides it while collapsed — see the note there). */}
       <div className="flex-1 overflow-y-auto">
         {views.length === 0 && (
-          <p className="p-3 text-ui-sm text-foreground-subtlest">
-            No spaces yet. Open a folder to get started.
-          </p>
+          <EmptyListLine>No spaces yet. Open a folder to get started.</EmptyListLine>
         )}
         {/* The ACTIVE space's sessions (the Spaces are the top TABS —
             the sidebar is sessions-only: no group headers, no folder
@@ -846,9 +846,15 @@ function SessionRow({
       onKeyDown={(e) => {
         if (e.key === "Enter") onOpen(sessionId);
       }}
-      className={`group flex cursor-pointer items-center gap-2 rounded-lg pl-2.5 pr-1 py-1 ${
-        active ? "bg-selected" : "hover:bg-surface-hover"
-      }`}
+      className={cn(
+        // The two arms are mutually exclusive and both land in the background
+        // group, so the merge is the identity: exactly one of `bg-selected` /
+        // `hover:bg-surface-hover` is present, which is what
+        // `SpacesList.test.tsx`'s `bg-selected` pin reads. Task C4 owns folding
+        // this row shell; the change here is only the `cn()` convention.
+        "group flex cursor-pointer items-center gap-2 rounded-lg pl-2.5 pr-1 py-1",
+        active ? "bg-selected" : "hover:bg-surface-hover",
+      )}
     >
       {/* The state glyph, in the slot the spinner already owned: a session that
           is idle now wears a RING rather than nothing, which is the cue the
@@ -1046,9 +1052,11 @@ function ArchivedSessionRow({
       onKeyDown={(e) => {
         if (e.key === "Enter") onOpen(session.sessionId);
       }}
-      className={`group flex cursor-pointer items-center gap-2 rounded-lg pl-2.5 pr-1 py-1 ${
-        active ? "bg-selected" : "hover:bg-surface-hover"
-      }`}
+      className={cn(
+        // The live row's shell, one line above — see the note there.
+        "group flex cursor-pointer items-center gap-2 rounded-lg pl-2.5 pr-1 py-1",
+        active ? "bg-selected" : "hover:bg-surface-hover",
+      )}
     >
       <span className="size-4 shrink-0" />
       <span

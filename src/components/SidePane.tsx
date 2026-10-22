@@ -11,6 +11,7 @@ import {
   subscribeSidePane,
 } from "../lib/sidePaneState";
 import TodoBoardPanel, { useBoardOpenCount, useMainTodoItems } from "./TodoBoardPanel";
+import { cn } from "./lib/utils";
 import TodoRail from "./TodoRail";
 import SessionConfigBlock from "./SessionConfigBlock";
 
@@ -375,9 +376,15 @@ export default function SidePane() {
           onPointerDown={onPointerDown}
         >
           <div
-            className={`h-full w-0.5 bg-foreground-subtlest/50 ${
-              dragging ? "opacity-100" : "opacity-0 hover:opacity-100"
-            }`}
+            // `opacity-100` / `opacity-0` are one tailwind-merge group and the two
+            // arms are mutually exclusive, so the merge is the identity here
+            // (`SidePane.test.tsx` anchors on the END of the attribute —
+            // `/ opacity-100$/` — and `cn` emits no trailing space, so that pin
+            // holds either way).
+            className={cn(
+              "h-full w-0.5 bg-foreground-subtlest/50",
+              dragging ? "opacity-100" : "opacity-0 hover:opacity-100",
+            )}
           />
         </div>
       )}
@@ -396,7 +403,13 @@ export default function SidePane() {
           survives) — `hidden` would unlayout it. The rail's per-board marks
           (below) are what show in its place. */}
       <div
-        className={`flex-1 overflow-y-auto p-3 ${collapsed ? "invisible" : ""}`}
+        className={cn(
+          "flex-1 overflow-y-auto p-3",
+          // `invisible` (visibility) is its own tailwind-merge group, so nothing
+          // here is dropped; see the long comment above the wrapper for why the
+          // utility is `invisible` and not `hidden`.
+          collapsed && "invisible",
+        )}
       >
         <div className="flex flex-col gap-4">
           {/* The session title (the old header's title — the header is

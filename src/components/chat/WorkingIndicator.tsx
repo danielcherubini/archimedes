@@ -1,5 +1,6 @@
 import { BrailleLoader } from "../ui/braille-loader";
 import type { BrailleLoaderVariant } from "../../lib/braille-loader";
+import { cn } from "../lib/utils";
 
 /**
  * The working indicator: the braille spinner + the rotating quip, the
@@ -130,7 +131,7 @@ export function WorkingIndicator({
   }
   return (
     <div
-      className={`flex flex-1 items-center gap-2 ${MIN_INDICATOR_WIDTH_CLASS}`}
+      className={cn("flex flex-1 items-center gap-2", MIN_INDICATOR_WIDTH_CLASS)}
       data-testid="working-indicator"
     >
       {agentState === "blocked" ? (

@@ -19,6 +19,8 @@ import ToolCallCard from "./ToolCallCard";
 import SubagentDelegatingCard from "./SubagentDelegatingCard";
 import DiffBlock from "./DiffBlock";
 import OpenAnchor from "./OpenAnchor";
+import { MutedCaption } from "./MutedCaption";
+import { cn } from "./lib/utils";
 import { useCopyButton } from "../hooks/useCopyButton";
 import { Reasoning, ReasoningTrigger, ReasoningContent } from "./Reasoning";
 
@@ -47,9 +49,10 @@ function SkillBlockCard({ block }: { block: SkillBlock }) {
         </span>
         <ChevronRightIcon
           aria-hidden
-          className={`ml-auto size-4 shrink-0 text-foreground-subtlest transition-transform ${
-            open ? "rotate-90" : "rotate-0"
-          }`}
+          className={cn(
+            "ml-auto size-4 shrink-0 text-foreground-subtlest transition-transform",
+            open ? "rotate-90" : "rotate-0",
+          )}
         />
       </button>
       {open && (
@@ -85,9 +88,7 @@ function NamedResourceChip({ block }: { block: MentionBlock }) {
       <span className="min-w-0 truncate font-mono text-ui-sm text-foreground-subtle">
         {block.name}
       </span>
-      <span className="text-ui-xs text-foreground-subtlest">
-        named by the user
-      </span>
+      <MutedCaption>named by the user</MutedCaption>
     </div>
   );
 }
@@ -249,10 +250,10 @@ function CodeBlock({ code, lang }: { code: string; lang?: string }) {
       className="flex items-center justify-between gap-2 border-b border-border bg-panel px-3 py-1.5"
     >
       <span className="flex min-w-0 items-center gap-1.5">
-        <Icon className={`size-3.5 shrink-0 ${descriptor.className}`} />
+        <Icon className={cn("size-3.5 shrink-0", descriptor.className)} />
         <span
           data-testid="code-block-lang"
-          className={`${descriptor.className} font-mono text-ui-caption lowercase`}
+          className={cn(descriptor.className, "font-mono text-ui-caption lowercase")}
         >
           {label}
         </span>

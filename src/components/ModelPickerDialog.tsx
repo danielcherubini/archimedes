@@ -7,6 +7,7 @@ import {
   DialogTitle,
 } from "./ui/dialog";
 import { Input } from "./ui/input";
+import { EmptyListLine } from "./EmptyListLine";
 
 /**
  * One model row (the caller flattens its data source — the composer's
@@ -127,16 +128,28 @@ export default function ModelPickerDialog({
             placeholder="Search models…"
           />
           {items.length === 0 ? (
-            <p className="p-3 text-ui-sm text-foreground-subtlest">
-              No models found.
-            </p>
+            <EmptyListLine>No models found.</EmptyListLine>
           ) : filtered.length === 0 ? (
-            <p className="p-3 text-ui-sm text-foreground-subtlest">
-              No models match "{query}".
-            </p>
+            <EmptyListLine>{`No models match "${query}".`}</EmptyListLine>
           ) : (
             <div className="flex min-w-0 flex-col gap-0.5 overflow-y-auto pr-2">
               {filtered.map((model) => (
+                // LEFT AS A TEMPLATE LITERAL on purpose (Task C8) — a measured
+                // same-group conflict, so this is one of the sites the `cn()`
+                // convention deliberately does not reach. The row's base spells
+                // `cursor-pointer` and the disabled arm spells
+                // `cursor-not-allowed`: ONE tailwind-merge cursor group, so `cn`
+                // would DROP `cursor-pointer` and a disabled row would render the
+                // not-allowed cursor. Today's concatenation keeps both and lets
+                // CSS source order decide, and the compiled stylesheet emits
+                // `.cursor-pointer` AFTER `.cursor-not-allowed` — so a disabled
+                // row shows a POINTER cursor right now. That is probably not what
+                // was intended, but it is what the user sees, and changing it is
+                // a behaviour change no test owns: nothing in
+                // `ModelPickerDialog.test.tsx` reads a cursor class (the disabled
+                // case pins `aria-disabled` and the suppressed click). Converting
+                // this site belongs with a decision about which cursor a disabled
+                // row should show.
                 <div
                   key={model.value}
                   role="button"

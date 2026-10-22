@@ -359,19 +359,26 @@ const stripJsComments = (source: string): string =>
     .join("\n");
 
 describe("the settings data-row shell is spelled once (Finding 6b's acceptance)", () => {
-  /** The three sections that hand-rolled the shell, plus the primitive that now
-   *  owns it. Listed (not walked) because the claim is about THESE files. */
+  /** Every file that once hand-rolled the shell, plus the primitive that now
+   *  owns it. Listed (not walked) because the claim is about THESE files.
+   *
+   *  `GeneralSection.tsx` and `UpdateSection.tsx` joined this list in Task C8.
+   *  C2 folded the three rows that carried `first:border-t-0` and left these two
+   *  open precisely because they do NOT — see the test below for why that turned
+   *  out not to block the fold. */
   const FILES = [
     "src/components/settings/primitives.tsx",
     "src/components/settings/ProviderSection.tsx",
     "src/components/settings/McpSection.tsx",
     "src/components/settings/SessionsSection.tsx",
+    "src/components/settings/GeneralSection.tsx",
+    "src/components/settings/UpdateSection.tsx",
   ];
 
-  it("only primitives.tsx spells the row shell; the three sections import it", () => {
+  it("only primitives.tsx spells the row shell; every section imports it", () => {
     // Vacuity guard first (an empty list would make the filter below pass for the
     // wrong reason — the lesson `themeTokens.test.ts` records).
-    expect(FILES).toHaveLength(4);
+    expect(FILES).toHaveLength(6);
     const spellers = FILES.filter((file) =>
       // The shell minus `first:border-t-0`, so the gate also catches a section
       // that keeps the padding and drops the first-row reset.
@@ -386,6 +393,37 @@ describe("the settings data-row shell is spelled once (Finding 6b's acceptance)"
       expect(stripJsComments(readFileSync(file, "utf8"))).toContain(
         "SettingsDataRow",
       );
+    }
+  });
+
+  it("the two rows C2 left open render through SettingsDataRow with no override", () => {
+    // C2's follow-up note recorded these two hand-rolled shells as "not drop-in
+    // `SettingsDataRow` users" because they lack `first:border-t-0`. C8 checked
+    // WHY, rather than assuming the difference was load-bearing, and found it is
+    // INERT at both sites:
+    //   · `GeneralSection`'s enabled-tools row is the LAST child of its
+    //     `SettingsGroupCard`, after three `PolicyRow`s and eight `SettingsRow`s;
+    //   · `UpdateSection`'s progress row is rendered AFTER its two `SettingsRow`s
+    //     and is the card's last child.
+    // `first:` is CSS `:first-child`, so on a row that is never first the utility
+    // can never match. Adopting the primitive's shell therefore changes no
+    // rendered border in any reachable state — and it makes the reset correct by
+    // construction if a future section ever does put one of these first.
+    //
+    // Asserted on the SOURCE because neither file has a test of its own and
+    // `SettingsPage.test.tsx` locates rows positionally, not by class list.
+    for (const file of [
+      "src/components/settings/GeneralSection.tsx",
+      "src/components/settings/UpdateSection.tsx",
+    ]) {
+      const source = stripJsComments(readFileSync(file, "utf8"));
+      // The primitive is used…
+      expect(source, file).toContain("<SettingsDataRow>");
+      // …and NOT with a `className` override: an override here would be a
+      // same-group fight (`px-4`/`py-3` are already the base's) with nothing to
+      // win, and a `first:border-t` override would be the one way to RE-ADD the
+      // top border these rows never had, silently.
+      expect(source, file).not.toMatch(/<SettingsDataRow\s+className/);
     }
   });
 });

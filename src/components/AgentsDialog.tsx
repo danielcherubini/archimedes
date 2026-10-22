@@ -12,6 +12,8 @@ import type {
 } from "../lib/tauri";
 import { foldAscii, orphanedOverrides, withOverride } from "../lib/agentOverrides";
 import ModelPicker from "./ModelPicker";
+import { EmptyListLine } from "./EmptyListLine";
+import { MutedCaption } from "./MutedCaption";
 import { modelItemsFromCatalog } from "./ModelPickerDialog";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -315,15 +317,11 @@ export default function AgentsDialog({
           {settings === null ? (
             // The mount guards on `settings` too; this arm only exists so the
             // dialog can never read `settings.agentOverrides` off `null`.
-            <p className="p-3 text-ui-sm text-foreground-subtlest">Loading…</p>
+            <EmptyListLine>Loading…</EmptyListLine>
           ) : rows.length === 0 ? (
-            <p className="p-3 text-ui-sm text-foreground-subtlest">
-              No Agent definitions found.
-            </p>
+            <EmptyListLine>No Agent definitions found.</EmptyListLine>
           ) : filtered.length === 0 ? (
-            <p className="p-3 text-ui-sm text-foreground-subtlest">
-              No agents match "{query}".
-            </p>
+            <EmptyListLine>{`No agents match "${query}".`}</EmptyListLine>
           ) : (
             <div className="flex min-w-0 flex-col gap-2 overflow-y-auto pr-2">
               {filtered.map((row) => (
@@ -370,9 +368,7 @@ export default function AgentsDialog({
                   <span className="min-w-0 flex-1 truncate text-foreground-subtle">
                     {name}
                   </span>
-                  <span className="text-ui-xs text-foreground-subtlest">
-                    No longer discovered (stale override)
-                  </span>
+                  <MutedCaption>No longer discovered (stale override)</MutedCaption>
                   <Button
                     type="button"
                     variant="ghost"
@@ -536,14 +532,11 @@ function AgentRow({
       <div className="flex min-w-0 items-center gap-2">
         <span className="min-w-0 truncate text-ui-base">{row.name}</span>
         {row.scope === "user" && (
-          <span className="text-ui-xs text-foreground-subtlest">global</span>
+          <MutedCaption>global</MutedCaption>
         )}
-        <span
-          className="min-w-0 flex-1 truncate text-ui-xs text-foreground-subtlest"
-          title={row.path}
-        >
+        <MutedCaption className="min-w-0 flex-1 truncate" title={row.path}>
           {row.path}
-        </span>
+        </MutedCaption>
       </div>
       {row.description !== "" && (
         <span
@@ -561,9 +554,9 @@ function AgentRow({
           fix is to set the field again from the picker), and a button would promise
           a repair this component cannot perform. */}
       {pinDiff.length > 0 && (
-        <span className="min-w-0 truncate text-ui-xs text-foreground-subtlest">
+        <MutedCaption className="min-w-0 truncate">
           stored pin the last fetch saw differs — {pinDiff.join(", ")}
-        </span>
+        </MutedCaption>
       )}
 
       {/* MODEL. The three spans are SEPARATE nodes on purpose: the source label
@@ -577,13 +570,13 @@ function AgentRow({
         <span className="w-16 shrink-0 text-ui-sm text-foreground-subtlest">
           Model
         </span>
-        <span className="min-w-0 truncate text-ui-xs text-foreground-subtlest">
+        <MutedCaption className="min-w-0 truncate">
           runs {row.effective.model ?? "—"}
-        </span>
+        </MutedCaption>
         <LayerTag>{sourceLabel(row.source.model, "model")}</LayerTag>
-        <span className="min-w-0 truncate text-ui-xs text-foreground-subtlest">
+        <MutedCaption className="min-w-0 truncate">
           in the file {row.file.model ?? "—"}
-        </span>
+        </MutedCaption>
         <ModelPicker
           label={`Model for ${row.name}`}
           value={stored?.model ?? ""}
@@ -615,13 +608,13 @@ function AgentRow({
         <span className="w-16 shrink-0 text-ui-sm text-foreground-subtlest">
           Thinking
         </span>
-        <span className="min-w-0 truncate text-ui-xs text-foreground-subtlest">
+        <MutedCaption className="min-w-0 truncate">
           runs {row.effective.thinking ?? "—"}
-        </span>
+        </MutedCaption>
         <LayerTag>{sourceLabel(row.source.thinking, "thinking")}</LayerTag>
-        <span className="min-w-0 truncate text-ui-xs text-foreground-subtlest">
+        <MutedCaption className="min-w-0 truncate">
           in the file {row.file.thinking ?? "—"}
-        </span>
+        </MutedCaption>
         <Select
           value={stored?.thinking ?? ""}
           onValueChange={(value) =>
@@ -664,7 +657,7 @@ function AgentRow({
             Tools
           </span>
           {stored?.tools === undefined ? (
-            <span className="min-w-0 truncate text-ui-xs text-foreground-subtlest">
+            <MutedCaption className="min-w-0 truncate">
               {/* Two spans, not one interpolated sentence: ADR 0067's labelled
                   empty state has to be findable as ITS OWN text (the
                   `Inherits parent tools` string is what the ADR names, and the
@@ -673,13 +666,13 @@ function AgentRow({
               <span>file: {(row.file.tools ?? []).join(", ") || "—"}</span>
               <span> · </span>
               <span>{toolsInheritLabel(row.source.tools)}</span>
-            </span>
+            </MutedCaption>
           ) : (
-            <span className="min-w-0 truncate text-ui-xs text-foreground-subtlest">
+            <MutedCaption className="min-w-0 truncate">
               file: {(row.file.tools ?? []).join(", ") || "—"} · runs:{" "}
               {(row.effective.tools ?? []).join(", ") || "—"} (
               {sourceLabel(row.source.tools, "tools")})
-            </span>
+            </MutedCaption>
           )}
         </div>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pl-16">
@@ -741,9 +734,9 @@ function ShadowReport({
   if (losers.length === 0) return null;
   return (
     <div className="flex min-w-0 flex-col gap-0.5 pt-1">
-      <p className="text-ui-xs text-foreground-subtlest">
+      <MutedCaption as="p">
         {shadowHeading(row.scope, losers.length)}
-      </p>
+      </MutedCaption>
       {losers.map((loser) => (
         <div
           key={loser.path}

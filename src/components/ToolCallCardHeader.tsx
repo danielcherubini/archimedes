@@ -10,6 +10,7 @@ import type { ToolCallUiStatus } from "../store/sessions";
 import FileChip from "./FileChip";
 import DiffCount from "./DiffCount";
 import { TRANSCRIPT_ROW } from "./lib/transcriptRow";
+import { cn } from "./lib/utils";
 import { useCopyButton } from "../hooks/useCopyButton";
 import {
   Tooltip,
@@ -70,7 +71,7 @@ export function ToolCallCardHeader({
     <button
       type="button"
       onClick={onToggle}
-      className={`group/tool-summary ${TRANSCRIPT_ROW}`}
+      className={cn("group/tool-summary", TRANSCRIPT_ROW)}
     >
       {/* The row glyph (ADR 0062): `text-row-icon`, not a foreground utility, so
           a Palette can re-hue every transcript row's glyph — and only that —
@@ -81,9 +82,10 @@ export function ToolCallCardHeader({
           conditional into one class and lose the motion signal. */}
       <Icon className="size-4 shrink-0 text-row-icon" />
       <span
-        className={`shrink-0 whitespace-nowrap font-medium ${
-          status === "pending" ? "animated-gradient-text" : "text-row-verb"
-        }`}
+        className={cn(
+          "shrink-0 whitespace-nowrap font-medium",
+          status === "pending" ? "animated-gradient-text" : "text-row-verb",
+        )}
       >
         {verb ?? title}
       </span>
@@ -143,6 +145,13 @@ export function ToolCallCardHeader({
           </Tooltip>
         </TooltipProvider>
       )}
+      {/* LEFT AS A TEMPLATE LITERAL on purpose (Task C8) — the same measured
+          blocker as `ChangesGroupCard.tsx`'s chevron: the base spells two
+          utilities from tailwind-merge's `transition` group, so `cn` drops
+          `transition-transform` (kept today, and winning the cascade —
+          `.transition-transform` is emitted after `.transition-opacity` in
+          `dist/assets/*.css`). Converting here would stop the rotate from
+          animating; the sibling file's comment carries the full reasoning. */}
       <ChevronRightIcon
         aria-hidden
         className={`size-4 shrink-0 text-foreground-subtlest opacity-0 transition-transform transition-opacity duration-200 ease-out group-hover/tool-summary:opacity-100 ${

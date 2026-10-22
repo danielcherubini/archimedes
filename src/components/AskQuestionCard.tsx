@@ -10,6 +10,8 @@ import { useSessions } from "../store/sessions";
 import { useSubagents } from "../store/subagents";
 import { Button } from "./ui/button";
 import { IpcErrorLine } from "./IpcErrorLine";
+import { MutedCaption } from "./MutedCaption";
+import { cn } from "./lib/utils";
 
 const OTHER_OPTION = "Other (type your own)";
 const RECOMMENDED_TAG = " (Recommended)";
@@ -377,9 +379,10 @@ export default function AskQuestionCard({
                         type="button"
                         disabled={busy}
                         onClick={() => toggleOption(question, index)}
-                        className={`flex w-full items-center gap-2 rounded-md px-1 py-0.5 text-left text-ui-base hover:bg-surface-hover disabled:opacity-50 ${
-                          selected ? "bg-interaction-ask-fill" : ""
-                        }`}
+                        className={cn(
+                          "flex w-full items-center gap-2 rounded-md px-1 py-0.5 text-left text-ui-base hover:bg-surface-hover disabled:opacity-50",
+                          selected && "bg-interaction-ask-fill",
+                        )}
                       >
                         {question.multi ? (
                           <span
@@ -405,11 +408,12 @@ export default function AskQuestionCard({
                           </span>
                         )}
                         <span
-                          className={`min-w-0 [overflow-wrap:anywhere] ${
+                          className={cn(
+                            "min-w-0 [overflow-wrap:anywhere]",
                             selected
                               ? "text-interaction-ask-foreground"
-                              : "text-foreground"
-                          }`}
+                              : "text-foreground",
+                          )}
                         >
                           {option.label}
                           {recommended && RECOMMENDED_TAG}
@@ -439,9 +443,10 @@ export default function AskQuestionCard({
                     type="button"
                     disabled={busy}
                     onClick={() => toggleOther(question)}
-                    className={`flex w-full items-center gap-2 rounded-md px-1 py-0.5 text-left text-ui-base hover:bg-surface-hover disabled:opacity-50 ${
-                      d.other ? "bg-interaction-ask-fill" : ""
-                    }`}
+                    className={cn(
+                      "flex w-full items-center gap-2 rounded-md px-1 py-0.5 text-left text-ui-base hover:bg-surface-hover disabled:opacity-50",
+                      d.other && "bg-interaction-ask-fill",
+                    )}
                   >
                     {question.multi ? (
                       <span
@@ -467,9 +472,12 @@ export default function AskQuestionCard({
                       </span>
                     )}
                     <span
-                      className={`[overflow-wrap:anywhere] ${
-                        d.other ? "text-interaction-ask-foreground" : "text-foreground"
-                      }`}
+                      className={cn(
+                        "[overflow-wrap:anywhere]",
+                        d.other
+                          ? "text-interaction-ask-foreground"
+                          : "text-foreground",
+                      )}
                     >
                       {OTHER_OPTION}
                     </span>
@@ -532,9 +540,7 @@ export default function AskQuestionCard({
         data-testid="ask-footer"
         className="mt-3 flex items-center justify-between gap-2 px-3 pb-3"
       >
-        <p className="text-ui-xs text-foreground-subtlest">
-          Enter submit · Esc cancel
-        </p>
+        <MutedCaption as="p">Enter submit · Esc cancel</MutedCaption>
         <div className="flex gap-2">
           <Button
             variant="outline"

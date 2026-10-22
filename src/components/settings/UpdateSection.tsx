@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { IpcErrorLine } from "@/components/IpcErrorLine";
 import {
   SettingsBadge,
+  SettingsDataRow,
   SettingsGroupCard,
   SettingsRow,
 } from "./primitives";
@@ -392,7 +393,11 @@ function UpdateProgressRow({
   const percent = total && total > 0 ? Math.min(100, Math.floor((downloaded / total) * 100)) : null;
 
   return (
-    <div className="border-t border-border px-4 py-3">
+    // Task C8: like `GeneralSection`'s enabled-tools row, this hand-rolled the
+    // shell without `first:border-t-0` — and for the same reason the reset is
+    // inert here: the progress row is the card's LAST child, rendered after the
+    // section's two `SettingsRow`s, so `:first-child` never matched it.
+    <SettingsDataRow>
       <p className="text-ui-base text-foreground-subtle">{announced}</p>
       <div
         className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-surface"
@@ -417,6 +422,6 @@ function UpdateProgressRow({
           ? `${bytes(downloaded)} downloaded`
           : `${percent}% of ${bytes(total as number)}`}
       </p>
-    </div>
+    </SettingsDataRow>
   );
 }

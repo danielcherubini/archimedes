@@ -74,9 +74,13 @@ export default function ModelPicker({
       >
         {icon}
         <span
-          className={`min-w-0 flex-1 truncate text-left ${
-            unset ? "text-foreground-subtlest" : ""
-          }`}
+          className={cn(
+            "min-w-0 flex-1 truncate text-left",
+            // `&&` rather than a `… : ""` ternary: `clsx` drops the falsy arm, so
+            // the empty string the concatenation used to append (and which
+            // `cn`/`clsx` drops anyway) is simply never written.
+            unset && "text-foreground-subtlest",
+          )}
         >
           {unset ? placeholder ?? "" : displayText}
           {!unset && selected?.provider !== undefined && (

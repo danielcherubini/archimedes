@@ -9,6 +9,7 @@ import {
 import FileChip from "./FileChip";
 import DiffCount from "./DiffCount";
 import { TRANSCRIPT_ROW } from "./lib/transcriptRow";
+import { cn } from "./lib/utils";
 import ToolCallCard from "./ToolCallCard";
 
 const CHIP_GAP_PX = 8;
@@ -148,7 +149,7 @@ export default function ChangesGroupCard({
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className={`group/tool-summary ${TRANSCRIPT_ROW}`}
+        className={cn("group/tool-summary", TRANSCRIPT_ROW)}
       >
         {/* The row glyph and the `Changes` verb (ADR 0062) — the same two row
             tokens the tool rows and the `Thought` trigger use, so one Palette
@@ -219,6 +220,20 @@ export default function ChangesGroupCard({
               <FileChip path={latestFile.path} />
             </span>
           )}
+          {/* LEFT AS A TEMPLATE LITERAL on purpose (Task C8) — the only site in
+              this file `classNameConvention.test.ts` allowlists, and the reason
+              is measured rather than assumed: the base spells TWO utilities from
+              tailwind-merge's `transition` group
+              (`transition-transform transition-opacity`), so merging it drops
+              one. `cn` keeps the later token (`transition-opacity`) where today's
+              concatenation keeps both and lets CSS source order decide — and
+              `dist/assets/*.css` emits `.transition-transform` AFTER
+              `.transition-opacity`, so the rotation is what animates now. A `cn`
+              swap would quietly stop the chevron's rotate from easing.
+              (`transcriptRow.test.tsx:118` also pins `opacity-0` on this very
+              element, which a merged `rotate-90` arm would drop.) Converting it
+              means first deleting the redundant transition utility — a visual
+              change, not a mechanical one. */}
           <ChevronRightIcon
             aria-hidden
             className={`size-4 shrink-0 text-foreground-subtlest opacity-0 transition-transform transition-opacity duration-200 ease-out group-hover/tool-summary:opacity-100 ${

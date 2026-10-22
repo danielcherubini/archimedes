@@ -5,6 +5,7 @@ import { useSubagentSelection } from "../store/subagentSelection";
 import { SHEET_WIDTH_CLASS } from "../lib/subagentSheetLayout";
 import { SubagentTranscript } from "./SubagentTranscript";
 import { StatusIcon, STATUS_CHIP_STYLES } from "./SubagentStatusIcon";
+import { cn } from "./lib/utils";
 
 /**
  * The subagent transcript SHEET — the `fixed` right-side panel that shows ONE
@@ -73,12 +74,18 @@ export default function SubagentDetailHost() {
       role="dialog"
       aria-label={`${selected?.agentName ?? ""} — transcript`}
       onKeyDown={handleEsc}
-      className={
-        "fixed top-0 right-0 z-50 flex h-full max-w-[90vw] flex-col border-l border-border bg-background shadow-xl " +
-        SHEET_WIDTH_CLASS +
-        " " +
-        (selected ? "" : "hidden")
-      }
+      className={cn(
+        // `hidden` and `flex` are ONE tailwind-merge group (display), so the
+        // merged string keeps `hidden` and DROPS `flex` on the unselected arm.
+        // That is not a behaviour change: the concatenation it replaces carried
+        // both and CSS source order already settled it — `.hidden` is emitted
+        // after `.flex` in `dist/assets/*.css`, so `display: none` won then and
+        // wins now, one way or the other. `flex-col` is a different group and
+        // survives untouched.
+        "fixed top-0 right-0 z-50 flex h-full max-w-[90vw] flex-col border-l border-border bg-background shadow-xl",
+        SHEET_WIDTH_CLASS,
+        selected ? "" : "hidden",
+      )}
     >
       {selected && (
         <>
@@ -89,7 +96,10 @@ export default function SubagentDetailHost() {
                 {selected.agentName}
               </span>
               <span
-                className={`shrink-0 text-ui-xs ${STATUS_CHIP_STYLES[selected.status]}`}
+                className={cn(
+                  "shrink-0 text-ui-xs",
+                  STATUS_CHIP_STYLES[selected.status],
+                )}
               >
                 {selected.status}
               </span>

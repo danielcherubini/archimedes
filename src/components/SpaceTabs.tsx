@@ -5,6 +5,7 @@ import { titleFor } from "../lib/sessionTitle";
 import { useSessions } from "../store/sessions";
 import { useSessionStatuses } from "../hooks/useSessionStatus";
 import { SessionStatusMark } from "./SessionStatusMark";
+import { cn } from "./lib/utils";
 import type { SessionStatus } from "../hooks/useSessionStatus";
 import CloseSpaceDialog from "./CloseSpaceDialog";
 import { openNewSpaceDialog } from "../lib/newSpaceDialogState";
@@ -221,11 +222,17 @@ export default function SpaceTabs() {
             // every pixel of the pill the label does not cover was window-drag
             // surface. A tab is a control, not chrome: every pixel of the pill
             // selects or closes, and never drags.
-            className={`flex h-8 max-w-48 items-center rounded-md ${
-              active
-                ? "bg-surface-hover"
-                : "bg-surface hover:bg-surface-hover"
-            }`}
+            className={cn(
+              // `bg-surface hover:bg-surface-hover` and `bg-surface-hover` are
+              // mutually exclusive arms of one background group, so the merge is
+              // the identity. `SpaceTabs.test.tsx:350` pins
+              // `inactive.className === active.className` for the ✕ (a different
+              // element, untouched here) and `SpaceTabs.pill.test.tsx` reduces
+              // class lists to geometry — a merge that only drops a losing arm
+              // cannot move either.
+              "flex h-8 max-w-48 items-center rounded-md",
+              active ? "bg-surface-hover" : "bg-surface hover:bg-surface-hover",
+            )}
             data-tauri-drag-region="false"
             onMouseDown={(e) => {
               // Middle-click anywhere on the pill closes the tab, as in every
@@ -274,11 +281,10 @@ export default function SpaceTabs() {
               // content, and a flex container's bare text child is an anonymous
               // BLOCK item, so `truncate` here would clip long folder names
               // without ever showing the `…`.
-              className={`flex min-w-0 self-stretch items-center gap-1.5 pl-3 text-ui-base ${
-                active
-                  ? "font-medium text-foreground"
-                  : "text-foreground-subtle"
-              }`}
+              className={cn(
+                "flex min-w-0 self-stretch items-center gap-1.5 pl-3 text-ui-base",
+                active ? "font-medium text-foreground" : "text-foreground-subtle",
+              )}
             >
               {tabStatus !== null && (
                 // The SAME glyph the sidebar row and the collapsed rail draw,

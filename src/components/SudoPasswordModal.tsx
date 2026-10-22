@@ -12,6 +12,7 @@ import {
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { IpcErrorLine } from "./IpcErrorLine";
+import { MutedCaption } from "./MutedCaption";
 
 /**
  * Modal for an interactive `password` request (the `sudo_exec` credential gate):
@@ -111,9 +112,9 @@ export default function SudoPasswordModal({
           aria-label="Password"
           className="tracking-widest"
         />
-        <p className="text-ui-xs text-foreground-subtlest">
+        <MutedCaption as="p">
           Enter confirm · Esc cancel · Backspace deletes the last character
-        </p>
+        </MutedCaption>
         {error && <IpcErrorLine error={error} />}
         <DialogFooter>
           <Button

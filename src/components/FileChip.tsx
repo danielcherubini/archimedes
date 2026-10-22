@@ -1,5 +1,6 @@
 import { basenameOfPath } from "../lib/paths";
 import { fileIconFor } from "../lib/fileIcons";
+import { cn } from "./lib/utils";
 
 const CHIP_CLASSES =
   "inline-flex min-w-0 max-w-full items-center gap-1.5 text-foreground-subtle";
@@ -35,7 +36,7 @@ export default function FileChip({
   // what the four button-nested call sites render.
   const glyph = (
     <>
-      <Icon className={`size-4 shrink-0 ${spec.className}`} />
+      <Icon className={cn("size-4 shrink-0", spec.className)} />
       <span className="min-w-0 truncate">{name}</span>
     </>
   );
@@ -48,7 +49,7 @@ export default function FileChip({
         type="button"
         onClick={onOpen}
         title={path}
-        className={`${CHIP_CLASSES} cursor-pointer hover:text-foreground text-left`}
+        className={cn(CHIP_CLASSES, "cursor-pointer hover:text-foreground text-left")}
       >
         {glyph}
       </button>
