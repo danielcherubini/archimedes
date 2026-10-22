@@ -120,7 +120,7 @@ satisfy a tool CI does not run — it sweeps unrelated lines into the diff.
 
 ## Phase B — the substrate
 
-Plan status: **PHASE B COMPLETE** (B4a, B1, B2, B3 all done — see `docs/roadmap/frontend-component-extraction.md` §Phase B).
+Plan status: **Phase B COMPLETE.** **Phase C planned + vetted, not yet started** — order C3 → C2 → C8 → C1 → C5 → C6 → C4 → C7. See `docs/roadmap/frontend-component-extraction.md` §Phase C.
 **Execution order is B4a → B1 → B2 → B3**, NOT the report's B1→B4: B4a is the task that makes
 every other task cheap to test, and B1's new tests want session fixtures that do not exist yet.
 
@@ -133,18 +133,20 @@ every other task cheap to test, and B1's new tests want session fixtures that do
 
 ## Phase C — components and hooks
 
-Plan status: **not yet planned**
+Plan status: **PLANNED + VETTED** (3 parallel ground-truth surveys, then 3 parallel scoped
+reviews). Order **C3 → C2 → C8 → C1 → C5 → C6 → C4 → C7** — cheapest first, the two highest-risk
+surfaces (`SpacesList` rows, the button sweep) last.
 
 | # | Task | Finding | Status |
 |---|------|---------|--------|
-| C1 | `useAsyncAction()` (one site per increment) + `useCatalogCache` | 11b, 11c | `todo` |
-| C2 | `CHROME_BUTTON` constant + `SettingsDataRow` + `badgeVariants` settings variant | 6a–6c | `todo` |
-| C3 | `IpcErrorLine` with `role="alert"` (behaviour change; one site per commit) | 7 | `todo` |
-| C4 | `SessionListRow` + `RowButton` | 3 | `todo` |
-| C5 | `InlineGateRow` (card only) | 5 | `todo` |
-| C6 | `CatalogSearchDialog` shell — **excludes `McpDialog`** | 4 | `todo` |
-| C7 | Full raw-`<button>` → `<Button>` sweep, one a11y group per commit | 6d | `todo` |
-| C8 | `cn()` everywhere + `MutedCaption`/`ErrorLine`/`EmptyListLine` + lint rule | 15 | `todo` |
+| C3 | `IpcErrorLine` with `role="alert"` — **9 sites, one per commit** | 7 | `todo` |
+| C2 | `CHROME_BUTTON` const + `SettingsDataRow` + badge `settings` variant | 6a–6c | `todo` |
+| C8 | `cn()` everywhere + `MutedCaption`/`EmptyListLine` + guard test | 15 | `todo` |
+| C1 | `useAsyncAction()` + shared catalog cache (on `useCatalogRow`) | 11b, 11c | `todo` |
+| C5 | `InlineGateRow` — the card only | 5 | `todo` |
+| C6 | `CatalogSearchDialog` shell (excludes `McpDialog`) | 4 | `todo` |
+| C4 | `SessionListRow` + `RowButton` — highest-risk surface | 3 | `todo` |
+| C7 | raw `<button>` → `<Button>`, one a11y group per commit | 6d | `todo` |
 
 ## Phase D — mega-files
 
@@ -202,6 +204,24 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   a per-tab close button, and this UI is deliberately browser-style closable tabs. A tablist
   with sibling controls beats orphaned `role="tab"`s. Not to be "fixed" later by
   restructuring the pill or adopting Radix Tabs.
+- **2026-10-22 — Phase C vetting: 6 parallel subagents, 5 audit/plan claims overturned.** Measured
+  numbers now in the plan: **37** raw buttons in 19 files (the audit's 50 counted doc-comment prose);
+  `useAgentCatalog.test.ts` **exists** (220 L / 8 tests) so the audit's C1 guard is already satisfied;
+  **no lint or format tooling exists anywhere** (no eslint/biome/oxlint/prettier in package.json or
+  the lockfile, no config, no CI step) so C8's "lint rule" is a vitest source-scanner, not a new
+  dependency; `MessageList.gap.test.tsx:123` filters `/^pt-/` not `mt-`; `SettingsBadge` has a test
+  reference (`WebSearchSection.test.tsx:120` asserts `title`), so "0 test references" was wrong.
+  **Five of my own plan claims were false and are corrected in place:** `<Button>` has
+  `defaultVariants {variant:"default"}` (`button.tsx:40`) so a bare swap repaints all 37 sites
+  `bg-primary` — every site must name variant/size/className; `badgeVariants`' base carries `h-5`,
+  `rounded-full`, `text-ui-xs` and `[&>svg]:size-2.5!` so a `settings` variant is **not**
+  byte-identical; `RowButton` must carry `disabled`/`aria-disabled`/`tabIndex` or it cannot serve
+  `ModelPickerDialog.tsx:142`; the C6 shell needs a **`beforeSearch`** slot because AgentsDialog's
+  `noSpaceOpen` block renders **above** the `<Input>` and a `header→input→children` shell would
+  move it with no test to catch it; and the transcript-row blocker is `Button`'s base
+  **`bg-clip-padding`**, not the `h-*`/`px-*` I originally blamed.
+  **Standing lesson: my absolute claims are the failure mode. Six parallel read-only surveys cost
+  less than one wrong task.**
 - **2026-10-22 — B3: `sessionTypes.ts` must have lib consumers, not just the store.** The full
   option was taken deliberately: re-pointing the 9 production `lib/**` importers gives it 13 lib
   consumers. A future task must NOT "simplify" this by having `lib/**` import the types back
