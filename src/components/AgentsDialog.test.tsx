@@ -9,6 +9,7 @@ import type {
   ShadowedAgent,
 } from "../lib/tauri";
 import AgentsDialog from "./AgentsDialog";
+import { makeSettings } from "../test/fixtures";
 
 /**
  * The dialog is PROP-DRIVEN (the fetch lives in `useAgentCatalog`, the save
@@ -64,15 +65,21 @@ const MODELS: ModelDto[] = [
 
 const TOOLS = ["read_file", "grep"];
 
+/**
+ * The settings document for this dialog: the shared `makeSettings` fixture with
+ * the two fields this file's rows are written against — a default model and the
+ * `tama` **Provider** that `MODELS` above belongs to (a row's stale-override cue
+ * resolves its pinned `provider/id` against this list, so the provider has to be
+ * configured or every model in the catalog reads as stale).
+ *
+ * The 22-field literal this replaces was the exact duplication
+ * `src/test/fixtures/settings.ts` exists to end: `AppSettings` has no optional
+ * top-level field, so a hand-copied document silently misses any field the real
+ * type later gains.
+ */
 function settings(overrides: Partial<AppSettings> = {}): AppSettings {
-  return {
-    theme: "dark",
-    palette: null,
-    paneLayout: {},
-    defaultTrustNewSpaces: false,
+  return makeSettings({
     defaultModel: "tama/Qwen3.8",
-    defaultThinkingLevel: null,
-    enabledTools: [],
     providers: [
       {
         id: "tama",
@@ -82,29 +89,8 @@ function settings(overrides: Partial<AppSettings> = {}): AppSettings {
         api: "openai-completions",
       },
     ],
-    mcpServers: {},
-    font: { sizePx: 14, uiFamily: null, codeFamily: null },
-    defaultThinkingLevels: {},
-    agentOverrides: {},
-    spinnerStyle: null,
-    emptyStateAnimation: null,
-    filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
-    web: {
-      braveApiKey: "",
-      tavilyApiKey: "",
-      perplexityApiKey: "",
-      searxngUrl: "",
-      defaultProvider: "auto",
-      proxy: "",
-    },
-    mcpMentionsEnabled: false,
-    sessionNamingEnabled: true,
-    sessionNamingModel: null,
-    sessionNamingReasoning: null,
-    attentionAlertsEnabled: true,
-    attentionAlertDelaySecs: 15,
     ...overrides,
-  };
+  });
 }
 
 /**
@@ -176,10 +162,10 @@ function openDialog(props: {
 }
 
 beforeEach(() => {
-  // jsdom has no layout, so Radix's `Select` throws on the focus-first-option
-  // scroll. The repo-wide convention for this in every file that mounts a
-  // `Select` (`SettingsPage.test.tsx`, `SessionConfigSelect.test.tsx`, …).
-  Element.prototype.scrollIntoView = vi.fn();
+  // `Element.prototype.scrollIntoView` is NOT stubbed here any more — jsdom has
+  // no layout and Radix's `Select` throws on the focus-first-option scroll, so
+  // `src/test/setup.tsx` installs the shared stub for every component test
+  // (Task B4a). This file used to carry its own copy of it.
   document.body.innerHTML = "";
 });
 
