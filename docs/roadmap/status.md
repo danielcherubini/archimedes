@@ -144,7 +144,7 @@ surfaces (`SpacesList` rows, the button sweep) last.
 | C8 | `cn()` everywhere + `MutedCaption`/`EmptyListLine` + guard test | 15 | **`done`** `8fe956e` + `3aa254c` |
 | C1 | `useAsyncAction()` + shared catalog cache (on `useCatalogRow`) | 11b, 11c | **`done`** `a49c68f`→`e981c29` (7 commits) |
 | C5 | `InlineGateRow` — the card only | 5 | **`done`** `d02dd10`→`4c57551` (3 commits) |
-| C6 | `CatalogSearchDialog` shell (excludes `McpDialog`) | 4 | `todo` |
+| C6 | `CatalogSearchDialog` shell (excludes `McpDialog`) | 4 | **`done`** `1b78344`→`0da832b` (3 commits) |
 | C4 | `SessionListRow` + `RowButton` — highest-risk surface | 3 | `todo` |
 | C7 | raw `<button>` → `<Button>`, one a11y group per commit | 6d | `todo` |
 
@@ -204,6 +204,17 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   a per-tab close button, and this UI is deliberately browser-style closable tabs. A tablist
   with sibling controls beats orphaned `role="tab"`s. Not to be "fixed" later by
   restructuring the pill or adopting Radix Tabs.
+- **2026-10-22 — C6: `CatalogSearchDialog` owns the DIALOG, never the row.** Its rows are keyed
+  `Fragment`s because a `div` in the row list is the extra DOM level the ancestry pins forbid
+  (`row.parentElement` → scroller → wrapper). **Any later task adding a wrapper element there breaks
+  `SkillsDialog.test.tsx` and `ModelPickerDialog.test.tsx`.** Two slots are load-bearing: `beforeSearch`
+  (renders ABOVE the `<Input>`) and `children` (BELOW the rows) — Agents needs both. The scroller
+  exposes only `rowGapClassName`, spliced positionally, because `cn()` MOVES a gap override to the end
+  of the string, which rewrites the class attribute.
+- **2026-10-22 — C6 method worth reusing: capture `document.body.innerHTML` per state, baseline via
+  `git stash`, diff.** 20 states, 20/20 byte-identical. For any extraction whose guards are DOM-ancestry
+  pins, this is stronger evidence than "tests pass", and it catches the regressions no test covers.
+  **C4 should do the same for `SpacesList` rows.**
 - **2026-10-22 — C5: the per-row vs per-region Escape asymmetry is NOT a defect to tidy.**
   `TranscriptFooter` stops Escape per-row, `SubagentModals` per-region, and `InlineGateRow` renders a
   **fragment with no handler at all** — deliberately. The attribution chip is a *sibling* of the card,
@@ -410,6 +421,10 @@ Record every autonomous decision here so a later iteration does not re-litigate 
 
 ## Changelog
 
+- `2026-10-22` — **C6 done** (3 commits, `1b78344`..`0da832b`, Skills → Models → Agents). 138 files /
+  2911 tests green; build green. Verified independently: `McpSection.tsx` untouched, five guard files
+  byte-identical, `RowButton.tsx` correctly absent (C4's job), `beforeSearch` confirmed rendering above
+  `<Input>` in the shell, 0 removed assertions, no scratch harness left.
 - `2026-10-22` — **C5 done** (3 commits, `d02dd10`..`4c57551`). 137 files / 2891 tests green; build
   green. Verified independently: all six guard/adjacent test files byte-identical, `SHEET_WIDTH_CLASS`
   still in `SubagentModals.tsx` (4 occurrences), tree clean. Found and fixed one false doc-comment
