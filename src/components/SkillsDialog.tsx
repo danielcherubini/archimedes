@@ -2,14 +2,7 @@ import { useState } from "react";
 import type { ShadowedSkill, SkillInfo } from "../lib/tauri";
 import { IPC_EVENTS } from "../lib/ipc/events";
 import { isMentionableSkillName } from "../lib/skills";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "./ui/dialog";
-import { Input } from "./ui/input";
-import { EmptyListLine } from "./EmptyListLine";
+import { CatalogSearchDialog } from "./CatalogSearchDialog";
 import { MutedCaption } from "./MutedCaption";
 
 /**
@@ -166,98 +159,91 @@ export default function SkillsDialog({
   };
 
   return (
-    <Dialog open onOpenChange={(nextOpen) => !nextOpen && onClose()}>
-      <DialogContent className="max-h-[70vh] sm:max-w-3xl">
-        <DialogHeader>
-          <DialogTitle>Skills</DialogTitle>
-        </DialogHeader>
-        <div className="flex max-h-[calc(70vh-7.5rem)] min-w-0 flex-col gap-3">
-          <Input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search skills…"
-          />
-          {skills.length === 0 ? (
-            <EmptyListLine>No skills found.</EmptyListLine>
-          ) : filtered.length === 0 ? (
-            <EmptyListLine>{`No skills match "${query}".`}</EmptyListLine>
-          ) : (
-            <div className="flex min-w-0 flex-col gap-0.5 overflow-y-auto pr-2">
-              {filtered.map((skill) => (
-                <div
-                  key={skill.path}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => insertSkill(skill.name)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") insertSkill(skill.name);
-                  }}
-                  className="group flex min-w-0 cursor-pointer flex-col gap-0.5 rounded-lg px-2.5 py-1 hover:bg-surface-hover"
-                >
-                  <div className="flex items-center gap-2">
-                    {/* `min-w-0` lets the span shrink below its content
-                        width so `truncate` clips it (without it the
-                        min-width:auto floor would push the row past the
-                        dialog's right edge). */}
-                    <span className="min-w-0 flex-1 truncate text-ui-base">
-                      {skill.name}
-                    </span>
-                    {skill.scope === "user" && (
-                      <MutedCaption>global</MutedCaption>
-                    )}
-                    {skill.disableModelInvocation && (
-                      <MutedCaption title={manualOnlyTooltip(skill.name)}>
-                        manual only
-                      </MutedCaption>
-                    )}
-                  </div>
-                  {skill.description !== "" && (
-                    <span
-                      className="min-w-0 truncate text-ui-sm text-foreground-subtle"
-                      title={skill.description}
-                    >
-                      {skill.description}
-                    </span>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-          {/* The shadowing report — a SIBLING of the three-branch ternary above,
-              never inside the rows branch, and gated on its OWN non-empty
-              condition so it can never ride along under either empty state.
-
-              Deliberately NOT a row: a row's onClick inserts `$<name> `, and
-              that token resolves to the WINNER — a row for an excluded entry is
-              a button that loads a different file than the one you are reading.
-              So this is plain text (no `role="button"`, no `tabIndex`, no
-              `onClick`, no hover affordance) and the winner stays the only row
-              for the name. Existing tokens only. */}
-          {shadowGroups.length > 0 && (
-            <div className="flex min-w-0 flex-col gap-0.5 overflow-y-auto">
-              {shadowGroups.map((group) => (
-                <div key={group.scope} className="flex min-w-0 flex-col gap-0.5">
-                  {/* The CAUSE names the WINNER's scope (see `shadowGroups`). */}
-                  <p className="text-ui-sm text-foreground-subtlest">
-                    {shadowHeading(group.scope, group.losers.length)}
-                  </p>
-                  {group.losers.map((loser) => (
-                    <div
-                      key={loser.path}
-                      className="flex min-w-0 items-center gap-2 text-ui-xs text-foreground-subtlest"
-                    >
-                      <span className="min-w-0 truncate">{loser.name}</span>
-                      <span className="min-w-0 truncate" title={loser.path}>
-                        {loser.path}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              ))}
-            </div>
+    <CatalogSearchDialog<SkillInfo>
+      open
+      onOpenChange={(nextOpen) => !nextOpen && onClose()}
+      title="Skills"
+      searchPlaceholder="Search skills…"
+      query={query}
+      onQueryChange={setQuery}
+      rows={filtered}
+      keyOf={(skill) => skill.path}
+      emptyMessage={
+        skills.length === 0
+          ? "No skills found."
+          : filtered.length === 0
+            ? `No skills match "${query}".`
+            : null
+      }
+      renderRow={(skill) => (
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() => insertSkill(skill.name)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") insertSkill(skill.name);
+          }}
+          className="group flex min-w-0 cursor-pointer flex-col gap-0.5 rounded-lg px-2.5 py-1 hover:bg-surface-hover"
+        >
+          <div className="flex items-center gap-2">
+            {/* `min-w-0` lets the span shrink below its content
+                width so `truncate` clips it (without it the
+                min-width:auto floor would push the row past the
+                dialog's right edge). */}
+            <span className="min-w-0 flex-1 truncate text-ui-base">
+              {skill.name}
+            </span>
+            {skill.scope === "user" && <MutedCaption>global</MutedCaption>}
+            {skill.disableModelInvocation && (
+              <MutedCaption title={manualOnlyTooltip(skill.name)}>
+                manual only
+              </MutedCaption>
+            )}
+          </div>
+          {skill.description !== "" && (
+            <span
+              className="min-w-0 truncate text-ui-sm text-foreground-subtle"
+              title={skill.description}
+            >
+              {skill.description}
+            </span>
           )}
         </div>
-      </DialogContent>
-    </Dialog>
+      )}
+    >
+      {/* The shadowing report — a SIBLING of the three-branch ternary above,
+          never inside the rows branch, and gated on its OWN non-empty
+          condition so it can never ride along under either empty state.
+
+          Deliberately NOT a row: a row's onClick inserts `$<name> `, and
+          that token resolves to the WINNER — a row for an excluded entry is
+          a button that loads a different file than the one you are reading.
+          So this is plain text (no `role="button"`, no `tabIndex`, no
+          `onClick`, no hover affordance) and the winner stays the only row
+          for the name. Existing tokens only. */}
+      {shadowGroups.length > 0 && (
+        <div className="flex min-w-0 flex-col gap-0.5 overflow-y-auto">
+          {shadowGroups.map((group) => (
+            <div key={group.scope} className="flex min-w-0 flex-col gap-0.5">
+              {/* The CAUSE names the WINNER's scope (see `shadowGroups`). */}
+              <p className="text-ui-sm text-foreground-subtlest">
+                {shadowHeading(group.scope, group.losers.length)}
+              </p>
+              {group.losers.map((loser) => (
+                <div
+                  key={loser.path}
+                  className="flex min-w-0 items-center gap-2 text-ui-xs text-foreground-subtlest"
+                >
+                  <span className="min-w-0 truncate">{loser.name}</span>
+                  <span className="min-w-0 truncate" title={loser.path}>
+                    {loser.path}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </CatalogSearchDialog>
   );
 }
