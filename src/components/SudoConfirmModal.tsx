@@ -1,6 +1,5 @@
-import { useState } from "react";
 import { respondInteractiveRequest } from "../lib/tauri";
-import { describeIpcError } from "../lib/ipcError";
+import { useAsyncAction } from "../hooks/useAsyncAction";
 import { useInteractive } from "../store/interactive";
 import {
   Dialog,
@@ -30,24 +29,23 @@ export default function SudoConfirmModal({
     (state.requests[sessionId] ?? []).find((r) => r.requestId === requestId),
   );
   const removeRequest = useInteractive((state) => state.removeRequest);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // NO `guard`: this site has no `if (busy) return` today (its sibling
+  // `SudoPasswordModal` does). Re-entrancy is blocked only by `disabled={busy}`
+  // on the two footer buttons — pinned by
+  // `SudoConfirmModal.test.tsx`'s "the ONLY re-entrancy protection here is the
+  // disabled attribute" — so that attribute stays load-bearing.
+  const { busy, error, run } = useAsyncAction();
 
   if (!request || request.method !== "confirm") return null;
   const params = request.params as { command?: string; reason?: string };
 
-  const respond = async (confirmed: boolean) => {
-    setBusy(true);
-    setError(null);
-    try {
-      await respondInteractiveRequest(sessionId, requestId, { confirmed });
-      removeRequest(sessionId, requestId);
-    } catch (err) {
-      setError(describeIpcError(err));
-    } finally {
-      setBusy(false);
-    }
-  };
+  const respond = (confirmed: boolean) =>
+    run(() =>
+      respondInteractiveRequest(sessionId, requestId, { confirmed }).then(() =>
+        // The request is settled and removed outright — no `markAnswered` step.
+        removeRequest(sessionId, requestId),
+      ),
+    );
 
   return (
     <Dialog open onOpenChange={() => {}}>
