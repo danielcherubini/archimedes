@@ -88,8 +88,14 @@ says otherwise. A task is not `done` until both commands are green.
 
 Plan status: **IN PROGRESS** — A0 done; A1–A6 remaining. See `docs/roadmap/frontend-component-extraction.md` §Phase A.
 
-**Current suite size: 125 files / 2697 tests** (121/2650 at baseline; A0 +1/0, A1 +1/+10,
-A2 +1/+27, A3 +1/+7, A4 +0/+3). `SubagentDelegatingCard.tsx` is now 424 code lines (was 696).
+**Current suite size: 125 files / 2699 tests** (121/2650 at baseline; A0 +1/0, A1 +1/+10,
+A2 +1/+27, A3 +1/+7, A4 +0/+3, A5 +0/+2). `SubagentDelegatingCard.tsx` is now 424 code lines (was 696).
+
+**There is NO prettier/eslint/biome gate in this repo** — verified `package.json` and
+`.github/workflows/ci.yml` name no formatter. The frontend gates are `pnpm test` + `pnpm build`
+(`tsc`); the Rust gates are `cargo test` / `clippy` / `fmt`. A child raised `prettier --check`
+warnings on A5; they are pre-existing at HEAD and enforced by nothing. Do not reformat files to
+satisfy a tool CI does not run — it sweeps unrelated lines into the diff.
 
 | # | Task | Finding | Files (primary) | Status |
 |---|------|---------|-----------------|--------|
@@ -98,7 +104,7 @@ A2 +1/+27, A3 +1/+7, A4 +0/+3). `SubagentDelegatingCard.tsx` is now 424 code lin
 | A2 | `lib/subagentActivity.ts` — 217 pure lines out | 14 | `lib/subagentActivity.ts` + `SubagentDelegatingCard.tsx` | **`done`** `edc2c33` |
 | A3 | `lib/sessionTime.ts` + shared formatters | 10 | `lib/sessionTime.ts`, `SubagentTranscript.tsx` | **`done`** `3886fae` |
 | A4 | User-visible copy + `source` label fixes | 16a | as planned | **`done`** `b5d0967` + `ff21d01` |
-| A5 | `SpaceTabs` tablist ARIA (2 attributes) | 18 | `src/components/SpaceTabs.tsx` | `todo` |
+| A5 | `SpaceTabs` tablist ARIA (2 attributes) | 18 | `src/components/SpaceTabs.tsx` | **`done`** `3b6ffb4` |
 | A6 | Dead-code deletion (orphans, dead IPC, tokens) | 17 | `ui/{badge,tabs,separator,dropdown-menu,card,select,dialog,kbd,input,progress,braille-loader}.tsx`, `lib/ids.ts`, `lib/tauri.ts`, + ADR 0072 | `todo` |
 
 ## Phase B — the substrate
@@ -183,6 +189,11 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   a per-tab close button, and this UI is deliberately browser-style closable tabs. A tablist
   with sibling controls beats orphaned `role="tab"`s. Not to be "fixed" later by
   restructuring the pill or adopting Radix Tabs.
+- **2026-10-22 — A5 shipped as 2 attributes, not a wrapper.** Verified in the diff: exactly
+  `role="tablist"` + `aria-orientation="horizontal"` are the only non-comment additions. The test
+  asserts `tablist === getByTestId("space-tabs")`, so a future wrapper-based "fix" fails it. The
+  accepted ARIA limitation (close/`+` buttons stay siblings of the tabs) is recorded in the
+  component — see the Decisions Log entry above for why it must not be "fixed".
 - **2026-10-22 — A4 accepted child deviation: `||`, not `??`, for the agent-name fallback.**
   The plan said `agentName ?? "Agent question"`. `SubagentEntry.agentName` is a **required** string
   and `dispatch.rs:270-273` builds it with `unwrap_or_default()`, emitted verbatim at
@@ -213,6 +224,8 @@ Record every autonomous decision here so a later iteration does not re-litigate 
 
 ## Changelog
 
+- `2026-10-22` — **A5 done** (`3b6ffb4`). 125 files / 2699 tests green; build green. Verified the
+  diff is 2 non-comment lines with zero deletions, so no className/drag-region/middle-click change.
 - `2026-10-22` — **A4 done** (`b5d0967` copy, `ff21d01` agent-name fix). 125 files / 2697 tests
   green; build green. The plan's AskQuestionCard trap was real: `isSubagent` is dead in production,
   so the naive fix would have gone green while changing nothing — the shipped tests use
