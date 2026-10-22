@@ -99,7 +99,7 @@ Plan status: **Phase A COMPLETE** (A0–A6 done). **Phase B planned and vetted**
 
 **Current suite size: 126 files / 2743 tests** (121/2650 at baseline; A0 +1/0, A1 +1/+10,
 A2 +1/+27, A3 +1/+7, A4 +0/+3, A5 +0/+2, A6 −1/−4 for the deleted `ids.test.ts`, B4a +1/+25,
-B1 +1/+23).
+B1 +1/+23, B2 +1/+22).
 `SubagentDelegatingCard.tsx` is now 424 code lines (was 696).
 
 **There is NO prettier/eslint/biome gate in this repo** — verified `package.json` and
@@ -128,7 +128,7 @@ every other task cheap to test, and B1's new tests want session fixtures that do
 |---|------|---------|--------|
 | B4a | `src/test/fixtures/*` + `resetStores()` (+ `renderWithProviders` **only if need is proven**) | 9 | **`done`** `5131bda` |
 | B1 | `src/lib/sessionLookup.ts` → `sessionFieldOf` (plain fn, NOT a hook) | 8 | **`done`** `58c52f9` |
-| B2 | `src/lib/ipc/events.ts` — event names (all 12 wrappers) + payload discriminants | 12b | `todo` |
+| B2 | `src/lib/ipc/events.ts` — event names (all 12 wrappers) + payload discriminants | 12b | **`done`** `bc77cb8` |
 | B3 | `src/lib/sessionTypes.ts` + drop store re-export barrel + `verbatimModuleSyntax` | 13b | `todo` |
 
 ## Phase C — components and hooks
@@ -202,6 +202,15 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   a per-tab close button, and this UI is deliberately browser-style closable tabs. A tablist
   with sibling controls beats orphaned `role="tab"`s. Not to be "fixed" later by
   restructuring the pill or adopting Radix Tabs.
+- **2026-10-22 — B2: `tauri.test.ts` and `update.test.ts` pin event names as LITERALS ON PURPOSE.
+  Do NOT "deduplicate" them onto `IPC_EVENTS` in a later task — reading the constant would make both
+  go green on any rename and destroy the only wire guard that exists. Verified: changing a
+  constant's value reddens them.
+- **2026-10-22 — B2: the plan contradicted itself and a child caught it.** My own ⚠️ correction
+  deleted the Rust-parity test but left its acceptance bullet ("The Rust-parity test exists and
+  passes") standing, so a later iteration would have "fixed the omission" and re-added the unsound
+  test. Bullet now states the corrected criterion. **When you correct a plan, re-read its
+  acceptance criteria for leftovers of the thing you removed.**
 - **2026-10-22 — B1: acceptance greps must be run TWICE, and one criterion was too strict.**
   `historySessions.find` alone misses any walk written as a local `titleOf(rows)` helper — so the
   criterion is that grep **plus** a `titleOf`-shaped check plus an `archivedSessions` review. Also:
@@ -305,6 +314,9 @@ Record every autonomous decision here so a later iteration does not re-litigate 
 
 ## Changelog
 
+- `2026-10-22` — **B2 done** (`bc77cb8`). 127 files / 2765 tests green; build green. Verified
+  independently: 0 bare event strings across all 12 `listen*` bodies, `App.tsx`'s default warns and
+  returns (no throw), and no test reads Rust source. Child caught a self-contradiction in my plan.
 - `2026-10-22` — **B1 done** (`58c52f9`). 126 files / 2743 tests green; build green. Verified
   independently: both greps at 0 hits, `git diff` removes 0 assertions, and `sessionFieldOf` is
   typed to return the field, not the row. Child mutation-tested: dropping archived −5, reordering
