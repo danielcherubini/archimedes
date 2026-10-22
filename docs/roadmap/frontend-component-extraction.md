@@ -452,6 +452,215 @@ Zero-consumer shipped code is not neutral: `ui/dropdown-menu.tsx` is 64% dead we
 
 ---
 
-## After Phase A
+## After each phase
 
-Update `docs/roadmap/status.md`: mark A0–A6 `done` with commit SHAs, then plan **Phase B** in this same file (append a `## Phase B` section with the same task format) and continue the loop. Do not stop to report to the owner.
+Update `docs/roadmap/status.md`: mark the phase's tasks `done` with commit SHAs, then plan the **next** phase in this same file (append a `## Phase <N>` section in the same task format) and continue the loop. Do not stop to report to the owner. **Vet every new phase's plan with parallel scoped reviewer dispatches before executing it** (see the Decisions Log: one broad dispatch truncates; several narrow ones do not).
+
+Phase A: **complete** — A0 `22ed787`, A1 `ea6fe14`, A2 `edc2c33`, A3 `3886fae`, A4 `b5d0967`+`ff21d01`, A5 `3b6ffb4`, A6 `287019f`+`3718ffc`.
+
+---
+
+## Phase B — the substrate
+
+**Measured before planning (these numbers are the plan's premises, re-derive them if the tree moves):**
+
+| Fact | Measured 2026-10-22 |
+|---|---|
+| `historySessions.find` walks outside `store/sessions.ts` | **5** sites: `SidePane.tsx:237`, `ChatStream.tsx:119`, `sessionConfig.ts:65` and `:90`, `useActiveSpaceCwd.ts:43` (the audit said 6; `SidePane.tsx:247-258`'s title walk does *not* use `historySessions.find` on a `SessionInfo` field the same way — verify) |
+| `verbatimModuleSyntax` errors if switched on today | **5, not a tree-wide sweep** — measured by flipping it and running `tsc`. See B3 |
+| `listen*` wrappers with a bare event-name string | **11** in `tauri.ts` (`:1101`–`:1234`) |
+| Test files with their own `vi.mock("../lib/tauri")` factory | **25** |
+| Test files stubbing `matchMedia` / `scrollIntoView` | **22 / 14** |
+| `src/test/` today | `setup.tsx` 26 lines + `setup.test.tsx` 37 |
+| `vite.config.ts` has **no** `test.typecheck` block | so `expectTypeOf` assertions never execute (this is why deleting `ids.test.ts` in A6 cost no real coverage) |
+
+**Phase B order: B4 first, then B1, B2, B3.** The report lists them B1→B4, and B1→B4 is wrong for execution: **B4 is the task that makes every other task cheap to test**, and B1's new `sessionLookup.test.ts` wants session-row fixtures that do not exist yet. Doing B4's *infrastructure* first and migrating test files *along the way* (each migrated file is its own commit) keeps the phase moving. The bulk 25-file migration is explicitly NOT in Phase B — see B4's scope line.
+
+### Parallelisation
+
+**Verdict:** SERIAL — B4 touches test files across the tree and every task's acceptance criterion is a full `pnpm test` run (gate 4). B1 and B2 additionally both touch `src/lib/` and B3 touches `tsconfig.json`, a shared config artifact (gate 3).
+
+---
+
+### Task B4a: Test infrastructure — fixtures, `resetStores()`, `renderWithProviders()`
+
+**Parallel:** none — full-suite verification; creates shared fixtures that later tasks consume (gate 3: shared fixtures are a shared mutable artifact).
+
+**Context:**
+`src/test/setup.tsx` is 26 lines holding only a Virtuoso stub and two scroll no-ops. Everything else is re-declared per file: **25** test files carry their own `vi.mock("../lib/tauri")` factory, 22 stub `matchMedia`, 14 stub `scrollIntoView`. Two `AppSettings` literals are byte-identical across `ChatStream.test.tsx:61-91` and `MessageBubble.codeblock.test.tsx:37-67`, and `App.test.tsx:76-105` is **stale — missing the `palette` key**, which is only possible because the literal is untyped. `SpacesList.test.tsx:100-104` names the cause precisely: a hoisted `vi.mock` factory cannot reference an outer `const`, so a new settings field must be added to every literal **by hand**.
+
+That is why extraction currently *costs* coverage: a new small component has no cheap way to get a test, so tested-rate by size is inverted (34% under 50 lines, 92% over 350). This task builds the seam. `src/components/AgentsDialog.test.tsx` is the model — it declares that it needs **no** IPC mock; read it first.
+
+**Files:**
+- Create: `src/test/fixtures/settings.ts`, `src/test/fixtures/sessions.ts`, `src/test/fixtures/subagents.ts`, `src/test/fixtures/index.ts`
+- Create: `src/test/resetStores.ts`
+- Create: `src/test/renderWithProviders.tsx`
+- Create: `src/test/fixtures.test.ts`
+- Modify: `src/test/setup.tsx` — absorb the `matchMedia` + `scrollIntoView` + pointer-capture stubs **globally** (they are already stubbed identically in 22 and 14 files)
+- Migrate (one commit each, ≤3 in this task): `src/components/SpaceTabs.pill.test.tsx`, `src/components/SpaceTabs.test.tsx`, and the new `src/lib/subagentActivity.test.ts` if it seeds stores
+
+**What to implement:**
+
+1. **`src/test/fixtures/settings.ts`** — one typed factory, the single place `AppSettings` is spelled:
+   ```ts
+   /** A complete `AppSettings` with per-test overrides. Typed, so a new field on
+    *  the real type is a COMPILE ERROR here — which is the whole point: today a
+    *  new field silently misses all N hand-copied literals (App.test.tsx's
+    *  literal is already missing `palette` and nothing noticed). */
+   export function makeSettings(overrides?: Partial<AppSettings>): AppSettings;
+   export const DEFAULT_SETTINGS: AppSettings;
+   ```
+   Derive the field set from the real `AppSettings` in `src/lib/tauri.ts` — do not copy a stale literal out of a test file. Use `vi.hoisted()` where a value must survive `vi.mock` factory hoisting, and **document** that requirement at the top of the module, because it is the reason `SpacesList.test.tsx` says literals must be edited by hand.
+2. **`src/test/fixtures/sessions.ts`** — `makeSessionRow(overrides)` (a `SessionInfo`), `makeMessage(overrides)` (a transcript `Message`), and `makeState(overrides)` returning a `SessionConfigSource`-shaped object, since `sessionConfig.ts` and B1's `sessionLookup.ts` are both tested against that shape.
+3. **`src/test/fixtures/subagents.ts`** — `makeSubagentEntry(overrides)`, `makeSubagentState(...)`.
+4. **`src/test/resetStores.ts`** — `resetStores(): void` that returns **every** store to its initial state (`useSessions`, `useSettings`, `useSubagents`, `useInteractive`, `useSubagentSelection`, `useQueuedPrompts`, `usePermissions` — enumerate the real set from `src/store/`). It must be safe to call in `beforeEach`. **The trap to avoid:** `setState(partial)` on zustand merges shallowly, so a partial reset leaves stale keys; reset each store from a captured-initial or explicit-full shape and say in the doc-comment which it does and why.
+5. **`src/test/renderWithProviders.tsx`** — `renderWithProviders(ui, options?)` wrapping RTL `render` with whatever providers the app needs, so a component test is 3 lines. Keep the plain `render` usable; this is additive.
+6. **`src/test/fixtures.test.ts`** — proves the fixtures are real: `makeSettings()` satisfies `AppSettings` (a type-level assertion **plus a runtime** one, since `expectTypeOf` never runs in this repo — no `test.typecheck` block), `makeSessionRow()` defaults are internally consistent, `resetStores()` really clears a dirty store (dirty it, reset it, assert it is clean — this is the test that catches a shallow-merge bug).
+
+**Do NOT** migrate all 25 mock factories in this task. Build the infrastructure, migrate ≤3 files as proof it works, and record the rest as a rolling migration: **every task from here on migrates the test files it already touches.** That is how the 833 lines actually go away without one unreviewable commit.
+
+**Steps:**
+- [ ] Read `src/test/setup.tsx`, `src/components/AgentsDialog.test.tsx`, and one heavy file (`SettingsPage.test.tsx:85-324`) to see what the seam must absorb.
+- [ ] Write `src/test/fixtures.test.ts` FIRST → confirm FAIL (modules absent).
+- [ ] Implement the fixtures + `resetStores` + `renderWithProviders`; re-run → PASS.
+- [ ] Move the `matchMedia`/`scrollIntoView`/pointer stubs into `setup.tsx` **without deleting any per-file stub yet** → `pnpm test` must be green (global stub + redundant local stub is harmless; deleting the locals is what could break files relying on a *different* stub shape — check for any file whose stub returns `matches: true`).
+- [ ] Migrate `SpaceTabs.pill.test.tsx` and `SpaceTabs.test.tsx` to the shared harness; re-run those two files → green.
+- [ ] Run `pnpm test` then `pnpm build`.
+- [ ] Commit: `test(fe): shared fixtures, resetStores and renderWithProviders`
+
+**Acceptance criteria:**
+- [ ] `src/test/fixtures/` exists and `fixtures.test.ts` proves `resetStores()` fully clears a dirtied store.
+- [ ] At least two previously-hand-rolled test files use the new harness and got **shorter**.
+- [ ] No existing assertion was weakened or deleted; suite count does not drop.
+- [ ] `pnpm test` and `pnpm build` green.
+
+---
+
+### Task B1: `lib/sessionLookup.ts` — the three-list walk, once
+
+**Parallel:** none — `SidePane.tsx` is touched by no other Phase B task but full-suite verification applies.
+
+**Context:**
+`sessions.find(...) ?? historySessions.find(...) ?? archivedSessions.find(...)` is re-derived in **five** places, each picking a different field: `useActiveSpaceCwd.ts:43` (cwd), `SidePane.tsx:237` (cwd), `sessionConfig.ts:65` (configOptions), `sessionConfig.ts:90` (contextUsage), `ChatStream.tsx:119` (row). `useActiveSpaceCwd.ts:14-16` already states the rule — "a second consumer re-deriving it is how the two silently disagree" — and `sessionConfig.ts:17-25` already models the right **shape**: a plain function called *inside* the selector, because a hook would force a component to subscribe to every list it does not otherwise show. This is the prerequisite for C8 and D4: any `useChatComposer` would otherwise re-implement the walk and the extraction would just relocate the duplication.
+
+**Two invariants that are easy to break and hard to notice:**
+- **Order is load-bearing.** Live → history → archived, and a live row must win over a stored row with the same id (the live row is current truth). `sessionConfig.ts:41-47` documents why archived is included at all: missing it makes an archived session's context bar read 0% and its selectors fall back to empty stubs.
+- **Return a primitive.** `SidePane.tsx:243-246` warns zustand v5 re-runs a selector that yields a fresh object on every snapshot read → infinite re-render, which **hangs the test suite rather than failing it**. So `sessionFieldOf` returns the field, never the row and never a `{ cwd, title }` object.
+
+**Files:**
+- Create: `src/lib/sessionLookup.ts`, `src/lib/sessionLookup.test.ts`
+- Modify: `src/hooks/useActiveSpaceCwd.ts` (call it; keep the doc comment's rationale, trimmed)
+- Modify: `src/components/SidePane.tsx:232-240` (the `activeCwd` walk)
+- Modify: `src/lib/sessionConfig.ts` (both walks — this is the module that already owns the shape, so it becomes a *caller*, and `SessionConfigSource` moves to or is re-exported from `sessionLookup.ts`)
+- Modify: `src/components/ChatStream.tsx:117-124`
+- **Not** in scope: `SidePane.tsx:247-258`'s `storedTitle` walk — read it, and if it can take `sessionFieldOf(s, id, "title")` without changing what it returns, fold it in; if folding it would change the `null`-vs-`undefined` distinction the header's render depends on, **leave it and say so in a comment**. `sessionTitle.ts`'s doc-comment already flags `SidePane` as carrying its own copy as known debt.
+
+**What to implement:**
+```ts
+// src/lib/sessionLookup.ts
+/** The slice of the sessions state the walk reads. Structural, not `SessionsState`
+ *  (the store does not export it) — a caller passes its whole state object from
+ *  inside a selector and a test builds a plain one. */
+export interface SessionLookupSource { … }  // superset of sessionConfig.ts's SessionConfigSource
+
+/** Read ONE field of one session across the three lists, live → history → archived.
+ *  Returns the FIELD, not the row: a selector returning a fresh object re-renders
+ *  forever under zustand v5. */
+export function sessionFieldOf<K extends keyof SessionRow>(
+  s: SessionLookupSource, id: string | null, key: K,
+): SessionRow[K] | undefined;
+```
+Decide and document whether the missing case is `undefined` or a caller-supplied default (`sessionConfig.ts` currently returns `null` for "nothing knows the id" so that *no config* stays distinguishable from *config with zero options* — that distinction must survive, so `sessionConfigOptionsOf` may keep its own `?? null` tail rather than delegating it). **Do not let the refactor flatten `null` vs `undefined` vs `[]`.**
+
+**Steps:**
+- [ ] Use the B4a fixtures to write `src/lib/sessionLookup.test.ts` FIRST → FAIL. Cover: field found in each of the three lists; **live wins over stored with the same id**; archived is reached (the 0%-bar bug); missing id → the documented empty case; `id === null` → the empty case; and that the result is a primitive (assert `typeof`, and for an object field assert a stable reference across two calls so a future "return the row" change fails here).
+- [ ] Implement → PASS.
+- [ ] Migrate `useActiveSpaceCwd.ts` → `pnpm test src/hooks/ src/components/ChatStream.test.tsx` green.
+- [ ] Migrate `sessionConfig.ts` (both) → `pnpm test src/lib/sessionConfig.test.ts src/components/SessionConfigSelect.test.tsx` green. **The `null`-vs-`[]` and archived-session cases are the ones to watch.**
+- [ ] Migrate `SidePane.tsx` + `ChatStream.tsx` → `pnpm test src/components/SidePane.test.tsx src/components/ChatStream.test.tsx` green.
+- [ ] Run `pnpm test` then `pnpm build`. Watch for a **hang** (not a failure) — that is the fresh-object-selector symptom.
+- [ ] Commit: `refactor(fe): one session-lookup seam replaces five three-list walks`
+
+**Acceptance criteria:**
+- [ ] `grep -rn 'historySessions.find' src --include='*.ts*' | grep -v '\.test\.' | grep -v 'src/store/sessions.ts'` returns **0** (the store's own internal walks are out of scope — finding 8's non-goal forbids splitting the store).
+- [ ] `sessionLookup.test.ts` pins live-wins-over-stored and the archived-reached case.
+- [ ] `sessionConfig.ts`'s `null` vs `[]` distinction is preserved and tested.
+- [ ] `pnpm test` and `pnpm build` green.
+
+---
+
+### Task B2: `ipc/events.ts` — event names and payload discriminants get an owner
+
+**Parallel:** none — `App.tsx` and `tauri.ts` are both touched; full-suite verification.
+
+**Context:**
+The `invoke` boundary is genuinely respected (0 call sites outside `lib/tauri.ts`) but the **event** side has no owner: 11 `listen*` wrappers each carry a bare string, and the `interactive-event` payload discriminants are literals inside `App.tsx:161-172` (`"todos_update"`, `"todos_clear"`, `"state"`, `"cost_update"`, `"session"`) with a comment apologising that the wire name is `cost_update` and not `cost` — which is exactly the class of bug a shared union prevents. Separately `"archimedes:insert-skill"` is a `CustomEvent` string duplicated between `SkillsDialog.tsx:158` and `ChatStream.tsx:854`.
+
+**Files:**
+- Create: `src/lib/ipc/events.ts`, `src/lib/ipc/events.test.ts`
+- Modify: `src/lib/tauri.ts` (the 11 `listen*` wrappers use the constants; keep every exported wrapper name and signature identical)
+- Modify: `src/App.tsx:157-174` (switch exhaustive over the union)
+- Modify: `src/components/SkillsDialog.tsx` + `src/components/ChatStream.tsx` (the `insert-skill` constant)
+
+**What to implement:**
+```ts
+// src/lib/ipc/events.ts
+export const IPC_EVENTS = {
+  sessionUpdate: "session-update", sessionClosed: "session-closed", /* …all 11… */
+} as const;
+export type IpcEventName = (typeof IPC_EVENTS)[keyof typeof IPC_EVENTS];
+
+/** The `interactive-event` payload's `event` discriminants — the wire names. */
+export const INTERACTIVE_EVENTS = {
+  todosUpdate: "todos_update", todosClear: "todos_clear", state: "state",
+  costUpdate: "cost_update", session: "session",
+} as const;
+export type InteractiveEventName = (typeof INTERACTIVE_EVENTS)[keyof typeof INTERACTIVE_EVENTS];
+```
+Then make `App.tsx`'s handler **exhaustive over `InteractiveEventName`**: a `switch` on `payload.event` with a `default:` branch that narrows to `never` (the standard `(_exhaustive: never) => never` trick), so adding a Rust-side event without a handler is a **compile error** rather than a silently-dropped frame. Verify the payload type's `event` field is actually typed as the union — if it is currently `string`, tightening it is part of this task and is where the value is; if tightening it forces changes in test fixtures, that is expected and good.
+Also add a test asserting **parity with the Rust side**: grep `src-tauri/src` for `emit(` / the bus constant names and require every name in `IPC_EVENTS` to appear, so a Rust event with no TS listener and a TS constant with no Rust emitter both fail. Read `src-tauri/src` for the real emitter names first — the comment at `App.tsx:160-161` about `COST_UPDATE` → `cost_update` (the `archimedes:`-prefix-strip) is the mapping rule to encode.
+
+**Steps:**
+- [ ] Enumerate every event name from **both** sides (`tauri.ts` listens + `src-tauri` emits) and write the parity test FIRST → FAIL.
+- [ ] Create `ipc/events.ts`; re-run → PASS.
+- [ ] Point the 11 wrappers at the constants → `pnpm test` green.
+- [ ] Convert `App.tsx`'s if-chain to an exhaustive switch → `pnpm test src/App.test.tsx` green.
+- [ ] Fold in the duplicated `archimedes:insert-skill` string → `pnpm test src/components/SkillsDialog.test.tsx src/components/ChatStream.test.tsx` green.
+- [ ] Run `pnpm test` then `pnpm build`.
+- [ ] Commit: `refactor(fe): one owner for IPC event names and interactive-event discriminants`
+
+**Acceptance criteria:**
+- [ ] No bare event-name string literal remains in `tauri.ts`'s `listen*` bodies or in `App.tsx`'s handler.
+- [ ] `App.tsx`'s handler is exhaustive (`never`-narrowed default); adding a discriminant breaks the build.
+- [ ] The Rust-parity test exists and passes.
+- [ ] `pnpm test` and `pnpm build` green.
+
+---
+
+### Task B3: `lib/sessionTypes.ts` + drop the re-export barrel + `verbatimModuleSyntax`
+
+**Parallel:** none — `tsconfig.json` is a shared config artifact (gate 3).
+
+**Context:**
+`store/sessions.ts` is simultaneously a store, a type module (fan-in 30) and a re-export barrel of `lib/transcript/*` (`:37-41`) — a cycle kept safe only by convention, because `tsconfig.json:13` sets `isolatedModules` but nothing enforces type-only imports. `SessionsState` is not exported, which is why `sessionConfig.ts:35` works around it with a structural interface.
+
+**Measured, not assumed:** flipping `verbatimModuleSyntax: true` produces exactly **5** errors, not a tree-wide sweep — 4 test files importing `Message`/`SessionConfigOption` as values, and **1 production file**, `src/components/SessionConfigSelect.tsx:15`. That single fact is what makes this task cheap enough to do now, and it is why B3 goes last: the 5 fixes are mechanical and the flag is what makes B1's and D1's `lib → store` type edges *enforced* instead of conventional.
+
+**Files:**
+- Create: `src/lib/sessionTypes.ts` — home for `Message`, `DiffRef`, `ToolCallUiStatus` (and any sibling type currently re-exported for no reason)
+- Modify: `src/store/sessions.ts` — drop the `:37-41` re-export barrel; **re-export the types from `sessionTypes.ts`** so existing `import type { Message } from "../store/sessions"` call sites keep working (a hard rename of ~all importers is not this task and would be an unreviewable diff)
+- Modify: `tsconfig.json` — add `"verbatimModuleSyntax": true`
+- Modify: the 5 TS1484 sites: `MessageBubble.codeblock.test.tsx:4`, `MessageBubble.markdown.test.tsx:4`, `MessageBubble.test.tsx:5`, `SessionConfigSelect.test.tsx:4`, `SessionConfigSelect.tsx:15`
+
+**Steps:**
+- [ ] Create `sessionTypes.ts` with the type definitions moved (not aliased) out of `store/sessions.ts`; have the store re-export them. Run `pnpm build` → green (this is a pure move; nothing else should change).
+- [ ] Add `verbatimModuleSyntax: true` to `tsconfig.json`; run `pnpm build` → expect **exactly 5** TS1484 errors. If the count is materially higher, STOP and re-measure — the tree moved and the plan's premise is stale.
+- [ ] Fix the 5 by adding `type` to the import specifier. Re-run → green.
+- [ ] Run `pnpm test` (the flag changes emit, so this is not optional) then `pnpm build`.
+- [ ] Commit: `refactor(fe): session types get a home, and type-only imports are enforced`
+
+**Acceptance criteria:**
+- [ ] `verbatimModuleSyntax: true` is set and `pnpm build` is green.
+- [ ] `Message`/`DiffRef`/`ToolCallUiStatus` are *defined* in `src/lib/sessionTypes.ts`, not in the store.
+- [ ] No call site was mass-renamed — the store still re-exports for compatibility.
+- [ ] `pnpm test` and `pnpm build` green.

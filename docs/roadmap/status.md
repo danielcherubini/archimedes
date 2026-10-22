@@ -70,6 +70,15 @@ already carries the role; put constraints in the `task` text instead. A reviewer
 returns only tool activity with no report text is **truncated, not failed** — re-dispatch
 split into narrower scopes rather than repeating the same broad one.
 
+**Dispatch independent subagents IN PARALLEL — same block, several calls (owner instruction,
+2026-10-22).** Anything sequential here is wasted time: the per-task review of an independent
+pair of tasks, several read-only verifications, a review running alongside a background test
+run. Batch them. The one thing NOT to parallelise is two subagents that edit the same tree —
+Phase A is SERIAL by gate 4, so implementation children go one at a time; it is *verification
+and review* that parallelises. Evidence: Phase A's single broad review returned nothing but
+tool activity; the same scope split three ways and dispatched together returned three full
+reports, and a 4th re-review of the corrections found two more blocking errors.
+
 Rust is untouched by this program — `cargo` gates are not required unless a task
 says otherwise. A task is not `done` until both commands are green.
 
@@ -86,7 +95,7 @@ says otherwise. A task is not `done` until both commands are green.
 
 ## Phase A — unblock and take the free wins (no structural risk)
 
-Plan status: **PHASE A COMPLETE** (A0–A6 all done). Phase B not yet planned — see `docs/roadmap/frontend-component-extraction.md`.
+Plan status: **Phase A COMPLETE** (A0–A6 done). **Phase B planned, awaiting review** — B4a, B1, B2, B3 (order deliberately B4a first: it is the task that makes the others cheap to test). See `docs/roadmap/frontend-component-extraction.md` §Phase B.
 
 **Current suite size: 124 files / 2695 tests** (121/2650 at baseline; A0 +1/0, A1 +1/+10,
 A2 +1/+27, A3 +1/+7, A4 +0/+3, A5 +0/+2, A6 −1/−4 for the deleted `ids.test.ts`).
