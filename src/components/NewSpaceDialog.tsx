@@ -7,6 +7,7 @@ import {
 } from "../lib/tauri";
 import { basenameOfPath } from "../lib/paths";
 import { describeIpcError } from "../lib/ipcError";
+import { useAsyncAction } from "../hooks/useAsyncAction";
 import { useSessions } from "../store/sessions";
 import {
   Dialog,
@@ -33,9 +34,15 @@ export default function NewSpaceDialog({ onClose }: { onClose: () => void }) {
   const addSpace = useSessions((s) => s.addSpace);
   const [cwd, setCwd] = useState("");
   const [check, setCheck] = useState<SpaceCheck | null>(null);
+  // The SEVENTH `describeIpcError`-derived state, and deliberately NOT on
+  // `useAsyncAction`: `folderError` has no `busy` pair — it is written by the
+  // `spaceForPath` validation that follows every keystroke, and it gates the
+  // Start button rather than tracking an in-flight action. A machine with one
+  // half is not this machine.
   const [folderError, setFolderError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // NO `guard`: this site has no `if (busy) return` today; the Start button's
+  // `disabled={busy || …}` is what holds a second click.
+  const { busy, error, run } = useAsyncAction();
 
   /**
    * Edit OR Browse pick: a non-empty cwd is validated with `space_for_path`
@@ -81,11 +88,9 @@ export default function NewSpaceDialog({ onClose }: { onClose: () => void }) {
     ? `New session in ${titleBase !== "" ? titleBase : cwd}`
     : "New space";
 
-  const start = async () => {
-    if (cwd.trim() === "" || folderError !== null) return;
-    setBusy(true);
-    setError(null);
-    try {
+  const start = () => {
+    if (cwd.trim() === "" || folderError !== null) return Promise.resolve();
+    return run(async () => {
       const info = await startSession(cwd);
       // `info.cwd` is the source of truth: the backend canonicalized it.
       // The view switches to this session automatically (the store's
@@ -93,14 +98,10 @@ export default function NewSpaceDialog({ onClose }: { onClose: () => void }) {
       addSession(info);
       addSpace(info.cwd);
       onClose();
-    } catch (err) {
-      // Keep the dialog open; `space_for_path` / `start_session` errors
-      // (e.g. `no such folder`) reject as a String or as a typed envelope —
-      // `describeIpcError` reads either.
-      setError(describeIpcError(err));
-    } finally {
-      setBusy(false);
-    }
+      // `startSession` / `spaceForPath` errors (e.g. `no such folder`) reject
+      // as a String or as a typed envelope — `useAsyncAction`'s
+      // `describeIpcError` reads either, and the dialog stays open.
+    });
   };
 
   return (
