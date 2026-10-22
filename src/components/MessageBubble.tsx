@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { createHighlighter, type Highlighter } from "shiki";
@@ -19,6 +19,7 @@ import ToolCallCard from "./ToolCallCard";
 import SubagentDelegatingCard from "./SubagentDelegatingCard";
 import DiffBlock from "./DiffBlock";
 import OpenAnchor from "./OpenAnchor";
+import { useCopyButton } from "../hooks/useCopyButton";
 import { Reasoning, ReasoningTrigger, ReasoningContent } from "./Reasoning";
 
 /**
@@ -204,8 +205,8 @@ const CODE_BODY_CLASS = "overflow-x-auto p-3 font-mono text-sm";
  *
  * Ported from ZCode's code block, HEADER ONLY: line numbers, the wrap toggle,
  * Mermaid, the fullscreen viewer and i18n are all out of scope here, and the
- * copy interaction reuses this repo's own `ToolCallCardHeader` pattern
- * (copy → check for 1.5s, timer cleared on unmount) rather than ZCode's.
+ * copy interaction is this repo's own copy→confirm machine (`useCopyButton`:
+ * copy → check for 1.5s, timer cleared on unmount) rather than ZCode's.
  *
  * The header renders whether or not the highlight succeeded — the block must
  * never change shape between highlighted and fallback rendering.
@@ -220,24 +221,10 @@ function CodeBlock({ code, lang }: { code: string; lang?: string }) {
   // stored default) is the zai default.
   const palette = useSettings((s) => s.settings?.palette ?? "zai");
 
-  // Copy → confirm for 1.5s (the `ToolCallCardHeader` pattern verbatim: a
-  // ref holds the pending timer so a second click restarts it, and the
-  // unmount cleanup clears it — no `setState` on an unmounted bubble).
-  const [copied, setCopied] = useState(false);
-  const resetRef = useRef<number | null>(null);
-  const handleCopy = () => {
-    void navigator.clipboard?.writeText(code)?.then(() => {
-      setCopied(true);
-      if (resetRef.current !== null) window.clearTimeout(resetRef.current);
-      resetRef.current = window.setTimeout(() => setCopied(false), 1500);
-    });
-  };
-  useEffect(
-    () => () => {
-      if (resetRef.current !== null) window.clearTimeout(resetRef.current);
-    },
-    [],
-  );
+  // Copy → confirm for 1.5s, owned by `useCopyButton` (the timer, the
+  // restart-on-second-click and the unmount cleanup all live there now). The
+  // BUTTON stays below, at the call site — see the hook's doc-comment for why.
+  const { copied, copy: handleCopy } = useCopyButton(code);
 
   // The identity is derived from a synthetic filename so the fence shares the
   // extension table the file chips use. An absent language is `text` (plain
@@ -524,7 +511,8 @@ function AgentMarkdown({ text }: { text: string }) {
  * The agent's reply: the text on a BAND, with a copy button below it.
  *
  * A NAMED component (not inline JSX in the `switch`) because it holds hooks —
- * a `useState`/`useRef`/`useEffect` trio cannot live in a `switch` arm of a
+ * the `useCopyButton` call (which owns what used to be a local
+ * `useState`/`useRef`/`useEffect` trio) cannot live in a `switch` arm of a
  * component whose other arms return early (`MessageBubble` itself may render a
  * `user` / `tool-call` / `diff` bubble and skip the call entirely, which would
  * change the hook count between renders).
@@ -545,27 +533,13 @@ function AgentMarkdown({ text }: { text: string }) {
  * path would shift every one of those assertions.
  */
 function AgentText({ text }: { text: string }) {
-  // Copy → confirm for 1.5s: the `ToolCallCardHeader` / `CodeBlock` pattern
-  // verbatim (a ref holds the pending timer so a second click restarts it, and
-  // the unmount cleanup clears it — no `setState` on an unmounted bubble).
-  const [copied, setCopied] = useState(false);
-  const resetRef = useRef<number | null>(null);
-  const handleCopy = () => {
-    // The PROP, so the clipboard gets the markdown SOURCE — backticks, table
-    // pipes and all. Reading the rendered DOM back would hand over the text
-    // with its markup stripped.
-    void navigator.clipboard?.writeText(text)?.then(() => {
-      setCopied(true);
-      if (resetRef.current !== null) window.clearTimeout(resetRef.current);
-      resetRef.current = window.setTimeout(() => setCopied(false), 1500);
-    });
-  };
-  useEffect(
-    () => () => {
-      if (resetRef.current !== null) window.clearTimeout(resetRef.current);
-    },
-    [],
-  );
+  // Copy → confirm for 1.5s, owned by `useCopyButton` (the timer, the
+  // restart-on-second-click and the unmount cleanup all live there now). The
+  // BUTTON stays below, at the call site — see the hook's doc-comment for why.
+  // The PROP is what gets copied, so the clipboard receives the markdown
+  // SOURCE — backticks, table pipes and all. Reading the rendered DOM back
+  // would hand over the text with its markup stripped.
+  const { copied, copy: handleCopy } = useCopyButton(text);
 
   return (
     <>

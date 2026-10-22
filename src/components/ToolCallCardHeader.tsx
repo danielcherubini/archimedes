@@ -1,4 +1,3 @@
-import { useEffect, useRef, useState } from "react";
 import { CheckIcon, ChevronRightIcon, CopyIcon } from "lucide-react";
 import {
   failureText,
@@ -11,6 +10,7 @@ import type { ToolCallUiStatus } from "../store/sessions";
 import FileChip from "./FileChip";
 import DiffCount from "./DiffCount";
 import { TRANSCRIPT_ROW } from "./lib/transcriptRow";
+import { useCopyButton } from "../hooks/useCopyButton";
 import {
   Tooltip,
   TooltipContent,
@@ -25,9 +25,10 @@ import {
  * by the caller (the `ToolCallCard`'s body uses them too) and passed in —
  * the header does NOT recompute them (no `SHELL_TOOLS` circular import).
  * The `verb`/`Icon`/`summary`/`failure` derivations + the failure-tooltip
- * `copied` state live HERE (moved from `ToolCallCard`). The toggle is
- * delegated to the caller via `onToggle` (the `open` state stays in the
- * `ToolCallCard`, which starts collapsed and changes it only on this toggle).
+ * copy state live HERE (moved from `ToolCallCard`), the latter via the shared
+ * `useCopyButton`. The toggle is delegated to the caller via `onToggle` (the
+ * `open` state stays in the `ToolCallCard`, which starts collapsed and changes
+ * it only on this toggle).
  */
 export function ToolCallCardHeader({
   title,
@@ -59,24 +60,11 @@ export function ToolCallCardHeader({
   const summary = summarizeToolCall(title, rawInput);
   const failure = status === "failed" ? failureText(rawOutput) : undefined;
 
-  // The failure tooltip's copy button (ZCode's pattern: copy → check
-  // for 1.5s; a no-op when there is no failure text).
-  const [copied, setCopied] = useState(false);
-  const resetRef = useRef<number | null>(null);
-  const handleCopy = () => {
-    if (!failure) return;
-    void navigator.clipboard?.writeText(failure)?.then(() => {
-      setCopied(true);
-      if (resetRef.current !== null) window.clearTimeout(resetRef.current);
-      resetRef.current = window.setTimeout(() => setCopied(false), 1500);
-    });
-  };
-  useEffect(
-    () => () => {
-      if (resetRef.current !== null) window.clearTimeout(resetRef.current);
-    },
-    [],
-  );
+  // The failure tooltip's copy button (copy → check for 1.5s; a no-op when
+  // there is no failure text), owned by `useCopyButton`. The BUTTON stays here,
+  // inside the tooltip content and inside the row's own `<button>` — see the
+  // hook's doc-comment for why it must not move into a shared component.
+  const { copied, copy: handleCopy } = useCopyButton(failure);
 
   return (
     <button
