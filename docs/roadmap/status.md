@@ -95,7 +95,7 @@ says otherwise. A task is not `done` until both commands are green.
 
 ## Phase A — unblock and take the free wins (no structural risk)
 
-Plan status: **Phase A COMPLETE** (A0–A6 done). **Phase B planned, awaiting review** — B4a, B1, B2, B3 (order deliberately B4a first: it is the task that makes the others cheap to test). See `docs/roadmap/frontend-component-extraction.md` §Phase B.
+Plan status: **Phase A COMPLETE** (A0–A6 done). **Phase B planned and vetted** — B4a, B1, B2, B3 (order deliberately B4a first: it is the task that makes the others cheap to test). See `docs/roadmap/frontend-component-extraction.md` §Phase B.
 
 **Current suite size: 124 files / 2695 tests** (121/2650 at baseline; A0 +1/0, A1 +1/+10,
 A2 +1/+27, A3 +1/+7, A4 +0/+3, A5 +0/+2, A6 −1/−4 for the deleted `ids.test.ts`).
@@ -199,6 +199,34 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   a per-tab close button, and this UI is deliberately browser-style closable tabs. A tablist
   with sibling controls beats orphaned `role="tab"`s. Not to be "fixed" later by
   restructuring the pill or adopting Radix Tabs.
+- **2026-10-22 — Phase B vetting: 2 parallel reviews, 4 more blocking errors in the plan.** All
+  verified by the orchestrator against source, not taken on trust:
+  (1) **B2's Rust-parity test was unsound** — only `todos_update` has a Rust emitter
+  (`interactive/mod.rs:307`); `todos_clear` is consumer-only (`persist.rs:173`), ADR 0046 says
+  `cost_update` has no native emitter, and the `COST_UPDATE`/`archimedes:`-strip "mapping rule"
+  returns **0 hits** in all of `src-tauri` — it exists only in two frontend comments. Names also
+  flow dynamically (`router.rs:44 sink.emit(&event, …)`), so a grep is incomplete by construction.
+  Deleted. **The parity test was my own invention and it was the exact mistake
+  `skills.test.ts:16-24` records the repo already retired.**
+  (2) **B2's `never` default would have turned a silent drop into a runtime throw** inside the
+  listener — default is now a logged ignore, keeping compile-time exhaustiveness.
+  (3) **B1's generic would not compile**: `sessionConfig.ts:8`'s `SessionRow` is
+  `Pick<SessionInfo, "sessionId"|"configOptions"|"contextUsage">` — no `cwd`, no `title`, the two
+  fields the walk needs. Widened `Pick` named in the plan. Also found a **sixth** walk
+  (`SpacesList.tsx:818-824`'s local `titleOf`) that the acceptance grep cannot see, because it
+  never writes `historySessions.find` — the criterion now runs a second grep on `archivedSessions`.
+  (4) **B3's barrel drop does not remove the cycle** — the cycle is `store → lib/transcript/reducer`
+  (value) vs `reducer.ts:8 → store` (type, erased at runtime); a compatibility re-export leaves 9
+  `src/lib/**` modules importing from the store and `sessionTypes.ts` with one consumer. The task
+  now either re-points those 9 or ships the flag alone.
+  Also corrected: B4a's `vi.hoisted()` is per-file and does not help a `vi.mock` factory (use
+  `await import()` — the factories are already async); `resetStores()` cannot clear module-scope
+  state (`sessions.ts:598,606,612,620`, `leftPaneState.ts:43`, …) so the name must not promise it;
+  4 test files call `vi.unstubAllGlobals()`, which would strip a global stub; `update.ts:77` is a
+  12th `listen*` wrapper outside `tauri.ts`; and `renderWithProviders` may be unnecessary — verify
+  before building it.
+  **Lesson: my own additions are the least-vetted part of a plan. Anything I invent (like that
+  parity test) gets verified against source before it ships.**
 - **2026-10-22 — A6 accepted child decisions.** `DialogPortal` was not in the plan's table but has
   an internal reader, so it was kept module-private under the same rule as `DialogOverlay`.
   `StalledInfo` (the payload type) stays for D1, but its doc-comments were re-pointed at the Rust
@@ -246,6 +274,8 @@ Record every autonomous decision here so a later iteration does not re-litigate 
 
 ## Changelog
 
+- `2026-10-22` — **Phase B planned and vetted** (2 parallel scoped reviewers — the parallel rule
+  paid for itself immediately). 4 blocking plan errors fixed, all verified against source first.
 - `2026-10-22` — **A6 done** (`287019f` deletions, `3718ffc` ADR 0072). 124 files / 2695 tests
   green; build green. Net **−472 lines**. Verified independently: `git status` shows **zero** files
   under `src-tauri/` touched, `ui/badge.tsx` survives with its C2 note, and a leftover-symbol sweep

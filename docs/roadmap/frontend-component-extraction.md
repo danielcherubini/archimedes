@@ -510,10 +510,15 @@ That is why extraction currently *costs* coverage: a new small component has no 
    export function makeSettings(overrides?: Partial<AppSettings>): AppSettings;
    export const DEFAULT_SETTINGS: AppSettings;
    ```
-   Derive the field set from the real `AppSettings` in `src/lib/tauri.ts` — do not copy a stale literal out of a test file. Use `vi.hoisted()` where a value must survive `vi.mock` factory hoisting, and **document** that requirement at the top of the module, because it is the reason `SpacesList.test.tsx` says literals must be edited by hand.
+   Derive the field set from the real `AppSettings` in `src/lib/tauri.ts` — do not copy a stale literal out of a test file. All **22** top-level fields are required (`theme: "dark"`, `palette: null`, `filePolicy: {reads,writes,shell}`, `web: {…6}`, `font: {…3}`, …), so the factory must supply every one; that is exactly why the untyped literals drifted.
+   **Hoisting — corrected after review.** `vi.hoisted()` is *per test file*, so it does not make a fixture module importable from inside a `vi.mock` factory. The mechanism that works here: the repo's 28 `vi.mock` factories are already `async`, so **`await import("../test/fixtures/settings")` inside the factory** is the simple, correct route. Use that, and document it at the top of the module — it is the thing `SpacesList.test.tsx:100-104` says it cannot do today.
 2. **`src/test/fixtures/sessions.ts`** — `makeSessionRow(overrides)` (a `SessionInfo`), `makeMessage(overrides)` (a transcript `Message`), and `makeState(overrides)` returning a `SessionConfigSource`-shaped object, since `sessionConfig.ts` and B1's `sessionLookup.ts` are both tested against that shape.
 3. **`src/test/fixtures/subagents.ts`** — `makeSubagentEntry(overrides)`, `makeSubagentState(...)`.
-4. **`src/test/resetStores.ts`** — `resetStores(): void` that returns **every** store to its initial state (`useSessions`, `useSettings`, `useSubagents`, `useInteractive`, `useSubagentSelection`, `useQueuedPrompts`, `usePermissions` — enumerate the real set from `src/store/`). It must be safe to call in `beforeEach`. **The trap to avoid:** `setState(partial)` on zustand merges shallowly, so a partial reset leaves stale keys; reset each store from a captured-initial or explicit-full shape and say in the doc-comment which it does and why.
+4. **`src/test/resetStores.ts`** — `resetStores(): void` over the **seven** stores (`useSessions`, `useSettings`, `useSubagents`, `useInteractive`, `useSubagentSelection`, `useQueuedPrompts`, `usePermissions` — that list is verified complete). Prefer each store's own `setState(<captured initial>)`; do **not** hand-write full shapes when zustand already has the initial.
+   **Three verified traps:**
+   - **`setState` shallow-merges**, so a partial reset leaves stale keys — reset whole slices and say so in the doc-comment.
+   - **Module-scope state is not store state and `resetStores()` cannot touch it.** Verified in `src/store/sessions.ts`: `inFlightToggles` (`:598`), `committedTrusted` (`:606`), `newSessionInFlight` (`:612`), `clientMessageSeq` (`:620`) are module `const`/`let`, and `leftPaneState.ts:43`, `sidePaneState.ts:25`, `newSpaceDialogState.ts:30` hold module-level pane/dialog state (~48 test files reset those by hand today). **Either fold explicit reset functions for them into this helper or name the helper for what it does** (`resetStores()` clears stores; module state needs its own named resets). Do not let the name promise isolation it does not provide — a test that trusts the name and inherits a dirty module Map is the worst kind of flake.
+   - **Four test files call `vi.unstubAllGlobals()`** (`EmptyStateFilm.test.tsx`, `lib/theme.test.ts`, `archimedes-film/compositor.test.ts`, `lib/settings.test.ts`). That removes anything a setup file `vi.stubGlobal`s, so a global stub added in step 6 can be pulled out from under a later test in the same worker. Keep per-file stubs in place for exactly that reason (step 6 does not delete them) and note this hazard in `setup.tsx`.
 5. **`src/test/renderWithProviders.tsx`** — `renderWithProviders(ui, options?)` wrapping RTL `render` with whatever providers the app needs, so a component test is 3 lines. Keep the plain `render` usable; this is additive.
 6. **`src/test/fixtures.test.ts`** — proves the fixtures are real: `makeSettings()` satisfies `AppSettings` (a type-level assertion **plus a runtime** one, since `expectTypeOf` never runs in this repo — no `test.typecheck` block), `makeSessionRow()` defaults are internally consistent, `resetStores()` really clears a dirty store (dirty it, reset it, assert it is clean — this is the test that catches a shallow-merge bug).
 
@@ -523,7 +528,7 @@ That is why extraction currently *costs* coverage: a new small component has no 
 - [ ] Read `src/test/setup.tsx`, `src/components/AgentsDialog.test.tsx`, and one heavy file (`SettingsPage.test.tsx:85-324`) to see what the seam must absorb.
 - [ ] Write `src/test/fixtures.test.ts` FIRST → confirm FAIL (modules absent).
 - [ ] Implement the fixtures + `resetStores` + `renderWithProviders`; re-run → PASS.
-- [ ] Move the `matchMedia`/`scrollIntoView`/pointer stubs into `setup.tsx` **without deleting any per-file stub yet** → `pnpm test` must be green (global stub + redundant local stub is harmless; deleting the locals is what could break files relying on a *different* stub shape — check for any file whose stub returns `matches: true`).
+- [ ] Move the `matchMedia`/`scrollIntoView`/pointer stubs into `setup.tsx` **without deleting any per-file stub yet** → `pnpm test` must be green. Verified: no test stubs `matches: true`, so that worry is unfounded — but **five files assert on the stub's presence or absence** and must be checked individually: `usePrefersReducedMotion.test.ts:135-138` *deletes* `window.matchMedia` and asserts `typeof !== "function"`; `braille-loader.test.tsx:33`, `QueueRow.test.tsx:25`, `QueueRows.test.tsx:24`, `EmptyStateFilm.test.tsx:297` guard on `typeof matchMedia !== "function"`; `AskQuestionCard.test.tsx:48-50` restores a captured `originalScrollIntoView` via `Reflect.deleteProperty`. A global stub can flip those guards — if a global stub makes any of them non-green, that file keeps its local stub and the global one is scoped down.
 - [ ] Migrate `SpaceTabs.pill.test.tsx` and `SpaceTabs.test.tsx` to the shared harness; re-run those two files → green.
 - [ ] Run `pnpm test` then `pnpm build`.
 - [ ] Commit: `test(fe): shared fixtures, resetStores and renderWithProviders`
@@ -553,9 +558,12 @@ That is why extraction currently *costs* coverage: a new small component has no 
 - Modify: `src/components/SidePane.tsx:232-240` (the `activeCwd` walk)
 - Modify: `src/lib/sessionConfig.ts` (both walks — this is the module that already owns the shape, so it becomes a *caller*, and `SessionConfigSource` moves to or is re-exported from `sessionLookup.ts`)
 - Modify: `src/components/ChatStream.tsx:117-124`
-- **Not** in scope: `SidePane.tsx:247-258`'s `storedTitle` walk — read it, and if it can take `sessionFieldOf(s, id, "title")` without changing what it returns, fold it in; if folding it would change the `null`-vs-`undefined` distinction the header's render depends on, **leave it and say so in a comment**. `sessionTitle.ts`'s doc-comment already flags `SidePane` as carrying its own copy as known debt.
+- Also in scope (**a sixth walk the audit's grep missed**): `src/components/SpacesList.tsx:818-824`'s `titleOf` walk — it walks `s.sessions`/`s.historySessions`/`s.archivedSessions` via a local `titleOf` helper, so it does not match a `historySessions.find` search and escapes detection entirely. `SidePane.tsx:251-256`'s `storedTitle` walk is the same shape.
+- **Not** in scope: `SidePane.tsx:251-256`'s `storedTitle` fold — read it, and if it can take `sessionFieldOf(s, id, "title")` without changing what it returns, fold it in; if folding it would change the `null`-vs-`undefined` distinction the header's render depends on, **leave it and say so in a comment**. `sessionTitle.ts`'s doc-comment already flags `SidePane` as carrying its own copy as known debt.
 
 **What to implement:**
+> ⚠️ **Corrected after review — the row type must be widened, or this does not compile.** `sessionConfig.ts:8` defines `type SessionRow = Pick<SessionInfo, "sessionId" | "configOptions" | "contextUsage">` — it has **no `cwd` and no `title`**, which are exactly the fields `useActiveSpaceCwd.ts:43` and the `title` walks read. So the new module cannot reuse that `Pick` as-is: define the row as `Pick<SessionInfo, "sessionId" | "cwd" | "title" | "configOptions" | "contextUsage">` and say in the comment why it is wider than `sessionConfig.ts`'s. (The generic itself is sound — the three lists hold the same `SessionInfo[]`, so `SessionRow[K] | undefined` type-checks once the `Pick` covers the walked fields.)
+
 ```ts
 // src/lib/sessionLookup.ts
 /** The slice of the sessions state the walk reads. Structural, not `SessionsState`
@@ -582,7 +590,7 @@ Decide and document whether the missing case is `undefined` or a caller-supplied
 - [ ] Commit: `refactor(fe): one session-lookup seam replaces five three-list walks`
 
 **Acceptance criteria:**
-- [ ] `grep -rn 'historySessions.find' src --include='*.ts*' | grep -v '\.test\.' | grep -v 'src/store/sessions.ts'` returns **0** (the store's own internal walks are out of scope — finding 8's non-goal forbids splitting the store).
+- [ ] No non-store file re-implements the three-list walk. Check with **two** greps, not one: `grep -rn 'historySessions.find' src --include='*.ts*' | grep -v '\.test\.' | grep -v 'src/store/sessions.ts'` → **0**, **and** `grep -rn 'archivedSessions' src --include='*.ts*' | grep -v '\.test\.' | grep -v 'src/store/sessions.ts' | grep -v sessionLookup.ts` → only the `SessionLookupSource` field declarations. The second grep is the one that catches a local `titleOf(rows)`-style helper (`SpacesList.tsx:818`, `SidePane.tsx:251`) which the first misses. The store's own internal walks stay out of scope — finding 8's non-goal forbids splitting the store.
 - [ ] `sessionLookup.test.ts` pins live-wins-over-stored and the archived-reached case.
 - [ ] `sessionConfig.ts`'s `null` vs `[]` distinction is preserved and tested.
 - [ ] `pnpm test` and `pnpm build` green.
@@ -598,7 +606,8 @@ The `invoke` boundary is genuinely respected (0 call sites outside `lib/tauri.ts
 
 **Files:**
 - Create: `src/lib/ipc/events.ts`, `src/lib/ipc/events.test.ts`
-- Modify: `src/lib/tauri.ts` (the 11 `listen*` wrappers use the constants; keep every exported wrapper name and signature identical)
+- Modify: `src/lib/tauri.ts` (the **11** `listen*` wrappers at `:1098-1237` use the constants; keep every exported wrapper name and signature identical)
+- Modify: `src/lib/update.ts:77` — `listenUpdateProgress` listens `"update://progress"` and is a **12th** wrapper outside `tauri.ts`. Include it (the point of the task is one owner for every event name), and note that `lib/update.ts` and `lib/version.ts` are the undocumented parallel IPC modules finding 12 names — organising those is D1's job, this task only takes their event string.
 - Modify: `src/App.tsx:157-174` (switch exhaustive over the union)
 - Modify: `src/components/SkillsDialog.tsx` + `src/components/ChatStream.tsx` (the `insert-skill` constant)
 
@@ -606,7 +615,15 @@ The `invoke` boundary is genuinely respected (0 call sites outside `lib/tauri.ts
 ```ts
 // src/lib/ipc/events.ts
 export const IPC_EVENTS = {
-  sessionUpdate: "session-update", sessionClosed: "session-closed", /* …all 11… */
+  sessionUpdate: "session-update", sessionClosed: "session-closed",
+  sessionStalled: "session-stalled", sessionTitled: "session-titled",
+  permissionRequest: "permission-request", interactiveRequest: "interactive-request",
+  interactiveRequestClose: "interactive-request-close", interactiveEvent: "interactive-event",
+  subagentSessionStarted: "subagent-session-started", subagentClosed: "subagent-closed",
+  windowStateChanged: "window-state-changed",   // the 11 in tauri.ts, in file order
+  updateProgress: "update://progress",          // the 12th, in lib/update.ts
+  insertSkill: "archimedes:insert-skill",       // a CustomEvent, not a Tauri event — keep it
+                                                // in a separate const if you prefer the purity
 } as const;
 export type IpcEventName = (typeof IPC_EVENTS)[keyof typeof IPC_EVENTS];
 
@@ -618,19 +635,28 @@ export const INTERACTIVE_EVENTS = {
 export type InteractiveEventName = (typeof INTERACTIVE_EVENTS)[keyof typeof INTERACTIVE_EVENTS];
 ```
 Then make `App.tsx`'s handler **exhaustive over `InteractiveEventName`**: a `switch` on `payload.event` with a `default:` branch that narrows to `never` (the standard `(_exhaustive: never) => never` trick), so adding a Rust-side event without a handler is a **compile error** rather than a silently-dropped frame. Verify the payload type's `event` field is actually typed as the union — if it is currently `string`, tightening it is part of this task and is where the value is; if tightening it forces changes in test fixtures, that is expected and good.
-Also add a test asserting **parity with the Rust side**: grep `src-tauri/src` for `emit(` / the bus constant names and require every name in `IPC_EVENTS` to appear, so a Rust event with no TS listener and a TS constant with no Rust emitter both fail. Read `src-tauri/src` for the real emitter names first — the comment at `App.tsx:160-161` about `COST_UPDATE` → `cost_update` (the `archimedes:`-prefix-strip) is the mapping rule to encode.
+> ⚠️ **Corrected after review — there is NO Rust-parity test. Do not write one.** An earlier draft of this task proposed grepping `src-tauri/src` for `emit(` and asserting every constant has an emitter. That is unsound, and it re-enacts the retired `skills.test.ts:16-24` pin. Verified reasons:
+> - **Four of the five `INTERACTIVE_EVENTS` have no Rust emitter at all.** Only `todos_update` is emitted (`interactive/mod.rs:307`); `todos_clear` exists purely as a *consumer* match (`persist.rs:173`), and ADR 0046 records `cost_update` as having no native emitter. A parity test would fail on correct code on day one.
+> - **The `COST_UPDATE` / `archimedes:`-prefix-strip "mapping rule" does not exist in Rust** — `grep -rn 'COST_UPDATE\|archimedes:' src-tauri/src --include='*.rs'` returns **0**. That rule lives only in two frontend comments (`App.tsx:159`, `tauri.ts:282`). There is nothing to encode.
+> - **Names flow dynamically**: `sink.emit(&event, payload)` (`session/router.rs:44`) forwards arbitrary `SinkFrame` names, so a literal grep is incomplete by construction, and it also misses multi-line `sink.emit(\n  "session-stalled",` forms.
+>
+> If real parity is ever wanted, the fix is Rust as the single source of truth (a generated or `const`-shared list both sides derive from), not a source-text grep. Out of scope here.
+
+**And make the exhaustive switch's default a LOGGED IGNORE, not a `never` throw.** The inner `interactive-event` name is built by the worker with no Rust-side closed set, so an unlisted-but-real frame is possible; an `assertNever` default turns today's silent drop into a **runtime throw inside the listener** — a behaviour regression dressed as type safety. Keep compile-time exhaustiveness by typing the discriminant as the union, and let the default branch `console.warn` and return.
 
 **Steps:**
-- [ ] Enumerate every event name from **both** sides (`tauri.ts` listens + `src-tauri` emits) and write the parity test FIRST → FAIL.
+- [ ] Enumerate every `listen*` wrapper's event string in `src/lib/` (all of them, not just `tauri.ts`) and write `ipc/events.test.ts` FIRST → FAIL (module absent). The test asserts the constants' **values** are the exact wire strings (a rename that changes a value is a wire break and must fail) — **not** that Rust emits them.
 - [ ] Create `ipc/events.ts`; re-run → PASS.
 - [ ] Point the 11 wrappers at the constants → `pnpm test` green.
-- [ ] Convert `App.tsx`'s if-chain to an exhaustive switch → `pnpm test src/App.test.tsx` green.
-- [ ] Fold in the duplicated `archimedes:insert-skill` string → `pnpm test src/components/SkillsDialog.test.tsx src/components/ChatStream.test.tsx` green.
+- [ ] Convert `App.tsx:161-173`'s five-arm if-chain to a switch over the union, default = logged ignore → `pnpm test src/App.test.tsx` green. **Expect near-zero fixture fallout**: verified that no test constructs an `InteractiveEventPayload` or invokes the `listenInteractiveEvent` callback (`App.test.tsx:120` stubs it with `vi.fn()`; tests drive `useInteractive.getState().apply*` directly at ~75 sites). Do not budget time for fixture rewrites, and do not "improve" anything beyond the switch.
+- [ ] Fold in the duplicated `archimedes:insert-skill` string — `SkillsDialog.tsx:158` and `ChatStream.tsx:854` are byte-identical (verified; no other duplicated `CustomEvent` name exists) — **and its 8 test occurrences**: `SkillsDialog.test.tsx:80,92,113,447,467`, `ChatStream.test.tsx:3072,3098`. → those two test files green.
 - [ ] Run `pnpm test` then `pnpm build`.
 - [ ] Commit: `refactor(fe): one owner for IPC event names and interactive-event discriminants`
 
 **Acceptance criteria:**
-- [ ] No bare event-name string literal remains in `tauri.ts`'s `listen*` bodies or in `App.tsx`'s handler.
+- [ ] No bare event-name string literal remains in any `listen*` body in `src/lib/` (all 12, including `update.ts:77`) or in `App.tsx`'s handler.
+- [ ] The switch's default **logs and returns** — it does not throw.
+- [ ] No test asserts parity against Rust source text, and none was added.
 - [ ] `App.tsx`'s handler is exhaustive (`never`-narrowed default); adding a discriminant breaks the build.
 - [ ] The Rust-parity test exists and passes.
 - [ ] `pnpm test` and `pnpm build` green.
@@ -646,9 +672,14 @@ Also add a test asserting **parity with the Rust side**: grep `src-tauri/src` fo
 
 **Measured, not assumed:** flipping `verbatimModuleSyntax: true` produces exactly **5** errors, not a tree-wide sweep — 4 test files importing `Message`/`SessionConfigOption` as values, and **1 production file**, `src/components/SessionConfigSelect.tsx:15`. That single fact is what makes this task cheap enough to do now, and it is why B3 goes last: the 5 fixes are mechanical and the flag is what makes B1's and D1's `lib → store` type edges *enforced* instead of conventional.
 
+> ⚠️ **Corrected after review — dropping the barrel does not remove the cycle, and a compatibility re-export would make the new module pointless.** Measured: `store/sessions.ts:37-41` re-exports reducer **values** (`applySessionUpdate`, `finalizeSessionMessages`, `rowToMessages`) and `:43-44` re-exports `AcpSessionUpdate`/`SessionConfigOption` — and **zero files import any of the five from the store**, so deleting those lines is safe and is worth doing on its own. But the real cycle is `store/sessions.ts:25-29 → lib/transcript/reducer` (a value edge) against `reducer.ts:8 → store/sessions` (a *type* edge, erased at runtime). If the store then re-exports the moved types "for compatibility", **nine `src/lib/**` modules keep importing them from the store** (`reducer.ts:8`, `identity.ts:2`, `unitKeys.ts:1`, `toolGroups.ts:1`, `toolOutput.ts:2`, `sessionTitle.ts:1`, `sessionActivity.ts:1`, `subagentActivity.ts:1`, `sessionTime.ts:1`) and `sessionTypes.ts` ends up with exactly one consumer — the store. The `lib → store` type edge B3 exists to enforce would survive untouched.
+>
+> So the move is only worth making **if the `src/lib/**` importers are re-pointed at `../lib/sessionTypes`** (9 files, mechanical, no component churn — the ~69 component importers keep going through the store). If you would rather not touch those 9, then **drop the `sessionTypes.ts` half of this task entirely and ship only the `verbatimModuleSyntax` flag + the 5 TS1484 fixes** — that is a smaller, honest change that still makes the type-only edges enforced. Decide, and say which you did in the commit body. Do not ship a `sessionTypes.ts` that nothing imports.
+
 **Files:**
-- Create: `src/lib/sessionTypes.ts` — home for `Message`, `DiffRef`, `ToolCallUiStatus` (and any sibling type currently re-exported for no reason)
-- Modify: `src/store/sessions.ts` — drop the `:37-41` re-export barrel; **re-export the types from `sessionTypes.ts`** so existing `import type { Message } from "../store/sessions"` call sites keep working (a hard rename of ~all importers is not this task and would be an unreviewable diff)
+- Create: `src/lib/sessionTypes.ts` — home for `Message`, `DiffRef`, `ToolCallUiStatus` (all three are **defined** at `sessions.ts:46-69` today, not re-exported; `Message` references only `ImageRef` from `chatAttachments.ts:24`, which is store-free, so the move is clean)
+- Modify: `src/store/sessions.ts` — delete the `:37-41` value barrel and the `:43-44` type re-exports (verified zero importers); import the three types from `sessionTypes.ts` and re-export them for the ~69 component call sites
+- Modify: the 9 `src/lib/**` importers listed above, re-pointed at `../lib/sessionTypes`
 - Modify: `tsconfig.json` — add `"verbatimModuleSyntax": true`
 - Modify: the 5 TS1484 sites: `MessageBubble.codeblock.test.tsx:4`, `MessageBubble.markdown.test.tsx:4`, `MessageBubble.test.tsx:5`, `SessionConfigSelect.test.tsx:4`, `SessionConfigSelect.tsx:15`
 
@@ -661,6 +692,6 @@ Also add a test asserting **parity with the Rust side**: grep `src-tauri/src` fo
 
 **Acceptance criteria:**
 - [ ] `verbatimModuleSyntax: true` is set and `pnpm build` is green.
-- [ ] `Message`/`DiffRef`/`ToolCallUiStatus` are *defined* in `src/lib/sessionTypes.ts`, not in the store.
+- [ ] `Message`/`DiffRef`/`ToolCallUiStatus` are *defined* in `src/lib/sessionTypes.ts`, not in the store, **and at least one `src/lib/**` module imports them from there** — a `sessionTypes.ts` that only the store imports is the failure mode this task's correction is about.
 - [ ] No call site was mass-renamed — the store still re-exports for compatibility.
 - [ ] `pnpm test` and `pnpm build` green.
