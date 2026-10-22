@@ -1,4 +1,3 @@
-import { useEffect, useRef, useState } from "react";
 import {
   listAgentDefinitionsForSpace,
   listCompletionEntries,
@@ -11,6 +10,21 @@ import {
   type SkillInfo,
 } from "../lib/tauri";
 import { useSkillCatalog } from "./useSkillCatalog";
+import { useCatalogPayload, useCatalogRow } from "./useCatalogRow";
+
+/**
+ * THE MACHINERY LIVES IN `useCatalogRow.ts` NOW (Task C1 / finding 11c).
+ * `useCatalogPayload` and `useCatalogRow` were born private to this file, as the
+ * generalisation of `useSkillCatalog`'s hand-rolled `{ key, rows }` state — while
+ * `useSkillCatalog` and `useAgentCatalog` each still carried their own copy of the
+ * same four cache rules. So the machinery moved out and all three consumers import
+ * it: ONE implementation, and no `useCatalogCache` module beside it (the
+ * array-shaped `useCatalogRow` API both standalone hooks need already existed
+ * here, and a second cache abstraction would have been the finding in reverse).
+ * The four rules and the deps/`empty` render-loop reasoning are documented at
+ * their new home. WHAT DID NOT MOVE: the two `empty` constants below — their
+ * module-level IDENTITY is what this file's test pins, and they belong here.
+ */
 
 /**
  * The FOUR composer catalogs for a Space (or `null` = user-level /
@@ -58,9 +72,6 @@ const completionCache = new Map<string, Promise<CompletionDirDto>>();
  */
 const EMPTY_FILE_LIST: FileListDto = { entries: [], truncated: false };
 
-/** The empty row array the array-shaped catalogs degrade to (stable). */
-const EMPTY_ROWS: never[] = [];
-
 /**
  * The empty Directory completion payload — a MODULE-LEVEL stable identity
  * for the same reason `EMPTY_FILE_LIST` exists above (it is the `empty`
@@ -71,123 +82,6 @@ const EMPTY_ROWS: never[] = [];
  */
 const EMPTY_COMPLETION_DIR: CompletionDirDto = { entries: [], truncated: false };
 
-/**
- * The shared freshness machinery for one catalog (the agents, mcp and
- * files rows). Replicates `useSkillCatalog`'s `{ key, rows }` state
- * pattern verbatim, generalised from a ROW ARRAY to any PAYLOAD (the
- * files row is `{ entries, truncated }`, not an array): a key change
- * immediately serves `empty` until the new fetch resolves (the state
- * tracks the key its payload belongs to); the LEFT key is evicted when
- * the effect re-runs for a different key (an unchanged key does NOT
- * evict — a remount reuses the settled cache entry); the cache stores
- * the IN-FLIGHT PROMISE (the two-consumers-same-key in-flight dedupe);
- * a failed fetch degrades to `empty` (logged, and the failed promise is
- * only evicted if it is still the cached entry — a test's
- * `clearMentionCatalogsCache()` + re-mount may have cached a FRESH one
- * under the same key).
- */
-function useCatalogPayload<P>(
-  cache: Map<string, Promise<P>>,
-  spacePath: string | null,
-  fetch: (spacePath: string | null) => Promise<P>,
-  fetchName: string,
-  empty: P,
-): { payload: P; pending: boolean } {
-  const key = spacePath ?? "__global__";
-  // ONE state object, deliberately: `payload` and `settled` must move together,
-  // because "the rows on screen" and "the fetch is over" are the same claim
-  // about the same key. Two separate `useState`s could be observed in between
-  // (a key change with an older key's payload on screen but a newer key's
-  // settle flag), which is precisely the window `pending` is meant to describe.
-  const [state, setState] = useState<{
-    key: string;
-    payload: P;
-    settled: boolean;
-  }>(() => ({ key, payload: empty, settled: false }));
-  const prevKeyRef = useRef<string | null>(null);
-  useEffect(() => {
-    const prevKey = prevKeyRef.current;
-    prevKeyRef.current = key;
-    if (prevKey !== null && prevKey !== key) {
-      cache.delete(prevKey); // stale on disk: re-fetch when we come back
-    }
-    let cancelled = false;
-    let p = cache.get(key);
-    if (!p) {
-      p = fetch(spacePath)
-        .catch((err) => {
-          // A failed fetch degrades to the empty value (logged — the app's
-          // convention for a non-critical background fetch failure).
-          // A FAILED promise is NOT cached (delete it) so a later effect
-          // retries — but only if THIS promise is still the cached entry
-          // (a test's `clearMentionCatalogsCache()` + re-mount may have
-          // cached a FRESH one under the same key; an unconditional
-          // delete would evict it).
-          console.error(`${fetchName} failed:`, err);
-          if (cache.get(key) === p) cache.delete(key);
-          return empty;
-        });
-      cache.set(key, p);
-    }
-    void p.then((r) => {
-      // Stale-response guard: the Space changed while in flight.
-      if (!cancelled) {
-        // A REJECTION lands here too (the `.catch` above converted it to
-        // `empty`), which is exactly what makes this the right place to mark a
-        // settle: "settled" means "the fetch is over", never "the fetch
-        // returned rows". A dead directory has NO rows ever, and a caller that
-        // inferred pending-from-rows would hold Enter down there forever.
-        setState({ key, payload: r, settled: true });
-      }
-    });
-    // The deps below intentionally omit `cache`, `fetch` AND `empty`: all
-    // three are stable BY CONSTRUCTION — `cache` is a module-level Map
-    // (`agentsCache` / `mcpCache` / `filesCache` / `completionCache`), `fetch`
-    // an imported module function, and `empty` a module constant (`EMPTY_ROWS`
-    // / `EMPTY_FILE_LIST` / `EMPTY_COMPLETION_DIR`). None can change between
-    // renders, so none may be tracked. `empty` is the one that would actually
-    // bite IF it ever were tracked: were `empty` added to these deps AND a
-    // caller passing a fresh literal (instead of the module constant), the
-    // effect would re-fire on EVERY render, each run's `.then` writing a NEW
-    // payload object — an infinite render loop. Read that sentence for what it
-    // IS: a conditional about a configuration this app does not have. It needs
-    // BOTH halves (tracked `empty` AND a literal caller) and neither holds, so
-    // the loop has never been observed here — a caller swapping in a literal on
-    // its own leaves this hook untouched (measured: the whole suite stayed
-    // green). That is precisely why the two stable-identity constants are
-    // pinned by IDENTITY assertions in `useMentionCatalogs.test.ts` rather than
-    // left to this paragraph: the observable contract today is "the empty value
-    // is one object", and that is what a test can actually see.
-    // (`empty` must therefore never be tracked — that is the rule, not the
-    // loop.)
-    return () => {
-      cancelled = true;
-    };
-  }, [spacePath, fetchName]);
-  return {
-    payload: state.key === key ? state.payload : empty,
-    // THE INVARIANT, and it is load-bearing: `pending === true` ⟹ `payload` is
-    // the EMPTY constant. Both halves read the same two fields of one state
-    // object, so they can never disagree — which matters because `pending` is
-    // only ever a reason to HOLD a keystroke while there is nothing to insert,
-    // and a `pending` that could be true beside a screen full of rows would
-    // swallow an insert the user can see. `state.payload` is the `empty` value
-    // whenever `settled` is false (it is only ever written by the settle), so
-    // the `state.key === key && !settled` branch cannot show rows either.
-    pending: state.key === key ? !state.settled : true,
-  };
-}
-
-/** An array-shaped catalog row (the agents / mcp lists). */
-function useCatalogRow<T>(
-  cache: Map<string, Promise<T[]>>,
-  spacePath: string | null,
-  fetch: (spacePath: string | null) => Promise<T[]>,
-  fetchName: string,
-): T[] {
-  return useCatalogPayload<T[]>(cache, spacePath, fetch, fetchName, EMPTY_ROWS)
-    .payload;
-}
 export function useMentionCatalogs(
   spacePath: string | null,
 ): {

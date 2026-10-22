@@ -1,12 +1,12 @@
-import { useEffect, useRef, useState } from "react";
 import { listAgentConfig, type AgentConfigDto } from "../lib/tauri";
+import { useCatalogRow } from "./useCatalogRow";
 
 /**
  * The Agent-definition catalog for a Space (or `null` = user-level definitions
  * only), for the sidebar **Agents** modal (ADR 0068).
  *
- * A deliberate copy of `useSkillCatalog` — its four cache rules are load-bearing
- * and are copied unchanged:
+ * Was a deliberate copy of `useSkillCatalog` — its four cache rules are
+ * load-bearing and were copied unchanged:
  *
  * 1. A module-level `Map<string, Promise<T[]>>` keyed by `spacePath ??
  *    "__global__"` storing the IN-FLIGHT PROMISE, so two components mounted in
@@ -22,7 +22,7 @@ import { listAgentConfig, type AgentConfigDto } from "../lib/tauri";
  *    is still the cached entry, so a fresh entry planted meanwhile survives.
  *
  * Rule 3 keeps this a DELIBERATE SHALLOW CACHE, and it still holds: the eviction
- * below happens on a SPACE SWITCH and on a WRITE, never on a plain remount, so two
+ * happens on a SPACE SWITCH and on a WRITE, never on a plain remount, so two
  * consumers opening the modal in one pane mount still share one (network-bound)
  * discovery. What was added is invalidation-on-write — `SpacesList`'s
  * `writeAgentOverrides` calls `clearAgentCatalogCache()` after a successful save,
@@ -46,50 +46,30 @@ import { listAgentConfig, type AgentConfigDto } from "../lib/tauri";
  * loading flag — `[]` is what the modal renders as "loading or empty" — but the
  * `orphanedOverrides` gate in `AgentsDialog` is what keeps that ambiguity from
  * producing a live remove button against nothing.
+ *
+ * THE MACHINERY LIVES ELSEWHERE NOW (Task C1 / finding 11c). The four rules above
+ * are implemented once, in `useCatalogRow` → `useCatalogPayload`. They are
+ * restated here rather than only cross-referenced because rule 3 is the premise
+ * of the invalidation-on-write decision in the paragraph above, and a reader of
+ * THIS file is the reader who has to evaluate that decision. What this catalog
+ * keeps to itself: its own cache Map (so `clearAgentCatalogCache()` cannot evict
+ * the skill listing that `App` and `ChatStream` share — the two catalogs share
+ * LOGIC, never state) and its own doc-comment, because its reasoning is not
+ * `useSkillCatalog`'s. `useAgentCatalog.test.ts` pins all four rules through this
+ * hook, unmodified.
  */
 const cache = new Map<string, Promise<AgentConfigDto[]>>();
 
 export function useAgentCatalog(spacePath: string | null): AgentConfigDto[] {
-  const key = spacePath ?? "__global__";
-  // Rows + their key, together (rule 2): a key change immediately serves []
-  // until the new fetch resolves.
-  const [state, setState] = useState<{
-    key: string;
-    rows: AgentConfigDto[];
-  }>(() => ({ key, rows: [] }));
-  // The key the PREVIOUS effect run fetched for — so a key change evicts the
-  // LEFT key (rule 3) without touching the new one.
-  const prevKeyRef = useRef<string | null>(null);
-  useEffect(() => {
-    const prevKey = prevKeyRef.current;
-    prevKeyRef.current = key;
-    if (prevKey !== null && prevKey !== key) {
-      cache.delete(prevKey); // stale on disk: re-fetch when we come back
-    }
-    let cancelled = false;
-    let p = cache.get(key);
-    if (!p) {
-      p = listAgentConfig(spacePath)
-        .catch((err) => {
-          // A failed fetch degrades to [] (logged — the app's convention for a
-          // non-critical background fetch failure), and the FAILED promise is
-          // dropped so a later effect retries — but only while THIS promise is
-          // still the cached entry (rule 4).
-          console.error("listAgentConfig failed:", err);
-          if (cache.get(key) === p) cache.delete(key);
-          return [] as AgentConfigDto[];
-        });
-      cache.set(key, p);
-    }
-    void p.then((r) => {
-      // Stale-response guard: the Space changed while in flight.
-      if (!cancelled) setState({ key, rows: r });
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [spacePath]);
-  return state.key === key ? state.rows : [];
+  // `useCatalogPayload`'s `[spacePath, fetchName]` deps stay inert because both
+  // arguments here are module constants, so the effect re-runs on a Space change
+  // and on nothing else.
+  return useCatalogRow<AgentConfigDto>(
+    cache,
+    spacePath,
+    listAgentConfig,
+    "listAgentConfig",
+  );
 }
 
 /**
