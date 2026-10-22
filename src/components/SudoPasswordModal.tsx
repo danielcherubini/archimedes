@@ -1,6 +1,6 @@
 import { useState, type ChangeEvent } from "react";
 import { respondInteractiveRequest } from "../lib/tauri";
-import { describeIpcError } from "../lib/ipcError";
+import { useAsyncAction } from "../hooks/useAsyncAction";
 import { useInteractive } from "../store/interactive";
 import {
   Dialog,
@@ -40,28 +40,26 @@ export default function SudoPasswordModal({
   // shows the mask: one `•` per char) and never stored in the interactive
   // store.
   const [secret, setSecret] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // `guard: true` — this is the site that self-guarded (`if (busy) return` at
+  // the old `:49`), and the guard is NOT redundant with `disabled={busy}`: the
+  // `<input>` is never disabled, so a second Enter reaches the handler and only
+  // the JS guard stops a sudo password being answered twice. Pinned by
+  // `SudoPasswordModal.test.tsx`'s "the JS guard at :49 blocks a second Enter".
+  const { busy, error, run } = useAsyncAction({ guard: true });
 
   if (!request || request.method !== "password") return null;
   const params = request.params as { command?: string; reason?: string };
   const masked = "•".repeat(secret.length);
 
-  const respond = async (cancelled: boolean) => {
-    if (busy) return;
-    setBusy(true);
-    setError(null);
+  const respond = (cancelled: boolean) => {
     const password = cancelled ? "" : secret;
-    try {
-      await respondInteractiveRequest(sessionId, requestId, { password });
-      // The password was in `useState` only — removing the request
-      // settles the card; it never persisted in store state.
-      removeRequest(sessionId, requestId);
-    } catch (err) {
-      setError(describeIpcError(err));
-    } finally {
-      setBusy(false);
-    }
+    return run(() =>
+      respondInteractiveRequest(sessionId, requestId, { password }).then(() =>
+        // The password was in `useState` only — removing the request settles
+        // the card; it never persisted in store state.
+        removeRequest(sessionId, requestId),
+      ),
+    );
   };
 
   // The controlled-mask trick: the input's DOM value is the mask, so a
