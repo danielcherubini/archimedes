@@ -11,6 +11,7 @@ import {
 } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
+import { IpcErrorLine } from "./IpcErrorLine";
 
 /**
  * Modal for an interactive `password` request (the `sudo_exec` credential gate):
@@ -113,7 +114,7 @@ export default function SudoPasswordModal({
         <p className="text-ui-xs text-foreground-subtlest">
           Enter confirm · Esc cancel · Backspace deletes the last character
         </p>
-        {error && <p className="text-ui-sm text-destructive">{error}</p>}
+        {error && <IpcErrorLine error={error} />}
         <DialogFooter>
           <Button
             variant="outline"
