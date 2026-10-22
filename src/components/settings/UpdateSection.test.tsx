@@ -160,6 +160,51 @@ describe("UpdateSection (the manual updater, ADR 0053)", () => {
     expect(screen.getByRole("button", { name: "Install update" })).toBeTruthy();
   });
 
+  it("announces BOTH failure lines through role=\"alert\", at text-ui-base (Task C3: the override case)", async () => {
+    // Finding 7: these two lines were bare `<p>`s, so a screen-reader user who
+    // clicked Check and reached a dead endpoint heard nothing. They are also
+    // the ONLY two error lines in the app that are `text-ui-base` rather than
+    // `text-ui-sm`, so they are the proof that a caller's font-size override
+    // survives `cn()` without dropping the destructive ink.
+    //
+    // 1. `checkFailed` (the `Could not reach the update server` line).
+    mockedCheck.mockRejectedValue("release-not-found");
+    render(<UpdateSection />);
+    await screen.findByText("0.1.0");
+    fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
+    const checkFailed = await screen.findByRole("alert");
+    expect(checkFailed.textContent ?? "").toContain("release-not-found");
+    // Byte-identical to the hand-written `text-ui-base text-destructive` line
+    // this replaced: `cn` drops the component's `text-ui-sm` (font-size group)
+    // and KEEPS `text-destructive` (a colour, a different group).
+    expect(checkFailed.getAttribute("class")).toBe("text-destructive text-ui-base");
+    expect(checkFailed.getAttribute("class")).not.toContain("text-ui-sm");
+
+    // 2. The `available` arm's INSTALL failure — a different line, in the
+    // other phase, so both cited sites are covered.
+    cleanup();
+    resetUpdaterSectionState();
+    render(<UpdateSection />);
+    await screen.findByText("0.1.0");
+    await openAvailable();
+    mockedInstall.mockRejectedValue("install-failed");
+    fireEvent.click(screen.getByRole("button", { name: "Install update" }));
+    const installFailed = await screen.findByRole("alert");
+    expect(installFailed.textContent ?? "").toContain("install-failed");
+    expect(installFailed.getAttribute("class")).toBe("text-destructive text-ui-base");
+    // And the two lines stay distinct: a failed CHECK is never worded like a
+    // failed INSTALL (the reason `CheckOutcome` is three-way).
+    expect(installFailed.textContent ?? "").toContain("Installing the update failed");
+  });
+
+  it("renders no alert region while nothing has failed", async () => {
+    mockedCheck.mockResolvedValue(AVAILABLE);
+    render(<UpdateSection />);
+    await screen.findByText("0.1.0");
+    await openAvailable();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("a resolved install ends on an explicit Restart to finish, deferred one beat (case 5: mac/linux)", async () => {
     // A resolve means the platform did NOT exit (macOS/Linux): the app is still
     // running on the OLD binary, so completion is an explicit button — never a

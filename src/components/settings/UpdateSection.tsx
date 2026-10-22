@@ -10,6 +10,7 @@ import {
 } from "@/lib/update";
 import { describeIpcError } from "@/lib/ipcError";
 import { Button } from "@/components/ui/button";
+import { IpcErrorLine } from "@/components/IpcErrorLine";
 import {
   SettingsBadge,
   SettingsGroupCard,
@@ -278,9 +279,10 @@ function UpdateStatus({ phase }: { phase: Phase }): ReactElement | null {
           {phase.error ? (
             // Distinct from a failed CHECK: the endpoint answered, the install
             // is what broke (a deb transaction, a signature, a full disk).
-            <p className="text-ui-base text-destructive">
-              Installing the update failed: {phase.error}
-            </p>
+            <IpcErrorLine
+              error={`Installing the update failed: ${phase.error}`}
+              className="text-ui-base"
+            />
           ) : null}
         </div>
       );
@@ -288,9 +290,10 @@ function UpdateStatus({ phase }: { phase: Phase }): ReactElement | null {
       // The conflation the type exists to prevent, made visible: "I could not
       // ask" is never worded like "it said no".
       return (
-        <p className="text-ui-base text-destructive">
-          Could not reach the update server: {phase.error}
-        </p>
+        <IpcErrorLine
+          error={`Could not reach the update server: ${phase.error}`}
+          className="text-ui-base"
+        />
       );
     case "downloaded":
       return (
