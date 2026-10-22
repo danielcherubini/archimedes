@@ -90,11 +90,11 @@ describe("ChromeControls", () => {
     const left = screen.getByTestId("left-pane-toggle");
     const right = screen.getByTestId("right-pane-toggle");
 
-    expect(left.getAttribute("aria-label")).toBe("Collapse sidebar");
+    expect(left.getAttribute("aria-label")).toBe("Collapse session list");
     expect(left.getAttribute("aria-pressed")).toBe("true"); // pressed = open
     fireEvent.click(left);
     expect(getLeftPaneCollapsed()).toBe(true);
-    expect(left.getAttribute("aria-label")).toBe("Expand sidebar");
+    expect(left.getAttribute("aria-label")).toBe("Expand session list");
     expect(left.getAttribute("aria-pressed")).toBe("false");
     fireEvent.click(left);
     expect(getLeftPaneCollapsed()).toBe(false);

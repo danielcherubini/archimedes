@@ -41,7 +41,7 @@ function TranscriptHeader({ context }: { context?: VirtuosoContext }) {
           <Spinner className="size-4 text-foreground-subtle" />
         ) : !context.hasMore ? (
           <p className="text-ui-sm text-foreground-subtlest">
-            Start of conversation
+            Start of session
           </p>
         ) : null}
       </div>

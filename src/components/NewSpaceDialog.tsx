@@ -77,7 +77,7 @@ export default function NewSpaceDialog({ onClose }: { onClose: () => void }) {
   const existingSpace = check?.isSpace;
   const titleBase = basenameOfPath(cwd);
   const title = existingSpace
-    ? `New conversation in ${titleBase !== "" ? titleBase : cwd}`
+    ? `New session in ${titleBase !== "" ? titleBase : cwd}`
     : "New space";
 
   const start = async () => {

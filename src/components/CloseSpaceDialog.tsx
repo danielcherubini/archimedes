@@ -83,7 +83,7 @@ export default function CloseSpaceDialog({
           {plural
             ? `${sessions.length} sessions here are still open`
             : "A session here is still open"}
-          . Closing the tab forgets the Space — its conversations stay, and
+          . Closing the tab forgets the Space — its sessions stay, and
           re-opening the folder brings them back. Stop the{" "}
           {plural ? "sessions" : "session"} too?
         </DialogDescription>

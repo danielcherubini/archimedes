@@ -297,9 +297,9 @@ function McpDialog({
               : `Edit MCP server ${initial.name}`}
           </DialogTitle>
           <DialogDescription>
-            Stored in the desktop's settings.json (pi's entry shape — it
-            copy-pastes to a mcp.json). Merged with pi's mcp.json files at
-            global precedence (project &gt; desktop &gt; pi-global).
+            Stored in the desktop's settings.json. A Space's own MCP config
+            overrides an entry here, and an entry here overrides the
+            user-level config (Space &gt; desktop &gt; user).
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-3">

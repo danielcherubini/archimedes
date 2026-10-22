@@ -229,7 +229,7 @@ function ProviderRow({
                   Remove provider {provider.name || "Untitled"}?
                 </AlertDialogTitle>
                 <AlertDialogDescription>
-                  Its {modelCount} models will leave the model picker.
+                  Its {modelCount} models will no longer be selectable.
                   Existing sessions are unaffected.
                 </AlertDialogDescription>
               </AlertDialogHeader>

@@ -196,7 +196,7 @@ export default function GeneralSection({
             this policy). The default, "Don't ask me", runs commands anywhere on
             the machine with no prompt.
             {shellSandboxAvailable && shellSandboxSupported
-              ? " Sandboxed runs them inside an OS sandbox (Landlock) confined to your project folder and the system temp dirs (/tmp, /var/tmp): writes stay inside those, system files stay readable, and there are no network rules."
+              ? " Sandboxed runs them inside an OS sandbox (Landlock) confined to your Space folder and the system temp dirs (/tmp, /var/tmp): writes stay inside those, system files stay readable, and there are no network rules."
               : null}
             {/* (ADR 0030 Task 5) Linux without Landlock: the tier is greyed
                 out and the reason is stated — the honest sentence is that

@@ -241,10 +241,13 @@ describe("SpaceTabs (the Spaces as browser-style tabs at the top of the chat)", 
     ).toBeNull();
     // The pane toggles live in the chrome bar's `ChromeControls` (`App.test.tsx`
     // pins that), never in the tab strip: the tabs are Spaces, and a strip that
-    // also held window furniture would read as a second titlebar. ALL four
-    // names, because the old assertion here queried a label that had since been
-    // renamed and so could never fail.
+    // also held window furniture would read as a second titlebar. EVERY label
+    // the left toggle has ever carried plus the current one, because the old
+    // assertion here queried a label that had since been renamed and so could
+    // never fail.
     for (const label of [
+      "Collapse session list",
+      "Expand session list",
       "Collapse sidebar",
       "Expand sidebar",
       "Collapse side pane",

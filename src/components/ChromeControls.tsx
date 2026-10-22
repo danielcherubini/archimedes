@@ -88,7 +88,9 @@ export default function ChromeControls({
       <button
         type="button"
         data-testid="left-pane-toggle"
-        aria-label={leftCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        aria-label={
+          leftCollapsed ? "Expand session list" : "Collapse session list"
+        }
         aria-pressed={!leftCollapsed}
         onClick={() => setLeftPaneCollapsed(!leftCollapsed)}
         className={BTN}

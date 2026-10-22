@@ -2230,6 +2230,8 @@ describe("SpacesList (archive, ADR 0016)", () => {
       // `Skills`, `Agents`) are NOT in this list — they legitimately survive the
       // collapse as rail icons, which is what the rail's own tests assert.
       for (const label of [
+        "Collapse session list",
+        "Expand session list",
         "Collapse sidebar",
         "Expand sidebar",
         "Settings",
