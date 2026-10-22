@@ -140,7 +140,7 @@ surfaces (`SpacesList` rows, the button sweep) last.
 | # | Task | Finding | Status |
 |---|------|---------|--------|
 | C3 | `IpcErrorLine` with `role="alert"` — **9 sites, one per commit** | 7 | **`done`** `7418e95`→`fd31c7b` (7 commits) |
-| C2 | `CHROME_BUTTON` const + `SettingsDataRow` + badge `settings` variant | 6a–6c | `todo` |
+| C2 | `CHROME_BUTTON` const + `SettingsDataRow` + badge `settings` variant | 6a–6c | **`done`** `45353b5` + `6144b17` |
 | C8 | `cn()` everywhere + `MutedCaption`/`EmptyListLine` + guard test | 15 | `todo` |
 | C1 | `useAsyncAction()` + shared catalog cache (on `useCatalogRow`) | 11b, 11c | `todo` |
 | C5 | `InlineGateRow` — the card only | 5 | `todo` |
@@ -204,6 +204,25 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   a per-tab close button, and this UI is deliberately browser-style closable tabs. A tablist
   with sibling controls beats orphaned `role="tab"`s. Not to be "fixed" later by
   restructuring the pill or adopting Radix Tabs.
+- **2026-10-22 — C2: finding 6c is CLOSED AS REJECTED, not implemented.** `badgeVariants` is the
+  wrong home for `SettingsBadge`; measured with the real `cn()`, the base's `h-5`/`w-fit`/
+  `rounded-full`/`overflow-hidden`/`[&>svg]:size-2.5!` survive a `settings` arm and change the box at
+  all 20 sites, and parity would need ~15 `!important` negations with **no visual test layer to verify
+  against** (`getComputedStyle` appears in 0 component tests). The evidence is executable: a 4-test
+  block in `primitives.test.tsx` re-runs the merge and reddens if anyone adds a `settings:` arm without
+  re-measuring. **Do not "finish" 6c in a later phase.**
+- **2026-10-22 — `badgeVariants({})` / `buttonVariants({})` are NOT their base strings.** Both have
+  `defaultVariants {variant:"default"}` folding in `bg-primary text-primary-foreground`. Any task
+  passing a `className` override to `<Badge>`/`<Button>` must name `variant` explicitly. This is the
+  single most repeatable trap found in this program — C7 depends on it.
+- **2026-10-22 — C2: two follow-ups left deliberately open.** `GeneralSection.tsx:418` and
+  `UpdateSection.tsx:395` also hand-roll `border-t border-border px-4 py-3` but **without**
+  `first:border-t-0`, so they are not drop-in `SettingsDataRow` users; C8 (which touches className
+  conventions across the tree) is the natural place to fold them via the `className` override.
+- **2026-10-22 — A source-scanner test must use the computed-specifier idiom.** A bare
+  `import "node:fs"` fails `tsc` (this app ships no `@types/node`). Use
+  `const NODE_FS = "node:" + "fs"; const {readFileSync, readdirSync} = await import(NODE_FS)` as
+  `cssSource.ts` / `themeTokens.test.ts` do. **C8's guard test needs this.**
 - **2026-10-22 — C3: `SudoConfirmModal.tsx` and `SudoPasswordModal.tsx` still have NO test file.**
   They are the only error-bearing components without one; the child verified those two migrations by
   DOM capture (before/after tag, class, role, siblings) rather than a test. **C1 touches the same
@@ -354,6 +373,10 @@ Record every autonomous decision here so a later iteration does not re-litigate 
 
 ## Changelog
 
+- `2026-10-22` — **C2 done** (`45353b5` chrome buttons, `6144b17` settings rows + badge decision).
+  129 files / 2804 tests green; build green. Verified independently: `SpaceTabs.tsx` diff is
+  **comments only** (16 added, 0 removed), 0 removed assertions, `badge.tsx` changed in comments only.
+  Finding 6c closed as REJECTED with executable evidence rather than implemented.
 - `2026-10-22` — **C3 done** (7 commits, `7418e95`..`fd31c7b`). 128 files / 2783 tests green; build
   green. Verified independently: 9 `<IpcErrorLine` call sites, zero scope violations against the 8
   out-of-scope files, 0 removed assertions, no scratch files left. First **behaviour-changing** task
