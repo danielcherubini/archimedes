@@ -1,9 +1,8 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { useSessions } from "../store/sessions";
-import { usePermissions } from "../store/permissions";
-import { setNewSpaceDialogOpen } from "../lib/newSpaceDialogState";
-import type { SpaceRow } from "../lib/tauri";
+import { makeSpaceRow } from "../test/fixtures";
+import { resetModuleFlags, resetStores } from "../test/resetStores";
 import SpaceTabs from "./SpaceTabs";
 
 /**
@@ -45,49 +44,23 @@ import SpaceTabs from "./SpaceTabs";
  * `SpaceTabs.tsx` means an assertion below is wrong, not that the component is.
  */
 
-// Radix (the `+`'s `NewSpaceDialog`) needs the pointer-capture stubs in jsdom +
-// `matchMedia` — the same `beforeAll` `SpaceTabs.test.tsx` uses, repeated rather
-// than shared so this file does not depend on a sibling's harness.
-beforeAll(() => {
-  Element.prototype.scrollIntoView = vi.fn();
-  Element.prototype.hasPointerCapture = vi.fn(() => false);
-  Element.prototype.setPointerCapture = vi.fn();
-  Element.prototype.releasePointerCapture = vi.fn();
-  vi.stubGlobal("matchMedia", (q: string) => ({
-    matches: false,
-    media: q,
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
-    addListener: vi.fn(),
-    removeListener: vi.fn(),
-    dispatchEvent: vi.fn(),
-  }));
-});
-
-const space = (path: string): SpaceRow => ({
-  path,
-  createdAt: 0,
-  lastOpenedAt: 0,
-  trusted: false,
-});
+// The environment this component needs (Radix's pointer-capture trio +
+// `matchMedia`, for the `+`'s `NewSpaceDialog`) is installed once for the whole
+// suite in `src/test/setup.tsx` — the block that used to sit here was the same
+// 12 lines `SpaceTabs.test.tsx` carried, "repeated rather than shared", which is
+// the duplication finding 9 is about.
+const space = (path: string) => makeSpaceRow({ path });
 
 beforeEach(() => {
-  useSessions.setState({
-    sessions: [],
-    historySessions: [],
-    archivedSessions: [],
-    activeSessionId: null,
-    activeSpacePath: null,
-    spaces: [],
-    closeReasons: {},
-    messages: {},
-    configOptions: {},
-  });
-  usePermissions.setState({ prompts: {} });
+  // Every store back to its initial state (the hand-written version of this
+  // named nine `useSessions` keys; the store has sixteen data fields, and the
+  // seven it skipped — `contextUsage`, `compacting`, `inTurn`, `stopReasons`,
+  // `stalled`, `history`, `newSessionError` — leaked between cases).
+  resetStores();
   // The Open-Space-dialog flag is module-scoped: a leaked `true` would auto-mount
   // a real Radix modal (`aria-hidden`ing the rest of the document) in every later
   // render here — the same guard `SpaceTabs.test.tsx` carries.
-  setNewSpaceDialogOpen(false);
+  resetModuleFlags();
 });
 
 /** Two Spaces, so there is always one tab to make active and one to leave inactive. */

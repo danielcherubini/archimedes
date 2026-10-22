@@ -1,33 +1,16 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { closeSession, deleteSpace } from "../lib/tauri";
 import { useSessions } from "../store/sessions";
 import { usePermissions } from "../store/permissions";
-import {
-  getNewSpaceDialogOpen,
-  setNewSpaceDialogOpen,
-} from "../lib/newSpaceDialogState";
-import type { SessionInfo, SpaceRow } from "../lib/tauri";
+import { getNewSpaceDialogOpen } from "../lib/newSpaceDialogState";
+import { makeSessionRow, makeSpaceRow } from "../test/fixtures";
+import { resetModuleFlags, resetStores } from "../test/resetStores";
 import SpaceTabs from "./SpaceTabs";
 
 // Radix (the `DropdownMenu` + `NewSpaceDialog`'s `Dialog`) needs the
-// pointer-capture stubs in jsdom (the ChatStream / SettingsPage tests'
-// `beforeAll`, verbatim) + `matchMedia`.
-beforeAll(() => {
-  Element.prototype.scrollIntoView = vi.fn();
-  Element.prototype.hasPointerCapture = vi.fn(() => false);
-  Element.prototype.setPointerCapture = vi.fn();
-  Element.prototype.releasePointerCapture = vi.fn();
-  vi.stubGlobal("matchMedia", (q: string) => ({
-    matches: false,
-    media: q,
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
-    addListener: vi.fn(),
-    removeListener: vi.fn(),
-    dispatchEvent: vi.fn(),
-  }));
-});
+// pointer-capture stubs jsdom lacks + `matchMedia`; `src/test/setup.tsx` installs
+// all of them for every file, so this file's own `beforeAll` block is gone.
 
 vi.mock("../lib/tauri", async () => {
   const actual = await vi.importActual<Record<string, unknown>>("../lib/tauri");
@@ -47,37 +30,19 @@ vi.mock("../lib/tauri", async () => {
   };
 });
 
-const space = (path: string): SpaceRow => ({
-  path,
-  createdAt: 0,
-  lastOpenedAt: 0,
-  trusted: false,
-});
+const space = (path: string) => makeSpaceRow({ path });
 
-const info = (sessionId: string, cwd: string): SessionInfo => ({
-  sessionId,
-  cwd,
-  capabilities: {},
-  archived: false,
-});
+const info = (sessionId: string, cwd: string) => makeSessionRow({ sessionId, cwd });
 
 beforeEach(() => {
-  useSessions.setState({
-    sessions: [],
-    historySessions: [],
-    archivedSessions: [],
-    activeSessionId: null,
-    activeSpacePath: null,
-    spaces: [],
-    closeReasons: {},
-    messages: {},
-    configOptions: {},
-  });
-  usePermissions.setState({ prompts: {} });
+  // Every store back to its own initial state — the hand-written version named
+  // nine `useSessions` keys + `usePermissions.prompts`, and the store has
+  // sixteen data fields (see `src/test/resetStores.ts`).
+  resetStores();
   // The Open-Space-dialog flag is module-scoped and the `+` raises it: a
   // leaked `true` would auto-mount a real Radix modal in every later render
   // here (which `aria-hidden`s the rest of the document).
-  setNewSpaceDialogOpen(false);
+  resetModuleFlags();
   // Closing tabs is asserted with `not.toHaveBeenCalled()` too, so the command
   // mocks must not carry calls across cases.
   vi.clearAllMocks();
