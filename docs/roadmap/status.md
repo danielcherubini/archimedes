@@ -88,8 +88,8 @@ says otherwise. A task is not `done` until both commands are green.
 
 Plan status: **IN PROGRESS** — A0 done; A1–A6 remaining. See `docs/roadmap/frontend-component-extraction.md` §Phase A.
 
-**Current suite size: 125 files / 2694 tests** (121/2650 at baseline; A0 +1/0, A1 +1/+10,
-A2 +1/+27, A3 +1/+7). `SubagentDelegatingCard.tsx` is now 424 code lines (was 696).
+**Current suite size: 125 files / 2697 tests** (121/2650 at baseline; A0 +1/0, A1 +1/+10,
+A2 +1/+27, A3 +1/+7, A4 +0/+3). `SubagentDelegatingCard.tsx` is now 424 code lines (was 696).
 
 | # | Task | Finding | Files (primary) | Status |
 |---|------|---------|-----------------|--------|
@@ -97,7 +97,7 @@ A2 +1/+27, A3 +1/+7). `SubagentDelegatingCard.tsx` is now 424 code lines (was 69
 | A1 | `useCopyButton(text)` — 3 sites | 11a | `hooks/useCopyButton.ts` + `MessageBubble.tsx`, `ToolCallCardHeader.tsx` | **`done`** `ea6fe14` |
 | A2 | `lib/subagentActivity.ts` — 217 pure lines out | 14 | `lib/subagentActivity.ts` + `SubagentDelegatingCard.tsx` | **`done`** `edc2c33` |
 | A3 | `lib/sessionTime.ts` + shared formatters | 10 | `lib/sessionTime.ts`, `SubagentTranscript.tsx` | **`done`** `3886fae` |
-| A4 | User-visible copy + `source` label fixes | 16a | `MessageList.tsx`, `NewSpaceDialog.tsx`, `CloseSpaceDialog.tsx`, `GeneralSection.tsx`, `ChromeControls.tsx`, `ProviderSection.tsx`, `AskQuestionCard.tsx`, `McpSection.tsx` | `todo` |
+| A4 | User-visible copy + `source` label fixes | 16a | as planned | **`done`** `b5d0967` + `ff21d01` |
 | A5 | `SpaceTabs` tablist ARIA (2 attributes) | 18 | `src/components/SpaceTabs.tsx` | `todo` |
 | A6 | Dead-code deletion (orphans, dead IPC, tokens) | 17 | `ui/{badge,tabs,separator,dropdown-menu,card,select,dialog,kbd,input,progress,braille-loader}.tsx`, `lib/ids.ts`, `lib/tauri.ts`, + ADR 0072 | `todo` |
 
@@ -183,6 +183,18 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   a per-tab close button, and this UI is deliberately browser-style closable tabs. A tablist
   with sibling controls beats orphaned `role="tab"`s. Not to be "fixed" later by
   restructuring the pill or adopting Radix Tabs.
+- **2026-10-22 — A4 accepted child deviation: `||`, not `??`, for the agent-name fallback.**
+  The plan said `agentName ?? "Agent question"`. `SubagentEntry.agentName` is a **required** string
+  and `dispatch.rs:270-273` builds it with `unwrap_or_default()`, emitted verbatim at
+  `worker/manager/subagent_flow.rs:636` — so an omitted `agentName` arrives as `""`, and `??`
+  would render an empty label between the accent rules for every config-less dispatch. Verified
+  both Rust sites myself. The child also added a test seeded with `agentName: ""`. Accepted.
+- **2026-10-22 — A4: negative label lists ACCUMULATE, never swap.** `SpaceTabs.test.tsx` and
+  `SpacesList.test.tsx` keep the old "sidebar" labels *alongside* the new ones. Both files say the
+  lists exist so a rename cannot quietly re-add a control and leave the test vacuous, and SpaceTabs
+  records being bitten by exactly that. Do not "clean up" the old entries in a later phase.
+- **2026-10-22 — A4 shipped as TWO commits** (`b5d0967` copy vocabulary, `ff21d01` the
+  agent-name behaviour fix), because the second changes what a user sees and the first does not.
 - **2026-10-22 — A0 accepted child decisions.** (a) The child applied `stripJsComments` to
   `themeTokens`'s *presence* gate too, beyond the plan: mutation showed `toContain("text-row-verb")`
   passed with the class deleted from markup, because a doc-comment names it — the prose-as-consumer
@@ -201,6 +213,10 @@ Record every autonomous decision here so a later iteration does not re-litigate 
 
 ## Changelog
 
+- `2026-10-22` — **A4 done** (`b5d0967` copy, `ff21d01` agent-name fix). 125 files / 2697 tests
+  green; build green. The plan's AskQuestionCard trap was real: `isSubagent` is dead in production,
+  so the naive fix would have gone green while changing nothing — the shipped tests use
+  `source: "native"` (verified against `ask.rs:79`) and mutation back to `request.source` reddens 3.
 - `2026-10-22` — **A3 done** (`3886fae`). 125 files / 2694 tests green; build green. Verified independently:
   one `relativeTimeFor` in `src/`, no raw-ms/`toFixed` render left in `SubagentTranscript` (only a
   doc-comment mentions it), and `SpacesList`/`SessionsSection` tests byte-identical. **First
