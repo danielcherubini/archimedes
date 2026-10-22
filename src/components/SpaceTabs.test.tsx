@@ -1,5 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { closeSession, deleteSpace } from "../lib/tauri";
 import { useSessions } from "../store/sessions";
 import { usePermissions } from "../store/permissions";
@@ -94,6 +94,57 @@ describe("SpaceTabs (the Spaces as browser-style tabs at the top of the chat)", 
     const beta = screen.getByRole("tab", { name: "beta" });
     expect(alpha.getAttribute("aria-selected")).toBe("false");
     expect(beta.getAttribute("aria-selected")).toBe("true");
+  });
+
+  // -- The accessibility tree: the strip IS a tablist (finding 18) ---------
+
+  /**
+   * The labels carry `role="tab"` + `aria-selected`, and a `tab` with no
+   * `tablist` ancestor is an ORPHAN: a screen reader announces "tab" against
+   * nothing, cannot report the group, and cannot report its orientation. These
+   * assertions read the RENDERED a11y tree through `getByRole` (the queries the
+   * rest of the file already uses) — not the source, so they cannot pass on a
+   * comment that merely claims the attribute is there.
+   */
+  it("the tab strip is a horizontal tablist and every tab lives inside it", () => {
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta"), space("/w/gamma")],
+      activeSpacePath: "/w/beta",
+    });
+    render(<SpaceTabs />);
+    const tablist = screen.getByRole("tablist");
+    expect(tablist.getAttribute("aria-orientation"), "the orientation").toBe(
+      "horizontal",
+    );
+    // THE SAME ELEMENT the tests and the drag-region pins already address — so
+    // the tablist was marked on the existing container and no DOM level was
+    // introduced (`getByTestId` would find a second element if it had been).
+    expect(tablist).toBe(screen.getByTestId("space-tabs"));
+    // One tab per Space, ALL inside the tablist (a `role="tab"` outside it is
+    // exactly the orphan this task exists to remove).
+    const tabs = screen.getAllByRole("tab");
+    expect(tabs).toHaveLength(3);
+    for (const tab of tabs) {
+      expect(tablist.contains(tab), tab.textContent ?? "(no text)").toBe(true);
+    }
+  });
+
+  it("the `New space` control is not exposed as a tab (the tablist's tabs are Spaces only)", () => {
+    // The `+` is a sibling control inside the tablist (see the accepted
+    // limitation documented on the container in `SpaceTabs.tsx`). It must stay
+    // a plain button: if it ever picked up `role="tab"` it would announce itself
+    // as a fourth Space you can select, and `getAllByRole("tab")` above would
+    // silently stop meaning "one per Space".
+    useSessions.setState({ spaces: [space("/w/alpha")], activeSpacePath: "/w/alpha" });
+    render(<SpaceTabs />);
+    const tablist = screen.getByRole("tablist");
+    const names = within(tablist)
+      .queryAllByRole("tab")
+      .map((el) => el.getAttribute("aria-label") ?? el.textContent?.trim());
+    expect(names).not.toContain("New space");
+    // And it is still reachable as what it is — a button, not a tab.
+    expect(screen.getByRole("button", { name: "New space" })).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "New space" })).toBeNull();
   });
 
   it("renders a spinner on the tab when a space has an active running session", () => {

@@ -141,7 +141,32 @@ export default function SpaceTabs() {
     // the empty strip after the `+` is just a spacer (the CHROME BAR
     // container itself is the drag region — the browser's empty tab
     // strip drags the window; double-click maximizes).
+    //
+    // THE TABLIST (finding 18). Marked on THIS existing container — the element
+    // that already carries `data-testid="space-tabs"` — because it *is* the tab
+    // strip. Deliberately NOT a new wrapper around `spaces.map()`: the pill
+    // inside that block holds both the `role="tab"` label and the ✕, so a fresh
+    // `role="tablist"` level would own generic `div` children plus two buttons
+    // (`SpaceTabs.test.tsx` pins `close.parentElement === tab.parentElement`),
+    // i.e. a worse ARIA tree than the one it replaced. Two attributes, no new DOM
+    // level.
+    //
+    // ACCEPTED ARIA LIMITATION — record, do NOT "fix". The per-tab ✕ and the
+    // `New space` button stay SIBLINGS of the tabs inside this tablist, and the
+    // pill `div`s are generic children of it. The ARIA tabs pattern has no owned
+    // slot for a per-tab close button: a `tab` may not hold an interactive child
+    // (it is dropped from the accessibility tree and `<button>`'s content model
+    // forbids it — see the note at the top of this file), so there is nowhere
+    // legal to put the ✕ *inside* its tab. This UI is deliberately browser-style
+    // closable tabs, and every browser-tab UI makes the same trade. A tablist
+    // with sibling controls is strictly better than orphaned `role="tab"`s with
+    // no tablist parent. So this is NOT to be revisited by restructuring the pill,
+    // wrapping children in `role="presentation"`, or adopting Radix Tabs —
+    // `ui/tabs.tsx`'s segmented-control geometry is wrong for this strip and it
+    // has no place for the ✕ or the `+` either.
     <div
+      role="tablist"
+      aria-orientation="horizontal"
       className="flex h-full min-w-0 flex-1 items-center gap-1 pl-px pr-2"
       data-testid="space-tabs"
     >
