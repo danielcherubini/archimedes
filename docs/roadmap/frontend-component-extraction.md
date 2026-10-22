@@ -695,3 +695,161 @@ Then make `App.tsx`'s handler **exhaustive over `InteractiveEventName`**: a `swi
 - [ ] `Message`/`DiffRef`/`ToolCallUiStatus` are *defined* in `src/lib/sessionTypes.ts`, not in the store, **and at least one `src/lib/**` module imports them from there** — a `sessionTypes.ts` that only the store imports is the failure mode this task's correction is about.
 - [ ] No call site was mass-renamed — the store still re-exports for compatibility.
 - [ ] `pnpm test` and `pnpm build` green.
+
+---
+
+## Phase C — components and hooks
+
+**Measured before planning. Four of these numbers contradict the audit or this plan's earlier draft — the measured figure wins.**
+
+| Fact | Measured 2026-10-22 |
+|---|---|
+| Raw `<button>` elements outside `ui/`, excluding tests | **37 in 19 files.** The audit's "50" counted 15 prose hits inside doc-comments (`FileChip.tsx:11,17,19,43` etc.) |
+| `useAgentCatalog`'s test file | **EXISTS — `src/hooks/useAgentCatalog.test.ts`, 220 lines, 8 tests**, covering all four cache rules. The audit's guard "transcribe its rules into a test first" is already satisfied |
+| `SettingsBadge` | `settings/primitives.tsx:75-89`, **no `variant` prop at all**, 20 call sites, 0 test references |
+| `role="alert"` in `src/` | 4 elements only: `SessionStalledBanner.tsx:34`, `NewSessionErrorBanner.tsx:61`, `SessionConfigSelect.tsx:254`, `:310` |
+| Lint/format tooling | **None.** No eslint/biome/oxlint/prettier in `package.json`, no config, nothing in `pnpm-lock.yaml`. `Makefile:check` runs cargo fmt/clippy/test + `pnpm build` + `pnpm test` |
+| `cn()` lives at | `src/components/lib/utils.ts:21` (`mergeUiClasses(clsx(...))` with a `text-ui-*` font-size extension). 39 uses inside `ui/`, **10 outside** in 5 files |
+| Busy/error machines | 6 confirmed, all `error: string \| null` from `describeIpcError`. **`SessionConfigSelect` differs**: names it `pending`, has a 5 s auto-clear (`:141-144`), already renders `role="alert"` |
+
+### Parallelisation
+
+**Verdict:** SERIAL — every task's acceptance criterion is a full `pnpm test` run (gate 4), and C2/C7 both touch `ChromeControls.tsx`/`SpaceTabs.tsx`, C3/C8 both touch `NewSpaceDialog.tsx`/`PermissionPrompt.tsx` (gate 1). One task at a time; **C7 is internally parallelisable** (its a11y groups are disjoint files) but its children would each run the full suite, so run its groups serially too.
+
+**Order: C3 → C2 → C8 → C1 → C5 → C6 → C4 → C7.** Cheapest-and-safest first, the two highest-risk surfaces (`SpacesList` rows, the button sweep) last, so a stall late in the phase does not strand the rest.
+
+---
+
+### Task C3: `IpcErrorLine` — the inline error a screen reader hears
+
+**Parallel:** none — full-suite verification.
+
+**Context:** Finding 7. Eleven genuine inline error lines render as a bare `<p>`/`<span>` with `text-destructive` and **no `role="alert"`**, so an error that appears under the user's cursor is announced to nobody. Only 4 elements in `src/` have `role="alert"`. **This is a behaviour change** — 7+ surfaces gain announcements — so it gets its own commit and an ADR 0063 cross-reference. Migrate **one site per commit**; the report is explicit about this.
+
+**Files:** Create `src/components/IpcErrorLine.tsx` + `.test.tsx`. Then, one commit each: `PermissionPrompt.tsx:82`, `SudoConfirmModal.tsx:63`, `SudoPasswordModal.tsx:116`, `AskQuestionCard.tsx:555`, `NewSpaceDialog.tsx:134` + `:138`, `ChatStream.tsx:1915`, `UpdateSection.tsx:281` + `:291`.
+**Do NOT touch** the 6 non-message `text-destructive` uses (`DiffCount.tsx:20`, `ChangesGroupCard.tsx:164`, `SubagentStatusIcon.tsx:11,27`, `WindowControls.tsx:49`, `QueueRow.tsx:155`'s "Failed" chip, `ToolCallCardHeader.tsx:113`'s tooltip trigger) — those are colour, not error messaging. `SubagentTranscript.tsx:170` is a status line, not an error line: leave it.
+
+**What to implement:** `IpcErrorLine({ error, className }: { error: string | null | undefined; className?: string })` → `null` when no error, else `<p role="alert" className={cn("text-ui-sm text-destructive", className)}>{error}</p>`. Use `cn()` from `../components/lib/utils` — the per-site extra padding (`px-3 pb-2`, `mb-2 px-3`) passes through `className` so rendered spacing is unchanged.
+
+**Steps:** TDD the component (`null` when no error; `role="alert"` present; `className` merges and does not drop `text-destructive`). Then per site: replace, run that site's test file, run `pnpm test`, commit. **Watch `SessionConfigSelect.test.tsx:285,290`** — it uses `findByRole("alert")`/`queryByRole` and that component already renders **two** `role="alert"` spans (`:254` model, `:310` thinking); if a new one lands in the same render, `getByRole` throws on multiple matches. Do not add a third in that tree. `getByText("Failed")` (`ChatStream.test.tsx:7362`) already matches several nodes — do not make it worse.
+**Acceptance:** every migrated site renders `role="alert"` with byte-identical spacing; the 4 pre-existing ones unchanged; `pnpm test`/`pnpm build` green per commit.
+
+---
+
+### Task C2: `CHROME_BUTTON` + `SettingsDataRow` + the badge `settings` variant
+
+**Parallel:** none — full-suite verification; shares `ChromeControls.tsx`/`SpaceTabs.tsx` with C7.
+
+**Context:** Finding 6a–6c. `ChromeControls.tsx:75-76` **already has a local `BTN` const** used 3× — so half of 6a exists and just isn't shared. `WindowControls.tsx:33,41` are that string minus `relative`; `:49` (close) swaps the hover pair for `hover:bg-destructive/20 hover:text-destructive`. The two `SpaceTabs` controls are **materially different** (`size-5`/`size-8`, `rounded` vs `rounded-md`, `bg-surface-hover` vs `bg-hover`, no `transition-colors`) — which is exactly why the report says a **class constant, not a component**: per CONTEXT.md **Chrome controls** + ADR 0038 the two clusters differ on purpose. Do not build a `ChromeButton` component.
+
+**Files:** Create `src/components/chromeButton.ts` (export `CHROME_BUTTON`, and `CHROME_BUTTON_CLOSE` or a second const for the destructive-hover arm if needed). Modify `ChromeControls.tsx:75-76`, `WindowControls.tsx:33,41,49`. **Leave `SpaceTabs.tsx:328,339` alone and say why in a comment** — they are the second cluster. Then: `SettingsDataRow` in `settings/primitives.tsx` for the 3 rows that hand-roll the shell (`ProviderSection.tsx:120`, `McpSection.tsx:117`, `SessionsSection.tsx:41`, all repeating `border-t border-border px-4 py-3 first:border-t-0`); and `badgeVariants` gains `variant: "settings"` matching `SettingsBadge`'s current class (`rounded-md bg-surface px-2.5 py-1 text-ui-base font-medium text-foreground-subtle`), with `SettingsBadge` re-implemented on it.
+
+**Guards (measured):** `ChromeControls.test.tsx:73-75` reads `cluster.children` **positionally** — keep the DOM shape. `settings/primitives.test.tsx:97` + `:112,113` assert `button.className` contains `bg-surface-hover` and **not** `hover:bg-surface-hover` — preserve both. `WindowControls.test.tsx` pins `[data-window-control]` count **=== 1** and each control's `closest()` resolving to it, and `App.test.tsx:375-378` pins ChromeControls' buttons have `closest("[data-window-control]") === null`. **Route the 23 `<SettingsRow>` sites through nothing new** — the report is explicit that the data rows must NOT go through `SettingsRow`.
+
+**Steps:** TDD each piece; one commit for `CHROME_BUTTON`, one for `SettingsDataRow`, one for the badge variant + the 20 `SettingsBadge` sites (0 test references, so the risk is purely visual — re-read the rendered class for byte-equality). Migrate touched tests to the shared fixtures (rolling instruction).
+**Acceptance:** no chrome-bar class string is spelled twice outside `chromeButton.ts`; `SettingsBadge` renders an identical class string via `badgeVariants`; the 3 hand-rolled settings rows use `SettingsDataRow`; `pnpm test`/`pnpm build` green.
+
+---
+
+### Task C8: `cn()` everywhere + the three caption components + a guard test
+
+**Parallel:** none — full-suite verification; touches ~19 files.
+
+**Context:** Finding 15. **40 dynamic `className` template literals** outside `cn()` in 19 files (`cn()` is used 39× inside `ui/` but only **10× outside**, in 5 files). The reason the convention keeps failing to spread is that nothing enforces it — hence the guard.
+
+**There is no lint tooling in this repo** (no eslint/biome/oxlint/prettier anywhere in `package.json` or `pnpm-lock.yaml`, no config, no `lint` script; `Makefile:check` has no JS lint step). So "add a lint rule" means **either adopt a linter — a new dependency, config and CI gate, not this task — or follow the repo's own mature precedent**: 6 of the 36 `src/lib/*.test.ts` files already scan component source (e.g. `slabFloatSeparation.test.ts:139-151` greps a component for a class). **Write a vitest source-scanner guard**, and record in the test's doc-comment that a real linter would supersede it. Note A0 just retired several source-grep gates for pinning *behaviour*; this one is different and must say so: it enforces a **convention on new code**, it does not pin rendered output, and its allowlist shrinks over time.
+
+**Files:** Create `src/components/ui/../..` — put the guard at `src/lib/classNameConvention.test.ts`. Create `src/components/MutedCaption.tsx`, `ErrorLine.tsx` (share it with C3's `IpcErrorLine` — **do not create two error components**; if C3 landed first, `ErrorLine` IS `IpcErrorLine` or wraps it), `EmptyListLine.tsx`. Modify the 19 files' 40 template literals → `cn()`.
+**Measured duplication to justify each component:** `MutedCaption` = `text-ui-xs text-foreground-subtlest`, **25 occurrences / 10 files**; `EmptyListLine` = `p-3 text-ui-sm text-foreground-subtlest`, **8 / 4** (note `McpSection.tsx:436` is a different variant — `px-4 py-3 text-ui-base text-foreground-subtle` — keep it as a `className` override, don't fold); `text-ui-sm text-destructive` = 9 / 7.
+
+**Steps:** TDD the three components. Convert template literals **file-group by file-group** (`cn` merges, so a `cn("flex", cond && "px-4")` swap must be checked for class-conflict changes — `mergeUiClasses` resolves conflicting utilities, which is the point but also the behavioural difference). Then write the guard with an explicit **allowlist of the files not yet converted** and assert the count only ever decreases. `MessageList.tsx:280` hand-rolls a merge guard with `.trim()` — convert it and keep its no-trailing-space behaviour.
+**Acceptance:** zero non-`cn` dynamic `className` in the converted files; the guard test exists with a shrinking allowlist; the three components have ≥5 real call sites each; `pnpm test`/`pnpm build` green.
+
+---
+
+### Task C1: `useAsyncAction()` + `useCatalogCache`
+
+**Parallel:** none — full-suite verification.
+
+**Context:** Finding 11b/11c. Six busy/error machines, all `error: string | null` written from `describeIpcError(err)` (`src/lib/ipcError.ts:60`, total, returns `string`). **`SessionConfigSelect.tsx` is the odd one out** — `pending` not `busy`, a 5 s auto-clear (`:141-144`), and it already renders `role="alert"`; migrate it **last** or not at all, and do not delete its auto-clear. `AskQuestionCard` carries an extra `queued` pair (`:159,:177`) + `drafts` — only the `busy`/`error` pair migrates. Two sites self-guard (`SudoPasswordModal.tsx:49`, `SessionConfigSelect.tsx:217`); four do not — **preserve each site's existing guard behaviour exactly**; do not add re-entrancy protection where there is none today.
+
+**Correction to the audit:** the guard "write `useAgentCatalog`'s four cache rules as a test first — it has no direct test file" is **obsolete**. `src/hooks/useAgentCatalog.test.ts` exists, 220 lines, 8 tests, covering all four rules including the `clearAgentCatalogCache` eviction case. `useSkillCatalog.ts` and `useAgentCatalog.ts` differ by 8 comment-stripped lines (import, `Map` type param, hook name, `console.error` string, an `[] as` cast, the `clear*Cache` name). `useMentionCatalogs.ts:89` `useCatalogPayload<P>` already generalises all four rules but **is not exported** and adds a `settled`/`pending` field the two copies lack. There is no third copy.
+
+**Files:** Create `src/hooks/useAsyncAction.ts` + test; `src/hooks/useCatalogCache.ts` + test. Migrate the 5 straightforward sites **one per commit** (`PermissionPrompt`, `SudoConfirmModal`, `SudoPasswordModal`, `AskQuestionCard`, `NewSpaceDialog`), then decide `SessionConfigSelect` explicitly. For the cache: export a shared `useCatalogCache` and re-implement both hooks on it, keeping `useSkillCatalog`/`clearSkillCatalogCache`/`useAgentCatalog`/`clearAgentCatalogCache` exported with identical signatures. `useAgentCatalog.test.ts` is the guard — it must pass **unmodified**.
+**Acceptance:** one `describeIpcError`-to-state machine; `useSkillCatalog.ts`/`useAgentCatalog.ts` hold no cache logic of their own; `useAgentCatalog.test.ts` green unmodified; `pnpm test`/`pnpm build` green.
+
+---
+
+### Task C5: `InlineGateRow` — the child-gate card, once
+
+**Parallel:** none — full-suite verification.
+
+**Context:** Finding 5. `TranscriptFooter.tsx:64-105` and `SubagentModals.tsx:366-391` render the same card; the card half is identical modulo variable name and indentation (`↳ {agentName}` chip, then `kind === "ask" ? <AskQuestionCard autoFocus={false}/> : <PermissionPrompt/>`). The invariant is **ADR 0040** — "every gate exactly once, so a gate is never answerable twice and never rendered NOWHERE" (`SubagentModals.tsx:61-63`, restated at `useChildGates.ts:125`, `App.tsx:263`, `lib/attention.ts:47,70`). The Escape `stopPropagation` rationale is prose-copied in both files (`TranscriptFooter.tsx:72-82`, `SubagentModals.tsx:53-79`).
+
+**Scope is the CARD ONLY.** Stay at the call sites: the `data-testid="gate-row"` wrapper (`TranscriptFooter.tsx:66-71`), and the whole overlay region (`SubagentModals.tsx:344-364`: `subagent-gate-overlay`, `role="region"`, `aria-label`, `pointer-events-none`, `SHEET_WIDTH_CLASS`, the dodge pair). **`SHEET_WIDTH_CLASS` stays in `SubagentModals.tsx`** — `subagentSheetLayout.test.ts:57-59,134,146` still reads that file.
+**Hard constraint:** the component receives an **already-filtered** gate and must not re-decide kinds — `SubagentModals.renderSite.test.tsx:72-135` asserts all four kinds pass through `isInlineChildGate` upstream.
+**Guards:** `SubagentModals.test.tsx` (743 L, 17 overlay/class assertions incl. `:292` keyDown on the region, `:398-496` class tokens); `TranscriptFooter.test.tsx:142-192` (`getByTestId("ask-cg1")`, `getByText("↳ explorer")`); `MessageList.gap.test.tsx:114,201-231` (`gate-row` count, `flex`+`flex-col` on the row, **no `mt-*`**).
+
+**Steps:** TDD `InlineGateRow({ gate, autoFocus })` for the two kinds and the chip; keep the Escape handler in the extracted card only if both sites need it identically — verify, since one is per-row and the other per-region. Migrate both sites in **separate commits**.
+**Acceptance:** one card implementation; ADR 0040's invariant stated once with a cross-reference from both call sites; all three guard test files green unmodified except import lines; `pnpm test`/`pnpm build` green.
+
+---
+
+### Task C6: `CatalogSearchDialog` — the picker shell, once
+
+**Parallel:** none — full-suite verification.
+
+**Context:** Finding 4. Three dialogs share a shell: `SkillsDialog.tsx:166-268`, `ModelPickerDialog.tsx:117-177`, `AgentsDialog.tsx:311-392`. Identical across all three: the `Dialog`/`DialogContent className="max-h-[70vh] sm:max-w-3xl"` wrapper, `DialogHeader`+`DialogTitle` with **no** `DialogDescription`, the `div className="flex max-h-[calc(70vh-7.5rem)] min-w-0 flex-col gap-3"` wrapper, an unlabelled search `<Input>`, the `p-3 text-ui-sm text-foreground-subtlest` empty `<p>` (7 sites), and the scroller `flex min-w-0 flex-col gap-… overflow-y-auto pr-2`.
+
+**They differ in ways a shell must not average away:** filter is name-only substring in Skills (`:101-104`) and Agents (`:177-180`) but `fuzzyMatch` ×3 fields **with a `.sort()`** in ModelPicker (`:100-109`); keyboard nav exists in Skills and ModelPicker but **NOT in Agents** — `AgentRow` is deliberately not `role="button"` (`:476`); Agents has a `noSpaceOpen` `<p>` **above** the Input (`:294-307`) and an orphans block below (`:356-386`); Skills has a shadow-report sibling (`:243-265`).
+
+**`McpDialog` is excluded — verified:** `settings/McpSection.tsx:273-417` uses `sm:max-w-lg`, has a `DialogDescription`, renders a `grid gap-3` of `Field`/`Input`/`Select`/`Textarea`, and has a `DialogFooter`. It is a form, not a picker. Do not fold it in.
+
+**Hard structural constraint:** `SkillsDialog.test.tsx:313-323` and `ModelPickerDialog.test.tsx:215-222` walk `row.parentElement` → scroll → wrapper asserting `min-w-0`/`overflow-y-auto`/`pr-2`, so **the shell may not insert a DOM level between the scroller and the rows**. `ModelPickerDialog.test.tsx:201-211` + `SkillsDialog.test.tsx:274` reach `[data-slot=dialog-content]` via `closest` and assert class tokens (`sm:max-w-3xl` present, bare `max-w-3xl` and `sm:max-w-md` **absent** — the `ui/dialog.tsx:63-71` `sm:`-prefix trap). `AgentsDialog.test.tsx:148-151` takes the **last** `[data-slot=dialog-content]` node (a nested model picker). Pass `className` through `cn()`.
+Empty-state copy is pinned at `SkillsDialog.test.tsx:236,268,519-535`, `ModelPickerDialog.test.tsx:187,195`, `SpacesList.test.tsx:871,996`.
+
+**What to implement:** a shell owning the Dialog wrapper, header, search input, empty state and scroller, taking `filter`/`renderRow`/`children` as props so each dialog keeps its own filter function, row markup, and nav-or-no-nav. Migrate one dialog per commit, **Agents last** (it has the least in common).
+**Acceptance:** the shell owns the 6 shared pieces; all three keep their own filter and row markup; no new DOM level (the three ancestry pins green unmodified); `McpDialog` untouched; `pnpm test`/`pnpm build` green.
+
+---
+
+### Task C4: `SessionListRow` + `RowButton` — the highest-risk surface
+
+**Parallel:** none — full-suite verification. `SpacesList.test.tsx` is 2,698 lines / 76 tests and is the single most fragile file in the repo.
+
+**Context:** Finding 3. `SessionRow` (`SpacesList.tsx:797-925`) and `ArchivedSessionRow` (`:1024-1101`) are one component twice. Diff-verified identical: the row chrome (`:842-846` ≡ `:1042-1046`, differing only in the click arg), the `onKeyDown` Enter + the full `group flex cursor-pointer … ${active ? "bg-selected" : "hover:bg-surface-hover"}` ternary (`:848-852` ≡ `:1048-1052`), the title span + 7-line `maskImage`/`WebkitMaskImage` style (`:872-881` ≡ `:1054-1063`), and the hover-action class string which appears **4×** (`:912, :927, :1084, :1095`). They differ in: the leading slot (`SessionStatusMark` vs a `<span className="size-4 shrink-0" />`), the time slot (hoisted `rightSlot` variable vs inlined ternary — same two arms), and the actions (live: Stop+Archive; archived: Unarchive+Delete).
+
+**`RowButton`:** the `role="button"` + `tabIndex={0}` + Enter handler is hand-rolled **5×** (`SpacesList.tsx:843, 967, 1043`, `SkillsDialog.tsx:191`, `ModelPickerDialog.tsx:142`). `TodoBoardPanel.tsx:278` is a 6th but handles `Enter || " "` with `preventDefault` — **different affordance, do not fold it in.**
+
+**THE guard:** `SpacesList.test.tsx` reaches rows via `.closest('[role="button"]')` at **8 sites** (`:553, 580, 595, 621, 634, 656, 757, 760`) plus a `rowOf()` helper at `:1771`. **Emit exactly ONE `role="button"` ancestor per row** — a second one breaks all 8 at once. Other pins: `:635` `row.className` contains `bg-selected`; `:555,601,659` `row.querySelector('[role="status"]')`; `:559,600,623,658` `[data-dot=…]`; `:805-807` title has `overflow-hidden`/`whitespace-nowrap`/`min-w-0`; `:2372` rail-vs-row mark positional equality; `:2418` `session-rail-marks` `querySelectorAll`; role-name queries `Archive {title}`/`Stop {title}`/`Unarchive`/`Delete {title}` at 11 sites. Rows carry **no `data-testid`** — do not add one to satisfy a test that doesn't need it.
+`DetachedSessionRow` (`settings/SessionsSection.tsx:28-78`) is NOT the same family (settings data row, no `role="button"`, no mask) — leave it.
+
+**Steps:** TDD `RowButton` (exactly one `role="button"`, Enter opens, no Space). Extract `RowButton` first and migrate all 5 hand-rolled sites in one commit; then extract `SessionListRow` with the differing slots as props (`leading`, `rightSlot`, `actions`) and migrate `SessionRow`, then `ArchivedSessionRow`, each its own commit.
+**Acceptance:** one row implementation; 5 hand-rolled affordances → `RowButton` (`TodoBoardPanel` untouched); `SpacesList.test.tsx` green with **no assertion changed** — if any of the 8 `.closest` sites needs editing, the extraction is wrong, not the test; `pnpm test`/`pnpm build` green.
+
+---
+
+### Task C7: the raw-`<button>` → `<Button>` sweep — one a11y group per commit
+
+**Parallel:** none — full-suite verification (its groups are file-disjoint but each group's proof is the full suite).
+
+**Context:** Finding 6d, and the owner chose the **full** sweep. **Measured 37 raw `<button>`s in 19 files** — the audit's 50 counted doc-comment prose. `<Button>` is already used at 56 sites outside `ui/`, so this is finishing a convention, not starting one.
+
+**Groups (one commit each, safest first):** transcript row affordances 5 (`ChangesGroupCard.tsx:148`, `ToolCallCardHeader.tsx:70,123`, `MessageBubble.tsx:35,260,574`) · chrome-bar icon buttons 6 (`WindowControls.tsx:29,37,45`, `ChromeControls.tsx:80,88,106`) · hover-revealed row actions 4 (`SpacesList.tsx:894,909,1073,1087`) · sidebar footer band 4 (`SpacesList.tsx:586,595,604,615`) · rail icons 2 (`SessionRail.tsx:158`, `SubagentDetailHost.tsx:97`) · settings rows/controls 3 (`settings/primitives.tsx:115`, `settings/controls.tsx:92,165` — both `role="radio"`) · chips 3 (`FileChip.tsx:47`, `SessionConfigBlock.tsx:229`, `SessionStalledBanner.tsx:43`) · ask-option rows 2 (`AskQuestionCard.tsx:375,437`) · composer rows 3 (`ComposerMentions.tsx:160`, `QueueRow.tsx:190`, `AttachmentStrip.tsx:46`) · big card row 1 (`SubagentDelegatingCard.tsx:418`) · tab strip 3 (`SpaceTabs.tsx:255,314,335`).
+
+**⚠️ Three groups are probably NOT sweepable. Determine this first and record the verdict per group — an honest "Button is wrong here" is a pass, a hacked test is a fail:**
+1. **Transcript rows (5).** `transcriptRow.test.tsx:96-118` requires a row affordance carry **no** `bg-*`, no `m*`/`p*-*`, no `h-*`, no `w-*` token. **Every `Button` size variant adds `h-*`/`px-*`** (`default h-7`, `icon size-7`, `icon-sm size-6`…), so routing these through `Button` reddens that test. It is guarding ADR 0062's "no band" rule for `TRANSCRIPT_ROW`.
+2. **Tab strip (3).** `SpaceTabs.test.tsx:320-323` asserts the close button's class does **not** match `/opacity-/`, but `ui/button.tsx:10`'s base adds `disabled:opacity-50` — so any `Button` fails it by construction. `:362-364` asserts `inactive.className === active.className` by **exact string equality**, which `Button`'s `data-slot`/`data-variant`/`data-size` + merged classes will break. Also `:255` is `role="tab"` and `:314` the ✕ whose `mr-3`/`not mr-1` is pinned.
+3. **`AttachmentStrip.tsx:46`** is `size-4 p-0`; the smallest `Button` size is `icon-xs` = `size-5`. There is no size that preserves the hit area.
+
+**Other measured risks:** `settings/primitives.test.tsx:112,113` (`bg-surface-hover` present, `hover:bg-surface-hover` absent); `ChatStream.test.tsx:3651,3652,3718,3802,4113,4129,4209,4226` all index `picker.querySelectorAll("button")` and assert `bg-surface-hover` on `ComposerMentions.tsx:160`; `MessageBubble.test.tsx:317,318` pins `self-end`/not `self-start`; `SidePane.test.tsx:1654,1655` requires no button match `/\babsolute\b/`; `ToolCallCard.test.tsx:593` pins `button button` nesting === 0; `SpaceTabs.test.tsx:380` pins `tab.querySelector("button")` null; `AskQuestionCard.keys.test.tsx:109` pins a button count of 27; `ChromeControls.test.tsx:73-75` reads `cluster.children` positionally. `PermissionPrompt.test.tsx:124-126` already targets `<Button>` — no risk there. **ADR 0038:** `data-window-control` sits on the **wrapper div** (`WindowControls.tsx:28`) and `useAttentionAlert.ts:417` uses `closest()`, so the exemption survives per-button changes **provided the 3 buttons stay inside that div**; `App.test.tsx:375-378` pins ChromeControls stays outside it. No raw button carries `data-tauri-drag-region`; the chrome bar is `"deep"` at `App.tsx:389` and Tauri leaves a `BUTTON` clickable, so a plain `<Button>` is safe — but do not use `asChild`/Slot or add a wrapper div.
+**`ui/button.tsx` also injects `[&_svg:not([class*='size-'])]:size-4`** — an icon child without an explicit `size-*` will change size. Every icon at these sites already carries one; verify per site.
+
+**Steps:** write a short group-verdict note (which groups are sweepable and why) **before** touching code. Then per group: sweep, run the group's own test file, run `pnpm test`, commit. Never edit a pinned assertion to get green — if a pin is what blocks the group, that pin is telling you `Button` is wrong for that surface; record the verdict and move on. Migrate touched tests to shared fixtures (rolling instruction).
+**Acceptance:** every sweepable group is on `Button`; every non-sweepable group has a recorded, evidenced verdict; no pinned assertion was weakened; `pnpm test`/`pnpm build` green per commit.
+
+---
+
+## After Phase C
+
+Update `docs/roadmap/status.md` and plan Phase D (D1 `lib/tauri.ts` domain split behind a barrel; D2 `useSettingsDocument()`; D3 collapse `SubagentDelegatingCard`'s two row derivations — the two `??` chains have already diverged; D4 `ChatStream.tsx` hooks, **hooks not JSX**, guarded by `ChatStream.test.tsx`; D5 the ADR-backed rename PR). Then the final review loop and the PR.
