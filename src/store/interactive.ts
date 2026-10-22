@@ -32,14 +32,16 @@ export interface InteractiveRequestData {
    * literal to `todo_apply` for its `todos_update` push, for a MAIN session and
    * a Subagent session alike. So this is NOT a main/child discriminator and
    * never was one on the wire: `"main"` and `"sudo"` exist only in Rust
-   * fixtures and `bin/fake_worker.rs`. The one consumer that still branches on
+   * fixtures and `bin/fake_worker.rs`. The consumers that still branch on
    * it — `AskQuestionCard`'s `source === "main"` anchoring and its `subagent:`
-   * label — is therefore DEAD: it never draws. Todo boards no longer branch on
+   * gate for the `queued` placeholder — therefore never fire on production
+   * traffic. The card's "who is asking" LABEL no longer reads this field at
+   * all: it resolves the child's `agentName` from `useSubagents` (see
+   * `AskQuestionCard`). Todo boards no longer branch on
    * it at all: they are keyed by SESSION id, never by this label (ADR 0041), so
    * a future real `source` must arrive as a SESSION identity the Client can
    * join (child id → parent, `agentName` — what `useSubagents` already
-   * provides), not a prettier string. The dead card branch is recorded as a
-   * follow-up in `docs/features/subagent-sessions.md`.
+   * provides), not a prettier string.
    */
   source: string;
   /** The invoking process's tool-call id (absent for `confirm`/`password`). */

@@ -7,6 +7,7 @@ import {
 import { useInteractive } from "../store/interactive";
 import { describeIpcError } from "../lib/ipcError";
 import { useSessions } from "../store/sessions";
+import { useSubagents } from "../store/subagents";
 import { Button } from "./ui/button";
 
 const OTHER_OPTION = "Other (type your own)";
@@ -69,11 +70,14 @@ function draftHasAnswer(draft: QuestionDraft): boolean {
  * **Correlation** is keyed by `(source, toolCallId)` or the frame UUID
  * `requestId` — never by bare `toolCallId` (the store keys by `requestId`;
  * the `toolCallId` is carried for anchoring to the ACP `tool_call` frame
- * when present). Subagent asks (`source` starts with `subagent:`) render a
- * labeled card anchored by `source` (the desktop has no ACP `tool_call`
- * frame for child tool calls). No emitter sends a `subagent:` source today —
- * `InteractiveRequestData.source` says what the transport really carries — so
- * this branch is live for a future emitter and for the fixtures that pin it,
+ * when present). The card's "who is asking" label is the RESOLVED agent
+ * name from `useSubagents` (keyed by this card's `sessionId`, which is the
+ * CHILD's id when a child's gate is rendered), never `request.source` — the
+ * only value the desktop's transport emits there is the transport label
+ * `native`, which names nobody. `isSubagent` survives ONLY as the `queued`
+ * placeholder's gate below (a child's ask never gets a `tool_call` frame, so
+ * it is never queued); no production emitter sends a `subagent:` source, so
+ * that gate is live for a future emitter and for the fixtures that pin it,
  * not for traffic. If the request arrives before its ACP
  * `tool_call` frame, the card renders queued (bounded ~1.5 s) then
  * unanchored/labeled.
@@ -129,6 +133,26 @@ export default function AskQuestionCard({
     );
   });
   const isSubagent = request?.source.startsWith("subagent:") ?? false;
+  // "Who is asking" comes from the RESOLVED agent name, never from
+  // `request.source`. Every `interactive-request` the desktop emits carries
+  // the transport label `"native"` (`ask_flow` in
+  // `src-tauri/src/agent/harness/ask.rs`, the sudo sub-prompts in
+  // `src-tauri/src/agent/interactive/mod.rs`) for a main session and a
+  // Subagent session alike, so `source` names no one — and `isSubagent`
+  // below, which needs a `subagent:` prefix no emitter sends, never fires
+  // in production. A child's card is mounted with the CHILD's session id
+  // (`TranscriptFooter` / `SubagentModals` pass `gate.childSessionId`),
+  // which is the key `useSubagents` stores entries under, so the child's
+  // own `agentName` resolves here. A main session has no entry under its id
+  // and keeps the generic copy. The fallback is a TRUTHINESS test, not a
+  // nullish coalesce: `agentName` is a required string and a config-less
+  // (label-only) dispatch stores `""` (`unwrap_or_default()` on the
+  // `agentName` param in `src-tauri/src/agent/harness/dispatch.rs`), which a
+  // `??` would render as an EMPTY label. The selector returns a PRIMITIVE, so
+  // no snapshot-equality churn (the store's stable-reference rule).
+  const agentName = useSubagents(
+    (state) => state.entries[sessionId]?.agentName,
+  );
   // Queued: the request arrived before its ACP `tool_call` frame — render a
   // bounded (~1.5 s) placeholder, then the full card (unanchored/labeled).
   // Subagent asks never get a `tool_call` frame, so they are never queued.
@@ -272,7 +296,7 @@ export default function AskQuestionCard({
     return (
       <div className="rounded-xl border border-border bg-interaction-ask-surface px-3 py-2">
         <p className="text-ui-sm text-interaction-ask-foreground">
-          {isSubagent ? `${request.source} is asking…` : "Agent is asking…"}
+          {agentName ? `${agentName} is asking…` : "Agent is asking…"}
         </p>
       </div>
     );
@@ -304,7 +328,7 @@ export default function AskQuestionCard({
       <div className="flex items-center gap-2 bg-interaction-ask-surface px-3 py-2">
         <span className="h-px flex-1 bg-interaction-ask-foreground/60" aria-hidden />
         <span className="text-ui-xs text-interaction-ask-foreground">
-          {isSubagent ? request.source : "Agent question"}
+          {agentName || "Agent question"}
         </span>
         <span className="h-px flex-1 bg-interaction-ask-foreground/60" aria-hidden />
       </div>

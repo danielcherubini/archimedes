@@ -463,7 +463,9 @@ named):
   `source === "main"` anchoring path never fires: nothing anchors, a main `ask`
   included, since `ask_flow` sends `toolCallId: null` too — and that is why the
   two lifted child sites pass `autoFocus={false}` (an unanchored card takes
-  focus on mount). Its `subagent:` label never renders either. `"main"` and
+  focus on mount). Its `subagent:` label never renders either — and since
+  Task A4 the card renders no `source` string at all: the label resolves the
+  child's `agentName` from `useSubagents`. `"main"` and
   `"sudo"` exist only in Rust fixtures, `bin/fake_worker.rs` and
   the frontend's own test seeds.
   **The todo-board half of this follow-up is RESOLVED by ADR 0041** (boards are
@@ -492,11 +494,15 @@ named):
   while `TodoBoardPanel` draws only the session it is handed, and the pane's
   child blocks come from `useTodoBoards` (see **Side pane todo boards**
   above).
-  The label branch and the fixtures that drive it are deliberately KEPT (they
-  exercise a live code path a future emitter would
-  use), so the fix here is a decision, not a deletion: either make the emitter
-  name the child (and give a main `ask` a real `toolCallId` so it can anchor),
-  or delete the two branches and the seeds with them.
+  The label branch is now RESOLVED (Task A4): the card's "who is asking"
+  label no longer reads `source` at all — it resolves the child's
+  `agentName` from `useSubagents` (keyed by the CHILD session id the card is
+  mounted with), so a child's gate names the child instead of falling back to
+  the generic copy. `isSubagent` remains only as the `queued` placeholder's
+  gate, and the `subagent:` fixtures stay (they exercise that path, which a
+  future emitter would use). The remaining open half is the anchoring path:
+  either make the emitter name the child (and give a main `ask` a real
+  `toolCallId` so it can anchor), or delete that branch and its seeds.
 - **A child's `interactive-request-close` frames are mis-keyed.** **RESOLVED by
   ADR 0055.** The defect was real: the pump relays a Subagent's frames under the
   PARENT's delivery id (`delivery_id` in

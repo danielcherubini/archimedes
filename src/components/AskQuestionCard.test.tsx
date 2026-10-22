@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import AskQuestionCard from "./AskQuestionCard";
 import { useInteractive } from "../store/interactive";
+import { useSubagents } from "../store/subagents";
 
 // Mock the Tauri IPC layer; everything else (stores) is the real code.
 vi.mock("../lib/tauri", async () => {
@@ -35,6 +36,8 @@ const originalScrollIntoView = Element.prototype.scrollIntoView;
 
 beforeEach(() => {
   useInteractive.getState().dismissSession("s1");
+  useInteractive.getState().dismissSession("child1");
+  useSubagents.getState().dismiss("child1");
   mockedRespond.mockReset();
   mockedRespond.mockResolvedValue(undefined);
   Element.prototype.scrollIntoView = vi.fn();
@@ -188,7 +191,7 @@ describe("AskQuestionCard", () => {
     // value the desktop's transport really emits is `native` — `main` and `sudo`
     // exist only in fixtures, `bin/fake_worker.rs` and the Rust gate fixtures — so
     // a `subagent:<name>` test value here exercises the store's shape and the
-    // label branch, not a string the transport sends.)
+    // `queued` gate's `isSubagent` arm, not a string the transport sends.)
     useInteractive.getState().addRequest("s1", {
       ...singleRequest,
       source: "subagent:reviewer",
@@ -204,11 +207,32 @@ describe("AskQuestionCard", () => {
     input.remove();
   });
 
-  it("labels a subagent request by its source", () => {
-    useInteractive.getState().addRequest("s1", {
+  it("labels a child's ask by its RESOLVED agent name, never by the transport label", () => {
+    // The label is keyed on the resolved name, NOT on `request.source`.
+    // `source: "native"` is the value production actually emits — every
+    // `interactive-request` the desktop builds carries it (`ask_flow` in
+    // `src-tauri/src/agent/harness/ask.rs`, and the sudo sub-prompts in
+    // `src-tauri/src/agent/interactive/mod.rs`), for a main session and a
+    // Subagent session alike. A child's card is mounted with the CHILD's
+    // session id (`TranscriptFooter` / `SubagentModals` pass
+    // `gate.childSessionId`), which is exactly the key `useSubagents`
+    // entries are stored under, so the name resolves from there.
+    //
+    // This is the ONLY shape that can prove the fix: the old
+    // `"subagent:x"` fixture exercised a branch production never enters
+    // (`isSubagent` needs a `subagent:` prefix no emitter sends), so a test
+    // built on it would stay green even if the label resolved nothing.
+    useSubagents.getState().addSession({
+      sessionId: "child1",
+      parentSessionId: "s1",
+      agentName: "scout",
+      task: "recon the auth code",
+      status: "running",
+    });
+    useInteractive.getState().addRequest("child1", {
       requestId: "r1",
       method: "ask",
-      source: "subagent:x",
+      source: "native",
       params: {
         questions: [
           {
@@ -219,8 +243,105 @@ describe("AskQuestionCard", () => {
         ],
       },
     });
-    render(<AskQuestionCard sessionId="s1" requestId="r1" />);
-    expect(screen.getByText("subagent:x")).toBeTruthy();
+    const { container } = render(
+      <AskQuestionCard sessionId="child1" requestId="r1" autoFocus={false} />,
+    );
+    expect(screen.getByText("scout")).toBeTruthy();
+    // The transport label is never user-facing copy (`native` is a transport
+    // detail, never a name — CONTEXT.md's Todo board `_Avoid_` list).
+    expect(container.textContent).not.toContain("native");
+    expect(screen.queryByText("Agent question")).toBeNull();
+  });
+
+  it("labels the queued placeholder of a child's ask by the resolved name too", () => {
+    // The queued arm (the request arrived before any `tool_call` frame) is a
+    // second label site, and it has the same problem: it rendered
+    // `${request.source} is asking…` behind the dead `isSubagent` gate. A
+    // `native` frame with a `toolCallId` is exactly what reaches it.
+    useSubagents.getState().addSession({
+      sessionId: "child1",
+      parentSessionId: "s1",
+      agentName: "scout",
+      task: "recon the auth code",
+      status: "running",
+    });
+    useInteractive.getState().addRequest("child1", {
+      requestId: "r1",
+      method: "ask",
+      source: "native",
+      toolCallId: "t1",
+      params: {
+        questions: [
+          {
+            id: "q1",
+            question: "Which color?",
+            options: [{ label: "Red" }],
+          },
+        ],
+      },
+    });
+    const { container } = render(
+      <AskQuestionCard sessionId="child1" requestId="r1" autoFocus={false} />,
+    );
+    expect(screen.getByText("scout is asking…")).toBeTruthy();
+    expect(container.textContent).not.toContain("native");
+  });
+
+  it("falls back to the generic label when the child has NO agent name (a config-less dispatch)", () => {
+    // `SubagentEntry.agentName` is a required string and the Rust dispatch
+    // writes `""` for an omitted/unknown `agentName`
+    // (`src-tauri/src/agent/harness/dispatch.rs`, `unwrap_or_default()` — a
+    // config-less, label-only dispatch). So a nullish coalesce would render
+    // an EMPTY label between the accent rules; the check must be truthiness.
+    useSubagents.getState().addSession({
+      sessionId: "child1",
+      parentSessionId: "s1",
+      agentName: "",
+      task: "recon the auth code",
+      status: "running",
+    });
+    useInteractive.getState().addRequest("child1", {
+      requestId: "r1",
+      method: "ask",
+      source: "native",
+      params: {
+        questions: [
+          {
+            id: "q1",
+            question: "Which color?",
+            options: [{ label: "Red" }],
+          },
+        ],
+      },
+    });
+    const { container } = render(
+      <AskQuestionCard sessionId="child1" requestId="r1" autoFocus={false} />,
+    );
+    expect(screen.getByText("Agent question")).toBeTruthy();
+    expect(container.textContent).not.toContain("native");
+  });
+
+  it("falls back to a generic Agent label when no agent name resolves", () => {
+    // A MAIN session's own ask has no `useSubagents` entry under its id, so
+    // nothing resolves and the generic copy renders — the fallback is the
+    // normal path for a main session, not an error state.
+    useInteractive.getState().addRequest("s1", {
+      requestId: "r1",
+      method: "ask",
+      source: "native",
+      params: {
+        questions: [
+          {
+            id: "q1",
+            question: "Which color?",
+            options: [{ label: "Red" }],
+          },
+        ],
+      },
+    });
+    const { container } = render(<AskQuestionCard sessionId="s1" requestId="r1" />);
+    expect(screen.getByText("Agent question")).toBeTruthy();
+    expect(container.textContent).not.toContain("native");
   });
 
   it("cancels with cancelled=true and empty results, and collapses", async () => {
