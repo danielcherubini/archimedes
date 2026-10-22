@@ -1758,6 +1758,15 @@ describe("ChatStream", () => {
     expect(screen.queryByAltText("a.txt")).toBeNull();
     const errorLine = screen.getByText(/is not a supported image format/);
     expect(errorLine.className).toContain("text-destructive");
+    // Task C3 (finding 7): the composer's rejection line is now an announced
+    // live region. Asserted HERE (the site's existing error-line test) rather
+    // than in a new case, so the class pin and the role pin travel together.
+    expect(errorLine.getAttribute("role")).toBe("alert");
+    // Byte-identical to the hand-written `mb-2 px-3 text-ui-sm text-destructive`
+    // line this replaced, so the gap under the transcript does not move.
+    expect(errorLine.getAttribute("class")).toBe(
+      "text-ui-sm text-destructive mb-2 px-3",
+    );
   });
 
   it("SVG is rejected (allowlist)", () => {

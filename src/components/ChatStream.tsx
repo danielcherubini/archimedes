@@ -59,6 +59,7 @@ import MessageList from "./chat/MessageList";
 import ComposerRow from "./chat/ComposerRow";
 import ComposerModals from "./chat/ComposerModals";
 import QueueRows from "./chat/QueueRows";
+import { IpcErrorLine } from "./IpcErrorLine";
 import type { MentionRow } from "./chat/ComposerMentions";
 
 /**
@@ -1911,11 +1912,7 @@ export default function ChatStream() {
         }}
       />
 
-      {error && (
-        <p className="mb-2 px-3 text-ui-sm text-destructive">
-          {error}
-        </p>
-      )}
+      {error && <IpcErrorLine error={error} className="mb-2 px-3" />}
       </main>
       {/* The **Prompt queue** stack: the THIRD island of the center column
           (transcript above, composer below). `QueueRows` is `null` while nothing
