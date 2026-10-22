@@ -290,6 +290,46 @@ describe("SessionConfigSelect", () => {
     await waitForElementToBeRemoved(() => screen.queryByRole("alert"), { timeout: 8000 });
   }, 10000);
 
+  it("the 5s auto-clear removes the alert while leaving the control usable", async () => {
+    // Task C1 characterization: the auto-clear at `:141-144` clears ONLY the
+    // error. It must not be allowed to touch the busy/pending half of the
+    // machine — a flag that could go false from a timer would re-enable a
+    // trigger mid-flight. Pinned here so `useAsyncAction`'s `clearError()` (the
+    // message-only clear) is provably the right seam. Real timers, like the
+    // auto-clear test above.
+    const onSet = vi.fn().mockRejectedValue(new Error("boom"));
+    render(<SessionConfigSelect option={mockOption} onSet={onSet} />);
+    const trigger = screen.getByRole("button", { name: "Model" });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByText("beta"));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("boom"));
+    expect(trigger.hasAttribute("disabled")).toBe(false);
+    const { waitForElementToBeRemoved } = await import("@testing-library/react");
+    await waitForElementToBeRemoved(() => screen.queryByRole("alert"), {
+      timeout: 8000,
+    });
+    // Still enabled — the timer cleared the message and nothing else.
+    expect(trigger.hasAttribute("disabled")).toBe(false);
+  }, 10000);
+
+  it("a second selection after a FAILED one is sent (the pending guard is not sticky)", async () => {
+    // The other half of the guard question: `if (pending) return` at `:217`
+    // blocks a change while one is in flight, but nothing latches — after a
+    // rejection the trigger is live again and the next pick goes through.
+    const onSet = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValue(undefined);
+    render(<SessionConfigSelect option={mockOption} onSet={onSet} />);
+    fireEvent.click(screen.getByRole("button", { name: "Model" }));
+    fireEvent.click(screen.getByText("beta"));
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: "Model" }));
+    fireEvent.click(screen.getByText("beta"));
+    await waitFor(() => expect(onSet).toHaveBeenCalledTimes(2));
+    expect(onSet).toHaveBeenLastCalledWith("model", "acme/beta");
+  });
+
   it("a null model option renders a disabled stub (the control's identity, no data — the session's config is dropped on close)", () => {
     render(
       <SessionConfigSelect kind="model" option={null} onSet={vi.fn()} />,

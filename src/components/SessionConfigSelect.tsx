@@ -1,4 +1,4 @@
-import { memo, useState, useEffect } from "react";
+import { memo, useEffect } from "react";
 import { Bot } from "lucide-react";
 import {
   Select,
@@ -14,7 +14,7 @@ import { modelItemsFromCatalog } from "./ModelPickerDialog";
 import { useSettings } from "../store/settings";
 import type { SessionConfigOption } from "../lib/tauri";
 import { THINKING_GLYPHS } from "../lib/toolOutput";
-import { describeIpcError } from "../lib/ipcError";
+import { useAsyncAction } from "../hooks/useAsyncAction";
 import { cn } from "./lib/utils";
 
 type OnSet = (optionId: string, value: string) => Promise<void>;
@@ -125,8 +125,17 @@ function SessionConfigSelect({
   disabled,
   fullWidth,
 }: SessionConfigSelectProps) {
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // `pending` is the hook's `busy`, renamed at the destructure so every reader
+  // in this file keeps its name (the trigger's `disabled`, the `isDisabled`
+  // join, the guard below). `guard: true` because this site self-guarded
+  // (`if (pending) return` at the old `:217`): unlike the sudo/ask cards, this
+  // control is NOT protected by a `disabled` attribute on the element that
+  // fires it — the model option's picker rows live in a DIALOG that is already
+  // open, so a second pick reaches `onSelect` regardless of the trigger's
+  // disabled state, and only the JS guard stops a second `set_config_option`.
+  const { busy: pending, error, run, clearError } = useAsyncAction({
+    guard: true,
+  });
   // The base disabled state (the call site — a STORED session's selector
   // is populated but read-only: no agent process to deliver
   // `set_config_option` to) OR the in-flight `onSet` (one change at a
@@ -140,10 +149,13 @@ function SessionConfigSelect({
 
   useEffect(() => {
     if (error) {
-      const timer = setTimeout(() => setError(null), 5000);
+      // The 5s auto-clear stays, and it clears the MESSAGE ONLY: `clearError`
+      // never touches `busy`, so a timer can never re-enable a trigger whose
+      // `onSet` is still in flight.
+      const timer = setTimeout(clearError, 5000);
       return () => clearTimeout(timer);
     }
-  }, [error]);
+  }, [error, clearError]);
 
   const value = typeof option?.currentValue === "string" ? option.currentValue : "";
   // The two controls' indicators (the reference UI's placement): the model
@@ -218,18 +230,8 @@ function SessionConfigSelect({
     settings?.providers ?? [],
   );
 
-  const handleValueChange = async (val: string) => {
-    if (pending) return;
-    setPending(true);
-    setError(null);
-    try {
-      await onSet(option.id, val);
-    } catch (e) {
-      setError(describeIpcError(e));
-    } finally {
-      setPending(false);
-    }
-  };
+  const handleValueChange = (val: string) =>
+    run(() => onSet(option.id, val));
 
   // The MODEL option: the shared `ModelPicker` (a ghost trigger — the
   // bot icon + the current value + a chevron — opening the model picker
