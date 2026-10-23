@@ -2,6 +2,49 @@ use serde_json::json;
 
 use crate::agent::harness::provider::ToolSpec;
 
+/// What the `bash` tool tells the model about the shell it is about to get.
+///
+/// Two literals, keyed on the SAME predicate `exec_bash` branches on
+/// (`unix` / `not(unix)`, not `windows` — keying the sentence and the executor
+/// to one predicate is what makes them unable to disagree), because
+/// `exec_bash` picks `sh -c` on Unix and `cmd.exe /d /s /c` on Windows. One
+/// unconditional sentence is therefore a lie on one of them, and the lie is
+/// what made issue #79 expensive: six detours, because the model — and the
+/// reader — trusted `NOT re-parsed` on the one platform where it is false twice
+/// over (the string IS re-quoted, on the way in, by std's command-line builder).
+///
+/// ADR 0017's invariant ("the `<tools>` section is byte-identical to the
+/// `tools[]` API param") SURVIVES the `cfg`: `model_request`
+/// (`harness/loop.rs:911`) and `advertised_specs` (`harness/loop.rs:926`) call
+/// the same `advertised_tool_specs`, and `worker/core.rs` renders that same
+/// value into the prompt — one process, one function, one target OS, so the two
+/// consumers cannot disagree. A resume replays the STORED seq-0 prompt, so an
+/// in-flight session keeps the sentence it started with.
+///
+/// The Unix literal is byte-identical to the single literal this replaced
+/// (pinned by `the_bash_description_names_the_shell_this_platform_actually_runs`).
+#[cfg(unix)]
+const BASH_DESCRIPTION: &str =
+    "Run a shell command (sh -c; NOT re-parsed), capturing interleaved stdout+stderr.";
+
+/// The Windows sibling — see [`BASH_DESCRIPTION`]'s doc for why there are two.
+///
+/// HARD CONSTRAINT on the wording: the expanded string must contain NEITHER the
+/// substring `read` NOR the substring `subagent`, because
+/// `src-tauri/tests/worker_e2e.rs` (`full_turn_real_worker_canned_provider`)
+/// asserts `!tools_section.contains("read") && !tools_section.contains("subagent")`
+/// over the rendered `<tools>` section with only `bash` enabled, and that test
+/// runs on the Windows CI leg. `the_bash_description_never_names_another_advertised_tool`
+/// keeps that constraint visible from Linux. It rules out `already`, `reads`,
+/// `reading`, `thread`, `spread` — hence "takes", not "reads".
+#[cfg(not(unix))]
+const BASH_DESCRIPTION: &str = "Run a shell command (cmd.exe /d /s /c; the string reaches \
+    cmd.exe EXACTLY as written, so write quoting the way cmd.exe expects it), capturing \
+    interleaved stdout+stderr. Two traps: `start` takes its FIRST quoted token as a window \
+    title, so never pass `\"\"` there, and a background launch is verified by the log file \
+    appearing — never by the launcher's exit code; `timeout /t` cannot run here (this child \
+    has no console input) — wait with `ping -n 20 127.0.0.1 > NUL`.";
+
 /// The tool specs sent to the model (the built-ins + the suite tools —
 /// the schemas mirror the `tools.ts` override). `pub(crate)` so the
 /// `dispatch_native` driver derives the child's tool set (the names
@@ -10,9 +53,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "bash".into(),
-            description:
-                "Run a shell command (sh -c; NOT re-parsed), capturing interleaved stdout+stderr."
-                    .into(),
+            description: BASH_DESCRIPTION.into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -411,5 +452,93 @@ mod tests {
                 "tool `{name}`: advertised {advertised:?} != executor keys {expected:?}"
             );
         }
+    }
+
+    /// The advertised `bash` description names the shell THIS platform's
+    /// executor actually picks, and never names the other one.
+    ///
+    /// This is issue #79's lie-as-regression: the sentence the model is given
+    /// must match the shell `exec_bash` branches to (`sh -c` on Unix,
+    /// `cmd.exe /d /s /c` on Windows). It was `sh -c; NOT re-parsed` on Windows
+    /// too, and that single false clause is what turned one quoting bug into six
+    /// detours — the model trusted it, and so did the reader of the output.
+    ///
+    /// Reads the description out of `tool_specs()` rather than comparing the
+    /// const to itself: the claim worth pinning is that the ADVERTISED spec is
+    /// honest. The Unix arm's exact-equality assertion is also the guard that
+    /// moving the literal into a const did not disturb one byte of the sentence
+    /// every Linux and macOS session prompt carries.
+    #[test]
+    fn the_bash_description_names_the_shell_this_platform_actually_runs() {
+        let d = bash_description();
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                d,
+                "Run a shell command (sh -c; NOT re-parsed), capturing interleaved stdout+stderr.",
+                "the Unix description is byte-frozen (it is printed into every \
+                 Unix session prompt and persisted as seq 0 of every session)"
+            );
+            assert!(
+                !d.contains("cmd.exe"),
+                "a Unix run never touches `cmd.exe`, so the description must not name it"
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            assert!(
+                d.contains("cmd.exe") && d.contains("/d /s /c"),
+                "the Windows description must name the shell the executor picks — \
+                 `exec_bash` runs `cmd.exe /d /s /c` here, got {d:?}"
+            );
+            assert!(
+                !d.contains("sh -c"),
+                "the Windows description must not promise `sh -c` (that was #79's \
+                 lie: the model trusted a sentence about a shell it never got), got {d:?}"
+            );
+        }
+    }
+
+    /// The `bash` description may not contain the substring `read` or the
+    /// substring `subagent` — on ANY platform.
+    ///
+    /// Why a whole substring ban and not a word-boundary one: the `<tools>`
+    /// section of the system prompt is rendered from the advertised specs
+    /// (`harness/prompt.rs`'s `- {name}: {description}`), and
+    /// `src-tauri/tests/worker_e2e.rs::full_turn_real_worker_canned_provider`
+    /// asserts `!tools_section.contains("read") &&
+    /// !tools_section.contains("subagent")` with only `bash` enabled — the
+    /// assertion is a plain `contains`, so a `bash` description that merely
+    /// contains the letters `read` (in `already`, `reads`, `thread`) reddens a
+    /// Worker e2e. That test is not `cfg`-gated, so on a `windows`-only wording
+    /// change the failure would appear ONLY on the Windows CI leg — the worst
+    /// possible place to discover it. This test moves the constraint to a
+    /// Linux-visible one.
+    #[test]
+    fn the_bash_description_never_names_another_advertised_tool() {
+        let d = bash_description();
+        assert!(
+            !d.contains("read"),
+            "`worker_e2e.rs`'s `full_turn_real_worker_canned_provider` asserts the \
+             rendered <tools> section does not contain `read`; the section is built \
+             from this description, so the substring is banned outright (this is why \
+             the Windows wording says `takes`, not `reads`). got {d:?}"
+        );
+        assert!(
+            !d.contains("subagent"),
+            "same guard as above for `subagent`: the e2e asserts the <tools> section \
+             with only `bash` enabled contains neither tool name, and a description \
+             that trips it reddens the Worker e2e. got {d:?}"
+        );
+    }
+
+    /// The advertised `bash` description, read out of `tool_specs()` (the same
+    /// call the loop advertises from) rather than from the const.
+    fn bash_description() -> String {
+        tool_specs()
+            .into_iter()
+            .find(|s| s.name == "bash")
+            .expect("`bash` is in `tool_specs()`")
+            .description
     }
 }
