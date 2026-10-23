@@ -146,6 +146,13 @@ export default function ChangesGroupCard({
 
   return (
     <div className="flex w-full flex-col" data-changes-group-row="">
+      {/* Stays a raw <button>, deliberately — Task C7's sweep stopped here.
+          `TRANSCRIPT_ROW` must render with NO `bg-*` token (ADR 0062's no-band
+          rule, pinned by `src/components/lib/transcriptRow.test.tsx:102`), and
+          `buttonVariants`' BASE string carries `bg-clip-padding`. `bg-clip-*` is
+          its own tailwind-merge group, so no `variant` and no `className`
+          override removes it — even `bg-clip-border` still contains `bg-`.
+          `ToolCallCardHeader.tsx`'s row is blocked for the identical reason. */}
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}

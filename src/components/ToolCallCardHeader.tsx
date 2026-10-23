@@ -156,6 +156,15 @@ export function ToolCallCardHeader({
   const { copied, copy: handleCopy } = useCopyButton(failure);
 
   return (
+    // Stays a raw <button>, deliberately — Task C7's sweep stopped here.
+    // `TRANSCRIPT_ROW` must render with NO `bg-*` token (ADR 0062's no-band rule,
+    // pinned by `src/components/lib/transcriptRow.test.tsx:102`), and
+    // `buttonVariants`' BASE string carries `bg-clip-padding`. `bg-clip-*` is its
+    // own tailwind-merge group, so no `variant` and no `className` override can
+    // remove it — even `bg-clip-border` still contains `bg-` and still trips the
+    // assertion. `ChangesGroupCard.tsx`'s row is blocked for the identical reason.
+    // Converting this would mean editing `Button`'s base, which repaints every
+    // other button in the app.
     <button
       type="button"
       onClick={onToggle}
