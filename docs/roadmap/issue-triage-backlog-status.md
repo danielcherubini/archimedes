@@ -85,8 +85,8 @@ Consequences, all deliberate:
 | # | Task | Issue | Wave | Seam (disjointness evidence) | Status |
 |---|------|-------|------|------------------------------|--------|
 | T1 | `parse_value` strips trailing `#` comments, mirroring pi | #11 | serial | `src-tauri/src/skills.rs`, `src-tauri/tests/skills.rs` | `todo` |
-| T2 | SkillsDialog stops inserting a dead `$name` token | #10 | 1a | `src/components/SkillsDialog.tsx` + `.test.tsx` | `todo` |
-| T3 | Inverse sig-completeness check; composer fails on an unsigned target | #41(d) | 1a | `scripts/compose-updater-manifest.sh`, `.test.sh`, `.github/workflows/release.yml`, `AGENTS.md` | `todo` |
+| T2 | SkillsDialog stops inserting a dead `$name` token | #10 | 1a | `src/components/SkillsDialog.tsx` + `.test.tsx` | `done` `863eec6` |
+| T3 | Inverse sig-completeness check; composer fails on an unsigned target | #41(d) | 1a | `scripts/compose-updater-manifest.sh`, `.test.sh`, `.github/workflows/release.yml`, `AGENTS.md` | `done` `2a3f8df` |
 | T4 | MCP callback HTTP response + clear `NeedsAuth` after auth | #46 | serial | `src-tauri/src/agent/mcp/callback.rs`, `agent/mcp/manager.rs` | `todo` |
 | T5 | Protected-dir refusal names a sanctioned route | #33 | serial | `agent/tools/exec/access.rs`, `agent/tools/exec/tests/policy.rs`, `agent/harness/loop/tests/policy_gate.rs` | `todo` |
 | T6 | `find`/`grep` get the Space cwd; make the scrub observable | #81 | serial | `agent/tools/exec/search.rs`, `agent/tools/exec/tests/search.rs`, `agent/hostenv.rs` | `todo` |
@@ -116,7 +116,19 @@ was deliberately NOT done, including the two items needing a human decision.
   (`skills:`, `systemPromptMode:`, `model_kwargs`) stays out** — it wants its own ADR.
 - 2026-10-23 — Entry was the triage itself (no `discuss` spec, no `issue:` key) → nothing to mirror the
   plan comment to. The issue tracker already carries the triage record; commits reference issue numbers.
+- 2026-10-23 — **T2 shipped with one recorded deviation**: `manualOnlyTooltip`'s header still closes
+  with "These TWO are the only places the rule is enforced for Skills" — now an under-count, but that
+  block is pinned byte-unchanged by a test, so the correction was written in `src/lib/skills.ts` and the
+  new `UNMENTIONABLE_ROW_REASON` doc instead. ADR 0036's Rust-side doc comments on
+  `skills::is_mentionable_name` / `exec_read_skill` under-count the frontend surfaces for the same
+  reason: Rust-doc-only, deliberately kept out of a frontend-only task. → follow-ups file.
+- 2026-10-23 — **Wave 1a held.** T2 and T3 committed as two disjoint pathspec commits (`863eec6`,
+  `2a3f8df`); full suite run once after the wave, green. Every task from T1 onward is SERIAL.
 
 ## Changelog
 
-Nothing landed yet.
+- `863eec6` — T2 (#10) Skills dialog inert rows. Gate after: FE 149 files / **3051 tests** (+2), build 0.
+- `2a3f8df` — T3 (#41d) inverse sig-completeness gate + composer `--require-payload`. Gate after:
+  Rust 1355 / 0 failed / 4 ignored, clippy 0 warnings, fmt clean, FE green, new harness 71 ok,
+  composer harness 131 ok. All three mutation probes turned their named cases RED.
+- Current gate figures live in the Gate section above; the numbers here are what they were then.
