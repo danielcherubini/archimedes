@@ -618,6 +618,134 @@ assert_fails "a Linux set with an rpm sig and no AppImage sig exits 1"
 assert_contains "that failure names the AppImage as the missing payload" "AppImage" "$output"
 assert_eq "no manifest survives the orphaned rpm signature" "no" "$(path_exists "$out_file")"
 
+# ---------------------------------------------------------------------------
+# 16. `--require-payload` — the composer-side half of issue #41(d).
+#
+# The PRIMARY gate is `scripts/check-release-signatures.sh`, which asks the
+# RELEASE whether every installer has its `.sig`. This flag is the SECONDARY one,
+# defence-in-depth for the path that never runs the release check: AGENTS.md step
+# 4, a human re-composing `latest.json` by hand after rewriting the notes. That
+# path downloads `*.sig` into a directory and hands the composer whatever came
+# back, so without an expectation list the composer shrinks the manifest and
+# **exits 0** — the silent omission this task exists to end (reproduced below, in
+# case 17, on the exact input the pre-change composer accepted).
+#
+# SEMANTICS: a claim about a NAME, not about bytes. `--require-payload NAME`
+# asserts that `$sigs_dir/NAME.sig` exists. It does NOT require `NAME` itself to
+# be on disk, and must not: on the real pipeline `--sigs-dir` holds SIGNATURES
+# ONLY (`gh release download --pattern '*.sig'`). Hence there is no
+# "--installers-dir" — scanning for installer files that lack a `.sig` would make
+# release.yml download ~300 MB of installers into the publish job to obtain
+# information `gh release view --json assets` already gives for free.
+#
+# The flag is OPT-IN: every case above calls the composer without it and must keep
+# passing unchanged, because the flag only ever REFUSES — it never adds a key.
+# ---------------------------------------------------------------------------
+
+# (a) The flag is satisfied: both named payloads have their sigs on disk, so the
+#     composition is exactly what it was without the flag. The assertion that
+#     matters here is the KEY SET — the flag adds nothing to any manifest.
+dir="$tmp_root/require-payload-satisfied"
+make_sigs_dir "$dir/sigs" "$win_sig" "$appimage_bare_sig" "$deb_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo" \
+  --require-payload "$deb_payload" --require-payload "$appimage_bare_payload"
+assert_eq "--require-payload for payloads whose sigs are present exits 0" "0" "$status"
+assert_manifest_eq "the flag adds no key to a five-key manifest" \
+  '.platforms | keys | sort | join(" ")' "$five_keys"
+
+# (b) The expected-but-unsigned target: the deb signature is missing from a set
+#     that would otherwise compose perfectly. Pre-implementation this case ALREADY
+#     exits 1, because `--require-payload` is an unknown argument — so
+#     `assert_fails` is not the assertion under test. The assertions that must go
+#     RED first are the two that name the payload and the missing signature (an
+#     unknown-argument message names the FLAG, not the payload), plus the
+#     no-manifest-survives one below.
+dir="$tmp_root/require-payload-unsigned-deb"
+make_sigs_dir "$dir/sigs" "$win_sig" "$appimage_bare_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo" \
+  --require-payload "$deb_payload"
+assert_fails "an expected payload with no signature in --sigs-dir exits 1"
+assert_contains "the failure names the payload that was expected" "$deb_payload" "$output"
+assert_contains "the failure names the signature file it looked for" "expected $deb_sig" "$output"
+assert_contains "the failure names the directory it looked in" "$dir/sigs" "$output"
+assert_eq "no manifest survives an expected-but-unsigned target" "no" "$(path_exists "$out_file")"
+
+# (c) THE #41(d) REGRESSION ITSELF, composer side: four payloads expected, two of
+#     their signatures never uploaded. Both offenders are reported in ONE run, so
+#     the operator sees the whole hole instead of discovering the second missing
+#     sig after fixing the first.
+dir="$tmp_root/require-payload-two-missing"
+make_sigs_dir "$dir/sigs" "$appimage_bare_sig" "$deb_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo" \
+  --require-payload "$deb_payload" \
+  --require-payload "$appimage_bare_payload" \
+  --require-payload "$rpm_payload" \
+  --require-payload "$win_exe_payload"
+assert_fails "two expected payloads with no signatures exit 1"
+assert_contains "the missing rpm signature is named by payload" "$rpm_payload" "$output"
+assert_contains "the rpm's expected signature file is named" "expected $rpm_sig" "$output"
+assert_contains "the missing Windows installer signature is named by payload" "$win_exe_payload" "$output"
+assert_contains "the Windows installer's expected signature file is named" "expected $win_exe_sig" "$output"
+assert_eq "no manifest survives the two missing signatures" "no" "$(path_exists "$out_file")"
+
+# (d) A `.sig` handed to a flag that takes a PAYLOAD name is refused rather than
+#     quietly becoming a check for `X.sig.sig` — which can never exist, so the
+#     flag would become a permanent failure, or worse a no-op if the check were
+#     written the other way round.
+dir="$tmp_root/require-payload-sig-name"
+make_sigs_dir "$dir/sigs" "$win_sig" "$appimage_bare_sig" "$deb_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo" \
+  --require-payload "$deb_sig"
+assert_fails "--require-payload with a .sig name exits 1"
+assert_contains "the failure says to pass the payload name" "pass the payload name" "$output"
+assert_eq "no manifest survives a mistyped flag value" "no" "$(path_exists "$out_file")"
+
+# (e) The missing-value guard. The composer's PRE-EXISTING flags (`--notes`,
+#     `--arch`, …) shift past the end of argv when given no value and die under
+#     `set -e` with exit 1 and no message; that behaviour is deliberately left
+#     alone here — fixing it would re-pin existing cases for no #41(d) benefit.
+#     The NEW flag gets the guarding idiom from check-versions.sh, and this case
+#     is what pins that it has one.
+dir="$tmp_root/require-payload-no-value"
+make_sigs_dir "$dir/sigs" "$win_sig" "$appimage_bare_sig" "$deb_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo" \
+  --require-payload
+assert_fails "--require-payload with no value exits 1"
+assert_contains "and it says which flag needs a value" "requires a payload asset name" "$output"
+
+# (f) Opt-in, stated explicitly as a regression pin: a set that composes without
+#     the flag still composes with exit 0 when the flag is simply not passed. This
+#     case is green before AND after the implementation — it exists to catch
+#     someone making the expectation list mandatory, which would break every
+#     manual invocation.
+dir="$tmp_root/require-payload-absent"
+make_sigs_dir "$dir/sigs" "$win_sig" "$appimage_bare_sig" "$deb_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo"
+assert_eq "composing with no --require-payload at all still exits 0" "0" "$status"
+assert_manifest_eq "and the key set is the plain five keys" \
+  '.platforms | keys | sort | join(" ")' "$five_keys"
+
+# (g) The check runs BEFORE any key is derived, so an expected-but-absent
+#     signature fails on a set that the composer would otherwise have refused for
+#     a different reason too — and the EXPECTATION failure is the one reported.
+#     Ordering matters: after derivation the failure would land next to `--out`
+#     having been written, and `fail()`'s cleanup is the only thing standing
+#     between a partial manifest and the upload step.
+dir="$tmp_root/require-payload-before-derivation"
+make_sigs_dir "$dir/sigs" "$win_sig" "$deb_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo" \
+  --require-payload "$appimage_bare_payload"
+assert_fails "an expected payload with no signature beats the AppImage rule it would otherwise hit"
+assert_contains "the expectation failure is what is reported" "expected $appimage_bare_sig" "$output"
+assert_eq "nothing is written on that path" "no" "$(path_exists "$out_file")"
+
 if ((failures > 0)); then
   echo
   echo "$failures check(s) failed" >&2

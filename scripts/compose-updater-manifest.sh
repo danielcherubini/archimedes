@@ -19,7 +19,7 @@
 # Usage:
 #   compose-updater-manifest.sh \
 #     --sigs-dir DIR --version X.Y.Z --tag v0.2.0 --repo owner/name --out latest.json \
-#     [--notes TEXT] [--arch darwin-arm64|darwin-x64]
+#     [--notes TEXT] [--arch darwin-arm64|darwin-x64] [--require-payload NAME]...
 
 set -euo pipefail
 
@@ -28,6 +28,7 @@ usage() {
 usage: compose-updater-manifest.sh --sigs-dir DIR --version X.Y.Z --tag TAG \
                                    --repo owner/name --out FILE \
                                    [--notes TEXT] [--arch darwin-arm64|darwin-x64]
+                                   [--require-payload PAYLOAD_NAME]...
 USAGE
 }
 
@@ -49,6 +50,10 @@ repo=""
 out_file=""
 notes=""
 arch=""
+# The expectation list for `--require-payload` (repeatable; several flags of the
+# same name is the normal call shape — release.yml passes one line per installer
+# the completeness gate accepted).
+required_payloads=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -63,6 +68,31 @@ while [[ $# -gt 0 ]]; do
     --out) out_file="${2:-}"; shift 2 ;;
     --notes) notes="${2:-}"; shift 2 ;;
     --arch) arch="${2:-}"; shift 2 ;;
+    --require-payload)
+      # The guarding idiom from check-versions.sh, checked BEFORE `shift 2`: a
+      # value-less flag otherwise shifts past the end of argv and dies under
+      # `set -e` with exit 1 and no message at all. (The composer's pre-existing
+      # flags have exactly that behaviour and are deliberately left alone —
+      # fixing them would re-pin existing cases for no issue-#41 benefit.)
+      if [[ $# -lt 2 || -z "${2:-}" ]]; then
+        fail "--require-payload requires a payload asset name (e.g. Archimedes_0.2.0_amd64.deb)"
+      fi
+      # A claim about a NAME, not about bytes: `--require-payload NAME` asserts
+      # that `$sigs_dir/NAME.sig` exists. It does NOT require NAME itself to be on
+      # disk, and must not — on the real pipeline `--sigs-dir` holds SIGNATURES
+      # ONLY (`gh release download --pattern '*.sig'`), so an installer-present
+      # requirement could never be satisfied there. The rejected alternative —
+      # scanning a directory for installer files that lack a `.sig` — would make
+      # release.yml download ~300 MB of installers into the publish job to obtain
+      # information `gh release view --json assets` already gives for free; that
+      # is why there is no `--installers-dir` and why the release-side gate is a
+      # separate script (scripts/check-release-signatures.sh).
+      if [[ "$2" == *.sig ]]; then
+        fail "--require-payload got a signature name ($2) — pass the payload name instead (pass ${2%.sig}): a `.sig` is never itself an updater payload, so requiring one would be a check for X.sig.sig that can never be satisfied"
+      fi
+      required_payloads+=("$2")
+      shift 2
+      ;;
     *)
       usage
       fail "unknown argument: $1"
@@ -133,6 +163,51 @@ shopt -u nullglob
 # so an empty sigs dir is an error and never an empty-but-valid manifest.
 if [[ ${#sig_paths[@]} -eq 0 ]]; then
   fail "no .sig files found in $sigs_dir — refusing to write a manifest with zero platforms"
+fi
+
+# --- the expectation list (issue #41(d), the secondary gate) ----------------
+#
+# WHY THIS EXISTS. The composer's keys are derived FROM the `.sig` files it was
+# handed, so an installer whose signature was never uploaded is simply absent from
+# the output — and the composition exits 0. Every completeness question put to the
+# RESULT of that derivation is therefore answered by a projection of the result
+# itself, which is why AGENTS.md's old "count the distinct manifest URL basenames
+# and require a `.sig` for each" could never fail. The primary gate is
+# `scripts/check-release-signatures.sh`, which asks the RELEASE (per asset: `X`
+# present ⇒ `X.sig` present). This flag is the secondary one, and it exists for the
+# path that never runs that script: a human re-composing `latest.json` by hand
+# after rewriting the notes (AGENTS.md step 4), who downloads whatever `.sig`s come
+# back and hands them over with no expectation list at all.
+#
+# It runs HERE — after the empty-directory refusal and before any pattern matching
+# or key derivation — so an expected-but-absent signature fails before a single key
+# is built and before `--out` is written. `fail()` removes `$out_file` on every exit
+# path, so a rejected composition leaves nothing for the next step to upload; that
+# property is what this placement protects.
+#
+# It only ever REFUSES. It never adds a key, never reorders one, and is opt-in:
+# with no `--require-payload` the composer behaves exactly as it always has.
+if (( ${#required_payloads[@]} > 0 )); then
+  missing_payloads=()
+  for required_payload in "${required_payloads[@]}"; do
+    if [[ ! -e "$sigs_dir/$required_payload.sig" ]]; then
+      missing_payloads+=("$required_payload")
+    fi
+  done
+  if (( ${#missing_payloads[@]} > 0 )); then
+    # EVERY offender, in one run — the same rule the release-side gate follows.
+    # Stopping at the first makes the operator fix one signature, re-run, and
+    # discover the second, which is how a partially-uploaded sig set survives a
+    # release ceremony.
+    for missing_payload in "${missing_payloads[@]}"; do
+      printf 'error: expected updater payload %s has no signature in %s (expected %s.sig) — refusing to compose a manifest that silently drops an installed platform\n' \
+        "$missing_payload" "$sigs_dir" "$missing_payload" >&2
+    done
+    # Not `fail`, which would print the message a third time: every exit-1 path
+    # above funnels through it for the `$out_file` cleanup, and nothing has been
+    # written at this point anyway — this block runs before the emit.
+    exit 1
+  fi
 fi
 
 # --- pattern matching -------------------------------------------------------
