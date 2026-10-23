@@ -5,6 +5,7 @@ import { useSubagentSelection } from "../store/subagentSelection";
 import { SHEET_WIDTH_CLASS } from "../lib/subagentSheetLayout";
 import { SubagentTranscript } from "./SubagentTranscript";
 import { StatusIcon, STATUS_CHIP_STYLES } from "./SubagentStatusIcon";
+import { Button } from "./ui/button";
 import { cn } from "./lib/utils";
 
 /**
@@ -104,14 +105,45 @@ export default function SubagentDetailHost() {
                 {selected.status}
               </span>
             </div>
-            <button
+            <Button
               type="button"
+              variant="ghost"
+              size="icon-sm"
               onClick={() => select(null)}
               aria-label="Close subagent transcript"
-              className="flex size-6 shrink-0 items-center justify-center text-foreground-subtle hover:text-foreground"
+              className={cn(
+                // C7. The negations undo `Button`'s base and the `icon-sm`
+                // size, both of which would change what this ✕ paints; the
+                // row's own classes come LAST so they win every group they
+                // spell (that is how `hover:text-foreground` and `size-6`
+                // already beat the ghost arm's ink and the size's box).
+                //   `rounded-none`  — `icon-sm` is `rounded-md`; this ✕ is
+                //                      square-cornered and a radius would
+                //                      clip its 2px hover inset;
+                //   `border-0`      — the base's 1px ring would make this 26px;
+                //   `transition-none` — no hover fade here. This is the tab
+                //                      strip's second-cluster grammar, not the
+                //                      chrome bar's `transition-colors` (see
+                //                      `chromeButton.ts`'s consumer contract);
+                //   `hover:bg-transparent` — the ghost arm FILLS `bg-hover`.
+                //                      This ✕ has never had a fill: its only
+                //                      hover affordance is the ink lift.
+                // The rest of the base is inert on this element: no background
+                // for `bg-clip-padding` to clip, nothing ever sets
+                // `aria-expanded` or `aria-invalid` here, the button is never
+                // disabled, `outline-none` is what `base.css:53-57` forces with
+                // `!important` on every focus anyway, no child carries
+                // `data-icon` for the `has-data-[icon=…]` paddings to fire on,
+                // the content is one icon so `whitespace-nowrap`/`select-none`
+                // have nothing to act on, and the `<X>` already carries
+                // `size-4` so the base's
+                // `[&_svg:not([class*='size-'])]:size-3` cannot reach it.
+                "rounded-none border-0 transition-none hover:bg-transparent",
+                "flex size-6 shrink-0 items-center justify-center text-foreground-subtle hover:text-foreground",
+              )}
             >
               <X className="size-4" />
-            </button>
+            </Button>
           </div>
           <div className="flex-1 overflow-y-auto p-3">
             <SubagentTranscript sessionId={selected.sessionId} />
