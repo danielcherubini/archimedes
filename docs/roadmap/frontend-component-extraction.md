@@ -882,15 +882,16 @@ Order: **D1 → D3 → D2 → D4 (scoped down) → D5 (deferred)**.
 > the audit guessed.
 >
 > 🔴 **Measured, in the file's favour: ZERO of its 49 exported functions is called by another function
-> in the same file.** So moving a function cannot break an internal caller — the split is mechanical in
+> in the same file** (re-verified before the split; `internal calls: []`). So moving a function cannot break an internal caller — the split is mechanical in
 > a way a mega-file split usually is not. Verify this holds before each move; it is the property making
 > D1 safe.
 
 ### Task D1: split `lib/tauri.ts` by domain, barrel preserved
 
-**Why the barrel is mandatory, not stylistic:** **34 test files `vi.mock` `@/lib/tauri` by module
-path**, 32 of them spreading `vi.importActual`, with **~107 named `vi.fn()` overrides** between them.
-Keep `lib/tauri.ts` as a re-export barrel and every one of those mocks keeps working unmodified.
+**Why the barrel is mandatory, not stylistic:** **33 test files `vi.mock` `@/lib/tauri` by module path
+at the time of the split** (35 today), most spreading `vi.importActual`. Keep `lib/tauri.ts` as a
+re-export barrel and every one of those mocks keeps working unmodified. **The exact count is pinned by
+`tauriBarrel.test.ts` — read it there rather than trusting this sentence, which is already stale.**
 
 **The hazard that follows, and it is the whole risk of this task:** a mock on `@/lib/tauri` only
 intercepts calls that go **through** `@/lib/tauri`. If any consumer imports a moved function from
@@ -917,7 +918,8 @@ bug-preventer, not churn. Do it as its own commit.
 
 **Acceptance:** `lib/tauri.ts` still exports every symbol it does today (assert this mechanically —
 diff the export list before/after), no consumer outside `lib/tauri/` imports a domain module directly,
-all 34 mock files pass **unmodified**, full suite + build green after each module.
+all mock files pass **unmodified** (33 at the time of the split; 35 today after D2's two new hook
+test files), full suite + build green after each module.
 
 ---
 
@@ -942,7 +944,10 @@ won; `:243`/`:398`/`:436` pass unmodified or are updated with a stated reason.
 ### Task D2: `useSettingsDocument()` — wider than the audit said
 
 `SettingsPage.tsx` (514 L) holds 9 `useState` (`:120-144`) + 8 mutation functions (`:219,242,314,340,
-347,357,363,370`) + 42 `getState()` calls. Verified accurate.
+347,357,363,370`). Both verified accurate. **The audit's "42 `getState()` calls" is NOT a property of
+this file** — it is a repo-wide count (42 sites across all of `src/`), and this file had **2**. An
+earlier draft of this section repeated it as "verified accurate", which was a failure to check the
+number against the thing it was attached to.
 
 > 🔴 **But `SettingsPage` is not the only owner.** `SpacesList.tsx:333, :354, :596, :607` are four more
 > owners of the same settings document, and `:590-607` carries its **own epoch/rollback ordering
@@ -975,8 +980,10 @@ but only **831 non-comment lines (58% is prose)**, and Phase C made it *bigger* 
 > and `:2106` (switching sessions releases the **LEFT** session's — depends on `prevSessionIdRef`
 > capturing `left` before the overwrite). **These fail as a leak, not a crash** — the worst kind.
 > `draft` is written from **11** sites across all three clusters; `attachments` from 7 across two.
-> 🔴 **Three hook-count pins (`:450`, `:6195`, `:7481`) forbid placing any hook after `:911`'s
-> `if (!activeSessionId) return`** — they render no-session → active-session and throw "Rendered more
+> 🔴 **Three hook-order tests (`ChatStream.test.tsx:450`, `:6195`, `:7486`) forbid placing any hook
+> after the `if (!activeSessionId)` early return** (the third moved off `:7481` when the file changed —
+> cite these by their `it(...)` names, which begin "survives the no-session → active-session…" and
+> "survives no-session → active-session WITH a pending child gate…") — they render no-session → active-session and throw "Rendered more
 > hooks". `:7481` also requires the extracted hook to still flush, so `flushRef`'s two-part structure
 > (`:895` + `:1504`) must survive.
 > 🟡 `ComposerRow` already takes **24 props**, commented "Props-only by design — ALL state stays in
@@ -995,7 +1002,8 @@ but only **831 non-comment lines (58% is prose)**, and Phase C made it *bigger* 
   ref-coupling evidence, so nobody retries it.**
 - Follow `useSessionIdleEdge`/`useAttentionAlert` as the pattern (own ONE state cell, test with
   `renderHook`). `useMentionCatalogs.ts:113` shows the ceiling for a multi-value hook: 4 fields, and it
-  still needed a 778-line component test rather than `renderHook`.
+  returns four fields and stays testable with `renderHook` (37 calls in its 778-line test file) — so
+  four is the practical ceiling before a hook is a prop list wearing a hook's clothes.
 - 🟢 `ChatStream.test.tsx:4468` pins the `dirPrefix` **derivation at component level** and its own
   comment says "a hook-level caching test cannot prove it" — extracting it makes that comment false.
 
@@ -1009,10 +1017,16 @@ but only **831 non-comment lines (58% is prose)**, and Phase C made it *bigger* 
 > (`0066-agent-overrides-live-in-the-store-not-the-database.md` and
 > `0066-the-store-holds-a-history-window-…md`) and **neither file mentions any of those three names**
 > (grep: 0 hits). The blessing was never written down.
-> 🟡 Its blast-radius figures are also wrong: "~50 `data-testid`s" — production has **189 across 24
-> files**, and the rename targets carry only **13**. Real cost is reference count: `ChatStream` 455 refs
-> / 68 files, `MessageBubble` 85/17, `Reasoning` 73/14. `Reasoning.tsx` and `TodoBoardPanel.tsx` are
-> read as SOURCE by tests, so those source-grep tests must move in the same commit.
+> 🟡 Its blast-radius figures were also wrong, **including the correction I wrote for them** (I claimed
+> 189 `data-testid`s across 24 files; measured: **56 across 25 production files**). The audit's "~50" was
+> closer than my "correction". What the targets actually carry: `MessageBubble.tsx` 6, `SessionRail.tsx`
+> 4, `Reasoning.tsx` 2, `TodoBoardPanel.tsx` 1, `SubagentModals.tsx` 1, `SubagentDelegatingCard.tsx` and
+> `SubagentTranscript.tsx` **0** — so 14, and the two files the audit worried most about carry one
+> between them. Reference count is the real cost and it is larger than anything previously recorded:
+> `ChatStream` 779 refs / 74 files (39 production), `Reasoning` 295/24, `MessageBubble` 147/17,
+> `TodoBoardPanel` 71/8. `Reasoning.tsx` and `TodoBoardPanel.tsx` are read as SOURCE by tests, so those
+> source-grep tests move in the same commit. **Every one of these numbers was wrong until it was
+> re-measured, which is the argument for not putting counts in a plan at all.**
 
 **Sequence, if it is ever done:** (1) fix the duplicate `0066` number — a collision is a real defect
 regardless of D5; (2) write the ADR that actually records the glossary and which names are blessed;
@@ -1029,8 +1043,12 @@ by a non-existent decision is exactly the drift this roadmap is meant to prevent
   `MutedCaption`; it is arguably a status line rather than an error line. Decide, don't leave it.
 - 🟡 **`SessionConfigSelect.tsx:261, :337`** re-spell `IpcErrorLine`'s exact class + `role="alert"` by
   hand. Explicitly out of C3's scope, still unowned. C1 touched this component and did not fold them.
-- 🟢 `MutedCaption.tsx:21-23` says `TRANSCRIPT_ROW` has "three" consumers; it has **four**
-  (`ChangesGroupCard`, `Reasoning`, `MessageBubble`, `ToolCallCardHeader`).
+- ✅ **CLOSED, and the earlier version of this line was the error.** `MutedCaption.tsx:21-23` says
+  `TRANSCRIPT_ROW` has "three" consumers and it is **correct**: `themeTokens.test.ts:747`
+  (`ROW_CONSUMER_FILES`) lists exactly `ToolCallCardHeader`, `ChangesGroupCard`, `Reasoning`, and that
+  is the authority. An earlier draft of this list "corrected" it to four by counting
+  `MessageBubble.tsx:265`, which only *names* the constant in prose and never imports it. **Do not
+  "fix" the component comment** — a reader who did would break the CSS gate.
 - 🟢 **Zero-production-importer exports worth a look** (none is a Phase C primitive, so nothing C2/C8
   built lost its last importer): `Reasoning.tsx` ×5 scroll/measure helpers, `lib/braille-loader.ts`
   `speedToDuration`/`getPrecomputeContext`, `lib/braille/math.ts` `DOT_BITS`/`BRAILLE_BASE`,

@@ -36,9 +36,10 @@ import type { AppSettings } from "../lib/tauri";
  * WHAT THE HOOK DOES **NOT** OWN, deliberately:
  *  - The page's catalog fetches (`listModels`, `listTools`, `listKnownProviders`,
  *    `getAppInfo`, `shellSandboxAvailable`). They are per-section picker data, not
- *    the document; folding them in would produce a hook returning eight fields —
- *    the shape `useMentionCatalogs.ts:113` records as the ceiling where a hook
- *    stops being testable and the component test has to carry it.
+ *    the document; folding them in would produce a hook returning eight fields.
+ *    That is a judgement about shape, not a cited rule: `useMentionCatalogs.ts`
+ *    returns four and stays testable with `renderHook`, and eight inputs plus
+ *    eight outputs starts to look like the prop list it was meant to replace.
  *  - The section nav, the MCP dialog draft, the picker selection. Component state.
  *  - `applySettingsToDocument` on LOAD. The boot path (`lib/settings.ts
  *    loadAndApplySettings`) already applied the loaded document to `<html>`; the

@@ -9,11 +9,18 @@ superseded-by:
 > **Renumbered from ADR 0066 on 2026-10-23.** Two decisions were committed on 2026-10-20 under the
 > same number: this one (09:53, `a277dd5`) and *Agent overrides live in the store, not the database*
 > (20:54, `6969610`, alongside ADRs 0067 and 0068 which cross-reference it by number). **0066 stays
-> with the Agent-overrides decision**, on two grounds. Volume: 76 `ADR 0066` citations mean that one
-> (`src-tauri/` 49, `src/` 11, `docs/` 14, `CONTEXT.md` 2) against 8 for this one. And adjacency:
+> with the Agent-overrides decision**, on two grounds. Volume: measured at the commit before the
+> move, 82 `ADR 0066` occurrences — **69 mean that one, 13 mean this one** (`src-tauri/` 49 of which 7
+> are this decision; `src/` 15 of which 4; `docs/` 13 none; `CONTEXT.md` 5 of which 2). And adjacency:
 > 0066/0067/0068 were committed as one trilogy in a single commit and reference each other by number,
 > so moving the Agent-overrides file would sever those cross-references while moving this one severs
 > nothing. No decision changed; only its address.
+>
+> **The first pass at this move missed the 7 `src-tauri/` sites** (paged history in `commands/history.rs`,
+> the `todos_json` migration and updates in `storage/db.rs`, the Supervisor's event-router persistence in
+> `agent/persist.rs`) because the sweep grepped `docs/` and `src/` and assumed the Rust hits were uniform.
+> They were not — which is the same failure the counts above were written to prevent. If you are here to
+> renumber something else, grep the whole tree including `src-tauri/`.
 
 A stored **Session**'s transcript is loaded as a **History window** — the latest 500 display rows, with 200 more prepended per scroll-up page (`load_history` takes `limit` / `beforeId`, cursor = the autoincrement `messages.id`) — and rendered through a virtualized list (`react-virtuoso`). `useSessions.messages[sessionId]` is therefore a *window onto* the transcript, never the transcript. Anything that must be correct regardless of how far the user has scrolled is **session state** with its own storage, and is never recovered by scanning `messages[]`. The first such case is the **Todo board**: its list is persisted in `sessions.todos_json` (written by the **Supervisor**'s event router on a main session's `todos_update` frame, and returned as `todos` on the FIRST page of `load_history`, which seeds `useInteractive.todos` on open / resume), and `useMainTodoItems`' history-scan fallback is deleted.
 

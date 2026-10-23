@@ -24,7 +24,7 @@ export interface ModelPickerItem {
  * raw key when the provider is not configured (a model can reference a
  * key absent from the configured list).
  */
-export function providerDisplayName(
+function providerDisplayName(
   providers: { id: string; name: string }[],
   key: string,
 ): string {

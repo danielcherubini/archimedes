@@ -31,8 +31,11 @@ import { cn } from "./lib/utils";
  * about `null`. An `alert` region mounted at page load announces whatever lands
  * in it later; an empty one is noise. So no error → no element at all, which
  * also keeps every site's `{error && …}` guard meaningful rather than doubled.
- * Note `SessionConfigSelect.tsx:254`/`:310` already carry their own
- * `role="alert"` and are NOT migrated here (Task C1 owns that component) — do
+ * Note `SessionConfigSelect.tsx:261`/`:337` already carry their own
+ * `role="alert"` and are NOT migrated here. **No task owns them**: C1 shipped without folding them and
+ * C8's change to that file was the `cn()`/edge-constant only, so this duplication is deliberately
+ * unowned rather than pending — these are the floating `absolute left-0 top-full` variant, not the
+ * inline line this component renders. Do
  * not add a second `IpcErrorLine` to a tree that renders those two spans, or a
  * `getByRole("alert")` in a test starts throwing on multiple matches.
  *

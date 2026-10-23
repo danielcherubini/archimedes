@@ -4,7 +4,9 @@ import { Slot } from "radix-ui";
 
 import { cn } from "@/components/lib/utils";
 
-// Retained on purpose, still with ZERO importers (ADR 0072 / Task A6 kept it).
+// Retained on purpose, still with ZERO importers (Task A6 / finding 17 kept it — NOT ADR 0072, which
+// is about unconsumed palette TOKENS and never mentions this file; an earlier draft of this comment
+// cited it wrongly). `badgeVariants` below has one importer, and it is a test.
 //
 // Task C2 looked at this primitive as the home for the settings badge and did NOT
 // add a `settings` variant — that is a recorded decision, not an omission

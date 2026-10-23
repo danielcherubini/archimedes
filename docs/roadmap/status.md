@@ -2,7 +2,7 @@
 status: running
 mode: autonomous
 loop: ralph
-updated: 2026-10-22
+updated: 2026-10-23
 ---
 
 # Frontend component-extraction program — STATUS
@@ -45,8 +45,9 @@ Rules that bind every iteration:
   decision in the Decisions Log below.
 - Respect the report's **explicit non-goals**: do not split `store/sessions.ts`;
   do not adopt `ui/tabs.tsx`; do not extract single-consumer JSX blocks; do not
-  rename `SubagentDelegatingCard`/`SubagentTranscript`/`SubagentModals` (ADR 0066
-  blesses those names).
+  rename `SubagentDelegatingCard`/`SubagentTranscript`/`SubagentModals` — the **`Agents` glossary
+  entry in CONTEXT.md** records that they keep their names today. (The plan cited "ADR 0066" for this;
+  that citation was wrong — see the 2026-10-23 lesson.)
 - New components take glossary-consistent names NOW (`CONTEXT.md` `_Avoid_` lists).
   Renaming existing files is Phase D5 only, as one ADR-backed change.
 - Anything that changes user-visible behaviour or the a11y tree gets its own commit.
@@ -95,9 +96,9 @@ says otherwise. A task is not `done` until both commands are green.
 
 ## Phase A — unblock and take the free wins (no structural risk)
 
-Plan status: **Phase A COMPLETE** (A0–A6 done). **Phase B planned and vetted** — B4a, B1, B2, B3 (order deliberately B4a first: it is the task that makes the others cheap to test). See `docs/roadmap/frontend-component-extraction.md` §Phase B.
+Plan status: **COMPLETE** (A0–A6). See `docs/roadmap/frontend-component-extraction.md` §Phase A.
 
-**Current suite size: 126 files / 2743 tests** (121/2650 at baseline; A0 +1/0, A1 +1/+10,
+**Suite size at end of Phase B: 126 files / 2743 tests** (121/2650 at baseline; A0 +1/0, A1 +1/+10,
 A2 +1/+27, A3 +1/+7, A4 +0/+3, A5 +0/+2, A6 −1/−4 for the deleted `ids.test.ts`, B4a +1/+25,
 B1 +1/+23, B2 +1/+22, B3 +0/0).
 `SubagentDelegatingCard.tsx` is now 424 code lines (was 696).
@@ -120,7 +121,7 @@ satisfy a tool CI does not run — it sweeps unrelated lines into the diff.
 
 ## Phase B — the substrate
 
-Plan status: **Phase B COMPLETE.** **Phase C planned + vetted, not yet started** — order C3 → C2 → C8 → C1 → C5 → C6 → C4 → C7. See `docs/roadmap/frontend-component-extraction.md` §Phase C.
+Plan status: **COMPLETE** (B4a, B1, B2, B3 — order deliberately B4a first: it is the task that makes the others cheap to test). See `docs/roadmap/frontend-component-extraction.md` §Phase B.
 **Execution order is B4a → B1 → B2 → B3**, NOT the report's B1→B4: B4a is the task that makes
 every other task cheap to test, and B1's new tests want session fixtures that do not exist yet.
 
@@ -133,9 +134,8 @@ every other task cheap to test, and B1's new tests want session fixtures that do
 
 ## Phase C — components and hooks
 
-Plan status: **PLANNED + VETTED** (3 parallel ground-truth surveys, then 3 parallel scoped
-reviews). Order **C3 → C2 → C8 → C1 → C5 → C6 → C4 → C7** — cheapest first, the two highest-risk
-surfaces (`SpacesList` rows, the button sweep) last.
+Plan status: **COMPLETE** — all eight tasks shipped (31 commits), planned as C3 → C2 → C8 → C1 → C5 →
+C6 → C4 → C7: cheapest first, the two highest-risk surfaces (`SpacesList` rows, the button sweep) last.
 
 | # | Task | Finding | Status |
 |---|------|---------|--------|
@@ -150,11 +150,11 @@ surfaces (`SpacesList` rows, the button sweep) last.
 
 ## Phase D — mega-files
 
-Plan status: **PLANNED + VETTED** (3 parallel surveys; 4 of my own assumptions overturned). Order **D1 → D3 → D2 → D4 → D5(deferred)**.
+Plan status: **COMPLETE except D5, deliberately deferred** (D1→D3→D2→D4 shipped; D5 has no ADR behind it — see its task).
 
 | # | Task | Finding | Status |
 |---|------|---------|--------|
-| D1 | Split `lib/tauri.ts` by domain, **barrel mandatory** (33 mock files) | 12a | **`done`** `9fa594e`→`c4c10a0` (12 commits) |
+| D1 | Split `lib/tauri.ts` by domain, **barrel mandatory** (mock seam: count pinned in `tauriBarrel.test.ts`) | 12a | **`done`** `9fa594e`→`c4c10a0` (12 commits) |
 | D3 | Collapse `SubagentDelegatingCard`'s two diverged `??` chains | 14b | **`done`** `0cbe0a1` |
 | D2 | `useSettingsDocument()` + `useAgentOverridesWrites` — **both** owners done | 13a | **`done`** `8c89248` + `6351a94` |
 | D4 | `ChatStream.tsx` hooks — **scoped to `useMentionPicker` + 2 trivial**; 3 of 4 rejected | 2 | **`done`** `212932a` (1963→1550 L) |
@@ -244,8 +244,11 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   was reflowed; left 12 verified per-module patches; I replayed them as 12 commits and confirmed the
   final `git write-tree` hash equalled the snapshot I had independently validated. **Capture a tree hash
   before reshaping a verified tree** — it makes a history rewrite provably lossless.
-- **2026-10-22 — D1's load-bearing constraint: 33 test files `vi.mock` `@/lib/tauri` BY MODULE PATH**
-  (32 spread `importActual`, ~107 named `vi.fn()` overrides). The barrel is what keeps them working.
+- **2026-10-22 — D1's load-bearing constraint: dozens of test files `vi.mock` `@/lib/tauri` BY MODULE
+  PATH**, most spreading `importActual`. The barrel is what keeps them working. **The count is pinned by
+  `tauriBarrel.test.ts` — read it there.** Every hand-carried copy of it in this file, the plan and two
+  doc-comments has gone stale at least once (33 → 34 → 35 as tasks added hook tests), and the
+  `vi.fn()`-override figure was wrong in three different places at once.
   **The hazard: a mock on `@/lib/tauri` does not intercept a consumer importing the moved function from
   its new domain module — and the test still passes, hitting real IPC.** So consumers must keep
   importing from the barrel, guarded by a scanner test, and the full suite runs after EVERY module move.
@@ -278,8 +281,9 @@ Record every autonomous decision here so a later iteration does not re-litigate 
 - **2026-10-22 — C4: `RowButton` is the ONLY `role="button"` in production `src/`** (plus
   `TodoBoardPanel.tsx:279`, a deliberately different affordance: Enter OR Space + `preventDefault`,
   pinned inert-in-RowButton so it can't be folded in). **Never use `RowButton` for a hover action
-  inside a row** — a second `role="button"` makes all 10 `.closest('[role="button"]')` reads in
-  `SpacesList.test.tsx` ambiguous. `RowButton` passes `className` **verbatim, never through `cn()`** —
+  inside a row** — a second `role="button"` makes the **9** `.closest('[role="button"]')` reads in
+  `SpacesList.test.tsx` ambiguous (8 call sites plus the `rowOf()` helper; grep returns 10 because one
+  hit is a comment at `:1773`). `RowButton` passes `className` **verbatim, never through `cn()`** —
   `ModelPickerDialog`'s disabled row depends on `cn` NOT running there.
 - **2026-10-22 — `SpacesList.test.tsx` line numbers are stale.** C4's fixture migration shifted them
   (−98 L). Every `:NNNN` citation to that file in this file or the Phase C plan is off by offset; the
@@ -500,9 +504,69 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   purpose" comment goes with them). Retiring the commands is a separate change with its own
   `cargo test`/`clippy` gate, and the commit message must not claim an ADR retired a surface.
 
+## Final review round (2026-10-23) — the code passed, the documentation did not
+
+Three parallel reviewers (Phase A+B+C-first-half, Phase C-second-half+D, and a docs-accuracy auditor)
+over 95 commits. **No reviewer found a defect in the shipped code.** Every finding was in the record.
+That is worth naming, because a program whose whole thesis is "verify before you assert" produced a
+record that needed 20+ corrections while its code stood up.
+
+**What was wrong, and the class each belongs to:**
+
+- **A renumber that missed a whole tree (🔴 mine).** The 0066→0073 sweep grepped `docs/` and `src/` and
+  assumed the 49 `src-tauri/` hits were uniform. 7 were this decision (paged history, the `todos_json`
+  migration, the event-router persistence). *Class: scoping a sweep to the trees you were thinking about.*
+- **My "correction" was wrong twice.** I wrote that `TRANSCRIPT_ROW` has four consumers — it has three;
+  `themeTokens.test.ts:747` is the authority and `MessageBubble.tsx:265` only names the constant in
+  prose. I also wrote "189 `data-testid`s across 24 files" where the truth is 56 across 25. *Class:
+  overcorrecting a caught error without re-measuring, which produces a second false claim with the
+  authority of a correction.*
+- **A citation invented into new production code.** `useSettingsDocument.ts` attributed a "ceiling where
+  a hook stops being testable" to `useMentionCatalogs.ts:113`, which is a bare `return { … }`. The plan
+  added that the 4-field hook "needed a component test rather than `renderHook`" — its test calls
+  `renderHook` 37 times. *Class: citing a claim rather than making an argument.*
+- **Stale-by-construction counts.** "33 mock files" lived in two doc-comments and four plan/status lines;
+  the true figure is 35 (pinned by the guard). The `vi.fn()`-override count was wrong in three places at
+  once. **Resolution: the number now lives only in `tauriBarrel.test.ts`; everything else points there.**
+  *Class: duplicating a fact that a test already owns.*
+- **Provenance errors.** `badge.tsx` credited ADR 0072, which never mentions it (real source: A6/finding
+  17). `status.md` still carried "ADR 0066 blesses those names" in an **active Constraints bullet** after
+  the same file had established that citation was false. A changelog line cited `bd7710d`, not a valid
+  object. *Class: writing the source of a decision from memory.*
+- **Phase A's acceptance criterion (g) was false while recorded COMPLETE** — "no shipped module exports a
+  symbol nothing imports". Fixed by code, not by weakening the criterion: deleted `speedToDuration`
+  (zero references anywhere, older than this repo's design-system port) and de-exported five
+  file-internal symbols (`DOT_BITS`, `BRAILLE_BASE`, `getPrecomputeContext`, `providerDisplayName`,
+  `tabStatusOf`), which is exactly A6's own stated rule. `Badge`/`badgeVariants` stay retained by
+  recorded decision. `noUnusedLocals: true` makes de-exporting self-checking — tsc fails if a reader
+  existed. *Class: declaring a phase complete against an enumerated task list instead of the criterion.*
+
+**The one structural lesson:** ~45% of the `file:line` citations in the two roadmap docs are stale, and
+the C7 table's were 32/37 dead **before** C7 started. Line numbers are the wrong unit for a durable
+pointer. **Cite the assertion** — an `it(...)` name, a named const, a symbol. Three of today's five
+corrections were pure line-drift and would not have existed.
+
 ## Blockers / open questions (resolve by deciding, not by asking)
 
-(none)
+Nothing blocks the merge. These are the **decisions left open on purpose** — each has a place to go, so
+none is lost when the plan file is deleted on ship:
+
+- **`SubagentTranscript.tsx:171`** — a 10th inline `text-destructive` line inside a `MutedCaption`, with
+  no `role="alert"`. Decide: status line (leave it) or error line (give it the role). C3 shipped nine
+  sites deliberately; this is the one with no recorded decision.
+- **`SessionConfigSelect.tsx:261,:337`** — hand-spell `IpcErrorLine`'s exact class + `role="alert"`.
+  Out of C3's scope, and C1 touched the component without folding them, so `IpcErrorLine.tsx`'s
+  doc-comment points at a task that never owned them. Either fold them or record why the floating
+  `absolute`-positioned variant must stay hand-written.
+- **`useSettingsDocument.patch`** reads the RENDERED document, so two patches in one batch compose from
+  the same base and the second save drops the first. Documented and pinned as a deliberate
+  non-improvement; the `getState()` fix is a two-line change that needs its own commit and a flipped pin.
+- **`SubagentDelegatingCard`'s `details.progress`/`details.results` envelope is unreachable in the
+  current backend** (all five `ToolResult`s in `dispatch.rs` return `details: None`; no Rust source
+  emits `"progress"`). Left in place because `rawOutput` is persisted, so a resumed old session can
+  still carry one. Wants its own task with that evidence.
+- **D5 (glossary renames) stays deferred** until an ADR exists for the renames. The 0066 number
+  collision is fixed (history-window ADR → 0073, including 7 `src-tauri` citations).
 
 ## Changelog
 
@@ -550,7 +614,7 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   green. Verified independently: 9 `<IpcErrorLine` call sites, zero scope violations against the 8
   out-of-scope files, 0 removed assertions, no scratch files left. First **behaviour-changing** task
   of the program (9 surfaces gain `role="alert"`), deliberately split one-site-per-commit.
-- `2026-10-22` — **B3 done** (`bd7710d`→`bd9701d`). 127 files / 2765 tests green; build green.
+- `2026-10-22` — **B3 done** (`bd9701d`). 127 files / 2765 tests green; build green.
   Verified independently: `verbatimModuleSyntax: true` set, 13 `sessionTypes` consumers in `lib/`,
   0 removed assertions, and the sole surviving `lib → store` import is a value import. Net −85 lines.
   **PHASE B COMPLETE.**

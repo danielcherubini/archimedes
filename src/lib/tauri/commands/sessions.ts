@@ -5,7 +5,7 @@
  *
  * NOTHING outside `src/lib/tauri/` imports this file — `src/lib/tauri.ts` is the
  * only public surface, and `src/lib/tauriBarrel.test.ts` enforces it. The reason
- * is the test seam: 33 test files `vi.mock("@/lib/tauri")` BY MODULE PATH, and a
+ * is the test seam: 35 test files `vi.mock("@/lib/tauri")` BY MODULE PATH, and a
  * direct import here would silently escape every one of those mocks (green, and
  * hitting real IPC). Read the barrel's header before adding an import.
  */

@@ -21,8 +21,8 @@
  *     import { startSession } from "@/lib/tauri";                    // correct
  *     import { startSession } from "@/lib/tauri/commands/sessions";  // WRONG
  *
- * The reason is a TEST SEAM, not taste. 33 test files `vi.mock` `@/lib/tauri` BY
- * MODULE PATH (121 named `vi.fn()` overrides between them), and `vi.mock`
+ * The reason is a TEST SEAM, not taste. 35 test files `vi.mock` `@/lib/tauri` BY
+ * MODULE PATH (34 of them spreading `vi.importActual`), and `vi.mock`
  * intercepts only the calls that travel THROUGH the path it was given. So a
  * single direct import of a domain module makes every test that mocked that
  * function **silently stop intercepting — and still pass, against real IPC.**

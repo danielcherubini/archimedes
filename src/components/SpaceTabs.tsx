@@ -172,7 +172,7 @@ const NEW_SPACE_BUTTON_WALL =
  * Pure and exported so the precedence is assertable without the tab strip's
  * store fixtures.
  */
-export function tabStatusOf(
+function tabStatusOf(
   statuses: (SessionStatus | undefined)[],
 ): SessionStatus | null {
   if (statuses.includes("waiting")) return "waiting";

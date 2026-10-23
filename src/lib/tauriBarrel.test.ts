@@ -355,7 +355,7 @@ describe("the scanner actually reads the tree", () => {
     // and this whole file's premise is gone — a decision to record, not a silent
     // one. Comment-stripped, because THIS file names the idiom in prose and would
     // otherwise count itself: the first version of this assertion did exactly that
-    // and reported 35 where the tree has 33.
+    // and reported 35 where the tree then had 33.
     const mockers = SOURCES.filter(
       (f) =>
         /\.test\.tsx?$/.test(f) &&
