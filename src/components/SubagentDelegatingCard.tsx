@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useSubagents } from "../store/subagents";
+import { useSubagents, type SubagentEntry } from "../store/subagents";
 import { useSubagentSelection } from "../store/subagentSelection";
 import { useInteractive } from "../store/interactive";
 import { useSessions, type ToolCallUiStatus } from "../store/sessions";
@@ -149,250 +149,205 @@ export default function SubagentDelegatingCard({
       ? (rawInput as Record<string, unknown>)
       : undefined;
 
-  const rows =
-    taskKeys.length > 0
-      ? taskKeys.map((taskKey, idx) => {
-          const storeEntry = matchingStoreEntries.find(
-            (e) =>
-              e.task === taskKey ||
-              (e.sessionId &&
-                resultsList.some(
-                  (r) => r.task === taskKey && r.childSessionId === e.sessionId,
-                )),
-          );
-          const progress = progressList.find((p) => p.task === taskKey);
-          const result = resultsList.find(
-            (r) =>
-              r.task === taskKey ||
-              (storeEntry && r.childSessionId === storeEntry.sessionId),
-          );
-          const rawInputItem = inputItems.find((i) => i.task === taskKey);
+  /**
+   * The store entry a task key belongs to: the one with the SAME `task`, or one
+   * the tool envelope links to that task through `childSessionId`.
+   */
+  const entryForTask = (taskKey: string): SubagentEntry | undefined =>
+    matchingStoreEntries.find(
+      (e) =>
+        e.task === taskKey ||
+        (e.sessionId &&
+          resultsList.some(
+            (r) => r.task === taskKey && r.childSessionId === e.sessionId,
+          )),
+    );
 
-          const resolvedSessionId = storeEntry?.sessionId ?? result?.childSessionId;
-          const agentCandidate =
-            (progress?.agent && progress.agent.trim()) ||
-            (result?.agent && result.agent.trim()) ||
-            (storeEntry?.agentName && storeEntry.agentName.trim()) ||
-            (rawInputItem?.agent && rawInputItem.agent.trim()) ||
-            (typeof rawInputObj?.agent === "string" && rawInputObj.agent.trim());
-          const agentName = agentCandidate || "subagent";
+  /**
+   * ONE derivation for every row (D3). This used to be TWO: a `taskKeys.map`
+   * block and a second `matchingStoreEntries.map` block that ran only when the
+   * first produced no key at all, each carrying its own copy of every `??`
+   * chain. Copies drift — the second one had already lost the
+   * `result.progressSummary.tokens` arm, the `agent` / `model` / `thinking`
+   * fallbacks to the tool call's own `rawInput`, the envelope-first `model`
+   * precedence and the `exitCode` status rule, so the SAME child printed
+   * different numbers depending on which block happened to render it. One
+   * builder, one precedence order, no second copy to forget to update. Where
+   * the two disagreed the ENVELOPE-AWARE chain won: it is the one every row
+   * takes today (the other only ran for a store entry carrying no `task`), and
+   * the envelope is the richer source — the store entry holds only what
+   * `subagent-session-started` / `subagent-closed` happened to carry.
+   *
+   * What decides a row: the task keys (the tool call's own `rawInput` +
+   * `details.progress` + `details.results` + the store entries that carry a
+   * task) PLUS any store entry that carries NO task — the one job the deleted
+   * second block did in anger, now an ordinary source in the same list. (It
+   * used to be an exclusive `else`: while any task key existed, a task-less
+   * entry rendered no row at all.)
+   */
+  const rowSources: Array<{ task: string; entry?: SubagentEntry }> = taskKeys.map((task) => ({
+    task,
+    entry: entryForTask(task),
+  }));
+  // A task-less entry the envelope already names is on screen as that task's
+  // row — adding it again would duplicate the child AND collide on the row key.
+  const claimedSessionIds = new Set(
+    rowSources
+      .map((source) => source.entry?.sessionId)
+      .filter((id): id is string => Boolean(id)),
+  );
+  for (const e of matchingStoreEntries) {
+    if (e.task) continue;
+    if (e.sessionId && claimedSessionIds.has(e.sessionId)) continue;
+    rowSources.push({ task: "", entry: e });
+  }
 
-          const subStatus: "running" | "completed" | "failed" =
-            result?.exitCode !== undefined
-              ? (result.exitCode === 0 ? "completed" : "failed")
-              : storeEntry?.status ??
-                progress?.status ??
-                (status === "completed" ? "completed" : "running");
+  const rows = rowSources.map((source, idx) => {
+    const taskKey = source.task;
+    const storeEntry = source.entry;
+    // A `""` key matches NO envelope frame: the key is only ever empty for a
+    // store entry that has no task, and `p.task === ""` would then match a
+    // frame that simply OMITS `task` — some other child's progress.
+    const progress =
+      taskKey === "" ? undefined : progressList.find((p) => p.task === taskKey);
+    const result = resultsList.find(
+      (r) =>
+        (taskKey !== "" && r.task === taskKey) ||
+        (storeEntry !== undefined && r.childSessionId === storeEntry.sessionId),
+    );
+    const rawInputItem =
+      taskKey === "" ? undefined : inputItems.find((i) => i.task === taskKey);
 
-          const model =
-            progress?.model ??
-            result?.model ??
-            storeEntry?.model ??
-            rawInputItem?.model ??
-            (typeof rawInputObj?.model === "string" ? rawInputObj.model : undefined);
+    const resolvedSessionId = storeEntry?.sessionId ?? result?.childSessionId;
+    const agentCandidate =
+      (progress?.agent && progress.agent.trim()) ||
+      (result?.agent && result.agent.trim()) ||
+      (storeEntry?.agentName && storeEntry.agentName.trim()) ||
+      (rawInputItem?.agent && rawInputItem.agent.trim()) ||
+      (typeof rawInputObj?.agent === "string" && rawInputObj.agent.trim());
+    const agentName = agentCandidate || "subagent";
 
-          const thinkingLevel =
-            storeEntry?.thinkingLevel ??
-            rawInputItem?.thinking ??
-            (typeof rawInputObj?.thinking === "string"
-              ? rawInputObj.thinking
-              : undefined) ??
-            extractThinkingFromModel(model);
+    const subStatus: "running" | "completed" | "failed" =
+      result?.exitCode !== undefined
+        ? (result.exitCode === 0 ? "completed" : "failed")
+        : storeEntry?.status ??
+          progress?.status ??
+          (status === "completed" ? "completed" : "running");
 
-          const interactiveCost = resolvedSessionId
-            ? (allInteractiveCost[resolvedSessionId] as
-                | {
-                    inputTokens?: number;
-                    outputTokens?: number;
-                    tokens?: number;
-                    cost?: number;
-                    percent?: number;
-                    contextPercent?: number;
-                  }
-                | undefined)
-            : undefined;
+    const model =
+      progress?.model ??
+      result?.model ??
+      storeEntry?.model ??
+      rawInputItem?.model ??
+      (typeof rawInputObj?.model === "string" ? rawInputObj.model : undefined);
 
-          const sessionMessages = resolvedSessionId ? allMessages[resolvedSessionId] : undefined;
+    const thinkingLevel =
+      storeEntry?.thinkingLevel ??
+      rawInputItem?.thinking ??
+      (typeof rawInputObj?.thinking === "string" ? rawInputObj.thinking : undefined) ??
+      extractThinkingFromModel(model);
 
-          const explicitTokens =
-            progress?.tokens ??
-            (interactiveCost &&
-            (interactiveCost.inputTokens !== undefined || interactiveCost.outputTokens !== undefined || interactiveCost.tokens !== undefined)
-              ? (interactiveCost.tokens ?? (interactiveCost.inputTokens ?? 0) + (interactiveCost.outputTokens ?? 0))
-              : undefined) ??
-            (result?.usage
-              ? (result.usage.input ?? 0) + (result.usage.output ?? 0)
-              : undefined) ??
-            result?.progressSummary?.tokens ??
-            (storeEntry?.metrics &&
-            (storeEntry.metrics.inputTokens > 0 || storeEntry.metrics.outputTokens > 0)
-              ? storeEntry.metrics.inputTokens + storeEntry.metrics.outputTokens
-              : undefined);
+    const interactiveCost = resolvedSessionId
+      ? (allInteractiveCost[resolvedSessionId] as
+          | {
+              inputTokens?: number;
+              outputTokens?: number;
+              tokens?: number;
+              cost?: number;
+              percent?: number;
+              contextPercent?: number;
+            }
+          | undefined)
+      : undefined;
 
-          const estimatedTokens =
-            sessionMessages && sessionMessages.length > 0
-              ? estimateTokensFromMessages(sessionMessages)
-              : undefined;
+    const sessionMessages = resolvedSessionId ? allMessages[resolvedSessionId] : undefined;
 
-          const tokens =
-            (explicitTokens && explicitTokens > 0 ? explicitTokens : undefined) ??
-            estimatedTokens;
+    const explicitTokens =
+      progress?.tokens ??
+      (interactiveCost &&
+      (interactiveCost.inputTokens !== undefined || interactiveCost.outputTokens !== undefined || interactiveCost.tokens !== undefined)
+        ? (interactiveCost.tokens ?? (interactiveCost.inputTokens ?? 0) + (interactiveCost.outputTokens ?? 0))
+        : undefined) ??
+      (result?.usage
+        ? (result.usage.input ?? 0) + (result.usage.output ?? 0)
+        : undefined) ??
+      result?.progressSummary?.tokens ??
+      (storeEntry?.metrics &&
+      (storeEntry.metrics.inputTokens > 0 || storeEntry.metrics.outputTokens > 0)
+        ? storeEntry.metrics.inputTokens + storeEntry.metrics.outputTokens
+        : undefined);
 
-          const modelContextWindow = getModelContextWindow(model);
-          const calculatedPct =
-            tokens && modelContextWindow > 0 ? (tokens / modelContextWindow) * 100 : undefined;
+    const estimatedTokens =
+      sessionMessages && sessionMessages.length > 0
+        ? estimateTokensFromMessages(sessionMessages)
+        : undefined;
 
-          const contextPercent =
-            progress?.percent ??
-            progress?.contextPercent ??
-            interactiveCost?.percent ??
-            interactiveCost?.contextPercent ??
-            calculatedPct;
+    const tokens =
+      (explicitTokens && explicitTokens > 0 ? explicitTokens : undefined) ??
+      estimatedTokens;
 
-          const cost =
-            progress?.cost ??
-            interactiveCost?.cost ??
-            result?.usage?.cost ??
-            storeEntry?.metrics?.cost;
+    const modelContextWindow = getModelContextWindow(model);
+    const calculatedPct =
+      tokens && modelContextWindow > 0 ? (tokens / modelContextWindow) * 100 : undefined;
 
-          const sessionToolCount = sessionMessages
-            ? sessionMessages.filter((m) => m.kind === "tool-call").length
-            : undefined;
-          const toolCount =
-            (sessionToolCount && sessionToolCount > 0 ? sessionToolCount : undefined) ??
-            progress?.toolCount ??
-            result?.progressSummary?.toolCount;
+    const contextPercent =
+      progress?.percent ??
+      progress?.contextPercent ??
+      interactiveCost?.percent ??
+      interactiveCost?.contextPercent ??
+      calculatedPct;
 
-          const isRunning = subStatus === "running";
-          const durationMs = isRunning
-            ? (storeEntry?.startedAt ? now - storeEntry.startedAt : progress?.durationMs)
-            : (result?.progressSummary?.durationMs ??
-              storeEntry?.metrics?.durationMs ??
-              (storeEntry?.endedAt && storeEntry?.startedAt
-                ? storeEntry.endedAt - storeEntry.startedAt
-                : undefined));
+    const cost =
+      progress?.cost ??
+      interactiveCost?.cost ??
+      result?.usage?.cost ??
+      storeEntry?.metrics?.cost;
 
-          const error = storeEntry?.error ?? result?.error ?? progress?.error;
-          // `reason` exists ONLY on the store entry (the `subagent-closed`
-          // payload): the `progress` / `result` shapes are the older tool-result
-          // detail stream and never carried a code.
-          const reason = storeEntry?.reason;
+    const sessionToolCount = sessionMessages
+      ? sessionMessages.filter((m) => m.kind === "tool-call").length
+      : undefined;
+    const toolCount =
+      (sessionToolCount && sessionToolCount > 0 ? sessionToolCount : undefined) ??
+      progress?.toolCount ??
+      result?.progressSummary?.toolCount;
 
-          return {
-            key: resolvedSessionId ?? `${taskKey}-${idx}`,
-            sessionId: resolvedSessionId,
-            agentName,
-            task: taskKey,
-            status: subStatus,
-            model: cleanModelName(model),
-            thinkingLevel,
-            tokens,
-            contextPercent,
-            cost,
-            toolCount,
-            durationMs,
-            error,
-            reason,
-            progress,
-            result,
-            sessionMessages,
-          };
-        })
-      : matchingStoreEntries.map((storeEntry, idx) => {
-          const progress = progressList.find(
-            (p) => p.task === storeEntry.task,
-          );
-          const result = resultsList.find(
-            (r) =>
-              r.childSessionId === storeEntry.sessionId ||
-              r.task === storeEntry.task,
-          );
-          const isRunning = storeEntry.status === "running";
-          const durationMs = isRunning
-            ? now - storeEntry.startedAt
-            : (result?.progressSummary?.durationMs ??
-              storeEntry.metrics?.durationMs ??
-              (storeEntry.endedAt ? storeEntry.endedAt - storeEntry.startedAt : undefined));
+    const isRunning = subStatus === "running";
+    const durationMs = isRunning
+      ? (storeEntry?.startedAt ? now - storeEntry.startedAt : progress?.durationMs)
+      : (result?.progressSummary?.durationMs ??
+        storeEntry?.metrics?.durationMs ??
+        (storeEntry?.endedAt && storeEntry?.startedAt
+          ? storeEntry.endedAt - storeEntry.startedAt
+          : undefined));
 
-          const sessionMessages = storeEntry.sessionId ? allMessages[storeEntry.sessionId] : undefined;
-          const sessionToolCount = sessionMessages
-            ? sessionMessages.filter((m) => m.kind === "tool-call").length
-            : undefined;
-          const toolCount =
-            (sessionToolCount && sessionToolCount > 0 ? sessionToolCount : undefined) ??
-            progress?.toolCount ??
-            result?.progressSummary?.toolCount;
+    const error = storeEntry?.error ?? result?.error ?? progress?.error;
+    // `reason` exists ONLY on the store entry (the `subagent-closed`
+    // payload): the `progress` / `result` shapes are the older tool-result
+    // detail stream and never carried a code.
+    const reason = storeEntry?.reason;
 
-          const interactiveCost = storeEntry.sessionId
-            ? (allInteractiveCost[storeEntry.sessionId] as
-                | {
-                    inputTokens?: number;
-                    outputTokens?: number;
-                    tokens?: number;
-                    cost?: number;
-                    percent?: number;
-                    contextPercent?: number;
-                  }
-                | undefined)
-            : undefined;
-
-          const explicitTokens =
-            progress?.tokens ??
-            (interactiveCost &&
-            (interactiveCost.inputTokens !== undefined || interactiveCost.outputTokens !== undefined || interactiveCost.tokens !== undefined)
-              ? (interactiveCost.tokens ?? (interactiveCost.inputTokens ?? 0) + (interactiveCost.outputTokens ?? 0))
-              : undefined) ??
-            (result?.usage
-              ? (result.usage.input ?? 0) + (result.usage.output ?? 0)
-              : undefined) ??
-            (storeEntry.metrics &&
-            (storeEntry.metrics.inputTokens > 0 || storeEntry.metrics.outputTokens > 0)
-              ? storeEntry.metrics.inputTokens + storeEntry.metrics.outputTokens
-              : undefined);
-
-          const estimatedTokens =
-            sessionMessages && sessionMessages.length > 0
-              ? estimateTokensFromMessages(sessionMessages)
-              : undefined;
-
-          const tokens =
-            (explicitTokens && explicitTokens > 0 ? explicitTokens : undefined) ??
-            estimatedTokens;
-
-          const rawModel = storeEntry.model ?? progress?.model ?? result?.model;
-          const modelContextWindow = getModelContextWindow(rawModel);
-          const calculatedPct =
-            tokens && modelContextWindow > 0 ? (tokens / modelContextWindow) * 100 : undefined;
-
-          const contextPercent =
-            progress?.percent ??
-            progress?.contextPercent ??
-            interactiveCost?.percent ??
-            interactiveCost?.contextPercent ??
-            calculatedPct;
-
-          return {
-            key: storeEntry.sessionId ?? `entry-${idx}`,
-            sessionId: storeEntry.sessionId,
-            agentName: storeEntry.agentName || "subagent",
-            task: storeEntry.task,
-            status: storeEntry.status,
-            model: cleanModelName(rawModel),
-            thinkingLevel:
-              storeEntry.thinkingLevel ??
-              extractThinkingFromModel(rawModel),
-            tokens,
-            contextPercent,
-            cost: progress?.cost ?? interactiveCost?.cost ?? result?.usage?.cost ?? storeEntry.metrics?.cost,
-            toolCount,
-            durationMs,
-            error: storeEntry.error ?? result?.error ?? progress?.error,
-            reason: storeEntry.reason,
-            progress,
-            result,
-            sessionMessages,
-          };
-        });
+    return {
+      // `entry-${idx}` keeps the deleted block's fallback key for a task-less
+      // entry with no session id; a task key keeps its own.
+      key: resolvedSessionId ?? `${taskKey || "entry"}-${idx}`,
+      sessionId: resolvedSessionId,
+      agentName,
+      task: taskKey,
+      status: subStatus,
+      model: cleanModelName(model),
+      thinkingLevel,
+      tokens,
+      contextPercent,
+      cost,
+      toolCount,
+      durationMs,
+      error,
+      reason,
+      progress,
+      result,
+      sessionMessages,
+    };
+  });
 
   const hasRunning =
     status === "pending" || rows.some((r) => r.status === "running");
