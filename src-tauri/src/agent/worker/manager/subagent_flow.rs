@@ -593,8 +593,10 @@ pub(crate) fn dispatch_subagent(
         }
     };
     // 4. The child system message (the `harness/prompt` function —
-    // `has_todo_tool` from the resolved child tool list; `None` →
-    // no system message — the child's seq-0 row is absent).
+    // `has_todo_tool` from the resolved child tool list; `None` → the child
+    // gets NO system message at all and NO seq-0 row, and the envelope's
+    // `FreshChild` mode is what makes that true: `(Fresh, None)` is the
+    // MAIN-prompt arm and a child must never reach it (issue #9)).
     let has_todo_tool = child_tools.iter().any(|t| t == "manage_todo_list");
     let system_prompt =
         build_child_system_message(wire.launch.system_prompt.as_deref(), has_todo_tool);
@@ -611,7 +613,7 @@ pub(crate) fn dispatch_subagent(
     let env = StartEnv::from_parts(
         child_id.clone(),
         wire.parent_cwd.clone(),
-        StartMode::Fresh,
+        StartMode::FreshChild,
         None,
         model.clone(),
         parent_env.catalog.clone(),

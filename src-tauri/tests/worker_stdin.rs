@@ -74,14 +74,14 @@ async fn read_ready_line(reader: &mut tokio::io::BufReader<tokio::process::Child
     assert_eq!(v["type"], "ready");
 }
 
-/// A `start` envelope (the subagent shape — `Fresh` + a `system_prompt`,
+/// A `start` envelope (the subagent shape — `FreshChild` + a `system_prompt`,
 /// which is what makes the Worker emit the seq-0 `transcript-insert`
 /// that races the inbound `prompt`).
 fn subagent_start(session_id: &str, cwd: &str) -> StartEnv {
     StartEnv::from_parts(
         session_id.to_string(),
         cwd.to_string(),
-        StartMode::Fresh,
+        StartMode::FreshChild,
         None,
         model(),
         ModelCatalog {

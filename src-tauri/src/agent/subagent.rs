@@ -1084,7 +1084,10 @@ mod tests {
         wm.detach("p1");
 
         // Case 4: `None` prompt + NO todo tool → `None` (NO system
-        // message — the child's seq-0 row is absent).
+        // message — the child's seq-0 row is absent, and now PROVABLY so:
+        // the envelope's `mode` is `FreshChild`, so the worker's
+        // `(StartMode::FreshChild, None)` arm prepends NOTHING instead of
+        // falling through to the main-prompt arm — issue #9).
         let (manager, wm, _sink_events, events) = make_manager(
             Some(Duration::from_secs(30)),
             test_env("p1", vec![m1.clone()], None, true),

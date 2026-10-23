@@ -266,7 +266,10 @@ impl WorkerManager {
     /// the parent Space's trust — the Supervisor owns the `spaces`
     /// table, `system_prompt` =
     /// `build_child_system_message(launch.system_prompt,
-    /// has_todo_tool)`, `enabled_tools` = the FULL three-way rule
+    /// has_todo_tool)` — a `None` there means the child gets NO system
+    /// message at all and NO seq-0 row, `mode: FreshChild` (the start
+    /// signal that keeps a child out of the main-prompt arm — issue #9),
+    /// `enabled_tools` = the FULL three-way rule
     /// VERBATIM, `subagent_enabled: false` — the recursion guard),
     /// spawn the subagent Worker (a fresh ephemeral session —
     /// `mint_session_id`), `wait_ready` + `send_start` + the initial

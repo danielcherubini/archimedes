@@ -1332,3 +1332,181 @@ async fn subagent_dispatch_end_to_end_real_workers() {
         "no on_crash (the subagent Worker exited cleanly via the drive teardown; the main via the close)"
     );
 }
+
+/// Issue #9's EXACT inverted path through the REAL binary and the REAL
+/// `default_build_loop`: an Agent definition whose `tools:` list excludes
+/// `manage_todo_list` AND whose body is EMPTY. That is the one child shape
+/// whose REDUCED message resolves to `None` (`agents.rs` yields `""` →
+/// `resolve_launch` yields `system_prompt: None` → `build_child_system_message
+/// (None, false)` yields `None`), and it used to land in the worker's
+/// `(StartMode::Fresh, None)` arm — the MAIN-prompt arm — so narrowing a
+/// child's tools REWARDED it with the largest prompt in the app.
+///
+/// Asserted here (not in a unit test) because the whole point is the shape
+/// that reaches the PERSISTED transcript: the child has NO `system` row at
+/// all, its seq 0 belongs to the `user` task, and no row anywhere mentions
+/// `<project_context>` / `<tools>` / `<cwd>` — the AGENTS.md walk-up never
+/// runs for a narrowed child. The `completed` close is the other half: it
+/// proves "no seq-0 row" breaks nothing downstream.
+// The `ENV_LOCK` (`std::sync::Mutex`) is held across the test's `await`
+// points INTENTIONALLY — a sibling test's `HOME` read mid-mutation would
+// see the wrong value (the `test_support` `ENV_LOCK` pattern).
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn a_child_with_a_tools_list_and_an_empty_body_gets_no_main_prompt() {
+    // The `HOME` isolation (the `test_support` `ENV_LOCK` pattern, verbatim
+    // in spirit from `subagent_dispatch_end_to_end_real_workers`): the
+    // canned definition is the ONLY one the Worker can discover.
+    let _lock = archimedes_lib::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let original_home = std::env::var_os("HOME");
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(v) => unsafe {
+                    std::env::set_var("HOME", v);
+                },
+                None => unsafe {
+                    std::env::remove_var("HOME");
+                },
+            }
+        }
+    }
+    let _restore = RestoreHome(original_home.clone());
+    let home = temp_dir();
+    std::fs::create_dir_all(home.join(".pi/agent/agents")).unwrap();
+    // The EMPTY body — nothing after the closing `---`. `tools: [bash]`
+    // excludes `manage_todo_list`, so `has_todo_tool` is `false` and the
+    // child's reduced message is `None`. `model: fake/sub-model` keeps the
+    // child on ITS OWN wiremock: without it the child would run the MAIN
+    // server, whose first-stream mock answers a `subagent` tool call and
+    // would make the child re-dispatch.
+    std::fs::write(
+        home.join(".pi/agent/agents/scout.md"),
+        "---\nname: scout\ndescription: Fast recon.\nmodel: fake/sub-model\ntools: [bash]\n---\n",
+    )
+    .unwrap();
+    // SAFETY: the `ENV_LOCK` is held for the whole set→assert→restore
+    // span (the `_lock` guard); no other thread mutates HOME concurrently.
+    unsafe {
+        std::env::set_var("HOME", &home);
+    }
+
+    let mut h = E2e::new().await;
+    let main_server = MockServer::start().await;
+    mount_two_request_streams(
+        &main_server,
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"tc_sub\",\"function\":{\"name\":\"subagent\",\"arguments\":\"{\\\"task\\\":\\\"find the answer\\\",\\\"agentName\\\":\\\"scout\\\"}\"}}]}}]}\n\n\
+         data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n\
+         data: [DONE]\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n\
+         data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+         data: [DONE]\n\n",
+    )
+    .await;
+    let sub_server = MockServer::start().await;
+    mount_sse(
+        &sub_server,
+        "data: {\"choices\":[{\"delta\":{\"content\":\"the answer is 42\"}}]}\n\n\
+         data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+         data: [DONE]\n\n",
+    )
+    .await;
+    let cwd = temp_dir();
+    let main_model = wire_model(&main_server, "main-model");
+    let sub_model = wire_model(&sub_server, "sub-model");
+    let catalog = ModelCatalog {
+        models: vec![main_model.clone(), sub_model],
+        ..Default::default()
+    };
+    let env = start_env(
+        "e2e-nochildprompt",
+        &cwd,
+        main_model.clone(),
+        catalog,
+        true,
+        Some(vec!["bash".to_string(), "subagent".to_string()]),
+        true,
+    );
+    h.attach(env).await;
+    h.manager
+        .handle_for("e2e-nochildprompt")
+        .expect("the session is attached")
+        .send_prompt("go", &[])
+        .expect("the prompt is sent");
+
+    // The child's id, off `subagent-session-started` (the same pattern as
+    // the dispatch e2e).
+    let sink_events = h
+        .wait_sink(Duration::from_secs(30), |evs| {
+            evs.iter().any(|(e, _)| e == "subagent-session-started")
+        })
+        .await
+        .expect("subagent-session-started arrives within the bound");
+    let started = sink_events
+        .iter()
+        .find_map(|(e, p)| (e == "subagent-session-started").then_some(p.clone()))
+        .expect("the subagent-session-started payload");
+    let child_id = started["sessionId"]
+        .as_str()
+        .expect("the child session id")
+        .to_string();
+
+    // The child CLOSES COMPLETED — the half that proves a missing seq-0 row
+    // breaks nothing downstream (the drive settles, the `SubagentCapture`
+    // captures, the `SubagentResult` lands, the parent's turn finishes).
+    let sink_events = h
+        .wait_sink(Duration::from_secs(60), |evs| {
+            evs.iter().any(|(e, _)| e == "subagent-closed")
+        })
+        .await
+        .expect("subagent-closed arrives within the bound");
+    let closed = sink_events
+        .iter()
+        .find_map(|(e, p)| (e == "subagent-closed").then_some(p.clone()))
+        .expect("the subagent-closed payload");
+    assert_eq!(closed["sessionId"], child_id);
+    assert_eq!(
+        closed["status"], "completed",
+        "the child completed with NO system message, got {closed:?}"
+    );
+
+    // The child's persisted transcript, read AFTER the close (the store
+    // frames all land before the child's `agent_settled` — the pump's
+    // capture-feed ordering — so no `wait_for_rows` count race is needed).
+    let child_rows =
+        h.db.load_native_messages(&child_id)
+            .expect("the child transcript loads");
+    let cv: Vec<Value> = child_rows
+        .iter()
+        .map(|r| serde_json::from_str(r).expect("the row is JSON"))
+        .collect();
+    // The guard that keeps "no `system` row" from passing on an EMPTY
+    // transcript (a child that never persisted anything is a DIFFERENT bug).
+    assert!(
+        child_rows.len() >= 2,
+        "the child persisted its task + its answer, got {child_rows:?}"
+    );
+    assert!(
+        !cv.iter().any(|r| r["role"] == "system"),
+        "a child with no reduced message has NO system row at all, got {cv:?}"
+    );
+    assert_eq!(
+        cv[0]["role"], "user",
+        "the child's seq 0 belongs to the conversation, got {cv:?}"
+    );
+    assert_eq!(
+        cv[0]["content"], "find the answer",
+        "the task is the first row"
+    );
+    for row in &child_rows {
+        for marker in ["<project_context>", "<tools>", "<cwd>"] {
+            assert!(
+                !row.contains(marker),
+                "the narrowed child was handed the MAIN prompt ({marker} in {row})"
+            );
+        }
+    }
+}

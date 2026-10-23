@@ -21,13 +21,24 @@
 
 use serde_json::Value;
 
-/// The session-start mode (the `start` envelope's `mode` field).
+/// The session-start mode (the `start` envelope's `mode` field): WHICH
+/// prompt this session starts from, and the FIRST half of every arm of
+/// `default_build_loop`'s init `match`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StartMode {
-    /// A fresh session: the Worker builds the main system prompt itself
-    /// (the seq-0 transcript row).
+    /// A fresh MAIN session: the Worker builds the main system prompt itself
+    /// (the seq-0 transcript row) — ADR 0017.
     Fresh,
+    /// A fresh SUBAGENT child (ADR 0017's REDUCED message): the Supervisor has
+    /// already computed `build_child_system_message` into `system_prompt`.
+    /// `Some` → that message is the seq-0 row; `None` → the child gets NO
+    /// system message at all and NO seq-0 row. A child NEVER reaches the
+    /// main-prompt arm — that is the whole reason this variant exists
+    /// (issue #9: `(Fresh, None)` used to mean both "main session" and
+    /// "child with nothing to say", and the child lost that tie to the
+    /// largest prompt in the app).
+    FreshChild,
     /// A resume: the Supervisor rehydrated the provider transcript (the
     /// `native_messages` re-read — moved from harness to Supervisor) and
     /// it arrives in the envelope's `transcript`.
@@ -886,6 +897,51 @@ mod tests {
             }
             other => panic!("expected `Start`, got {other:?}"),
         }
+    }
+
+    /// (E) `FreshChild`'s WIRE SPELLING is `fresh_child`, pinned as a raw
+    /// substring of the encoded line — not merely a decoded equality: the
+    /// spelling IS the contract, and a variant rename (or a stray per-variant
+    /// `rename`) must not silently change it.
+    #[test]
+    fn the_fresh_child_mode_round_trips_as_the_fresh_child_wire_name() {
+        let mut env = test_env();
+        env.mode = StartMode::FreshChild;
+        let line = encode_inbound(&Inbound::from(&env));
+        assert!(
+            line.contains(r#""mode":"fresh_child""#),
+            "the wire spells the child mode `fresh_child`, got {line}"
+        );
+        match decode_inbound(&line).expect("the frame decodes") {
+            Inbound::Start(env_dec) => assert_eq!(
+                env_dec.mode,
+                StartMode::FreshChild,
+                "the child mode round-trips"
+            ),
+            other => panic!("expected `Start`, got {other:?}"),
+        }
+    }
+
+    /// (F) An UNREADABLE `mode` is a decode ERROR — never a silent main
+    /// prompt. This is the DESIRED direction, and the trap-pin against
+    /// "tidying" the tolerance later: the protocol is permissive about
+    /// unknown top-level `type`s ONLY (`decode_inbound` routes on `type`,
+    /// then deserializes the WHOLE payload), so a bad nested `mode` is a
+    /// `ProtoError::Json` the Worker prints as `worker: bad inbound line` on
+    /// the stderr the Supervisor pipes into its log — LOUD. The alternative,
+    /// a `#[serde(other)]` fallback on `Fresh`, would make an unreadable mode
+    /// SILENTLY become the main-prompt arm: the exact defect issue #9 removes.
+    #[test]
+    fn an_unknown_start_mode_is_a_decode_error_never_a_silent_main_prompt() {
+        let mut env = test_env();
+        env.mode = StartMode::FreshChild;
+        let line = encode_inbound(&Inbound::from(&env));
+        let bad = line.replace(r#""mode":"fresh_child""#, r#""mode":"nonsense""#);
+        assert_ne!(bad, line, "the rewrite happened");
+        assert!(
+            decode_inbound(&bad).is_err(),
+            "an unreadable `mode` is a loud error, not a silent main prompt: {bad}"
+        );
     }
 
     /// Every `Start` mints its OWN incarnation stamp: the token is what keeps

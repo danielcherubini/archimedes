@@ -155,10 +155,14 @@ pub fn build_main_prompt(ctx: &PromptContext) -> String {
 /// `systemPrompt` (if any — an empty/whitespace-only value counts as `None`,
 /// so no leading blank line) + the `manage_todo_list` guidance line (when the
 /// child has the tool) — no preamble, no tools list. `None` + no tool → `None`,
-/// and `None` means "no REDUCED message", NOT "no system message": the worker's
-/// `(StartMode::Fresh, None)` arm then builds the MAIN prompt for that child,
-/// whose `<skills>` section is FILTERED like any other (ADR 0036's subagent
-/// bullet is the authoritative statement of both child shapes).
+/// and `None` means NO SYSTEM MESSAGE AT ALL: the worker's
+/// `(StartMode::FreshChild, None)` arm prepends NOTHING, so such a child has no
+/// system message and no seq-0 transcript row (issue #9 removed the fall-through
+/// that used to hand it the MAIN prompt). The ADR 0036 filter therefore lives on
+/// the TOOLS side of the child story alone: no child shape — reduced message or
+/// no message at all — carries a `<skills>` section, so `read_skill`/`list_skills`
+/// (ADR 0036's subagent bullet) are the whole child story for a model-hidden
+/// Skill.
 pub fn build_child_system_message(
     system_prompt: Option<&str>,
     has_todo_tool: bool,
