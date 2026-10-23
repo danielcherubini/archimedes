@@ -4,6 +4,7 @@ import { IPC_EVENTS } from "../lib/ipc/events";
 import { isMentionableSkillName } from "../lib/skills";
 import { CatalogSearchDialog } from "./CatalogSearchDialog";
 import { MutedCaption } from "./MutedCaption";
+import { RowButton } from "./RowButton";
 
 /**
  * The `manual only` tooltip for a model-hidden row (ADR 0036). Two honesty
@@ -176,13 +177,8 @@ export default function SkillsDialog({
             : null
       }
       renderRow={(skill) => (
-        <div
-          role="button"
-          tabIndex={0}
+        <RowButton
           onClick={() => insertSkill(skill.name)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") insertSkill(skill.name);
-          }}
           className="group flex min-w-0 cursor-pointer flex-col gap-0.5 rounded-lg px-2.5 py-1 hover:bg-surface-hover"
         >
           <div className="flex items-center gap-2">
@@ -208,7 +204,7 @@ export default function SkillsDialog({
               {skill.description}
             </span>
           )}
-        </div>
+        </RowButton>
       )}
     >
       {/* The shadowing report — a SIBLING of the three-branch ternary above,

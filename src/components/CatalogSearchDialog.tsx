@@ -34,10 +34,11 @@ import { cn } from "./lib/utils";
  *    emits no `role`, no `tabIndex`, no key handler, no click. Its own test
  *    measures that.
  *
- * The two `role="button"` rows the callers pass in are hand-rolled affordances
- * (`SkillsDialog.tsx` and `ModelPickerDialog.tsx` each spell `role="button"` +
- * `tabIndex` + the Enter handler). They are NOT folded in here: this shell owns
- * the dialog, not the row, and they are Task C4's `RowButton` sites.
+ * The two `role="button"` rows the callers pass in are `RowButton` (Task C4),
+ * passed in as `renderRow` — NOT folded in here: this shell owns the dialog, not
+ * the row. That split is load-bearing, because the row list must stay a keyed
+ * `Fragment` with no element of its own, and the row's own ancestry is what the
+ * callers' `row.parentElement` pins walk.
  *
  * `McpDialog` (`settings/McpSection.tsx`) is NOT one of these and is deliberately
  * not a caller: `sm:max-w-lg`, a `DialogDescription`, a `grid` of

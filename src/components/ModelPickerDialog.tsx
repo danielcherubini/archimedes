@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { fuzzyMatch } from "../lib/fuzzy";
 import { CatalogSearchDialog } from "./CatalogSearchDialog";
+import { RowButton } from "./RowButton";
 
 /**
  * One model row (the caller flattens its data source — the composer's
@@ -103,6 +104,12 @@ export default function ModelPickerDialog({
   ).sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
 
   const select = (item: ModelPickerItem) => {
+    // The guard is now TWO deep: `RowButton` refuses a click/Enter on a
+    // `disabled` row, and this is the same check the site spelled before the
+    // affordance was extracted. Kept deliberately — `select` is the function
+    // that OWNS the side effect (`onSelect` + close), so it must not depend on
+    // its only caller having filtered. Deleting either half is safe today and
+    // a trap the day a second caller appears.
     if (item.disabled) return;
     onSelect(item.value);
     onOpenChange(false);
@@ -142,14 +149,15 @@ export default function ModelPickerDialog({
         // case pins `aria-disabled` and the suppressed click). Converting
         // this site belongs with a decision about which cursor a disabled
         // row should show.
-        <div
-          role="button"
-          tabIndex={model.disabled ? -1 : 0}
-          aria-disabled={model.disabled ? "true" : undefined}
+        //
+        // Task C4 moved the AFFORDANCE (`role="button"` + `tabIndex` + the
+        // Enter handler + the disabled pair) into `RowButton`, and this
+        // string survives untouched BECAUSE `RowButton` passes `className`
+        // through verbatim rather than merging it — `RowButton.test.tsx`
+        // pins that both cursor tokens reach the DOM.
+        <RowButton
+          disabled={model.disabled}
           onClick={() => select(model)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") select(model);
-          }}
           className={`group flex min-w-0 cursor-pointer flex-col gap-0.5 rounded-lg px-2.5 py-1 hover:bg-surface-hover ${
             model.disabled
               ? "cursor-not-allowed opacity-50"
@@ -172,7 +180,7 @@ export default function ModelPickerDialog({
               )}
             </span>
           </div>
-        </div>
+        </RowButton>
       )}
     />
   );
