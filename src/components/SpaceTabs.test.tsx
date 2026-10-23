@@ -644,3 +644,187 @@ describe("SpaceTabs (the Spaces as browser-style tabs at the top of the chat)", 
     consoleError.mockRestore();
   });
 });
+
+// ---------------------------------------------------------------------------
+// C7 (finding 6d): the tab label and the `+` are `<Button>`s.
+//
+// These two sites are the tab strip's share of the raw-`<button>` sweep. The ✕
+// is deliberately NOT one of them and is NOT asserted here: `Button`'s base
+// carries `disabled:opacity-50`, which the assertion above ("no opacity
+// machinery at all") forbids and which `className` cannot strip — it names no
+// `opacity-*` utility for `tailwind-merge` to drop, so the variant survives the
+// merge. That blocker is recorded on the component.
+//
+// WHY A SET COMPARISON AND A PINNED ADDITION LIST (the shape C7 group 3
+// introduced, and for the same reason): the byte-exact `toBe` on a class
+// attribute is unsatisfiable once `Button` contributes utilities, but "every
+// token still present" plus "the additions are EXACTLY this literal" is the
+// stronger claim — it fails on a repaint in either direction, and it does not
+// move when `buttonVariants` is edited, because the list is a literal rather
+// than a recomputation from the component under test.
+//
+// Every entry in the addition lists is inert HERE, and the wall constants on
+// the component carry the per-token reasoning. What these tests guard is the
+// two properties the strip's own contract depends on: the label still owns the
+// pill's height and its leading inset, and the `+` is still a `rounded-md`
+// 32px square in the second chrome cluster.
+// ---------------------------------------------------------------------------
+
+/** Class attributes are SETS, not strings — `cn()` reorders on conflict. */
+const tokensOf = (className: string): string[] =>
+  [...new Set(className.split(/\s+/).filter(Boolean))].sort();
+
+/** What `<Button variant="link" size="default">` adds to the tab label. */
+const TAB_ADDITIONS = [
+  "[&_svg:not([class*='size-'])]:size-3.5",
+  "[&_svg]:pointer-events-none",
+  "[&_svg]:shrink-0",
+  "aria-invalid:border-destructive",
+  "aria-invalid:ring-2",
+  "aria-invalid:ring-destructive/20",
+  "bg-clip-padding",
+  "border-0",
+  "border-transparent",
+  "dark:aria-invalid:border-destructive/50",
+  "dark:aria-invalid:ring-destructive/40",
+  "disabled:opacity-50",
+  "disabled:pointer-events-none",
+  "group/button",
+  "h-auto",
+  "has-data-[icon=inline-end]:pr-1.5",
+  "has-data-[icon=inline-start]:pl-1.5",
+  "hover:no-underline",
+  "justify-start",
+  "outline-none",
+  "px-0",
+  "rounded-md",
+  "select-auto",
+  "shrink",
+  "transition-none",
+  "underline-offset-4",
+  "whitespace-normal",
+].sort();
+
+/** What `<Button variant="ghost" size="icon-lg">` adds to the `+`. */
+const NEW_SPACE_ADDITIONS = [
+  "[&_svg:not([class*='size-'])]:size-4",
+  "[&_svg]:pointer-events-none",
+  "[&_svg]:shrink-0",
+  "aria-expanded:bg-hover",
+  "aria-expanded:text-foreground",
+  "aria-invalid:border-destructive",
+  "aria-invalid:ring-2",
+  "aria-invalid:ring-destructive/20",
+  "bg-clip-padding",
+  "border-0",
+  "border-transparent",
+  "dark:aria-invalid:border-destructive/50",
+  "dark:aria-invalid:ring-destructive/40",
+  "disabled:opacity-50",
+  "disabled:pointer-events-none",
+  "group/button",
+  "hover:text-foreground-subtle",
+  "inline-block",
+  "items-center",
+  "justify-center",
+  "outline-none",
+  "select-auto",
+  "text-[length:inherit]",
+  "transition-none",
+  "whitespace-normal",
+].sort();
+
+describe("the tab label and the `+` route through <Button> (C7)", () => {
+  /** The label's class list BEFORE the sweep, spelled as a literal rather than
+   *  recomputed: `classNameConvention.test.ts` records why a pin must not go
+   *  through `cn()` — a merge could hide a change from the assertion meant to
+   *  catch it. (These two strings are the identity under `cn()`; they are here
+   *  as the pre-extraction record, exactly as `ChromeControls.test.tsx` keeps
+   *  its `CONTROL_BUTTON` literal.) */
+  const LABEL_WAS_ACTIVE =
+    "flex min-w-0 self-stretch items-center gap-1.5 pl-3 text-ui-base font-medium text-foreground";
+  const LABEL_WAS_INACTIVE =
+    "flex min-w-0 self-stretch items-center gap-1.5 pl-3 text-ui-base text-foreground-subtle";
+  const labelWas = (active: boolean): string[] =>
+    tokensOf(active ? LABEL_WAS_ACTIVE : LABEL_WAS_INACTIVE);
+
+  it("the tab label is a <Button variant=\"link\" size=\"default\"> that loses nothing", () => {
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta")],
+      activeSpacePath: "/w/alpha",
+    });
+    render(<SpaceTabs />);
+    for (const [name, active] of [
+      ["alpha", true],
+      ["beta", false],
+    ] as const) {
+      const tab = screen.getByRole("tab", { name });
+      expect(tab.tagName, `${name}: the tab is not a <button>`).toBe("BUTTON");
+      expect(tab.getAttribute("data-slot"), `${name}: not a Button`).toBe(
+        "button",
+      );
+      expect(tab.getAttribute("data-variant"), `${name}: variant`).toBe("link");
+      expect(tab.getAttribute("data-size"), `${name}: size`).toBe("default");
+      const painted = tokensOf(tab.className);
+      for (const token of labelWas(active)) {
+        expect(painted, `${name}'s tab lost ${token}`).toContain(token);
+      }
+      expect(
+        painted.filter((t) => !labelWas(active).includes(t)),
+        `${name}: the additions are not the pinned inert set`,
+      ).toEqual(TAB_ADDITIONS);
+      // The strip's own geometry contract, restated so a future wall edit that
+      // removes one of these cannot pass on the set comparison alone.
+      expect(painted).toContain("self-stretch");
+      expect(painted).toContain("pl-3");
+      expect(painted).toContain("items-center");
+      // Exactly ONE font-size utility: the label spelled `text-ui-base` and
+      // must not gain a second one (`ChatStream.test.tsx`'s `primaryLines()`
+      // finds rows by `.text-ui-base`, so a gained token is selectable code).
+      expect(painted.filter((t) => /^text-ui-/.test(t))).toEqual([
+        "text-ui-base",
+      ]);
+    }
+  });
+
+  it("the `+` is a <Button variant=\"ghost\" size=\"icon-lg\"> that stays a rounded-md square", () => {
+    useSessions.setState({ spaces: [space("/w/alpha")], activeSpacePath: "/w/alpha" });
+    render(<SpaceTabs />);
+    const plus = screen.getByRole("button", { name: "New space" });
+    expect(plus.getAttribute("data-slot")).toBe("button");
+    expect(plus.getAttribute("data-variant")).toBe("ghost");
+    expect(plus.getAttribute("data-size")).toBe("icon-lg");
+    const was = tokensOf(
+      "size-8 shrink-0 rounded-md text-foreground-subtle hover:bg-surface-hover",
+    );
+    const painted = tokensOf(plus.className);
+    for (const token of was) {
+      expect(painted, `the + lost ${token}`).toContain(token);
+    }
+    expect(painted.filter((t) => !was.includes(t))).toEqual(
+      NEW_SPACE_ADDITIONS,
+    );
+    // The second chrome cluster's corners survive: `icon-lg` contributes
+    // `rounded-lg`, and the site's own `rounded-md` must be the one that wins
+    // the border-radius group (tailwind-merge keeps the LAST, i.e. the site).
+    expect(painted.filter((t) => /^rounded(-|$)/.test(t))).toEqual([
+      "rounded-md",
+    ]);
+    // And the box: `icon-lg`'s `size-8` is the same 32px the site spelled, so
+    // exactly one size utility is declared.
+    expect(painted.filter((t) => /^size-/.test(t))).toEqual(["size-8"]);
+  });
+
+  it("neither conversion puts a control inside a control (the pill's two stay siblings)", () => {
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta")],
+      activeSpacePath: "/w/alpha",
+    });
+    const { container } = render(<SpaceTabs />);
+    // `Button` renders a `<button>`, so a `role="tab"` that became one is still
+    // not allowed to hold the ✕ (`SpaceTabs.test.tsx` above pins this for the
+    // raw shape; this is the same claim, re-asserted after the sweep).
+    expect(screen.getByRole("tab", { name: "alpha" }).querySelector("button")).toBeNull();
+    expect(container.querySelectorAll("button button")).toHaveLength(0);
+  });
+});
