@@ -865,6 +865,177 @@ Empty-state copy is pinned at `SkillsDialog.test.tsx:236,268,519-535`, `ModelPic
 
 ---
 
-## After Phase C
+## Phase D — mega-files
 
-Update `docs/roadmap/status.md` and plan Phase D (D1 `lib/tauri.ts` domain split behind a barrel; D2 `useSettingsDocument()`; D3 collapse `SubagentDelegatingCard`'s two row derivations — the two `??` chains have already diverged; D4 `ChatStream.tsx` hooks, **hooks not JSX**, guarded by `ChatStream.test.tsx`; D5 the ADR-backed rename PR). Then the final review loop and the PR.
+**Planned after 3 parallel ground-truth surveys (D1+D3, D4, D2+D5+loose-ends).** Phase C is
+complete (C1–C8, 31 commits). **Four of my own Phase D assumptions were wrong and are corrected
+below; the corrections are the useful part of this plan.**
+
+Order: **D1 → D3 → D2 → D4 (scoped down) → D5 (deferred)**.
+
+> 🔴 **The audit's D1 proposal is half already-done and its boundary is wrong.** It said "split by
+> domain … delete the dead exports". The dead exports were deleted in `2026019f`/Phase A. And it filed
+> `listSkills` / `listAgentDefinitionsForSpace` / `listMcpServersEffective` / `listSpaceFiles` /
+> `listCompletionEntries` under `spaces.ts` — **they are one `catalogs` domain**, proven by Phase C:
+> all six are passed as the `fetch` argument to the same cache machine (`useSkillCatalog.ts:56`,
+> `useAgentCatalog.ts:70`, `useMentionCatalogs.ts:97`). Use the boundary Phase C discovered, not the one
+> the audit guessed.
+>
+> 🔴 **Measured, in the file's favour: ZERO of its 49 exported functions is called by another function
+> in the same file.** So moving a function cannot break an internal caller — the split is mechanical in
+> a way a mega-file split usually is not. Verify this holds before each move; it is the property making
+> D1 safe.
+
+### Task D1: split `lib/tauri.ts` by domain, barrel preserved
+
+**Why the barrel is mandatory, not stylistic:** **34 test files `vi.mock` `@/lib/tauri` by module
+path**, 32 of them spreading `vi.importActual`, with **~107 named `vi.fn()` overrides** between them.
+Keep `lib/tauri.ts` as a re-export barrel and every one of those mocks keeps working unmodified.
+
+**The hazard that follows, and it is the whole risk of this task:** a mock on `@/lib/tauri` only
+intercepts calls that go **through** `@/lib/tauri`. If any consumer imports a moved function from
+`lib/tauri/catalogs.ts` directly, that test's `vi.mocked(tauri.foo)` silently stops intercepting —
+**and the test passes anyway, calling real IPC.** So:
+- **Consumers keep importing from `@/lib/tauri`. Never from a domain module.** Write a guard test for
+  this (source scanner, repo idiom, `node:`+`fs` computed specifier): no file outside `lib/tauri/`
+  imports from `lib/tauri/*` directly. This is the acceptance criterion that matters.
+- Run the **full suite after every single module moved**, not at the end — a silently-unmocked IPC call
+  is invisible until you look for it.
+
+**Proposed modules** (from the file's own section banners, corrected as above): `types.ts` (the ~71
+Rust-mirroring interfaces — consider keeping types in ONE module rather than scattering them by
+subject, since they cross-cut), `commands/` for the 26 `invoke` wrappers grouped as
+sessions / spaces / settings / **catalogs** / gates / window, `events.ts` for the 12 `listen*`.
+**57 exported symbols have exactly one production importer** — those are the clean moves; start there.
+The 28 with zero importers are **not dead**: 27 are payload types consumed by `listen*` inside the
+file. Do not delete them.
+
+**Also in scope, because the audit named it and it is cheap:** the 12 `listen*` wrappers each carry a
+bare event-name string, and `"archimedes:insert-skill"` is duplicated across `SkillsDialog.tsx` and
+`ChatStream.tsx`. A constants module + a union for the `interactive-event` discriminators is a real
+bug-preventer, not churn. Do it as its own commit.
+
+**Acceptance:** `lib/tauri.ts` still exports every symbol it does today (assert this mechanically —
+diff the export list before/after), no consumer outside `lib/tauri/` imports a domain module directly,
+all 34 mock files pass **unmodified**, full suite + build green after each module.
+
+---
+
+### Task D3: collapse `SubagentDelegatingCard`'s two row derivations
+
+Phase C already took this file 792 → **540** lines by extracting `subagentActivity.ts` (346 L); the two
+remaining row blocks are `:154` and `:301`. **This task is one collapse, not a decomposition.**
+
+> 🔴 **The two `??` chains have already DIVERGED, and that is the task.** `:218-226` and `:340-344`
+> compute the same display values with different fallbacks. `SubagentDelegatingCard.test.tsx:243` pins
+> the exact strings (`"30k tok (3%)"`, `"$0.04"`), `:398` pins toolCount/duration, `:436` pins the
+> `matchingStoreEntries`-only `Done` path. **Collapsing them necessarily changes which fallback wins in
+> some state** — so first write a test that shows the two chains disagree today (find the input where
+> they diverge), then decide which is correct, then collapse. A collapse that doesn't name the
+> divergence is just picking one silently.
+
+**Acceptance:** the divergence is documented with the input that exposes it and the reason one side
+won; `:243`/`:398`/`:436` pass unmodified or are updated with a stated reason.
+
+---
+
+### Task D2: `useSettingsDocument()` — wider than the audit said
+
+`SettingsPage.tsx` (514 L) holds 9 `useState` (`:120-144`) + 8 mutation functions (`:219,242,314,340,
+347,357,363,370`) + 42 `getState()` calls. Verified accurate.
+
+> 🔴 **But `SettingsPage` is not the only owner.** `SpacesList.tsx:333, :354, :596, :607` are four more
+> owners of the same settings document, and `:590-607` carries its **own epoch/rollback ordering
+> logic**. A `useSettingsDocument()` that retires only `SettingsPage` leaves the worse half and creates
+> a second abstraction over the same thing. **Survey both owners first and design the hook against
+> both**, or scope the task honestly to "SettingsPage only" and say the SpacesList half is left.
+>
+> 🟡 **`store/settings.ts:24 loadSettings` and `:9 loaded` have zero production callers** — only
+> `store/settings.test.ts:63-78` and `fixtures.test.ts:453`. `SpacesList.tsx:316-318` explicitly
+> declines to use it and `SettingsPage.tsx:152-157` re-fetches by hand. **D2 must resolve this**: either
+> the hook adopts `loadSettings` and it becomes live, or it is deleted with its tests. A dead loader
+> beside a live hand-rolled fetch is the exact drift this program exists to remove.
+
+No cycle risk: `lib/settings.ts → store/settings.ts` is one-way and nothing under `lib/` or `store/`
+imports `hooks/`. `verbatimModuleSyntax` is live.
+
+---
+
+### Task D4: `ChatStream.tsx` hooks — SCOPED DOWN, deliberately
+
+The plan named four hooks: `useMentionPicker`, `useAttachmentStaging`, `useComposerSend`,
+`usePromptQueueFlush`. **Three of the four cannot be extracted.** Measure first: the file is 1963 lines
+but only **831 non-comment lines (58% is prose)**, and Phase C made it *bigger* (+45/−25), so the
+"mega-file" premise is weaker than assumed.
+
+> 🔴 **`heldForSendRef` (`:321`) is shared by three clusters** — written by the unmount effect (`:358`),
+> the session-switch effect (`:397`) and `send`/`flushHead` (`:1275,1295,1298,1322,1366`). Splitting
+> `useAttachmentStaging` from `useComposerSend` puts one `Map` behind two owners. Two tests exist
+> precisely to police this: `ChatStream.test.tsx:2082` (unmount mid-send releases the held attachment)
+> and `:2106` (switching sessions releases the **LEFT** session's — depends on `prevSessionIdRef`
+> capturing `left` before the overwrite). **These fail as a leak, not a crash** — the worst kind.
+> `draft` is written from **11** sites across all three clusters; `attachments` from 7 across two.
+> 🔴 **Three hook-count pins (`:450`, `:6195`, `:7481`) forbid placing any hook after `:911`'s
+> `if (!activeSessionId) return`** — they render no-session → active-session and throw "Rendered more
+> hooks". `:7481` also requires the extracted hook to still flush, so `flushRef`'s two-part structure
+> (`:895` + `:1504`) must survive.
+> 🟡 `ComposerRow` already takes **24 props**, commented "Props-only by design — ALL state stays in
+> `ChatStream`". A hook returning 7 fields and taking 8 is that prop list moved up one level.
+
+**Do only what measures as separable:**
+- **`useMentionPicker`** — cluster C only (`:484-865`, `:1795-1855`). Touches just `picker`, `draft`,
+  `composerRef`, `draftRef` + catalog values. Owns the `pickerRows` memo (`:561-781`), `pickerNote`
+  (`:795`), `activeIndex` (`:829`), the insert-skill effect (`:836`), `selectMention` (`:1829`).
+  ~440 lines out; `ComposerRow`'s props drop from 24 toward ~19. **This one is real.**
+- **`useAutoGrowComposer(composerRef, draft)`** (`:446`) and **`useWindowDropBackstop()`** (`:429`) —
+  zero coupling, ~30 lines each.
+- **Leave `send` / `flushHead` / `resume` / `sendText` in place** — 591 lines reading 28 of the
+  component's values. Extracting them yields a 12-parameter hook whose only gain is moving lines
+  between files, and its first casualty is `:2082`/`:2106`. **Record this as a rejected scope, with the
+  ref-coupling evidence, so nobody retries it.**
+- Follow `useSessionIdleEdge`/`useAttentionAlert` as the pattern (own ONE state cell, test with
+  `renderHook`). `useMentionCatalogs.ts:113` shows the ceiling for a multi-value hook: 4 fields, and it
+  still needed a 778-line component test rather than `renderHook`.
+- 🟢 `ChatStream.test.tsx:4468` pins the `dirPrefix` **derivation at component level** and its own
+  comment says "a hook-level caching test cannot prove it" — extracting it makes that comment false.
+
+---
+
+### Task D5: the ADR-backed rename PR — **DEFERRED, with a reason**
+
+> 🔴 **There is no ADR to back it, and the citation that justified it is false.** The highest ADR is
+> 0072; none proposes these renames. Both the plan and the audit state "ADR 0066 explicitly blesses
+> `SubagentDelegatingCard`/`SubagentTranscript`/`SubagentModals`". **`0066` is a DUPLICATED number**
+> (`0066-agent-overrides-live-in-the-store-not-the-database.md` and
+> `0066-the-store-holds-a-history-window-…md`) and **neither file mentions any of those three names**
+> (grep: 0 hits). The blessing was never written down.
+> 🟡 Its blast-radius figures are also wrong: "~50 `data-testid`s" — production has **189 across 24
+> files**, and the rename targets carry only **13**. Real cost is reference count: `ChatStream` 455 refs
+> / 68 files, `MessageBubble` 85/17, `Reasoning` 73/14. `Reasoning.tsx` and `TodoBoardPanel.tsx` are
+> read as SOURCE by tests, so those source-grep tests must move in the same commit.
+
+**Sequence, if it is ever done:** (1) fix the duplicate `0066` number — a collision is a real defect
+regardless of D5; (2) write the ADR that actually records the glossary and which names are blessed;
+(3) split `bg-chat` out of D5 — it is a Palette token touching `theme.css` + `themeTokens.test.ts`, a
+different kind of change. **Do not start renames before the ADR exists** — a rename program justified
+by a non-existent decision is exactly the drift this roadmap is meant to prevent.
+
+---
+
+### Loose ends Phase C left (fold into the right task, don't leave them floating)
+
+- 🟡 **`SubagentTranscript.tsx:171`** — `<span className="text-destructive">{entry.error}</span>` is a
+  **10th** inline error line with no `role="alert"`. C3 recorded nine and this one is inside a
+  `MutedCaption`; it is arguably a status line rather than an error line. Decide, don't leave it.
+- 🟡 **`SessionConfigSelect.tsx:261, :337`** re-spell `IpcErrorLine`'s exact class + `role="alert"` by
+  hand. Explicitly out of C3's scope, still unowned. C1 touched this component and did not fold them.
+- 🟢 `MutedCaption.tsx:21-23` says `TRANSCRIPT_ROW` has "three" consumers; it has **four**
+  (`ChangesGroupCard`, `Reasoning`, `MessageBubble`, `ToolCallCardHeader`).
+- 🟢 **Zero-production-importer exports worth a look** (none is a Phase C primitive, so nothing C2/C8
+  built lost its last importer): `Reasoning.tsx` ×5 scroll/measure helpers, `lib/braille-loader.ts`
+  `speedToDuration`/`getPrecomputeContext`, `lib/braille/math.ts` `DOT_BITS`/`BRAILLE_BASE`,
+  `ModelPickerDialog.tsx` `providerDisplayName`, `SpaceTabs.tsx` `tabStatusOf`,
+  `lib/chatAttachments.ts` `INLINE_IMAGE_ATTACHMENT_MAX_BYTES`/`SUPPORTED_IMAGE_TYPES`, and
+  `ui/badge.tsx:64` `Badge` — the retention comment at `:7` covers `badgeVariants` only, never `Badge`
+  itself. Check each is genuinely unused before deleting; `tabStatusOf` and `providerDisplayName` may be
+  read by source-scanner tests.

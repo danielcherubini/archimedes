@@ -150,15 +150,15 @@ surfaces (`SpacesList` rows, the button sweep) last.
 
 ## Phase D — mega-files
 
-Plan status: **not yet planned**
+Plan status: **PLANNED + VETTED** (3 parallel surveys; 4 of my own assumptions overturned). Order **D1 → D3 → D2 → D4 → D5(deferred)**.
 
 | # | Task | Finding | Status |
 |---|------|---------|--------|
-| D1 | Split `lib/tauri.ts` by domain behind a re-export barrel | 12a | `todo` |
-| D2 | `useSettingsDocument()` — single owner of the settings document | 13a | `todo` |
-| D3 | Collapse `SubagentDelegatingCard`'s two row derivations | 14b | `todo` |
-| D4 | `ChatStream.tsx` hooks: `useMentionPicker`, `useAttachmentStaging`, `useComposerSend`, `usePromptQueueFlush` | 2 | `todo` |
-| D5 | ADR-backed rename PR (glossary identifiers) | 16b | `todo` |
+| D1 | Split `lib/tauri.ts` by domain, **barrel mandatory** (34 mock files) | 12a | `todo` |
+| D3 | Collapse `SubagentDelegatingCard`'s two diverged `??` chains | 14b | `todo` |
+| D2 | `useSettingsDocument()` — **both** owners, not just `SettingsPage` | 13a | `todo` |
+| D4 | `ChatStream.tsx` hooks — **scoped to `useMentionPicker` + 2 trivial**; 3 of 4 rejected | 2 | `todo` |
+| D5 | ADR-backed renames — **DEFERRED: the justifying ADR does not exist; 0066 is duplicated** | 16b | `deferred` |
 
 ---
 
@@ -204,6 +204,21 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   a per-tab close button, and this UI is deliberately browser-style closable tabs. A tablist
   with sibling controls beats orphaned `role="tab"`s. Not to be "fixed" later by
   restructuring the pill or adopting Radix Tabs.
+- **2026-10-22 — Phase D vetting overturned 4 of my own assumptions.** (1) **D5's justifying citation
+  is FALSE**: "ADR 0066 blesses SubagentDelegatingCard/SubagentTranscript/SubagentModals" — `0066` is a
+  **duplicated ADR number** and neither file mentions those names. D5 is deferred until an ADR exists.
+  (2) **D4: 3 of its 4 named hooks cannot be extracted** — `heldForSendRef` is shared by three clusters
+  and `ChatStream.test.tsx:2082/:2106` fail as a *leak*, not a crash, if split. (3) **D1's audit
+  boundary is wrong** — the catalog fetchers are one domain (Phase C's `useCatalogRow` proves it), and
+  the "delete dead exports" half was already done. (4) **D2's scope is half** — `SpacesList.tsx:333,354,
+  596,607` own the same settings document, one with its own rollback logic.
+- **2026-10-22 — D1's load-bearing constraint: 34 test files `vi.mock` `@/lib/tauri` BY MODULE PATH**
+  (32 spread `importActual`, ~107 named `vi.fn()` overrides). The barrel is what keeps them working.
+  **The hazard: a mock on `@/lib/tauri` does not intercept a consumer importing the moved function from
+  its new domain module — and the test still passes, hitting real IPC.** So consumers must keep
+  importing from the barrel, guarded by a scanner test, and the full suite runs after EVERY module move.
+  Useful measured fact: **zero of `tauri.ts`'s 49 exported functions calls another in the same file**,
+  so moves cannot break internal callers.
 - **2026-10-22 — C7 IS DONE with 3 sites left as raw `<button>`s ON PROOF. Do not "finish" them.**
   `SpaceTabs.tsx`'s ✕ is blocked by `SpaceTabs.test.tsx:345` (`not.toMatch(/opacity-/)` vs the base's
   `disabled:opacity-50` — tailwind-merge cannot strip a variant `className` doesn't name);
@@ -287,7 +302,7 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   (`InlineGateRow`, the picker shell, `SessionListRow`/`RowButton`, C7's sweep) must use `cn()` from
   their first commit. **Do not widen its allowlists** — it asserts set membership both ways, so an
   allowlist entry whose site was converted also fails. Two allowlists exist for real reasons:
-  `HAND_ROLLED_COMPOSITION` (4 sites where `cn` changes rendering — a same-group conflict drops a
+  `HAND_ROLLED_COMPOSITION` (**3** sites — verified by counting the list; an earlier note here said 4) where `cn` changes rendering — a same-group conflict drops a
   utility: `transition-transform` at `ChangesGroupCard:239`/`ToolCallCardHeader:157`, `cursor-pointer`
   at `ModelPickerDialog:162`) and `STATIC_TERNARY_SECTIONS` (8 whole-expression ternaries where `cn`
   is provably the identity). **The general rule: `cn` drops the loser of a same-tailwind-group
@@ -303,18 +318,16 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   `defaultVariants {variant:"default"}` folding in `bg-primary text-primary-foreground`. Any task
   passing a `className` override to `<Badge>`/`<Button>` must name `variant` explicitly. This is the
   single most repeatable trap found in this program — C7 depends on it.
-- **2026-10-22 — C2: two follow-ups left deliberately open.** `GeneralSection.tsx:418` and
-  `UpdateSection.tsx:395` also hand-roll `border-t border-border px-4 py-3` but **without**
-  `first:border-t-0`, so they are not drop-in `SettingsDataRow` users; C8 (which touches className
-  conventions across the tree) is the natural place to fold them via the `className` override.
+- **2026-10-22 — C2 follow-up CLOSED by C8.** `GeneralSection.tsx:424` and `UpdateSection.tsx:400` are
+  now `SettingsDataRow`. C8 checked *why* the missing `first:border-t-0` looked like a blocker and found
+  it inert: neither row is ever its card's first child, so `:first-child` could never have matched.
 - **2026-10-22 — A source-scanner test must use the computed-specifier idiom.** A bare
   `import "node:fs"` fails `tsc` (this app ships no `@types/node`). Use
   `const NODE_FS = "node:" + "fs"; const {readFileSync, readdirSync} = await import(NODE_FS)` as
   `cssSource.ts` / `themeTokens.test.ts` do. **C8's guard test needs this.**
-- **2026-10-22 — C3: `SudoConfirmModal.tsx` and `SudoPasswordModal.tsx` still have NO test file.**
-  They are the only error-bearing components without one; the child verified those two migrations by
-  DOM capture (before/after tag, class, role, siblings) rather than a test. **C1 touches the same
-  busy/error shape and should give them tests.**
+- **2026-10-22 — C3 flagged a test gap; C1 CLOSED it.** `SudoConfirmModal.test.tsx` and
+  `SudoPasswordModal.test.tsx` now exist (15 tests each, written as characterisation tests before the
+  migration). C3 had had to verify those two sites by DOM capture instead.
 - **2026-10-22 — C3: `cn()` reorders conflicting classes; that is not a bug.** `UpdateSection`'s
   `text-ui-base` override renders as `text-destructive text-ui-base` (attribute string reordered,
   utility set identical). Any later task claiming "byte-identical class string" must mean the
