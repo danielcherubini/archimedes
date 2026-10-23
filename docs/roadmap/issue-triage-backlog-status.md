@@ -49,6 +49,10 @@ Windows-arm check (only T8 needs it; see the T8 note):
 Baseline measured at `a6e3f02` (branch `main`, v0.6.0): ALL FIVE GREEN — 3049 FE tests / 149 files,
 1355 Rust tests, clippy 0 warnings, fmt clean. Nothing was red before this work started.
 
+**CURRENT figures (update on every task):** Rust 1360 / 0 failed / 4 ignored, clippy 0 warnings, fmt
+clean; FE 3051 tests / 149 files; build exit 0. New tests added so far: +5 Rust (T1), +2 FE (T2),
+plus the T3 shell harnesses (71 + 131 `ok` assertions, not counted by pnpm/cargo).
+
 ## Why the waves collapsed to serial — DO NOT "fix" this by re-parallelising
 
 The original decomposition declared 5 waves. **Wave 1a is the only surviving wave.** Measured, not
@@ -84,12 +88,12 @@ Consequences, all deliberate:
 
 | # | Task | Issue | Wave | Seam (disjointness evidence) | Status |
 |---|------|-------|------|------------------------------|--------|
-| T1 | `parse_value` strips trailing `#` comments, mirroring pi | #11 | serial | `src-tauri/src/skills.rs`, `src-tauri/tests/skills.rs` | `todo` |
+| T1 | `parse_value` strips trailing `#` comments, mirroring pi | #11 | serial | `src-tauri/src/skills.rs`, `src-tauri/tests/skills.rs`, `src-tauri/src/agents.rs` (doc comment only) | `done` `142ef2f` |
 | T2 | SkillsDialog stops inserting a dead `$name` token | #10 | 1a | `src/components/SkillsDialog.tsx` + `.test.tsx` | `done` `863eec6` |
 | T3 | Inverse sig-completeness check; composer fails on an unsigned target | #41(d) | 1a | `scripts/compose-updater-manifest.sh`, `.test.sh`, `.github/workflows/release.yml`, `AGENTS.md` | `done` `2a3f8df` |
 | T4 | MCP callback HTTP response + clear `NeedsAuth` after auth | #46 | serial | `src-tauri/src/agent/mcp/callback.rs`, `agent/mcp/manager.rs` | `todo` |
 | T5 | Protected-dir refusal names a sanctioned route | #33 | serial | `agent/tools/exec/access.rs`, `agent/tools/exec/tests/policy.rs`, `agent/harness/loop/tests/policy_gate.rs` | `todo` |
-| T6 | `find`/`grep` get the Space cwd; make the scrub observable | #81 | serial | `agent/tools/exec/search.rs`, `agent/tools/exec/tests/search.rs`, `agent/hostenv.rs` | `todo` |
+| T6 | `find`/`grep` get the Space cwd; make the scrub observable | #81 | serial | `agent/tools/exec/search.rs`, `agent/tools/exec/tests/search.rs`, `agent/tools/exec/tests/bash_hostenv.rs`, `agent/hostenv.rs` | `todo` |
 | T7 | MCP bare-call false success + token expiry/refresh | #68 | serial | `agent/mcp/tool.rs`, `agent/mcp/oauth.rs`, `agent/mcp/manager.rs` (after T4) | `todo` |
 | T8 | Windows `cmd /C` via `raw_arg` + truthful bash tool description | #79 | serial | `agent/childproc.rs`, `agent/tools/exec/bash.rs`, `agent/tools/exec/tests/bash.rs`, `agent/harness/tool_specs.rs` | `todo` |
 | T9 | `unknown_param_warning` + `SUBAGENT_GUIDANCE` + advertise `thinking` | #78 | serial | `agent/harness/tool_specs.rs`, `agent/harness/prompt.rs`, `agent/harness/loop/turn.rs`, `agent/harness/loop/tests/*` | `todo` |
@@ -122,6 +126,15 @@ was deliberately NOT done, including the two items needing a human decision.
   new `UNMENTIONABLE_ROW_REASON` doc instead. ADR 0036's Rust-side doc comments on
   `skills::is_mentionable_name` / `exec_read_skill` under-count the frontend surfaces for the same
   reason: Rust-doc-only, deliberately kept out of a frontend-only task. → follow-ups file.
+- 2026-10-23 — **The KNOWN GAP comment in `exec/search.rs` has the wrong model, and #81 understates the
+  defect.** The comment claims `fd` prints relative to its cwd so changing cwd changes the post-processing.
+  Measured: `fd` echoes the search path as given (its `strip_current_dir` is only a `strip_prefix(".")`),
+  and both tools always receive a canonical absolute root — so output is cwd-independent and **no flag is
+  needed**. What the missing cwd actually breaks is `rg`'s cwd-relative `-g` globs: reproduced on this
+  box, `rg -g 'sub/*' -- needle <abs space>` returns 0 matches with **exit 0** when cwd is not the Space.
+  So under `AppRun.c`'s `chdir("$APPDIR/usr")` every directory-scoped `grep` silently reports "nothing
+  found" — a false negative, not cosmetic. T6's plan is written against the measurement, not the comment.
+
 - 2026-10-23 — **Wave 1a held.** T2 and T3 committed as two disjoint pathspec commits (`863eec6`,
   `2a3f8df`); full suite run once after the wave, green. Every task from T1 onward is SERIAL.
 
@@ -131,4 +144,8 @@ was deliberately NOT done, including the two items needing a human decision.
 - `2a3f8df` — T3 (#41d) inverse sig-completeness gate + composer `--require-payload`. Gate after:
   Rust 1355 / 0 failed / 4 ignored, clippy 0 warnings, fmt clean, FE green, new harness 71 ok,
   composer harness 131 ok. All three mutation probes turned their named cases RED.
+- `142ef2f` — T1 (#11) `strip_trailing_comment`, one shared helper for both readers. Gate after:
+  Rust **1360** / 0 failed / 4 ignored (+5 tests), clippy 0, fmt clean, FE 3051 / 149 unchanged.
+  RED evidence was the issue's own fixture resolving to the name `a # note`.
+- `159a124` — plans for T5/T6 (docs only, no gate needed).
 - Current gate figures live in the Gate section above; the numbers here are what they were then.
