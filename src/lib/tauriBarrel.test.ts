@@ -361,18 +361,20 @@ describe("the scanner actually reads the tree", () => {
           stripJsComments(readFileSync(f, "utf8")),
         ),
     );
-    // SET SIZE, pinned: 33 files mock the barrel by path. The number may only
-    // move when a test file is added or removed, in a commit that says so.
-    expect(mockers).toHaveLength(33);
-    // 32 of the 33 SPREAD `vi.importActual`, which is the shape that makes the
-    // seam forgiving: an unlisted export still resolves. The 33rd replaces the
-    // module wholesale, so a name it forgets is `undefined` — the case the
+    // SET SIZE, pinned: 34 files mock the barrel by path. The number may only
+    // move when a test file is added or removed, in a commit that says so — this
+    // one moved 33 -> 34 when D2 added `useSettingsDocument.test.ts`, which mocks
+    // the barrel the documented way.
+    expect(mockers).toHaveLength(34);
+    // 33 of the 34 SPREAD `vi.importActual`, which is the shape that makes the
+    // seam forgiving: an unlisted export still resolves. The remaining one replaces
+    // the module wholesale, so a name it forgets is `undefined` — the case the
     // pinned-surface assertion below covers.
     expect(
       mockers.filter((f) =>
         /vi\.importActual/.test(readFileSync(f, "utf8")),
       ).length,
-    ).toBe(32);
+    ).toBe(33);
   });
 });
 

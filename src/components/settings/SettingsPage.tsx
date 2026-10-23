@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ReactElement } from "react";
 import {
   ArrowLeftIcon,
@@ -11,14 +11,11 @@ import {
   Settings2Icon,
 } from "lucide-react";
 
-import { applySettingsToDocument } from "@/lib/settings";
 import { getAppInfo } from "@/lib/version";
 import {
-  getSettings,
   listKnownProviders,
   listModels,
   listTools,
-  saveSettings,
   shellSandboxAvailable,
   type AppSettings,
   type AgentOverrides,
@@ -30,7 +27,7 @@ import {
 } from "@/lib/tauri";
 import { Button } from "@/components/ui/button";
 import { SettingsSidebarButton } from "./primitives";
-import { useSettings } from "@/store/settings";
+import { useSettingsDocument } from "@/hooks/useSettingsDocument";
 import GeneralSection from "./GeneralSection";
 import AppearanceSection from "./AppearanceSection";
 import ProviderSection from "./ProviderSection";
@@ -117,7 +114,11 @@ function remapModelRefs(
  * fields commit on blur/Enter; no save button, no dirty state).
  */
 export default function SettingsPage({ onBack }: { onBack: () => void }): ReactElement {
-  const [settings, setSettings] = useState<AppSettings | null>(null);
+  // THE settings document, from its one owner (`useSettingsDocument`): the store,
+  // loaded on mount, saved + re-applied by `patch`. The page used to keep a second
+  // copy of it in `useState` and mirror it into the store by hand at two sites, so
+  // within this screen two things owned one document (finding 13a).
+  const { settings, patch: update } = useSettingsDocument();
   const [section, setSection] = useState<Section>("general");
   const [models, setModels] = useState<ModelDto[]>([]);
   // The known-providers catalog (ADR 0024 — the Providers section's picker
@@ -142,21 +143,11 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
   // The MCP add/edit dialog draft (`null` = closed — a fresh draft per open
   // so a Cancel never leaks the draft into the next open).
   const [mcpDialog, setMcpDialog] = useState<McpDraft | null>(null);
-  // The theme cleanup is HELD IN A REF and replaced on each apply —
-  // discarding it would leak a `matchMedia` listener per control change
-  // (`applySettingsToDocument` subscribes one for "system" themes).
-  const themeCleanupRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
-    // The page's single source of truth: the settings document.
-    getSettings()
-      .then((settings) => {
-        setSettings(settings);
-        // Keep the app-wide store in sync (the working-indicator spinner
-        // style reads it at runtime — the boot path seeds it too).
-        useSettings.getState().setSettings(settings);
-      })
-      .catch(() => {});
+    // The page's own picker data — NOT the settings document, which
+    // `useSettingsDocument` loads through the store. Each fetch degrades to its
+    // own empty/not-offered value: a section is never built on an assumption.
     listModels()
       .then(setModels)
       .catch(() => {});
@@ -175,9 +166,6 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
         console.error("loading the known-providers catalog failed", error);
         setKnownProviders([]);
       });
-    return () => {
-      themeCleanupRef.current?.();
-    };
   }, []);
 
   /**
@@ -215,21 +203,9 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
       ? storedLevel
       : null;
 
-  /** The immediate-save pattern (one helper, used by every control). */
-  const update = (patch: Partial<AppSettings>) => {
-    if (settings === null) return;
-    const next = { ...settings, ...patch };
-    setSettings(next);
-    // The app-wide store (the working indicator reads `spinnerStyle` from
-    // it — a settings change must take effect without a reload).
-    useSettings.getState().setSettings(next);
-    void saveSettings(next); // the complete document
-    themeCleanupRef.current?.(); // drop the previous theme listener
-    themeCleanupRef.current = applySettingsToDocument(next); // live theme/font
-  };
-
   /**
-   * A provider field commit (immediate save): `update` + re-run the changed
+   * A provider field commit (immediate save): `update` (the document hook's
+   * `patch`) + re-run the changed
    * provider's discovery (Task 2's `force_refresh` bypasses its cache).
    * The id is derived from the name: a committed name (a non-blank slug)
    * that differs from the current id re-identifies the provider — the
