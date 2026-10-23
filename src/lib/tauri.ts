@@ -21,16 +21,27 @@
  *     import { startSession } from "@/lib/tauri";                    // correct
  *     import { startSession } from "@/lib/tauri/commands/sessions";  // WRONG
  *
- * The reason is a TEST SEAM, not taste. 35 test files `vi.mock` `@/lib/tauri` BY
- * MODULE PATH (34 of them spreading `vi.importActual`), and `vi.mock`
- * intercepts only the calls that travel THROUGH the path it was given. So a
- * single direct import of a domain module makes every test that mocked that
- * function **silently stop intercepting — and still pass, against real IPC.**
- * That failure is invisible in a diff and invisible in a green suite, so it is
- * gated mechanically: `src/lib/tauriBarrel.test.ts` scans the import graph
- * (test files included, because a test that imports a domain module bypasses its
- * own mock) and reddens on the first direct import. The same file pins this
- * module's export set to the 107 names measured before the split, so a forgotten
+ * The reason is a TEST SEAM, not taste. Many test files `vi.mock` `@/lib/tauri`
+ * BY MODULE PATH (the exact count is pinned in `src/lib/tauriBarrel.test.ts` and
+ * deliberately stated nowhere else — every prose copy of it has gone stale at
+ * least once), and `vi.mock` intercepts only the calls that travel THROUGH the
+ * path it was given. So a single direct import of a domain module makes the tests
+ * that mocked that function stop intercepting it.
+ *
+ * HOW BADLY THAT SHOWS UP, measured rather than assumed, because the claim this
+ * comment used to make ("invisible in a green suite") was too strong: importing
+ * `saveSettings` from `tauri/commands/settings.ts` reddened **37 tests**, and
+ * bypassing `shellSandboxAvailable` — a function no test asserts on directly —
+ * still reddened one, through a render dependency. So when the bypassed function
+ * is mocked, the suite usually does catch it. The case the suite CANNOT see is a
+ * hand-rolled `invoke("…")` in a component, which touches no mock at all: that
+ * passed the whole suite and `tsc`. Both are gated mechanically anyway, because
+ * "usually caught" is not a property to build on —
+ * `src/lib/tauriBarrel.test.ts` scans the import graph (test files included,
+ * because a test that imports a domain module bypasses its own mock) and reddens
+ * on the first direct import, and `src/lib/tauriBoundary.test.ts` reddens on any
+ * Tauri wire import outside the IPC modules. The first file also pins this
+ * module's export set to the names measured before the split, so a forgotten
  * re-export cannot hide either.
  *
  * It is a PURE surface — no logic lives here. A function the split failed to

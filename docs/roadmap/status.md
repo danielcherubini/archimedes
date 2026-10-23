@@ -166,6 +166,71 @@ Plan status: **COMPLETE except D5, deliberately deferred** (D1→D3→D2→D4 sh
 
 Record every autonomous decision here so a later iteration does not re-litigate it.
 
+- **2026-10-23 — Task "12 of 20" was a stale re-delivery of D1; D1 is DONE and there is nothing to
+  resume.** The instruction ("`src/lib/tauri.ts` is 1,259 lines, 10 domains, 4 moved, 6 remain, the rest
+  mechanically identical") describes a state that has never existed on this branch: the file is 178
+  lines, 11 domain modules exist, 0 remain, and D1 shipped in 12 commits (`9fa594e`→`c4c10a0`). "10
+  domains" and "6 remaining" appear in no file in the repo. **The instruction was internally consistent
+  and completely false** — which is the failure mode of a loop that reads a task text more readily than
+  it reads `git log`. Before starting any task in the morning: `git log --oneline -15` and the guard
+  tests, THEN the task text. If they disagree, the tree wins. See the re-entry guard above this log.
+- **2026-10-23 — I did NOT manufacture the 6 missing moves, and that was the whole judgement of the
+  night.** Six more commits relocating 58 interfaces from `tauri/types.ts` into per-domain files would
+  have changed no import (the barrel is the only legal entry point, enforced), no behaviour, and no
+  line count anyone reads — at two gate runs apiece. The plan had already rejected that boundary in
+  advance: "consider keeping types in ONE module rather than scattering them by subject, since they
+  cross-cut." **A task description is not acceptance criteria.** Where they conflict, say so in the
+  commit and record the conflict; do not let the diff grow to match the prose.
+- **2026-10-23 — "the last two moves took 40 min, most of it the test suite" is FALSE, and it was worth
+  measuring before optimising.** Timed at `55d22ec`: `pnpm build` **15 s**, `pnpm test` **103 s**
+  (148 files / 3042 tests), the barrel scanner alone **3 s**. The full gate is under two minutes, so it
+  cannot have eaten 40. The 40 minutes was the loop's own protocol around each move — plan section,
+  subagent dispatch, review round, re-dispatch on truncation — not the gate. **Do not build a faster
+  test harness for this program; there is nothing to win.** If a future task is genuinely slow, time
+  the two commands first and believe the stopwatch over the memory.
+- **2026-10-23 — the mock-seam hazard is LOUDER than this file and `tauri.ts` both claimed, and I
+  measured it rather than repeating the claim.** `tauri.ts` says a bypass is "invisible … in a green
+  suite". Planted the exact bug — `useSettingsDocument.ts` importing `saveSettings` from
+  `tauri/commands/settings.ts` instead of the barrel — and **37 tests failed across
+  `useSettingsDocument.test.ts` and `SettingsPage.test.tsx`**. The suite catches it *when an assertion
+  depends on the mocked function*. The genuinely silent case is the other one: a hand-rolled
+  `invoke("delete_session")` planted in `SpaceTabs.tsx` passed **all 3,047 pre-existing tests** and
+  `pnpm build`, because it never touches a mock at all. Three bypass attempts were planted and the
+  suite reddened on the two that went through a mocked function (`saveSettings` → 37 failures;
+  `shellSandboxAvailable`, which no test asserts on directly, → 1 failure via an indirect render
+  dependency) and stayed completely green on the one that bypassed mocking entirely. So the precise
+  rule is: **a bypass of a *mocked* function is usually caught by the suite; a hand-rolled IPC call is
+  caught by nothing but the scanner** — and the second case is the one a reviewer cannot see in a diff
+  either. That is a stronger argument for `tauriBoundary.test.ts` and `tauriBarrel.test.ts` than the
+  absolute claim it replaces. Absolute claims about detection are as dangerous as absolute claims about
+  counts.
+- **2026-10-23 — finding 12's third clause finally has an owner (`5a937a8`).** The report's
+  "undocumented parallel IPC modules" (`lib/update.ts`, `lib/version.ts`) was handed by B2 to D1, and
+  D1's plan never mentions them, so it sat unowned for 95 commits. Now pinned by
+  `src/lib/tauriBoundary.test.ts` (outgoing-edge guard, 6 tests, ~3 s) with the two files named in a
+  literal allowlist and the reasons in follow-up item 10. **The boundary had never been enforced by
+  anything** — the report's "0 call sites outside it" was a measurement of a commit, copied into two
+  documents, and mistaken for a property.
+- **2026-10-23 — two bugs I wrote into the new scanner, both caught by habits this program built.**
+  (1) `.filter((line) => !/^\s*\/\//)` — a RegExp object is truthy, so negated it drops EVERY line and
+  the scanner silently read **0 files**; it took several confused debug rounds to find because the
+  helper is character-identical to the working inline chain. It was found at all only because the file
+  opens with a vacuity guard (`expect(productionIpcImporters().length).toBeGreaterThan(0)`) — without
+  that one line all six tests would have passed while reading nothing. **Every scanner in this repo
+  must ship a vacuity guard; it is the only thing that catches a blind scanner.** (2) Matching
+  `["']@tauri-apps/api/core["']` bare flags PROSE as a dependency — `tauriBarrel.test.ts` passes that
+  string as an argument to its own resolver and was reported as an unmocked IPC import. Match the
+  import shape, not the token: the lesson `themeTokens.test.ts` already records. (3) I also wrote
+  "30+ files mock `invoke` at that path" — the real figure is **4** — and "the review is the only place
+  that number lives", which is false, the plan repeats it too. Both corrected before commit.
+- **2026-10-23 — Phase D and all four phases are CLOSED; the only open work is the 10 follow-ups.**
+  `status.md` has **zero tasks with Status `todo`**. A loop iteration that finds none must not invent
+  scope: the correct end state is to say the plan is finished. What is NOT done is the ship sequence
+  (the `review` skill loop, the PR, then deleting `status.md` + the plan per AGENTS.md). **I did not
+  open a PR at 4am.** The branch is 95+ commits and pushed; a PR opened unattended cannot be answered
+  if review comes back, and deleting the loop's memory files is irreversible. Both are one command for
+  a human in the morning.
+
 - **2026-10-22 — Plan vetting: 2 rounds, 6 blocking errors found and fixed.** The reviewers
   were right and the plan was wrong about its own citations. Fixed: (1) **A5** — wrapping
   `{spaces.map()}` in a `role="tablist"` div was wrong: the pill holds BOTH the `role="tab"`
@@ -559,6 +624,37 @@ An earlier pass at this lesson claimed "~45% stale" and "the C7 table's were 32/
 started". Neither was reproducible when checked — the C7 section's 22 citations are **0/22 provably dead**
 today — and the 45% was a reviewer's estimate I adopted without measuring. Both are gone; the numbers
 above are ones I ran.
+
+## 🔴 Task-12 re-entry guard — READ THIS BEFORE TOUCHING `lib/tauri` AGAIN
+
+A later iteration was handed this task text: *"Split `src/lib/tauri.ts` (1,259 lines) by domain
+… you've moved 4 of 10 domains, 6 remain, mechanically identical."* **That description is false at
+HEAD and was false when it was written.** It is a stale snapshot of a finished task, not a resume
+point. Measured at `55d22ec`:
+
+| the task asserts | the tree |
+|---|---|
+| `src/lib/tauri.ts` is 1,259 lines | **178** lines, zero `invoke`, zero `listen` |
+| 4 of 10 domains moved, 6 remain | **11 domain modules exist; 0 remain** |
+| work is in progress | D1 shipped `9fa594e`→`c4c10a0`, 12 commits, recorded `done` above |
+
+The "10 domains" and "6 remaining" figures appear **nowhere** in this repo — not in the report, the
+plan, this file, or any follow-up. They cannot be resumed from, because they were never true here.
+The 1,259-line figure is the report's own **pre-split** measurement of a file that no longer exists
+in that shape; `docs/reviews/2026-10-22-codebase-improvement.md` heading 12 still reads
+"one 1,259-line seam", and that heading is the only reason the number survives.
+
+**Do not "finish" D1.** If a task description conflicts with `git log` and a green guard test, the
+guard test wins. The 1,259 lines went to `tauri/types.ts` (877) + 9 `tauri/commands/*.ts` +
+`tauri/events.ts` (138), and `tauriBarrel.test.ts` pins the whole surface at **107 names / 49
+runtime values** (measured from the two literal lists in that file — the counts live there, per
+follow-up item 9, not here).
+
+**If you are tempted to split `types.ts` by subject to manufacture the missing 6 moves: don't.** The
+plan rejected that boundary in advance — "consider keeping types in ONE module rather than scattering
+them by subject, since they cross-cut". Six more commits of moving 58 interfaces between files would
+change no import, no behaviour and no line count that matters, at ~2 gate runs each. **D1 is done;
+take the next task or stop.**
 
 ## Blockers / open questions (resolve by deciding, not by asking)
 
