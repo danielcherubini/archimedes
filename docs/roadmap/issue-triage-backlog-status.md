@@ -49,11 +49,10 @@ Windows-arm check (only T8 needs it; see the T8 note):
 Baseline measured at `a6e3f02` (branch `main`, v0.6.0): ALL FIVE GREEN — 3049 FE tests / 149 files,
 1355 Rust tests, clippy 0 warnings, fmt clean. Nothing was red before this work started.
 
-**CURRENT figures (update on every task):** Rust 1369 / 0 failed / 4 ignored, clippy 0 warnings, fmt
-clean; FE 3051 tests / 149 files; build exit 0. New tests so far: +5 Rust (T1), +2 FE (T2), +3 Rust
-(T4), 0 new (T5, wording only), +6 Rust (T6); plus the T3 shell harnesses (71 + 131 `ok` assertions,
-not counted by pnpm/cargo). The `agent::hostenv` module's test count is platform-split (16 Linux /
-7 elsewhere) — pinned by its own module doc, read it there.
+**CURRENT figures (update on every task):** Rust 1385 / 0 failed / 4 ignored, clippy 0 warnings, fmt
+clean, `cargo check --target x86_64-pc-windows-gnu --all-targets` green; FE 3051 tests / 149 files;
+build exit 0. The `agent::hostenv` module's test count is platform-split (16 Linux / 7 elsewhere) —
+pinned by its own module doc, read it there.
 
 ## Why the waves collapsed to serial — DO NOT "fix" this by re-parallelising
 
@@ -96,8 +95,8 @@ Consequences, all deliberate:
 | T4 | MCP callback HTTP response + clear `NeedsAuth` after auth | #46 | serial | `src-tauri/src/agent/mcp/callback.rs`, `agent/mcp/manager.rs` | `done` `c71bb7b` |
 | T5 | Protected-dir refusal names a sanctioned route | #33 | serial | `agent/tools/exec/access.rs`, `agent/tools/exec/tests/policy.rs`, `agent/harness/loop/tests/policy_gate.rs` | `done` `e5ae57e` |
 | T6 | `find`/`grep` get the Space cwd; make the scrub observable | #81 | serial | `agent/tools/exec/search.rs`, `agent/tools/exec/tests/search.rs`, `agent/tools/exec/tests/bash_hostenv.rs`, `agent/hostenv.rs` | `done` `f571a0b` |
-| T7 | MCP bare-call false success + token expiry/refresh | #68 | serial | `agent/mcp/tool.rs`, `agent/mcp/oauth.rs`, `agent/mcp/manager.rs` (after T4) | `todo` |
-| T8 | Windows `cmd /C` via `raw_arg` + truthful bash tool description | #79 | serial | `agent/childproc.rs`, `agent/tools/exec/bash.rs`, `agent/tools/exec/tests/bash.rs`, `agent/harness/tool_specs.rs` | `todo` |
+| T7 | MCP bare-call false success + token expiry/refresh | #68 | serial | `agent/mcp/tool.rs`, `agent/mcp/oauth.rs`, `agent/mcp/manager.rs` (after T4) | `done` `d2cb1fa` |
+| T8 | Windows `cmd /C` via `raw_arg` + truthful bash tool description | #79 | serial | `agent/childproc.rs`, `agent/tools/exec/bash.rs`, `agent/tools/exec/tests/bash.rs`, `agent/harness/tool_specs.rs`, ADR 0060 | `done` `70bffe1` |
 | T9 | `unknown_param_warning` + `SUBAGENT_GUIDANCE` + advertise `thinking` | #78 | serial | `agent/harness/tool_specs.rs`, `agent/harness/prompt.rs`, `agent/harness/loop/turn.rs`, `agent/harness/loop/tests/*` | `todo` |
 | T10 | A child start signal that never reaches the main-prompt arm | #9 | serial | `agent/worker/protocol.rs`, `agent/worker/core.rs`, `agent/worker/manager/subagent_flow.rs`, `agent/worker/manager/tests/mod.rs` | `todo` |
 | T11 | A resolve miss is observable on `subagent-session-started` | #47 → #78 | serial | `agent/harness/launch.rs`, `agent/worker/protocol.rs`, `agent/worker/manager/subagent_flow.rs`, `src/store/subagents.ts`, `src/components/SubagentDelegatingCard.tsx` | `todo` |
@@ -150,6 +149,18 @@ was deliberately NOT done, including the two items needing a human decision.
   path does run. Strike item (b). T8's planner also handed back a stale paragraph in
   `docs/research/windows-child-console-window.md`. → follow-ups file.
 
+- 2026-10-23 — **Doc corrections handed back, not folded into task commits** (T6/T8 precedent):
+  (a) `docs/research/appimage-child-process-env-leak.md` §Gaps item (b) — `--max-results` IS a real fd
+  flag; strike it. (b) `docs/research/windows-child-console-window.md` line ~133 and the first
+  follow-ups bullet still describe #79 as open — they now read CLOSED by `70bffe1` (`raw_arg` +
+  `/d /s /c` through childproc, invariant E); the follow-ups list legitimately keeps `sudo_exec` on
+  Windows, the Windows process-group kill, and the non-Linux relaunch. → follow-ups file.
+- 2026-10-23 — **T9's planner found a same-class credibility bug outside this roadmap's scope**:
+  `fetch_content`/`get_search_content` advertise params their schemas don't carry (six functional keys,
+  e.g. `findText`), and fetch_content's own truncation note tells the model to use `responseId`. When
+  T9's checker ships it will start warning on those tools' legal-looking calls. Needs its own issue:
+  fix the schemas, or the warning fires on the web tools constantly. → follow-ups file + file it.
+
 ## Changelog
 
 - `863eec6` — T2 (#10) Skills dialog inert rows. Gate after: FE 149 files / **3051 tests** (+2), build 0.
@@ -171,4 +182,12 @@ was deliberately NOT done, including the two items needing a human decision.
   **1369** / 0 / 4 (+6), clippy 0, fmt clean, FE unchanged. Implementer re-measured fd/rg and confirmed
   the plan over the code's old gap comment — and found fd's own `-g` is cwd-independent too, so `find`
   never had the glob bug; only `rg` did.
+- `d2cb1fa` — T7 (#68) skipped servers fail the call; expired tokens refresh, persisted; auth-file
+  injection closes T4's recorded gap. Gate after: Rust **1381** / 0 / 4 (+12), clippy 0, fmt clean,
+  FE unchanged. Corrected its plan's self-contradiction with the `miss_result` helper (healthy path
+  byte-identical and still `ok`).
+- `70bffe1` — T8 (#79) `append_cmd_c` + census invariant E; per-platform bash description; 4 decision
+  tests un-gated from `cfg(unix)`. Gate after (orchestrator-verified): Rust **1385** / 0 / 4, clippy 0,
+  fmt clean, gnu `--all-targets` green, FE unchanged. cmd.exe behaviour is CI-windows-only by
+  construction; the compile proof was itself proved with planted type errors.
 - Current gate figures live in the Gate section above; the numbers here are what they were then.
