@@ -506,6 +506,11 @@ Record every autonomous decision here so a later iteration does not re-litigate 
 
 ## Final review round (2026-10-23) — the code passed, the documentation did not
 
+**Suite size at ship: 148 files / 3042 tests** (`pnpm test`, ~96 s); `pnpm build` clean; `cargo test`
+1241 passed; `cargo clippy --all-targets` 0 warnings; `cargo fmt --check` clean. Every "N files / M
+tests" figure elsewhere in this file is a HISTORICAL entry for the phase it sits under — none of them is
+current, and no per-phase line was ever meant to be read as the live number.
+
 Three parallel reviewers (Phase A+B+C-first-half, Phase C-second-half+D, and a docs-accuracy auditor)
 over 95 commits. **No reviewer found a defect in the shipped code.** Every finding was in the record.
 That is worth naming, because a program whose whole thesis is "verify before you assert" produced a
