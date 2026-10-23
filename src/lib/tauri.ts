@@ -45,8 +45,6 @@ import type {
   InteractiveEventPayload,
   InteractiveRequestClosePayload,
   InteractiveRequestPayload,
-  InteractiveResponseDto,
-  PermissionOutcome,
   PermissionRequestPayload,
   SessionClosedPayload,
   SessionTitledPayload,
@@ -165,14 +163,10 @@ export {
   listCompletionEntries,
 } from "./tauri/commands/catalogs";
 
-
-export async function respondPermission(
-  sessionId: string,
-  requestId: string,
-  outcome: PermissionOutcome,
-): Promise<void> {
-  return invoke("respond_permission", { sessionId, requestId, outcome });
-}
+export {
+  respondPermission,
+  respondInteractiveRequest,
+} from "./tauri/commands/gates";
 
 
 // ---------------------------------------------------------------------------
@@ -327,21 +321,6 @@ export function listenSubagentClosed(
   return listen<SubagentClosedPayload>(IPC_EVENTS.subagentClosed, (event) =>
     callback(event.payload),
   );
-}
-
-
-/**
- * Answer an interactive request. The invoke key is `result` (the Rust command's
- * `result: serde_json::Value` param — Tauri's camelCase↔snake_case handles
- * `sessionId`/`requestId` but will not alias `response`↔`result`). The
- * `result` is written into the response frame verbatim (no wrapper).
- */
-export async function respondInteractiveRequest(
-  sessionId: string,
-  requestId: string,
-  result: InteractiveResponseDto,
-): Promise<void> {
-  return invoke("respond_interactive_request", { sessionId, requestId, result });
 }
 
 
