@@ -546,32 +546,31 @@ record that needed 20+ corrections while its code stood up.
   recorded decision. `noUnusedLocals: true` makes de-exporting self-checking — tsc fails if a reader
   existed. *Class: declaring a phase complete against an enumerated task list instead of the criterion.*
 
-**The one structural lesson:** ~45% of the `file:line` citations in the two roadmap docs are stale, and
-the C7 table's were 32/37 dead **before** C7 started. Line numbers are the wrong unit for a durable
-pointer. **Cite the assertion** — an `it(...)` name, a named const, a symbol. Three of today's five
-corrections were pure line-drift and would not have existed.
+**The one structural lesson: cite the assertion, not the address.** Measured at ship, not estimated: of
+the **159** `file:line` citations in these two docs, **4 are provably dead** (the line is past the file's
+end — `tauri.ts:958` and `:282` in a file now 179 lines long, `ChatStream.tsx:1915` in one now 1551).
+Weaker but closer to what actually misleads: sampling 30 citations and checking whether the cited line
+still contains the symbol the prose attached to it, **11 of the 19 that were checkable failed**. So the
+true rate of "stale enough to point somewhere wrong" sits between 2% and ~40% and nobody has measured it
+exactly — which is itself the argument. A line number you cannot check is a line number you cannot trust;
+an `it(...)` name, a named const or a symbol survives every edit that moves it.
+
+An earlier pass at this lesson claimed "~45% stale" and "the C7 table's were 32/37 dead before C7
+started". Neither was reproducible when checked — the C7 section's 22 citations are **0/22 provably dead**
+today — and the 45% was a reviewer's estimate I adopted without measuring. Both are gone; the numbers
+above are ones I ran.
 
 ## Blockers / open questions (resolve by deciding, not by asking)
 
-Nothing blocks the merge. These are the **decisions left open on purpose** — each has a place to go, so
-none is lost when the plan file is deleted on ship:
+**Nothing blocks the merge.** The open decisions live in
+`frontend-component-extraction-follow-ups.md` — nine of them, each with its status and the reason it was
+left. That file exists because this one and the plan are **deleted on ship**, and until now every
+"deliberately not fixed" note in this file was scheduled to vanish with it. Precedent:
+`compaction-recovery-hardening-follow-ups.md`, which has been carrying resolved and accepted items since
+2026-10-14 and names the same symbol-not-line citation rule this file's review round arrived at.
 
-- **`SubagentTranscript.tsx:171`** — a 10th inline `text-destructive` line inside a `MutedCaption`, with
-  no `role="alert"`. Decide: status line (leave it) or error line (give it the role). C3 shipped nine
-  sites deliberately; this is the one with no recorded decision.
-- **`SessionConfigSelect.tsx:261,:337`** — hand-spell `IpcErrorLine`'s exact class + `role="alert"`.
-  Out of C3's scope, and C1 touched the component without folding them, so `IpcErrorLine.tsx`'s
-  doc-comment points at a task that never owned them. Either fold them or record why the floating
-  `absolute`-positioned variant must stay hand-written.
-- **`useSettingsDocument.patch`** reads the RENDERED document, so two patches in one batch compose from
-  the same base and the second save drops the first. Documented and pinned as a deliberate
-  non-improvement; the `getState()` fix is a two-line change that needs its own commit and a flipped pin.
-- **`SubagentDelegatingCard`'s `details.progress`/`details.results` envelope is unreachable in the
-  current backend** (all five `ToolResult`s in `dispatch.rs` return `details: None`; no Rust source
-  emits `"progress"`). Left in place because `rawOutput` is persisted, so a resumed old session can
-  still carry one. Wants its own task with that evidence.
-- **D5 (glossary renames) stays deferred** until an ADR exists for the renames. The 0066 number
-  collision is fixed (history-window ADR → 0073, including 7 `src-tauri` citations).
+Do not restate those nine items here. This file is the loop's working memory and it is already the worst
+evidence in the repo of what happens when a fact is written down in six places.
 
 ## Changelog
 
