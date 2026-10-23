@@ -59,6 +59,8 @@ import AgentsDialog from "./AgentsDialog";
 import DeleteSessionDialog from "./DeleteSessionDialog";
 import SessionRail, { type SessionRailAction } from "./SessionRail";
 import { SessionStatusMark } from "./SessionStatusMark";
+import { SessionListRow } from "./SessionListRow";
+import { RowButton } from "./RowButton";
 import { EmptyListLine } from "./EmptyListLine";
 import { cn } from "./lib/utils";
 import { Kbd } from "./ui/kbd";
@@ -830,72 +832,18 @@ function SessionRow({
   const time = relativeTimeFor(messages);
   const title = titleFor(messages, spaceName, storedTitle);
 
-  const rightSlot =
-    time !== null ? (
-      <span className="text-ui-sm text-foreground-subtle">{time}</span>
-    ) : (
-      // Empty slot — keeps alignment when there is no loaded transcript.
-      <span className="size-4" />
-    );
-
-  return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={() => onOpen(sessionId)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") onOpen(sessionId);
-      }}
-      className={cn(
-        // The two arms are mutually exclusive and both land in the background
-        // group, so the merge is the identity: exactly one of `bg-selected` /
-        // `hover:bg-surface-hover` is present, which is what
-        // `SpacesList.test.tsx`'s `bg-selected` pin reads. Task C4 owns folding
-        // this row shell; the change here is only the `cn()` convention.
-        "group flex cursor-pointer items-center gap-2 rounded-lg pl-2.5 pr-1 py-1",
-        active ? "bg-selected" : "hover:bg-surface-hover",
-      )}
-    >
-      {/* The state glyph, in the slot the spinner already owned: a session that
-          is idle now wears a RING rather than nothing, which is the cue the
-          collapsed rail has always had and the expanded list has never shown.
-          16px = the slot's old `size-4`, so the title's indent is unchanged and
-          these rows still line up with `ArchivedSessionRow`, whose leading slot
-          is the same 16px. `dotSize={8}` halves the RING alone: the three
-          states are three different amounts of ink, and the ring is the only
-          one that reads as a solid chunk of paint, so at a shared 16px the
-          idle state outshouted the working state above it — inverting their
-          importance. The spinner and the `?` are outlines whose weight is what
-          makes them readable, and they keep the full slot. No `testId`: the
-          tests reach the mark through the STATE it paints (`[data-dot="…"]`) —
-          the hook that asserts what the user sees rather than which node
-          carried it. NO ink class either: the mark owns the ink
-          (`text-foreground` on the active row, `text-foreground-subtlest`
-          otherwise), and passing one from the row would fight it — which of two
-          same-specificity utility classes wins is a CSS source-order fact this
-          row cannot control. */}
-      <SessionStatusMark status={status} active={active} size={16} dotSize={8} />
-      <span
-        className="min-w-0 flex-1 overflow-hidden whitespace-nowrap text-ui-base text-foreground"
-        style={{
-          maskImage:
-            "linear-gradient(to right, black calc(100% - 1.5rem), transparent)",
-          WebkitMaskImage:
-            "linear-gradient(to right, black calc(100% - 1.5rem), transparent)",
-        }}
-      >
-        {title}
-      </span>
-      {/* Every row — live or stored — swaps the time for its actions at hover. The
-          live row used to render the time with no swap at all: the Pause button
-          was deleted and nothing replaced it, so a running Session had no way to
-          be stopped or put away without opening it first. */}
-      <span className="group-hover:hidden">{rightSlot}</span>
-      {/* Stop first: it is the action that pertains to a session that is RUNNING, so the
-          row reads left-to-right as "stop what's running, then put it away". The Archived
-          row keeps its destructive control OUTERMOST (Unarchive then Delete); this row
-          deliberately does not copy that — Archive is not destructive (ADR 0016:
-          reversible, and it never destroys a transcript). */}
+  // Stop first: it is the action that pertains to a session that is RUNNING, so the
+  // row reads left-to-right as "stop what's running, then put it away". The Archived
+  // row keeps its destructive control OUTERMOST (Unarchive then Delete); this row
+  // deliberately does not copy that — Archive is not destructive (ADR 0016:
+  // reversible, and it never destroys a transcript).
+  //
+  // The actions are plain `<button>`s, NOT `RowButton`: a `role="button"` inside
+  // the row would resolve every `.closest('[role="button"]')` read in
+  // `SpacesList.test.tsx` to the button instead of the row, and would turn each
+  // `rowOf(…).getByRole("button", …)` into a multiple-match throw.
+  const actions = (
+    <>
       {isLive && (
         <button
           type="button"
@@ -926,7 +874,33 @@ function SessionRow({
       >
         <ArchiveIcon className="size-4" />
       </button>
-    </div>
+    </>
+  );
+
+  // The state glyph, in the slot the spinner already owned: a session that
+  // is idle now wears a RING rather than nothing, which is the cue the
+  // collapsed rail has always had and the expanded list has never shown.
+  // `dotSize={8}` halves the RING alone: the three states are three different
+  // amounts of ink, and the ring is the only one that reads as a solid chunk of
+  // paint, so at a shared 16px the idle state outshouted the working state
+  // above it — inverting their importance. The spinner and the `?` are outlines
+  // whose weight is what makes them readable, and they keep the full slot. No
+  // `testId`: the tests reach the mark through the STATE it paints
+  // (`[data-dot="…"]`) — the hook that asserts what the user sees rather than
+  // which node carried it. The mark owns its own ink (`text-foreground` on the
+  // active row, `text-foreground-subtlest` otherwise) — see
+  // `SessionListRow`'s note on why the row must not pass one.
+  return (
+    <SessionListRow
+      title={title}
+      active={active}
+      time={time}
+      onOpen={() => onOpen(sessionId)}
+      leading={
+        <SessionStatusMark status={status} active={active} size={16} dotSize={8} />
+      }
+      actions={actions}
+    />
   );
 }
 
@@ -969,13 +943,8 @@ function ArchivedSection({
   );
   return (
     <div className="px-2.5 py-1">
-      <div
-        role="button"
-        tabIndex={0}
+      <RowButton
         onClick={() => setOpen(!open)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") setOpen(!open);
-        }}
         className="group flex cursor-pointer items-center gap-1 rounded-lg px-1 hover:bg-surface-hover"
       >
         <ArchiveIcon className="size-4 shrink-0 text-foreground-subtlest" />
@@ -990,7 +959,7 @@ function ArchivedSection({
         ) : (
           <ChevronRightIcon className="size-4 shrink-0 text-foreground-subtlest" />
         )}
-      </div>
+      </RowButton>
       {open && (
         <div className="mt-1 flex flex-col gap-0.5">
           {visible.length === 0 ? (
@@ -1044,66 +1013,50 @@ function ArchivedSessionRow({
   const spaceName = spaceNameFor(session.cwd, spaces);
   const title = titleFor(messages, spaceName, session.title);
   const time = relativeTimeFor(messages);
+  // Unarchive first, Delete OUTERMOST: Delete is the only destructive action on
+  // this row (confirm dialog), so it sits furthest from the content. The live
+  // row deliberately does NOT copy this rule — Archive there is reversible and
+  // never destroys a transcript (ADR 0016), so it can sit outside Stop.
+  //
+  // NO `leading` prop: an archived Session is NEVER live, so the leading slot is
+  // `SessionListRow`'s empty 16px spacer — the same width the status mark
+  // occupies, which is what keeps these rows aligned with the ones above.
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={() => onOpen(session.sessionId)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") onOpen(session.sessionId);
-      }}
-      className={cn(
-        // The live row's shell, one line above — see the note there.
-        "group flex cursor-pointer items-center gap-2 rounded-lg pl-2.5 pr-1 py-1",
-        active ? "bg-selected" : "hover:bg-surface-hover",
-      )}
-    >
-      <span className="size-4 shrink-0" />
-      <span
-        className="min-w-0 flex-1 overflow-hidden whitespace-nowrap text-ui-base text-foreground"
-        style={{
-          maskImage:
-            "linear-gradient(to right, black calc(100% - 1.5rem), transparent)",
-          WebkitMaskImage:
-            "linear-gradient(to right, black calc(100% - 1.5rem), transparent)",
-        }}
-      >
-        {title}
-      </span>
-      <span className="group-hover:hidden">
-        {time !== null ? (
-          <span className="text-ui-sm text-foreground-subtle">{time}</span>
-        ) : (
-          // Empty slot — keeps alignment when there is no loaded transcript.
-          <span className="size-4" />
-        )}
-      </span>
-      <button
-        type="button"
-        title="Unarchive"
-        aria-label={`Unarchive ${title}`}
-        onClick={(e) => {
-          e.stopPropagation();
-          void unarchiveSession(session.sessionId).catch((err) => {
-            console.error("Failed to unarchive session:", err);
-          });
-        }}
-        className="hidden size-6 items-center justify-center rounded-md group-hover:flex hover:bg-surface-hover"
-      >
-        <ArchiveXIcon className="size-4" />
-      </button>
-      <button
-        type="button"
-        title="Delete"
-        aria-label={`Delete ${title}`}
-        onClick={(e) => {
-          e.stopPropagation();
-          onDelete(session);
-        }}
-        className="hidden size-6 items-center justify-center rounded-md group-hover:flex hover:bg-surface-hover"
-      >
-        <Trash2Icon className="size-4" />
-      </button>
-    </div>
+    <SessionListRow
+      title={title}
+      active={active}
+      time={time}
+      onOpen={() => onOpen(session.sessionId)}
+      actions={
+        <>
+          <button
+            type="button"
+            title="Unarchive"
+            aria-label={`Unarchive ${title}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              void unarchiveSession(session.sessionId).catch((err) => {
+                console.error("Failed to unarchive session:", err);
+              });
+            }}
+            className="hidden size-6 items-center justify-center rounded-md group-hover:flex hover:bg-surface-hover"
+          >
+            <ArchiveXIcon className="size-4" />
+          </button>
+          <button
+            type="button"
+            title="Delete"
+            aria-label={`Delete ${title}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(session);
+            }}
+            className="hidden size-6 items-center justify-center rounded-md group-hover:flex hover:bg-surface-hover"
+          >
+            <Trash2Icon className="size-4" />
+          </button>
+        </>
+      }
+    />
   );
 }
