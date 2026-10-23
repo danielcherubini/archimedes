@@ -68,6 +68,11 @@ struct ServerEntry {
 pub struct McpManager {
     servers: BTreeMap<String, ServerEntry>,
     project_cwd: PathBuf,
+    /// The credentials file (`mcp-auth.json`). Production: `oauth::auth_file_path()`.
+    /// A field, not a call, so a test can drive the token paths against a temp
+    /// file instead of the developer's stored tokens (issue #68 — the read that
+    /// T4 left pointed at the real path).
+    auth_file: PathBuf,
 }
 
 impl McpManager {
@@ -98,7 +103,23 @@ impl McpManager {
         Self {
             servers,
             project_cwd,
+            auth_file: oauth::auth_file_path(),
         }
+    }
+
+    /// Point the credentials read/write at a specific file (the test seam —
+    /// every token test injects a temp path so it never touches the developer's
+    /// `mcp-auth.json`).
+    #[cfg(test)]
+    pub(crate) fn with_auth_file(mut self, auth_file: PathBuf) -> Self {
+        self.auth_file = auth_file;
+        self
+    }
+
+    /// A server's current state (`None` = no such server). For callers that must
+    /// report WHY a server was unavailable, not just that it was.
+    pub fn state_of(&self, name: &str) -> Option<&McpState> {
+        self.servers.get(name).map(|entry| &entry.state)
     }
 
     /// The server names (for the tests / the `status` action).
@@ -153,7 +174,7 @@ impl McpManager {
                 // An OAuth server: a `TokenProvider` (the stored token, if
                 // any; `None` → a 401 → `NeedsAuth`).
                 let get_token = if matches!(def.auth, AuthSpec::OAuth { .. }) {
-                    stored_token_provider(name)
+                    usable_token_provider(name, &self.auth_file).await
                 } else {
                     None
                 };
@@ -234,8 +255,10 @@ impl McpManager {
         name: &str,
         cancel: &CancellationToken,
     ) -> Result<String, String> {
-        self.authenticate_with(name, cancel, &oauth::auth_file_path())
-            .await
+        // Clone FIRST: `self.authenticate_with(…, &self.auth_file)` would borrow
+        // `*self` mutably (the receiver) and immutably (the argument) at once.
+        let auth_file = self.auth_file.clone();
+        self.authenticate_with(name, cancel, &auth_file).await
     }
 
     /// The body of `authenticate` with the credentials path injected (the test
@@ -306,13 +329,45 @@ impl McpManager {
     }
 }
 
-/// A `TokenProvider` for a server's stored token (the `mcp-auth.json` entry,
-/// if any; `None` → the request goes out unauthenticated → a 401 →
-/// `NeedsAuth`).
-fn stored_token_provider(server_name: &str) -> Option<TokenProvider> {
-    let map = oauth::load_credentials(&oauth::auth_file_path());
-    let stored = map.get(server_name)?;
-    let token = stored.token.clone();
+/// The stored token for a server, **refreshed first when it is expired**
+/// (issue #68). A refresh is async and needs an HTTP client, and the
+/// `TokenProvider` seam is a sync closure called per request — so the refresh
+/// happens HERE, before the closure is built, and the closure captures the
+/// token that survived.
+///
+/// `None` = nothing usable (no stored entry, or an expired token whose refresh
+/// failed or is forbidden by the ADR 0015 public-client guard). The request
+/// then goes out unauthenticated and the server's 401 marks the entry
+/// `NeedsAuth` — the honest fallback, and the same path a missing token already
+/// takes.
+///
+/// A FREE function (not a method): `ensure_connected` calls it while `entry`
+/// (a `self.servers` borrow) and `def` (an `entry.def` borrow) are live, so a
+/// `&self` receiver would be a double borrow.
+async fn usable_token_provider(server_name: &str, auth_file: &Path) -> Option<TokenProvider> {
+    let mut map = oauth::load_credentials(auth_file);
+    let stored = map.get(server_name).cloned()?;
+    let token = if stored.is_expired(oauth::now_epoch_secs()) {
+        eprintln!("mcp: {server_name}'s stored token is expired — trying the refresh_token grant");
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .ok()?;
+        // The ADR 0015 guard lives INSIDE `oauth::refresh` (a client with no
+        // secret returns `None` before it touches the network) — this call site
+        // must not grow its own copy of that decision.
+        let refreshed = oauth::refresh(&stored, &client).await?;
+        let token = refreshed.token.clone();
+        map.insert(server_name.to_string(), refreshed);
+        // A failed WRITE must not throw away a token we just earned: use it for
+        // this connection and let the next attempt retry the write.
+        if let Err(e) = oauth::save_credentials(auth_file, &map) {
+            eprintln!("mcp: persisting the refreshed token for {server_name} failed: {e}");
+        }
+        token
+    } else {
+        stored.token
+    };
     Some(Box::new(move || Some(token.clone())))
 }
 
@@ -337,11 +392,15 @@ pub async fn test_server(
             tools
         }
         ServerDef::Http(def) => {
-            // An OAuth server: the stored token for this server, if any.
-            let get_token = if matches!(def.auth, AuthSpec::OAuth { .. }) {
-                server_name.and_then(stored_token_provider)
-            } else {
-                None
+            // An OAuth server: the stored token for this server, if any
+            // (refreshed first when expired — the same seam the manager uses;
+            // `test_server` is a free function with no manager, so the real
+            // credentials path is correct here).
+            let get_token = match (server_name, &def.auth) {
+                (Some(n), AuthSpec::OAuth { .. }) => {
+                    usable_token_provider(n, &oauth::auth_file_path()).await
+                }
+                _ => None,
             };
             let mut client = HttpClient::connect(def, timeout, &cancel, get_token).await?;
             let tools = client.list_tools(&cancel).await?;
@@ -751,6 +810,503 @@ mod tests {
             manager.status_lines(),
             vec!["a: NeedsAuth"],
             "a rejected reconnect re-marks NeedsAuth honestly"
+        );
+
+        mcp_server.abort();
+        auth_server.abort();
+    }
+
+    /// A minimal auth server for the `refresh_token` grant: the well-known
+    /// metadata (its own `/token`) + a token endpoint that answers per
+    /// `succeeds` and RECORDS every form field it received (so a test can prove
+    /// the `refresh_token` grant was used, and — with the request counter — that
+    /// no request was made at all).
+    ///
+    /// The counter counts EVERY request to the auth server: a successful
+    /// `oauth::refresh` makes TWO (the `discover` well-known GET, then the
+    /// `/token` POST) — so it is only ever asserted at `0` (proof that nothing
+    /// touched the network).
+    async fn start_refresh_server(
+        succeeds: bool,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        std::sync::Arc<std::sync::atomic::AtomicU32>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the listener binds");
+        let addr = listener.local_addr().expect("the listener has an address");
+        let base = format!("http://{addr}");
+        let base_inner = base.clone();
+        let recorded: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded_inner = recorded.clone();
+        let counter: std::sync::Arc<std::sync::atomic::AtomicU32> =
+            std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counter_inner = counter.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let base = base_inner.clone();
+                let recorded = recorded_inner.clone();
+                let counter = counter_inner.clone();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    // Read the whole request (headers + body — the form body
+                    // follows the header block, so a single `read` is not
+                    // enough).
+                    let mut data = Vec::new();
+                    let mut buf = [0u8; 8192];
+                    loop {
+                        let Ok(n) = stream.read(&mut buf).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        data.extend_from_slice(&buf[..n]);
+                        if data.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let header_end = match data.windows(4).position(|w| w == b"\r\n\r\n") {
+                        Some(p) => p,
+                        None => return,
+                    };
+                    let headers = String::from_utf8_lossy(&data[..header_end + 4]).to_string();
+                    let mut body = data[header_end + 4..].to_vec();
+                    let content_length = headers
+                        .lines()
+                        .find_map(|l| {
+                            l.to_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    while body.len() < content_length {
+                        let Ok(n) = stream.read(&mut buf).await else {
+                            break;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        body.extend_from_slice(&buf[..n]);
+                    }
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let path = headers
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or_default()
+                        .to_string();
+                    let (status, body) = if path.starts_with("/.well-known") {
+                        (
+                            "200 OK",
+                            serde_json::json!({
+                                "authorization_endpoint": format!("{base}/authorize"),
+                                "token_endpoint": format!("{base}/token"),
+                            })
+                            .to_string(),
+                        )
+                    } else if path.starts_with("/token") {
+                        // Record every decoded `k=v` form field.
+                        let body_str = String::from_utf8_lossy(&body).to_string();
+                        for pair in body_str.split('&') {
+                            let mut kv = pair.splitn(2, '=');
+                            let k = kv.next().unwrap_or_default();
+                            let v = kv.next().unwrap_or_default();
+                            recorded
+                                .lock()
+                                .unwrap()
+                                .push(format!("{}={}", k, url_decode(v)));
+                        }
+                        if succeeds {
+                            (
+                                "200 OK",
+                                serde_json::json!({
+                                    "access_token": "refreshed-access-token",
+                                    "refresh_token": "rotated-refresh",
+                                    "expires_in": 3600,
+                                })
+                                .to_string(),
+                            )
+                        } else {
+                            ("400 Bad Request", "{}".to_string())
+                        }
+                    } else {
+                        ("404 Not Found", "{}".to_string())
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (base, recorded, counter, handle)
+    }
+
+    /// Percent-decode a form field (the `oauth.rs` mock's decoder).
+    fn url_decode(s: &str) -> String {
+        let bytes = s.as_bytes();
+        let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let hex = &s[i + 1..i + 3];
+                if let Ok(v) = u8::from_str_radix(hex, 16) {
+                    out.push(v);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).to_string()
+    }
+
+    /// An MCP-over-HTTP server that accepts a request only when its
+    /// `Authorization` header carries `accepted` — everything else gets a `401`
+    /// (which `HttpClient::send_request` maps to `needs-auth` because the def is
+    /// OAuth). This is the "the stale token is dead, the fresh one works"
+    /// scenario. Records every `Authorization` value it saw.
+    async fn start_token_gated_server(
+        accepted: &str,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the listener binds");
+        let addr = listener.local_addr().expect("the listener has an address");
+        let accepted = accepted.to_string();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_inner = seen.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let accepted = accepted.clone();
+                let seen = seen_inner.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let _ = stream.read(&mut buf).await;
+                    let request = String::from_utf8_lossy(&buf).to_string();
+                    let authorization = request
+                        .lines()
+                        .find(|l| l.to_lowercase().starts_with("authorization:"))
+                        .map(|l| l.trim().to_string())
+                        .unwrap_or_default();
+                    seen.lock().unwrap().push(authorization.clone());
+                    // Accept ONLY a header carrying the expected token. (Assert
+                    // with `contains` in the tests: the client sends an OAuth
+                    // token with no `Bearer ` prefix today — out of scope here.)
+                    let (status, body) = if authorization.contains(accepted.as_str()) {
+                        (
+                            "200 OK",
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "result": {
+                                    "protocolVersion": "2025-06-18",
+                                    "capabilities": {},
+                                    "serverInfo": { "name": "fake", "version": "0" },
+                                },
+                            })
+                            .to_string(),
+                        )
+                    } else {
+                        ("401 Unauthorized", "{}".to_string())
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (format!("http://{addr}/mcp"), seen, handle)
+    }
+
+    /// A stored-credentials file holding one entry (the refresh tests' setup).
+    fn write_credentials(auth_file: &std::path::Path, entry: oauth::StoredAuth) {
+        let mut map: std::collections::BTreeMap<String, oauth::StoredAuth> =
+            std::collections::BTreeMap::new();
+        map.insert("a".to_string(), entry);
+        oauth::save_credentials(auth_file, &map).expect("writes the credentials");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_expired_token_is_refreshed_and_persisted_instead_of_needs_auth() {
+        // Issue #68: an `mcp-auth.json` entry whose `expires_at` has passed is
+        // refreshed + re-persisted on the next connect, instead of sending the
+        // dead token and dropping the server into `NeedsAuth`.
+        let (mcp_url, mcp_seen, mcp_server) =
+            start_token_gated_server("refreshed-access-token").await;
+        let (auth_base, auth_fields, _auth_counter, auth_server) = start_refresh_server(true).await;
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let auth_file = dir.path().join("mcp-auth.json");
+        write_credentials(
+            &auth_file,
+            oauth::StoredAuth {
+                client_id: "cid".into(),
+                client_secret: Some("sec".into()),
+                token: "stale-access-token".into(),
+                refresh_token: Some("stale-refresh".into()),
+                expires_at: Some(oauth::now_epoch_secs() - 10),
+                auth_server_url: auth_base.clone(),
+                scope: None,
+            },
+        );
+        let (mut manager, _dir) = manager_with(
+            &serde_json::json!({
+                "mcpServers": { "a": {
+                    "url": mcp_url,
+                    "auth": { "clientId": "cid", "clientSecret": "sec" },
+                } }
+            })
+            .to_string(),
+            None,
+        );
+        manager = manager.with_auth_file(auth_file.clone());
+        let cancel = CancellationToken::new();
+
+        manager
+            .connect("a", &cancel, Duration::from_secs(5))
+            .await
+            .expect("the expired token is refreshed and the connect succeeds");
+        assert_eq!(manager.status_lines(), vec!["a: Connected"]);
+
+        // The FRESH token was the one sent (never the stale one). Assert with
+        // `contains` — the OAuth header framing is out of this task's scope.
+        let seen = mcp_seen.lock().unwrap().join("\n");
+        assert!(
+            seen.contains("refreshed-access-token"),
+            "the refreshed token is the one sent: {seen}"
+        );
+        assert!(
+            !seen.contains("stale-access-token"),
+            "the stale token must not be sent: {seen}"
+        );
+
+        // Exactly ONE `refresh_token` grant was used (the recorded vec is only
+        // written by `/token`, so one occurrence = one grant — the auth-server
+        // request counter is 2 here: the `discover` GET + this POST).
+        let fields = auth_fields.lock().unwrap().clone();
+        assert_eq!(
+            fields
+                .iter()
+                .filter(|f| f.as_str() == "grant_type=refresh_token")
+                .count(),
+            1,
+            "exactly one refresh_token grant: {fields:?}"
+        );
+        assert!(
+            fields.contains(&"refresh_token=stale-refresh".to_string()),
+            "the stored refresh token was exchanged: {fields:?}"
+        );
+
+        // The refresh was PERSISTED (the next session does not re-run the flow).
+        let persisted = oauth::load_credentials(&auth_file);
+        let stored = persisted.get("a").expect("the entry is still there");
+        assert_eq!(stored.token, "refreshed-access-token");
+        assert_eq!(stored.refresh_token.as_deref(), Some("rotated-refresh"));
+        assert!(
+            stored
+                .expires_at
+                .is_some_and(|at| at > oauth::now_epoch_secs()),
+            "the new expiry is in the future: {:?}",
+            stored.expires_at
+        );
+
+        mcp_server.abort();
+        auth_server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_failed_refresh_lands_in_needs_auth() {
+        // A refresh that fails (the auth server rejects it) degrades to the
+        // existing fallback: no token → a 401 → `NeedsAuth` → the `auth`
+        // action. And a failed refresh WRITES NOTHING (a transient auth-server
+        // outage must not destroy a possibly-reusable refresh token).
+        let (mcp_url, _mcp_seen, mcp_server) =
+            start_token_gated_server("refreshed-access-token").await;
+        let (auth_base, auth_fields, _counter, auth_server) = start_refresh_server(false).await;
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let auth_file = dir.path().join("mcp-auth.json");
+        write_credentials(
+            &auth_file,
+            oauth::StoredAuth {
+                client_id: "cid".into(),
+                client_secret: Some("sec".into()),
+                token: "stale-access-token".into(),
+                refresh_token: Some("stale-refresh".into()),
+                expires_at: Some(oauth::now_epoch_secs() - 10),
+                auth_server_url: auth_base.clone(),
+                scope: None,
+            },
+        );
+        let (mut manager, _dir) = manager_with(
+            &serde_json::json!({
+                "mcpServers": { "a": {
+                    "url": mcp_url,
+                    "auth": { "clientId": "cid", "clientSecret": "sec" },
+                } }
+            })
+            .to_string(),
+            None,
+        );
+        manager = manager.with_auth_file(auth_file.clone());
+        let cancel = CancellationToken::new();
+
+        let r = manager.connect("a", &cancel, Duration::from_secs(5)).await;
+        assert!(r.is_err(), "a failed refresh → an error: {r:?}");
+        let e = r.unwrap_err();
+        assert!(
+            e.contains("requires authentication"),
+            "the existing needs-auth message: {e}"
+        );
+        assert_eq!(
+            manager.status_lines(),
+            vec!["a: NeedsAuth"],
+            "a failed refresh still degrades to NeedsAuth"
+        );
+
+        // A refresh WAS attempted (no exact request count — `oauth::refresh`
+        // makes two calls: the well-known `discover` + the `/token` POST).
+        let fields = auth_fields.lock().unwrap().clone();
+        assert!(
+            fields.contains(&"grant_type=refresh_token".to_string()),
+            "the refresh_token grant was attempted: {fields:?}"
+        );
+        assert!(
+            fields.contains(&"refresh_token=stale-refresh".to_string()),
+            "with the stored refresh token: {fields:?}"
+        );
+
+        // The credentials file is UNCHANGED (a failed refresh writes nothing).
+        let kept = oauth::load_credentials(&auth_file);
+        assert_eq!(
+            kept.get("a").map(|s| s.token.as_str()),
+            Some("stale-access-token"),
+            "a failed refresh must not touch the stored entry"
+        );
+
+        mcp_server.abort();
+        auth_server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_token_without_an_expiry_is_never_refreshed() {
+        // PASSING BEFORE the implementation too, on purpose: it pins behaviour
+        // that must NOT regress — an entry with `expires_at: None` is never
+        // refreshed (no round trip, no downgrade of a working token). Do not
+        // "fix" it into asserting a refresh.
+        let (mcp_url, _mcp_seen, mcp_server) = start_token_gated_server("stale-access-token").await;
+        let (auth_base, auth_fields, counter, auth_server) = start_refresh_server(true).await;
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let auth_file = dir.path().join("mcp-auth.json");
+        write_credentials(
+            &auth_file,
+            oauth::StoredAuth {
+                client_id: "cid".into(),
+                client_secret: Some("sec".into()),
+                token: "stale-access-token".into(),
+                refresh_token: Some("stale-refresh".into()),
+                expires_at: None,
+                auth_server_url: auth_base.clone(),
+                scope: None,
+            },
+        );
+        let (mut manager, _dir) = manager_with(
+            &serde_json::json!({
+                "mcpServers": { "a": {
+                    "url": mcp_url,
+                    "auth": { "clientId": "cid", "clientSecret": "sec" },
+                } }
+            })
+            .to_string(),
+            None,
+        );
+        manager = manager.with_auth_file(auth_file.clone());
+        let cancel = CancellationToken::new();
+
+        manager
+            .connect("a", &cancel, Duration::from_secs(5))
+            .await
+            .expect("the stored token works");
+        assert_eq!(manager.status_lines(), vec!["a: Connected"]);
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "expires_at: None never spends a refresh round trip"
+        );
+        assert!(auth_fields.lock().unwrap().is_empty());
+
+        mcp_server.abort();
+        auth_server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_public_client_is_never_auto_refreshed_end_to_end() {
+        // The ADR 0015 guard at the CALL SITE (`oauth.rs` covers the guard
+        // inside `refresh` itself). PASSING BEFORE the implementation too, on
+        // purpose — it pins that a public client (no `clientSecret`) makes ZERO
+        // auth-server requests: the guard short-circuits before `discover`, so
+        // the degradation lands on the interactive flow, never a token POST the
+        // auth server would reject with `invalid_client`.
+        let (mcp_url, _mcp_seen, mcp_server) =
+            start_token_gated_server("refreshed-access-token").await;
+        let (auth_base, _auth_fields, counter, auth_server) = start_refresh_server(true).await;
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let auth_file = dir.path().join("mcp-auth.json");
+        write_credentials(
+            &auth_file,
+            oauth::StoredAuth {
+                client_id: "cid".into(),
+                client_secret: None,
+                token: "stale-access-token".into(),
+                refresh_token: Some("stale-refresh".into()),
+                expires_at: Some(oauth::now_epoch_secs() - 10),
+                auth_server_url: auth_base.clone(),
+                scope: None,
+            },
+        );
+        let (mut manager, _dir) = manager_with(
+            // No `clientSecret` — the def and the stored entry tell the same
+            // story (a pre-registered PUBLIC client).
+            &serde_json::json!({
+                "mcpServers": { "a": {
+                    "url": mcp_url,
+                    "auth": { "clientId": "cid" },
+                } }
+            })
+            .to_string(),
+            None,
+        );
+        manager = manager.with_auth_file(auth_file.clone());
+        let cancel = CancellationToken::new();
+
+        let r = manager.connect("a", &cancel, Duration::from_secs(5)).await;
+        assert!(r.is_err(), "a public client's dead token → an error: {r:?}");
+        assert_eq!(manager.status_lines(), vec!["a: NeedsAuth"]);
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "the ADR 0015 guard short-circuits before discover — zero auth-server calls"
         );
 
         mcp_server.abort();

@@ -2,6 +2,14 @@
 //! retired `@pi-archimedes/mcp` proxy tool's `buildProxyToolExecute` —
 //! `status` (the default) / `server` / `search` / `describe` / `tool`
 //! (+ `args`) / `connect` / `action: "auth"`.
+//!
+//! Issue #68: a `search` / `describe` / name-resolution miss computed while at
+//! least one server was UNAVAILABLE (a `NeedsAuth` / `Error` state, a failed
+//! connect) is a FAILURE naming each skipped server and its state — not a
+//! successful "no such tool" the model reads as "it doesn't exist". With every
+//! server reachable the wording is unchanged and stays a success. The `server`
+//! -param path and `call_tool` are untouched: they already surface the manager's
+//! real error.
 
 use std::time::Duration;
 
@@ -9,7 +17,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use super::manager::McpManager;
-use super::types::ToolCallResult;
+use super::types::{McpState, ToolCallResult};
 use crate::agent::tools::{ContentBlock, ToolResult};
 
 /// The `mcp` tool's per-request timeout (a stdio / HTTP request bound).
@@ -44,19 +52,81 @@ fn map_call_outcome(outcome: Result<ToolCallResult, String>) -> ToolResult {
     }
 }
 
+/// What `collect_tools` gathered: the `(server, tool)` pairs that answered,
+/// plus the servers that contributed NOTHING and the reason to show the model
+/// (`(name, reason)`).
+struct Collected {
+    tools: Vec<(String, super::types::ToolInfo)>,
+    skipped: Vec<(String, String)>,
+}
+
+/// Why a server was skipped — the STATE when the state explains it (the issue's
+/// ask: `atlassian (NeedsAuth — use the auth action)`), else the transport
+/// error, because a failed STDIO connect never leaves `Error` (it propagates
+/// with `?` and the entry stays `Connecting`), so the state alone would say
+/// nothing useful.
+fn skip_reason(state: &McpState, err: &str) -> String {
+    match state {
+        McpState::NeedsAuth => "NeedsAuth — use the auth action".to_string(),
+        McpState::Error { text } => format!("error: {text}"),
+        other => format!("not usable ({other:?}): {err}"),
+    }
+}
+
+/// The `Skipped servers: …` suffix (`""` when nothing was skipped) — appended
+/// to a message that has no trailing period, so the result reads
+/// `Tool not found: X. Skipped servers: atlassian (NeedsAuth — use the auth action)`.
+fn skipped_note(skipped: &[(String, String)]) -> String {
+    if skipped.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = skipped
+        .iter()
+        .map(|(name, reason)| format!("{name} ({reason})"))
+        .collect();
+    format!(". Skipped servers: {}", parts.join(", "))
+}
+
+/// The "nothing matched" answer: a SUCCESS with the plain `message` when every
+/// server answered (the wording is byte-identical to before this rule existed),
+/// a FAILURE with the same message + the `Skipped servers: …` note when the
+/// answer was computed over a PARTIAL server set (issue #68 — "I searched
+/// everywhere and it isn't there" is a lie when a server was skipped).
+fn miss_result(message: String, skipped: &[(String, String)]) -> ToolResult {
+    if skipped.is_empty() {
+        ok(message)
+    } else {
+        fail(format!("{message}{}", skipped_note(skipped)))
+    }
+}
+
 /// The `mcp` tool's `search` / `describe` / call-tool tool source: lazily
 /// connect every server (the `tools/list` is cached per connection) and
-/// collect `(server, tool)` pairs. A server that can't connect (`NeedsAuth`
-/// / `Error` — not auto-retried) is skipped (its tools are simply absent).
-async fn all_tools(
-    manager: &mut McpManager,
-    cancel: &CancellationToken,
-) -> Vec<(String, super::types::ToolInfo)> {
-    let mut out = Vec::new();
+/// collect `(server, tool)` pairs. A server that can't connect (`NeedsAuth` /
+/// `Error` — not auto-retried) contributes nothing, and IS reported: the
+/// caller must not answer "no such tool" when the answer was computed over a
+/// partial server set (issue #68).
+async fn collect_tools(manager: &mut McpManager, cancel: &CancellationToken) -> Collected {
+    let mut out = Collected {
+        tools: Vec::new(),
+        skipped: Vec::new(),
+    };
     for name in manager.server_names() {
-        if let Ok(tools) = manager.list_tools(&name, cancel, TIMEOUT).await {
-            for t in tools {
-                out.push((name.clone(), t));
+        let outcome = manager.list_tools(&name, cancel, TIMEOUT).await;
+        // NOTE: bind the `Result` first — in a `let … else` the scrutinee's
+        // mutable borrow of `manager` is still live inside the `else` block, so
+        // reading `manager.state_of(&name)` there is a borrow error.
+        match outcome {
+            Ok(tools) => out
+                .tools
+                .extend(tools.into_iter().map(|t| (name.clone(), t))),
+            Err(err) => {
+                let reason = match manager.state_of(&name) {
+                    Some(state) => skip_reason(state, &err),
+                    // An unknown name (it was just in `server_names()`) — defensive.
+                    None => format!("not usable: {err}"),
+                };
+                out.skipped.push((name, reason));
             }
         }
     }
@@ -78,6 +148,11 @@ async fn all_tools(
 ///   disambiguation: an exact raw-name match across servers wins; a tie →
 ///   the `server` param is required (an error naming the candidates).
 /// - an unknown `action` — an error listing the valid ones.
+///
+/// A `search` / `describe` / bare-`tool` miss while a server was skipped
+/// (`NeedsAuth` / `Error` / a failed connect) is a FAILED result naming the
+/// skipped servers; a successful call is never downgraded by an unrelated dead
+/// server (issue #68).
 pub async fn mcp_tool(
     manager: &mut McpManager,
     args: &Value,
@@ -145,9 +220,10 @@ pub async fn mcp_tool(
 
     // ── search ──
     if let Some(q) = &search {
-        let all = all_tools(manager, cancel).await;
+        let all = collect_tools(manager, cancel).await;
         let q_lower = q.to_lowercase();
         let results: Vec<String> = all
+            .tools
             .iter()
             .filter(|(s, t)| {
                 server
@@ -170,16 +246,20 @@ pub async fn mcp_tool(
             })
             .collect();
         if results.is_empty() {
-            return ok(format!("No tools matching \"{q}\""));
+            // A search computed over a PARTIAL server set is not an answer:
+            // it fails and names what was skipped (issue #68).
+            return miss_result(format!("No tools matching \"{q}\""), &all.skipped);
         }
         return ok(results.join("\n"));
     }
 
     // ── describe ──
     if let Some(name) = &describe {
-        let all = all_tools(manager, cancel).await;
-        let Some((s, t)) = all.iter().find(|(_, ti)| ti.name == name.as_str()) else {
-            return ok(format!("Tool not found: {name}"));
+        let all = collect_tools(manager, cancel).await;
+        let Some((s, t)) = all.tools.iter().find(|(_, ti)| ti.name == name.as_str()) else {
+            // Nothing matched AND something was skipped → a FAILED result
+            // naming the skipped servers (issue #68).
+            return miss_result(format!("Tool not found: {name}"), &all.skipped);
         };
         let schema =
             serde_json::to_string_pretty(&t.input_schema).unwrap_or_else(|_| "{}".to_string());
@@ -224,14 +304,19 @@ pub async fn mcp_tool(
         let (server_name, raw_tool) = match &server {
             Some(s) => (s.clone(), t.clone()),
             None => {
-                let all = all_tools(manager, cancel).await;
+                let all = collect_tools(manager, cancel).await;
                 let matches: Vec<String> = all
+                    .tools
                     .iter()
                     .filter(|(_, ti)| ti.name == t.as_str())
                     .map(|(s, _)| s.clone())
                     .collect();
                 if matches.is_empty() {
-                    return ok(format!("Tool not found: {t}"));
+                    // Nothing matched AND something was skipped → a FAILED
+                    // result naming the skipped servers (issue #68); with every
+                    // server reachable the wording is unchanged and stays a
+                    // success.
+                    return miss_result(format!("Tool not found: {t}"), &all.skipped);
                 }
                 if matches.len() == 1 {
                     (matches[0].clone(), t.clone())
@@ -296,7 +381,12 @@ mod tests {
             serde_json::json!({ "mcpServers": mcp }).to_string(),
         )
         .expect("writes the mcp.json");
-        (McpManager::new(home, project, None), dir)
+        // Compute the credentials path BEFORE `McpManager::new` MOVES `home`,
+        // and inject it — no test here can ever read the developer's real
+        // `mcp-auth.json` (issue #68).
+        let auth_file = home.join("mcp-auth.json");
+        let manager = McpManager::new(home, project, None).with_auth_file(auth_file);
+        (manager, dir)
     }
 
     fn cancel() -> CancellationToken {
@@ -526,6 +616,146 @@ mod tests {
         .await;
         assert!(r.is_error);
         assert!(text(&r).contains("Unknown action"), "{:?}", text(&r));
+        manager.close_all();
+    }
+
+    // ── issue #68: a skipped server FAILS the call ───────────────────
+
+    /// A `{"dead": {…}}` def pointing at a dead port: NON-OAuth, so no token
+    /// logic, so the connect fails instantly and the entry lands in `Error`
+    /// (the same loopback-refusal trick as `status_shows_the_error_state`).
+    fn dead_server() -> Value {
+        serde_json::json!({ "url": "http://127.0.0.1:1/mcp" })
+    }
+
+    #[test]
+    fn the_skip_reason_names_the_state_and_the_action() {
+        assert_eq!(
+            skip_reason(&McpState::NeedsAuth, "ignored"),
+            "NeedsAuth — use the auth action"
+        );
+        assert_eq!(
+            skip_reason(
+                &McpState::Error {
+                    text: "boom".to_string()
+                },
+                "ignored"
+            ),
+            "error: boom"
+        );
+        // A failed STDIO connect never leaves `Error` (it propagates with `?`
+        // and the entry stays `Connecting`), so the state alone says nothing —
+        // the transport error text is what the model needs.
+        let reason = skip_reason(&McpState::Connecting, "child exited");
+        assert!(reason.contains("not usable"), "{reason}");
+        assert!(reason.contains("child exited"), "{reason}");
+    }
+
+    #[test]
+    fn the_skipped_note_matches_the_issue_example() {
+        // The issue's exact sentence.
+        assert_eq!(
+            format!(
+                "Tool not found: X{}",
+                skipped_note(&[(
+                    "atlassian".to_string(),
+                    skip_reason(&McpState::NeedsAuth, "ignored")
+                )])
+            ),
+            "Tool not found: X. Skipped servers: atlassian (NeedsAuth — use the auth action)"
+        );
+        // Nothing skipped → no suffix at all (the all-healthy wording is
+        // byte-identical to before).
+        assert_eq!(skipped_note(&[]), "");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_skipped_server_fails_the_bare_call_and_names_it() {
+        let (mut manager, _dir) =
+            manager_with(&serde_json::json!({ "ok": "fake", "dead": dead_server() }));
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "tool": "nope" }),
+            &cancel(),
+        )
+        .await;
+        assert!(
+            r.is_error,
+            "a partial server set is not a successful 'not found'"
+        );
+        let t = text(&r);
+        assert!(t.contains("Tool not found: nope"), "{t}");
+        assert!(t.contains("Skipped servers:"), "{t}");
+        assert!(t.contains("dead"), "the skipped server is named: {t}");
+        manager.close_all();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn describe_fails_and_names_a_skipped_server() {
+        let (mut manager, _dir) =
+            manager_with(&serde_json::json!({ "ok": "fake", "dead": dead_server() }));
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "describe": "nope" }),
+            &cancel(),
+        )
+        .await;
+        assert!(r.is_error, "a describe over a partial server set fails");
+        let t = text(&r);
+        assert!(t.contains("Tool not found: nope"), "{t}");
+        assert!(t.contains("dead"), "the skipped server is named: {t}");
+        manager.close_all();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn search_fails_and_names_a_skipped_server() {
+        // A declared decision: a search computed over a partial server set is
+        // not an answer — it fails, keeping the accurate `No tools matching`
+        // prefix and naming what was skipped.
+        let (mut manager, _dir) =
+            manager_with(&serde_json::json!({ "ok": "fake", "dead": dead_server() }));
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "search": "zzz" }),
+            &cancel(),
+        )
+        .await;
+        assert!(r.is_error, "a search over a partial server set fails");
+        let t = text(&r);
+        assert!(t.contains("No tools matching \"zzz\""), "{t}");
+        assert!(t.contains("dead"), "the skipped server is named: {t}");
+        manager.close_all();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_plain_not_found_is_still_a_success_when_every_server_answered() {
+        // The all-healthy case is unchanged: the same bytes, still a SUCCESS.
+        let (mut manager, _dir) = manager_with(&serde_json::json!({ "a": "fake" }));
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "tool": "nope" }),
+            &cancel(),
+        )
+        .await;
+        assert!(!r.is_error, "every server answered → a plain not found");
+        assert_eq!(text(&r), "Tool not found: nope");
+        manager.close_all();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_call_on_a_healthy_server_is_not_broken_by_a_skipped_one() {
+        // The rule must not over-apply: a successful call is never downgraded
+        // because an unrelated server is dead.
+        let (mut manager, _dir) =
+            manager_with(&serde_json::json!({ "ok": "fake", "dead": dead_server() }));
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "tool": "echo", "args": { "text": "hi" } }),
+            &cancel(),
+        )
+        .await;
+        assert!(!r.is_error, "a working call stays a success");
+        assert_eq!(text(&r), "hi");
         manager.close_all();
     }
 }

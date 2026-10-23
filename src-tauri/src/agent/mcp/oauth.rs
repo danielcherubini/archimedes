@@ -55,6 +55,36 @@ pub struct StoredAuth {
     pub scope: Option<String>,
 }
 
+impl StoredAuth {
+    /// Is this token expired, or expiring inside `TOKEN_EXPIRY_MARGIN_SECS`
+    /// (a token expiring in 5 seconds IS expired — the request has to survive
+    /// the round trip)? `expires_at: None` means the auth server never told us
+    /// an expiry: treat it as NEVER expiring. Refreshing on a guess would cost
+    /// a round trip per request and — for a public client, which the ADR 0015
+    /// guard refuses to refresh — would downgrade a working token to a browser
+    /// flow.
+    pub fn is_expired(&self, now: i64) -> bool {
+        self.expires_at
+            .is_some_and(|at| at.saturating_sub(TOKEN_EXPIRY_MARGIN_SECS) <= now)
+    }
+}
+
+/// A stored token counts as EXPIRED this many seconds before its `expires_at`:
+/// the skew between this clock and the auth server's, plus the request in
+/// flight. `tool.rs`'s per-request bound is 60 s, so a token that dies inside
+/// that window is expired for our purposes.
+pub const TOKEN_EXPIRY_MARGIN_SECS: i64 = 60;
+
+/// The current wall-clock time in Unix epoch seconds (the same reading
+/// `parse_token_response` uses to turn `expires_in` into `expires_at` — one
+/// clock for both sides of the comparison).
+pub fn now_epoch_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 /// The `mcp-auth.json` path (`~/.local/data_dir/archimedes/mcp-auth.json` —
 /// the `dirs` data dir the rest of the desktop uses, joined with a bare
 /// `archimedes` (NOT the bundle identifier)).
@@ -213,10 +243,7 @@ fn parse_token_response(
         .and_then(Value::as_str)
         .ok_or("no access_token in the token response")?
         .to_string();
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now_secs = now_epoch_secs();
     Ok(StoredAuth {
         client_id: creds.client_id.clone(),
         client_secret: creds.client_secret.clone(),
@@ -228,7 +255,7 @@ fn parse_token_response(
         expires_at: v
             .get("expires_in")
             .and_then(Value::as_i64)
-            .map(|e| now_secs.saturating_add(e as u64) as i64),
+            .map(|e| now_secs.saturating_add(e)),
         auth_server_url: auth_server_url.to_string(),
         scope: scope.map(str::to_string),
     })
@@ -315,8 +342,13 @@ pub async fn client_credentials_grant(
 /// Refresh a token (the `refresh_token` grant). The ADR 0015 guard: a
 /// pre-registered PUBLIC client (a `client_id`, NO `client_secret`) is
 /// NEVER auto-refreshed (the auth server rejects the refresh grant with
-/// `invalid_client`) → `None` (the caller degrades to a fresh interactive
-/// flow).
+/// `invalid_client`) → `None`.
+///
+/// Its only production caller is `manager::usable_token_provider`, and the
+/// guard fires BEFORE `discover`, so a public client never touches the network
+/// here. The degradation the `None` produces lands where the ADR wants it: the
+/// request goes out with no token → the server's 401 → `McpState::NeedsAuth` →
+/// the `mcp` tool's `auth` action (a fresh interactive flow).
 pub async fn refresh(stored: &StoredAuth, client: &reqwest::Client) -> Option<StoredAuth> {
     let Some(refresh_token) = &stored.refresh_token else {
         return None;
@@ -647,6 +679,52 @@ mod tests {
             from_www_authenticate(r#"Bearer error="invalid_token""#),
             None
         );
+    }
+
+    #[test]
+    fn the_expiry_margin_decides_when_a_token_must_be_refreshed() {
+        // Issue #68: a stored token is expired when its `expires_at` has
+        // passed OR lands inside `TOKEN_EXPIRY_MARGIN_SECS` (the request in
+        // flight has to survive the round trip). `expires_at: None` = the auth
+        // server never told us an expiry → NEVER expires (never refresh).
+        let now = 1_700_000_000;
+        let stored = |expires_at: Option<i64>| StoredAuth {
+            client_id: "cid".into(),
+            client_secret: Some("sec".into()),
+            token: "tok".into(),
+            refresh_token: Some("rt".into()),
+            expires_at,
+            auth_server_url: "https://auth.example".into(),
+            scope: None,
+        };
+        // Already dead.
+        assert!(
+            stored(Some(now - 10)).is_expired(now),
+            "a past expiry is expired"
+        );
+        // The "expiring in 5 seconds is expired" case.
+        assert!(
+            stored(Some(now + 5)).is_expired(now),
+            "a token dying inside the margin is expired"
+        );
+        // The inclusive boundary: `expires_at == now + margin` counts as expired.
+        assert!(
+            stored(Some(now + TOKEN_EXPIRY_MARGIN_SECS)).is_expired(now),
+            "the boundary is inclusive"
+        );
+        // Comfortably alive.
+        assert!(
+            !stored(Some(now + 3600)).is_expired(now),
+            "a token with an hour left is not expired"
+        );
+        // No known expiry → never expires (refreshing on a guess would cost a
+        // round trip and would downgrade a public client to a browser flow).
+        assert!(
+            !stored(None).is_expired(now),
+            "expires_at: None never expires"
+        );
+        // A wildly negative `expires_at` must not overflow (`saturating_sub`).
+        assert!(stored(Some(i64::MIN)).is_expired(now), "no overflow panic");
     }
 
     #[test]
