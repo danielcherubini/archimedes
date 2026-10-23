@@ -5,6 +5,7 @@ import { isMentionableSkillName } from "../lib/skills";
 import { CatalogSearchDialog } from "./CatalogSearchDialog";
 import { MutedCaption } from "./MutedCaption";
 import { RowButton } from "./RowButton";
+import { cn } from "./lib/utils";
 
 /**
  * The `manual only` tooltip for a model-hidden row (ADR 0036). Two honesty
@@ -47,6 +48,43 @@ function manualOnlyTooltip(name: string): string {
 }
 
 /**
+ * Why a row is inert, in the row's own native tooltip (issue #10, amending ADR
+ * 0036). Two wording rules, both inherited from `manualOnlyTooltip`:
+ *
+ * 1. NO `$` glyph anywhere. A tooltip spelling `$has space` would print the
+ *    exact dead token the row just stopped inserting — and the bug this fixes
+ *    was a lie one node from the truth, so the new surface obeys the same rule
+ *    as the old one.
+ * 2. TRUE FOR A MODEL-VISIBLE ROW TOO. The `manual only` badge (and its
+ *    tooltip) renders only for a `disableModelInvocation` row, while the defect
+ *    is older than and independent of that flag, so the reason must stand on
+ *    its own: the first half repeats the badge's phrase VERBATIM (so the two
+ *    surfaces cannot drift) and the second half names the user's own one-line
+ *    fix — the frontmatter `name`, else the directory name it falls back to
+ *    (ADR 0036).
+ *
+ * (The `manualOnlyTooltip` header above still closes with "These TWO are the
+ * only places the rule is enforced for Skills". That block is pinned, so the
+ * correction lives HERE and in `skills.ts`'s "WHERE it is applied" paragraph:
+ * this row affordance is the third frontend site.)
+ */
+const UNMENTIONABLE_ROW_REASON =
+  "This name can't be typed as a mention — rename the Skill to give it one";
+
+/** The row shell, shared by both arms (geometry only — nothing cursor- or
+ *  hover-shaped, so the arm below decides the entire affordance cue). */
+const SKILL_ROW_BASE =
+  "group flex min-w-0 flex-col gap-0.5 rounded-lg px-2.5 py-1";
+/** A row that inserts something: the pointer and the hover fill it has always had. */
+const SKILL_ROW_ACTIVE = "cursor-pointer hover:bg-surface-hover";
+/** A row that inserts NOTHING: not allowed, and dimmed. Deliberately the ONLY
+ *  cursor class on this arm — unlike `ModelPickerDialog`, which spells
+ *  `cursor-pointer` AND `cursor-not-allowed` in one tailwind-merge group and so
+ *  shows a POINTER on a disabled row (its own comment calls that a behaviour
+ *  nobody owns). Here, dropping `cursor-pointer` is the point. */
+const SKILL_ROW_INERT = "cursor-not-allowed opacity-50";
+
+/**
  * The shadowing report's heading — and the ONE place its wording is decided.
  *
  * The clause names the WINNER's scope (the CAUSE), never the excluded entry's.
@@ -76,8 +114,12 @@ function shadowHeading(winnerScope: "space" | "user", count: number): string {
  * cue may not promise every name).
  * Clicking a row inserts `$name ` into the composer via the
  * `archimedes:insert-skill` CustomEvent (the composer listens) and closes
- * the dialog — unconditionally, so the click is NOT the surface that tells the
- * truth about an untypeable name; the tooltip is (ADR 0036). The search filters
+ * the dialog — for a name the `$` mention grammar CAN carry. A row whose name
+ * it cannot carry is LISTED BUT INERT (issue #10, amending ADR 0036): the row
+ * is `disabled`, so click and Enter do nothing, the dialog stays open, and a
+ * `$`-free `title` says why. The row and the tooltip therefore finally agree;
+ * the catalog is still not filtered, because it stays total for model-facing
+ * discovery (ADR 0036). The search filters
  * by case-insensitive NAME substring (v1: name only — the same policy as the
  * composer's skill picker).
  *
@@ -149,8 +191,21 @@ export default function SkillsDialog({
    * CustomEvent — the composer lives in a different subtree) and close
    * the dialog. The name is LOWERCASED (the case policy: the inserted
    * token must be expandable, and the mention regex is lowercase-only).
+   *
+   * GUARDED, and deliberately so (issue #10). A name the `$` grammar cannot
+   * carry expands to NOTHING — `expandMentions` leaves an unmatched token
+   * VERBATIM — so inserting one records dead text in the SENT message. The
+   * guard is TWO deep: `RowButton` refuses a click/Enter on a `disabled` row,
+   * and this is the same check, kept because this function OWNS the side effect
+   * (the dispatch AND the `onClose()`) and must not depend on its only caller
+   * having filtered — the exact reason `ModelPickerDialog`'s `select` keeps its
+   * own `if (item.disabled) return`. Deleting either half is safe today and a
+   * trap the day a second caller appears. The early return skips `onClose()`
+   * too: an inert row leaves the dialog OPEN, because such a row is listed for
+   * discovery and not for action.
    */
   const insertSkill = (name: string) => {
+    if (!isMentionableSkillName(name)) return;
     window.dispatchEvent(
       new CustomEvent(IPC_EVENTS.insertSkill, {
         detail: "$" + name.toLowerCase() + " ",
@@ -176,36 +231,54 @@ export default function SkillsDialog({
             ? `No skills match "${query}".`
             : null
       }
-      renderRow={(skill) => (
-        <RowButton
-          onClick={() => insertSkill(skill.name)}
-          className="group flex min-w-0 cursor-pointer flex-col gap-0.5 rounded-lg px-2.5 py-1 hover:bg-surface-hover"
-        >
-          <div className="flex items-center gap-2">
-            {/* `min-w-0` lets the span shrink below its content
-                width so `truncate` clips it (without it the
-                min-width:auto floor would push the row past the
-                dialog's right edge). */}
-            <span className="min-w-0 flex-1 truncate text-ui-base">
-              {skill.name}
-            </span>
-            {skill.scope === "user" && <MutedCaption>global</MutedCaption>}
-            {skill.disableModelInvocation && (
-              <MutedCaption title={manualOnlyTooltip(skill.name)}>
-                manual only
-              </MutedCaption>
+      renderRow={(skill) => {
+        // The row's OWN mentionability, decided once and used twice: for the
+        // affordance (`RowButton`'s `disabled`, which emits
+        // `aria-disabled="true"` + `tabIndex={-1}` and makes click AND Enter
+        // inert) and for the reason tooltip. The row stays LISTED either way —
+        // the `$` catalog is deliberately total (ADR 0036: the same catalog
+        // feeds model-facing discovery), so the honest seam is the row's
+        // affordance, not its presence. Do not hand-write any of those three
+        // attributes here, and do not add a second `role="button"` anywhere in
+        // a row: the whole suite reaches rows through
+        // `.closest('[role="button"]')`.
+        const mentionable = isMentionableSkillName(skill.name);
+        return (
+          <RowButton
+            onClick={() => insertSkill(skill.name)}
+            disabled={!mentionable}
+            title={mentionable ? undefined : UNMENTIONABLE_ROW_REASON}
+            className={cn(
+              SKILL_ROW_BASE,
+              mentionable ? SKILL_ROW_ACTIVE : SKILL_ROW_INERT,
             )}
-          </div>
-          {skill.description !== "" && (
-            <span
-              className="min-w-0 truncate text-ui-sm text-foreground-subtle"
-              title={skill.description}
-            >
-              {skill.description}
-            </span>
-          )}
-        </RowButton>
-      )}
+          >
+            <div className="flex items-center gap-2">
+              {/* `min-w-0` lets the span shrink below its content
+                  width so `truncate` clips it (without it the
+                  min-width:auto floor would push the row past the
+                  dialog's right edge). */}
+              <span className="min-w-0 flex-1 truncate text-ui-base">
+                {skill.name}
+              </span>
+              {skill.scope === "user" && <MutedCaption>global</MutedCaption>}
+              {skill.disableModelInvocation && (
+                <MutedCaption title={manualOnlyTooltip(skill.name)}>
+                  manual only
+                </MutedCaption>
+              )}
+            </div>
+            {skill.description !== "" && (
+              <span
+                className="min-w-0 truncate text-ui-sm text-foreground-subtle"
+                title={skill.description}
+              >
+                {skill.description}
+              </span>
+            )}
+          </RowButton>
+        );
+      }}
     >
       {/* The shadowing report — a SIBLING of the three-branch ternary above,
           never inside the rows branch, and gated on its OWN non-empty

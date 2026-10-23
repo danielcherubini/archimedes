@@ -186,6 +186,132 @@ describe("SkillsDialog", () => {
     );
   });
 
+  // ---------------------------------------------------------------------------
+  // The inert row (issue #10, amending ADR 0036). A `$` Mention token is
+  // `[a-z0-9]+(?:-[a-z0-9]+)*` (ADR 0031) while discovery screens a name merely
+  // for tag-safety, so `has space` IS discovered yet NO token can ever equal it
+  // — and `expandMentions` leaves an unmatched token VERBATIM. Inserting
+  // `$has space ` therefore put dead text into the SENT message, while the
+  // tooltip one node away already said the name can't be typed as a mention.
+  // Two rules the tests below own:
+  //
+  // 1. The row is LISTED and INERT. The `$` catalog stays total (ADR 0036 — it
+  //    feeds model-facing discovery), so the fix is the row's AFFORDANCE, not
+  //    its presence: `aria-disabled="true"`, out of the tab order, click and
+  //    Enter both inert, and the dialog stays open.
+  // 2. The reason carries NO `$` glyph — the badge tooltip's rule, extended to
+  //    the new surface, because a lie one node from the truth is this bug.
+  // ---------------------------------------------------------------------------
+
+  it("an unmentionable name is listed but its row is inert", async () => {
+    // Model-VISIBLE on purpose: the flag is irrelevant to the defect (the bug
+    // predates ADR 0036), and the `manual only` badge does not exist for this
+    // row — a fixture with the flag set would let the fix lean on the badge.
+    const events: CustomEvent[] = [];
+    const listener = (e: Event) => {
+      events.push(e as CustomEvent);
+    };
+    window.addEventListener(IPC_EVENTS.insertSkill, listener);
+    const onClose = vi.fn();
+    try {
+      render(
+        <SkillsDialog
+          skills={[skill({ name: "has space", disableModelInvocation: false })]}
+          onClose={onClose}
+        />,
+      );
+      // Still LISTED — discovery stays total (ADR 0036), so the fix may not
+      // delete a row the user owns. Asserted as presence, not absence.
+      const name = await screen.findByText("has space");
+      expect(screen.getAllByRole("button")).toContain(
+        name.closest('[role="button"]'),
+      );
+      const row = name.closest('[role="button"]');
+      expect(row).not.toBeNull();
+      // The affordance is OFF: `aria-disabled` + out of the tab order (the
+      // same pair `RowButton` emits for the Model picker's stale override).
+      expect(row!.getAttribute("aria-disabled")).toBe("true");
+      expect(row!.getAttribute("tabindex")).toBe("-1");
+      // Neither activation path dispatches anything, and neither closes the
+      // dialog — the guard sits in `insertSkill`, which owns the `onClose()`
+      // too, not only in the click handler.
+      fireEvent.click(row!);
+      fireEvent.keyDown(row!, { key: "Enter" });
+      expect(
+        events.find((e) => e.type === IPC_EVENTS.insertSkill),
+      ).toBeUndefined();
+      expect(onClose).not.toHaveBeenCalled();
+      // NOT merely styled away: the click-shaped classes are GONE and the
+      // not-allowed cue is present, so the row does not look clickable.
+      const tokens = row!.className.split(/\s+/);
+      expect(tokens).toContain("cursor-not-allowed");
+      expect(tokens).not.toContain("cursor-pointer");
+      expect(tokens).not.toContain("hover:bg-surface-hover");
+      // The truncation chain still holds (the row is still a flex item of the
+      // scroll container — `SkillsDialog.test.tsx`'s other layout pin).
+      expect(tokens).toContain("min-w-0");
+    } finally {
+      window.removeEventListener(IPC_EVENTS.insertSkill, listener);
+    }
+  });
+
+  it("the inert row says why without emitting a $ glyph", async () => {
+    // The hard constraint, applied to the node this task adds: the row explains
+    // itself in a tooltip that carries NO `$`, because a tooltip that reads
+    // `$has space` is the exact dead token the row just stopped inserting.
+    const first = render(
+      <SkillsDialog
+        skills={[skill({ name: "has space", disableModelInvocation: false })]}
+        onClose={() => {}}
+      />,
+    );
+    const row = (await screen.findByText("has space")).closest(
+      '[role="button"]',
+    );
+    expect(row).not.toBeNull();
+    const title = row!.getAttribute("title");
+    expect(title).toBeTruthy();
+    expect(title).toMatch(/can't be typed/i);
+    expect(title).not.toMatch(/\$/);
+    first.unmount();
+
+    // Model-hidden AND unmentionable: BOTH tooltips in the tree are `$`-free —
+    // the badge's (pinned elsewhere) and the row's (pinned here). This is what
+    // stops a future edit from folding the explanation into a `$`-carrying
+    // string for the flagged shape only.
+    const second = render(
+      <SkillsDialog
+        skills={[skill({ name: "has space", disableModelInvocation: true })]}
+        onClose={() => {}}
+      />,
+    );
+    const badge = await screen.findByText("manual only");
+    expect(badge.getAttribute("title")).not.toMatch(/\$/);
+    const flaggedRow = badge.closest('[role="button"]');
+    expect(flaggedRow!.getAttribute("title")).not.toMatch(/\$/);
+    expect(flaggedRow!.getAttribute("title")).toMatch(/can't be typed/i);
+    second.unmount();
+
+    // The mentionable arm is UNCHANGED — the regression pin for every row that
+    // works today (no `aria-disabled` attribute at all, focusable, no tooltip
+    // stealing the row's own click affordance).
+    const third = render(
+      <SkillsDialog skills={[skill({ name: "Omega" })]} onClose={() => {}} />,
+    );
+    const activeRow = (await screen.findByText("Omega")).closest(
+      '[role="button"]',
+    );
+    expect(activeRow).not.toBeNull();
+    expect(activeRow!.hasAttribute("aria-disabled")).toBe(false);
+    expect(activeRow!.getAttribute("tabindex")).toBe("0");
+    expect(activeRow!.getAttribute("title")).toBeNull();
+    const tokens = activeRow!.className.split(/\s+/);
+    expect(tokens).toContain("cursor-pointer");
+    expect(tokens).toContain("hover:bg-surface-hover");
+    expect(tokens).not.toContain("cursor-not-allowed");
+    third.unmount();
+  });
+
   it("a_model_visible_skill_carries_no_manual_only_marker", async () => {
     // The default (`disableModelInvocation: false`) renders no marker.
     const visible = render(

@@ -23,9 +23,14 @@ const MENTION_RE = /\$([a-z0-9]+(?:-[a-z0-9]+)*)/g;
  * a `$name` route to a user or a model must check this first, or it promises a
  * dead end.
  *
- * WHERE it is applied for SKILLS, precisely: `read_skill`'s model-hidden
- * refusal (Rust) and this dialog's tooltip (`SkillsDialog.tsx`) — and NOT the
- * composer's `$` picker, whose rows are the FULL skill catalog with only a name
+ * WHERE it is applied for SKILLS, precisely, on the CLIENT side: this dialog's
+ * tooltip (`SkillsDialog.tsx`) AND this dialog's ROW AFFORDANCE — a row whose
+ * name fails this predicate renders inert (`disabled`: `aria-disabled`, out of
+ * the tab order, click and Enter inert, reason in a `$`-free tooltip) instead of
+ * inserting a token that expands nothing, and `insertSkill` guards the same
+ * predicate before it dispatches (issue #10, amending ADR 0036). Plus
+ * `read_skill`'s model-hidden refusal (Rust). And NOT the composer's `$`
+ * picker, whose rows are the FULL skill catalog with only a name
  * -substring filter (`ChatStream.tsx`), deliberately: the Client's skill
  * catalog must stay total or the flag would delete the user's own route
  * (ADR 0036). So the `$` picker CAN offer a name whose token expands nothing —
