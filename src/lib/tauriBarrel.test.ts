@@ -10,8 +10,8 @@ import { describe, expect, it } from "vitest";
  * ---------------------------------------------------------------------------
  *
  * `src/lib/tauri.ts` was split by domain into `src/lib/tauri/*.ts`. It survives
- * as a RE-EXPORT BARREL for one reason: **34 test files `vi.mock` `@/lib/tauri`
- * BY MODULE PATH** (32 spreading `vi.importActual`, ~107 named `vi.fn()`
+ * as a RE-EXPORT BARREL for one reason: **33 test files `vi.mock` `@/lib/tauri`
+ * BY MODULE PATH** (32 spreading `vi.importActual`, 121 named `vi.fn()`
  * overrides between them). A `vi.mock` on a module path intercepts only the
  * calls that travel THROUGH that path. So the moment any consumer imports a
  * moved function from `lib/tauri/sessions.ts` directly, every test that mocked
@@ -349,13 +349,30 @@ describe("the scanner actually reads the tree", () => {
   });
 
   it("the scanner sees the mock seam it exists to protect", () => {
-    // If this ever reads 0, `vi.mock("@/lib/tauri")` was rewritten and the whole
-    // file's premise is gone — that is a decision to record, not a silent one.
-    const mockers = SOURCES.filter((f) =>
-      /\.test\.tsx?$/.test(f) &&
-      /vi\.mock\(\s*["'](.*lib\/tauri)["']/.test(readFileSync(f, "utf8")),
+    // If this ever reads 0, the `vi.mock("@/lib/tauri")` factories were rewritten
+    // and this whole file's premise is gone — a decision to record, not a silent
+    // one. Comment-stripped, because THIS file names the idiom in prose and would
+    // otherwise count itself: the first version of this assertion did exactly that
+    // and reported 35 where the tree has 33.
+    const mockers = SOURCES.filter(
+      (f) =>
+        /\.test\.tsx?$/.test(f) &&
+        /^\s*vi\.mock\(\s*["'][^"']*lib\/tauri["']/m.test(
+          stripJsComments(readFileSync(f, "utf8")),
+        ),
     );
-    expect(mockers.length).toBeGreaterThan(20);
+    // SET SIZE, pinned: 33 files mock the barrel by path. The number may only
+    // move when a test file is added or removed, in a commit that says so.
+    expect(mockers).toHaveLength(33);
+    // 32 of the 33 SPREAD `vi.importActual`, which is the shape that makes the
+    // seam forgiving: an unlisted export still resolves. The 33rd replaces the
+    // module wholesale, so a name it forgets is `undefined` — the case the
+    // pinned-surface assertion below covers.
+    expect(
+      mockers.filter((f) =>
+        /vi\.importActual/.test(readFileSync(f, "utf8")),
+      ).length,
+    ).toBe(32);
   });
 });
 
@@ -393,6 +410,24 @@ describe("nothing bypasses the lib/tauri barrel (D1's mock seam)", () => {
       }
     }
     expect(clashes).toEqual([]);
+  });
+
+  it("the barrel holds NO implementation — it is a pure re-export surface", () => {
+    // This assertion was RED before the split (this file WAS the implementation)
+    // and went green with the last module's move. It stays because a function the
+    // split failed to place would otherwise drift back here silently, and because
+    // a barrel holding logic is a barrel that can no longer be read as a list of
+    // the domains it forwards.
+    const src = stripJsComments(readFileSync(BARREL, "utf8"));
+    expect(src).not.toMatch(/\binvoke\s*[<(]/);
+    expect(src).not.toMatch(/\blisten\s*[<(]/);
+    // A DECLARED function / interface / const. `export { … } from` and
+    // `export type { … } from` are re-exports — the only thing that belongs here.
+    expect(src).not.toMatch(/^export (async function|function|interface|const)\b/m);
+    expect(src).not.toMatch(/^export type\s+[A-Za-z_]/m);
+    // `export *` is banned outright: it would make the pinned-surface assertion
+    // above blind, and the pinned list would stop being the contract.
+    expect(src).not.toMatch(/^export \*/m);
   });
 
   it("no name is declared in the barrel AND re-exported from a domain module", () => {
