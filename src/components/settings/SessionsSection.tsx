@@ -6,31 +6,11 @@ import { Button } from "@/components/ui/button";
 import type { SessionInfo } from "@/lib/tauri";
 import { basenameOfPath } from "@/lib/paths";
 import { titleFor } from "@/lib/sessionTitle";
-import { detachedSessions, useSessions, type Message } from "@/store/sessions";
+import { relativeTimeFor } from "@/lib/sessionTime";
+import { detachedSessions, useSessions } from "@/store/sessions";
 import DeleteSessionDialog from "../DeleteSessionDialog";
 import ClearDetachedSessionsDialog from "./ClearDetachedSessionsDialog";
-import { SettingsBadge, SettingsGroupCard } from "./primitives";
-
-/**
- * The relative time of a Session's last activity, derived ONLY from the latest
- * message's `at` when the transcript is loaded this boot
- * (`useSessions.messages[sessionId]`): `<60s` → `now`, `<60m` → `Nm`, else
- * `Nh`. Copied from `SpacesList`'s identical helper rather than exported from
- * there: `SessionInfo` has NO `createdAt` (the store's ordering note says so
- * explicitly), so a stored row that was never opened this boot has no loaded
- * messages and renders an empty slot instead.
- */
-function relativeTimeFor(
-  messages: Message[] | undefined,
-  now: number = Date.now(),
-): string | null {
-  const latest = messages?.[messages.length - 1];
-  if (!latest) return null;
-  const diff = now - latest.at;
-  if (diff < 60_000) return "now";
-  if (diff < 60 * 60_000) return `${Math.floor(diff / 60_000)}m`;
-  return `${Math.floor(diff / (60 * 60_000))}h`;
-}
+import { SettingsBadge, SettingsDataRow, SettingsGroupCard } from "./primitives";
 
 /**
  * One **Detached** row: the title (the one rule, `titleFor`), the FULL `cwd`,
@@ -38,8 +18,9 @@ function relativeTimeFor(
  * empty slot), and the two actions — Reopen Space (non-destructive) then
  * Delete (the existing per-row confirm).
  *
- * The markup follows `McpSection`'s `McpRow` (a `border-t` row with a
- * `min-w-0 flex-1` text column and ghost icon buttons), NOT `SettingsRow`:
+ * The markup follows `McpSection`'s `McpRow` (a `SettingsDataRow` shell — the
+ * `border-t` divider row — with a `min-w-0 flex-1` text column and ghost icon
+ * buttons), NOT `SettingsRow`:
  * `SettingsRow` is a label/control grid for a preference, and this is a list of
  * data. The full path is on the row because this section is cross-Space — the
  * path is the one thing that says which folder a row came from (the confirm
@@ -58,7 +39,7 @@ function DetachedSessionRow({
   const title = titleFor(messages, basenameOfPath(row.cwd), row.title);
   const time = relativeTimeFor(messages);
   return (
-    <div className="border-t border-border px-4 py-3 first:border-t-0">
+    <SettingsDataRow>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
         <div className="min-w-0 flex-1">
           <div className="truncate text-ui-base font-medium text-foreground">
@@ -97,7 +78,7 @@ function DetachedSessionRow({
           <Trash2Icon className="size-3.5" />
         </Button>
       </div>
-    </div>
+    </SettingsDataRow>
   );
 }
 

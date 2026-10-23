@@ -1,12 +1,7 @@
 import { useState } from "react";
 import { fuzzyMatch } from "../lib/fuzzy";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "./ui/dialog";
-import { Input } from "./ui/input";
+import { CatalogSearchDialog } from "./CatalogSearchDialog";
+import { RowButton } from "./RowButton";
 
 /**
  * One model row (the caller flattens its data source — the composer's
@@ -29,7 +24,7 @@ export interface ModelPickerItem {
  * raw key when the provider is not configured (a model can reference a
  * key absent from the configured list).
  */
-export function providerDisplayName(
+function providerDisplayName(
   providers: { id: string; name: string }[],
   key: string,
 ): string {
@@ -109,71 +104,84 @@ export default function ModelPickerDialog({
   ).sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
 
   const select = (item: ModelPickerItem) => {
+    // The guard is now TWO deep: `RowButton` refuses a click/Enter on a
+    // `disabled` row, and this is the same check the site spelled before the
+    // affordance was extracted. Kept deliberately — `select` is the function
+    // that OWNS the side effect (`onSelect` + close), so it must not depend on
+    // its only caller having filtered. Deleting either half is safe today and
+    // a trap the day a second caller appears.
     if (item.disabled) return;
     onSelect(item.value);
     onOpenChange(false);
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[70vh] sm:max-w-3xl">
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-        </DialogHeader>
-        <div className="flex max-h-[calc(70vh-7.5rem)] min-w-0 flex-col gap-3">
-          <Input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search models…"
-          />
-          {items.length === 0 ? (
-            <p className="p-3 text-ui-sm text-foreground-subtlest">
-              No models found.
-            </p>
-          ) : filtered.length === 0 ? (
-            <p className="p-3 text-ui-sm text-foreground-subtlest">
-              No models match "{query}".
-            </p>
-          ) : (
-            <div className="flex min-w-0 flex-col gap-0.5 overflow-y-auto pr-2">
-              {filtered.map((model) => (
-                <div
-                  key={model.value}
-                  role="button"
-                  tabIndex={model.disabled ? -1 : 0}
-                  aria-disabled={model.disabled ? "true" : undefined}
-                  onClick={() => select(model)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") select(model);
-                  }}
-                  className={`group flex min-w-0 cursor-pointer flex-col gap-0.5 rounded-lg px-2.5 py-1 hover:bg-surface-hover ${
-                    model.disabled
-                      ? "cursor-not-allowed opacity-50"
-                      : ""
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    {/* `min-w-0` lets the span shrink below its content
-                        width so `truncate` clips it (without it the
-                        min-width:auto floor would push the row past the
-                        dialog's right edge). The provider (when known)
-                        is INLINE, after the name, in muted grey — the
-                        `Qwen3.8-27B (Tama)` shape. */}
-                    <span className="min-w-0 flex-1 truncate text-ui-base">
-                      {model.name}
-                      {model.provider !== undefined && (
-                        <span className="text-foreground-subtlest">
-                          {" (" + model.provider + ")"}
-                        </span>
-                      )}
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </DialogContent>
-    </Dialog>
+    <CatalogSearchDialog<ModelPickerItem>
+      open={open}
+      onOpenChange={onOpenChange}
+      title={title}
+      searchPlaceholder="Search models…"
+      query={query}
+      onQueryChange={setQuery}
+      rows={filtered}
+      keyOf={(model) => model.value}
+      emptyMessage={
+        items.length === 0
+          ? "No models found."
+          : filtered.length === 0
+            ? `No models match "${query}".`
+            : null
+      }
+      renderRow={(model) => (
+        // LEFT AS A TEMPLATE LITERAL on purpose (Task C8) — a measured
+        // same-group conflict, so this is one of the sites the `cn()`
+        // convention deliberately does not reach. The row's base spells
+        // `cursor-pointer` and the disabled arm spells
+        // `cursor-not-allowed`: ONE tailwind-merge cursor group, so `cn`
+        // would DROP `cursor-pointer` and a disabled row would render the
+        // not-allowed cursor. Today's concatenation keeps both and lets
+        // CSS source order decide, and the compiled stylesheet emits
+        // `.cursor-pointer` AFTER `.cursor-not-allowed` — so a disabled
+        // row shows a POINTER cursor right now. That is probably not what
+        // was intended, but it is what the user sees, and changing it is
+        // a behaviour change no test owns: nothing in
+        // `ModelPickerDialog.test.tsx` reads a cursor class (the disabled
+        // case pins `aria-disabled` and the suppressed click). Converting
+        // this site belongs with a decision about which cursor a disabled
+        // row should show.
+        //
+        // Task C4 moved the AFFORDANCE (`role="button"` + `tabIndex` + the
+        // Enter handler + the disabled pair) into `RowButton`, and this
+        // string survives untouched BECAUSE `RowButton` passes `className`
+        // through verbatim rather than merging it — `RowButton.test.tsx`
+        // pins that both cursor tokens reach the DOM.
+        <RowButton
+          disabled={model.disabled}
+          onClick={() => select(model)}
+          className={`group flex min-w-0 cursor-pointer flex-col gap-0.5 rounded-lg px-2.5 py-1 hover:bg-surface-hover ${
+            model.disabled
+              ? "cursor-not-allowed opacity-50"
+              : ""
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {/* `min-w-0` lets the span shrink below its content
+                width so `truncate` clips it (without it the
+                min-width:auto floor would push the row past the
+                dialog's right edge). The provider (when known)
+                is INLINE, after the name, in muted grey — the
+                `Qwen3.8-27B (Tama)` shape. */}
+            <span className="min-w-0 flex-1 truncate text-ui-base">
+              {model.name}
+              {model.provider !== undefined && (
+                <span className="text-foreground-subtlest">
+                  {" (" + model.provider + ")"}
+                </span>
+              )}
+            </span>
+          </div>
+        </RowButton>
+      )}
+    />
   );
 }

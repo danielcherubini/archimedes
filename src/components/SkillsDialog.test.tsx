@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ShadowedSkill, SkillInfo } from "../lib/tauri";
+import { IPC_EVENTS } from "../lib/ipc/events";
 import SkillsDialog from "./SkillsDialog";
 
 // The dialog is PROP-DRIVEN (it does not fetch — the fetch lives in
@@ -77,7 +78,7 @@ describe("SkillsDialog", () => {
     const listener = (e: Event) => {
       events.push(e as CustomEvent);
     };
-    window.addEventListener("archimedes:insert-skill", listener);
+    window.addEventListener(IPC_EVENTS.insertSkill, listener);
     const onClose = vi.fn();
     try {
       // Uppercase name: the case policy lowercases the INSERTED token
@@ -89,14 +90,14 @@ describe("SkillsDialog", () => {
       expect(row).not.toBeNull();
       fireEvent.click(row!);
       const dispatched = events.find(
-        (e) => e.type === "archimedes:insert-skill",
+        (e) => e.type === IPC_EVENTS.insertSkill,
       );
       expect(dispatched).toBeDefined();
       expect(dispatched!.detail).toBe("$alpha ");
       // The dialog closes on insert (one pick, one action).
       expect(onClose).toHaveBeenCalledTimes(1);
     } finally {
-      window.removeEventListener("archimedes:insert-skill", listener);
+      window.removeEventListener(IPC_EVENTS.insertSkill, listener);
     }
   });
 
@@ -110,7 +111,7 @@ describe("SkillsDialog", () => {
     const listener = (e: Event) => {
       events.push(e as CustomEvent);
     };
-    window.addEventListener("archimedes:insert-skill", listener);
+    window.addEventListener(IPC_EVENTS.insertSkill, listener);
     const onClose = vi.fn();
     try {
       render(
@@ -129,13 +130,13 @@ describe("SkillsDialog", () => {
       // The row is still clickable and still inserts the LOWERCASED token.
       fireEvent.click(screen.getByText("Omega"));
       const dispatched = events.find(
-        (e) => e.type === "archimedes:insert-skill",
+        (e) => e.type === IPC_EVENTS.insertSkill,
       );
       expect(dispatched).toBeDefined();
       expect(dispatched!.detail).toBe("$omega ");
       expect(onClose).toHaveBeenCalledTimes(1);
     } finally {
-      window.removeEventListener("archimedes:insert-skill", listener);
+      window.removeEventListener(IPC_EVENTS.insertSkill, listener);
     }
   });
 
@@ -444,7 +445,7 @@ describe("SkillsDialog", () => {
     const listener = (e: Event) => {
       events.push(e as CustomEvent);
     };
-    window.addEventListener("archimedes:insert-skill", listener);
+    window.addEventListener(IPC_EVENTS.insertSkill, listener);
     const onClose = vi.fn();
     try {
       render(
@@ -464,7 +465,7 @@ describe("SkillsDialog", () => {
       }
       fireEvent.click(path);
       fireEvent.click(line);
-      expect(events.find((e) => e.type === "archimedes:insert-skill")).toBeUndefined();
+      expect(events.find((e) => e.type === IPC_EVENTS.insertSkill)).toBeUndefined();
       expect(onClose).not.toHaveBeenCalled();
       // The winner is still the ONE clickable route for this name: every row
       // dispatches `$alpha `, which resolves to the winner, so a second row
@@ -477,7 +478,7 @@ describe("SkillsDialog", () => {
       // only ONE of them is a button.
       expect(screen.getAllByText("alpha")).toHaveLength(2);
     } finally {
-      window.removeEventListener("archimedes:insert-skill", listener);
+      window.removeEventListener(IPC_EVENTS.insertSkill, listener);
     }
   });
 

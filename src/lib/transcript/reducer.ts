@@ -5,7 +5,7 @@ import type {
   MessageRow,
   ToolCallContent,
 } from "../tauri";
-import type { DiffRef, Message, ToolCallUiStatus } from "../../store/sessions";
+import type { DiffRef, Message, ToolCallUiStatus } from "../sessionTypes";
 import { diffMessages } from "./identity";
 
 export function mapStatus(status: AcpToolCallStatus | undefined): ToolCallUiStatus {

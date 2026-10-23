@@ -2,9 +2,68 @@ import { useEffect, useState, type KeyboardEvent } from "react";
 import { motion } from "motion/react";
 import { PaperclipIcon, PencilIcon, TrashIcon } from "lucide-react";
 import { Button } from "../ui/button";
+import { cn } from "../lib/utils";
+import { MutedCaption } from "../MutedCaption";
 import AttachmentStrip from "./AttachmentStrip";
 import { draftIsMarkerOnly, renumberImageMarkers } from "../../lib/chatAttachments";
 import { useQueuedPrompts, type QueuedPrompt } from "../../store/queuedPrompts";
+
+/**
+ * C7: the LIVE row body is a `<Button variant="ghost" size="default">` (both
+ * named explicitly — `ui/button.tsx:40` sets `defaultVariants {variant:"default"}`,
+ * so a bare `<Button>` would paint the whole row body `bg-primary` at `h-7 px-2`).
+ * The LEAVING body stays a `<span>`: it is deliberately not a control, so it must
+ * not gain `data-slot`/`data-variant`/`data-size` or any button styling, and the
+ * two shapes still share `contentClasses` byte-for-byte.
+ *
+ * Measured with the real `cn()`, the button's utility SET is `contentClasses`
+ * plus only utilities that are inert here. What `QUEUE_BODY_WALL` undoes:
+ *  - `border-0` — the base's `border` is a 1px ring; the body had none
+ *    (preflight sets `border: 0 solid`).
+ *  - `h-auto` — the size's `h-7` is a fixed 28px, which would grow the one-line
+ *    row (the wrapper is `py-1.5` around content that is `text-ui-sm`/`text-ui-xs`).
+ *  - `px-0` — the size's `px-2` would inset the `Queued` caption by 8px,
+ *    misaligning the body against the `px-3` wrapper and the action buttons.
+ *  - `justify-start` — the base centres on the main axis. This is a REAL repaint,
+ *    not belt-and-braces: the body is `flex-1`, so a short prompt leaves free
+ *    space and centring would push `Queued` and the text to the middle of the row.
+ *  - `whitespace-normal` — the base's `whitespace-nowrap` (the body inherited
+ *    `normal`; only the text span's own `truncate` needs nowrap and it spells it).
+ *  - `select-auto` — the base's `select-none` would make a queued prompt's text
+ *    unselectable.
+ *  - `transition-none` — the base's `transition-colors`: this body has no hover
+ *    fill at all (the pencil button beside it is the hover affordance), so there
+ *    is nothing to fade.
+ *  - `hover:bg-transparent` — `ghost` adds `hover:bg-hover`, which would light up
+ *    the whole row body on hover. The row's own surface is the wrapper's
+ *    `bg-composer`, and `QueueRow.test.tsx` pins that the row introduces no other
+ *    background — the pin reads the WRAPPER (`queue-row`), which this does not
+ *    touch, but the fill would still be a real repaint.
+ * Inert here: `shrink-0` — the base spells it but `cn()` DROPS it, because the
+ * body's own `flex-1` is the same conflict group and comes later (measured:
+ * `cn("shrink-0","flex-1") === "flex-1"`), so the row keeps its shrink behaviour
+ * — this is the one place a `cn` conflict is load-bearing rather than a hazard;
+ * `gap-1` (the body spells `gap-1.5`, which wins); the wall's
+ * `text-[length:inherit]` collapses the size's `text-ui-base` AND the base's
+ * `text-ui-base/relaxed`, so the body declares no font-size and no line-height —
+ * exactly as the plain `<button>` it replaces, whose four children all spell
+ * their own size (`text-ui-xs` ×3 and `text-ui-sm`); `text-foreground` +
+ * `hover:text-foreground` from `ghost` (every child spells its own ink:
+ * `text-foreground-subtlest`, `text-destructive`, `text-foreground-subtle`,
+ * `text-foreground`); `rounded-md` and `bg-clip-padding` (no background and no
+ * border paint on the body, so neither has anything to round or clip);
+ * `outline-none` (`base.css:53-57` forces `outline: none !important` on every
+ * focus, and again under `forced-colors`); `disabled:*` (the LEAVING row is a
+ * `<span>`, so this button is never rendered disabled); `aria-invalid:*` /
+ * `aria-expanded:*`; `group/button`; `underline-offset-4` (only `link` would
+ * underline); `has-data-[icon=inline-*]:pr/pl` (lucide sets no `data-icon`);
+ * `[&_svg]:pointer-events-none` (the click handler is on the button);
+ * `[&_svg]:shrink-0`; and `[&_svg:not([class*='size-'])]:size-3.5` — the body's
+ * only `<svg>` is the paperclip, which carries an explicit `size-3`, so the
+ * `:not([class*='size-'])` guard excludes it (the icon-resize hazard, checked).
+ */
+const QUEUE_BODY_WALL =
+  "border-0 h-auto px-0 justify-start whitespace-normal select-auto transition-none text-[length:inherit] hover:bg-transparent";
 
 /**
  * One **queue row** (ADR 0069): a **Queued prompt** between the transcript and
@@ -148,7 +207,7 @@ function QueueRowBody({
     <>
       {/* Its OWN element — never `"Queued: " + text`, or selecting the
           prompt's text drags the label along with it. */}
-      <span className="shrink-0 text-ui-xs text-foreground-subtlest">Queued</span>
+      <MutedCaption className="shrink-0">Queued</MutedCaption>
       {/* A failed Flush is LIVE state the user has to see: nothing will ever
           send this entry but saving an edit of it. `text-destructive` is an
           existing status colour, so no new token enters the Palette. */}
@@ -187,14 +246,16 @@ function QueueRowBody({
           {content}
         </span>
       ) : (
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="default"
           data-testid="queue-row-body"
           onClick={onEdit}
-          className={contentClasses}
+          className={cn(QUEUE_BODY_WALL, contentClasses)}
         >
           {content}
-        </button>
+        </Button>
       )}
       {/* `shrink-0` is `WorkingIndicator`'s lesson: at the default 800px window
           the island's content box is ~108px, and an unshrinkable sibling would

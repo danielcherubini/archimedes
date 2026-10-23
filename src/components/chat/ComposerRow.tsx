@@ -24,7 +24,9 @@ import { WorkingIndicator } from "./WorkingIndicator";
  *
  * Props-only by design — ALL state stays in `ChatStream` (the `draft`,
  * `picker` and `attachments` state, the `composerRef` the auto-grow and
- * skill-insert effects need, `send`, and the attachment handlers). The
+ * skill-insert effects need — both now in their own hooks,
+ * `useAutoGrowComposer` / `useMentionPicker` — `send`, and the attachment
+ * handlers). The
  * `onChange` / `onKeyDown` closures live here VERBATIM (they are pure given
  * these props: `activeMentionToken` is a free function, the `draft` / `picker`
  * setters and the `send` / `selectMention` callbacks are props). Extracted

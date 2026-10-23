@@ -5,9 +5,157 @@ import { titleFor } from "../lib/sessionTitle";
 import { useSessions } from "../store/sessions";
 import { useSessionStatuses } from "../hooks/useSessionStatus";
 import { SessionStatusMark } from "./SessionStatusMark";
+import { cn } from "./lib/utils";
 import type { SessionStatus } from "../hooks/useSessionStatus";
 import CloseSpaceDialog from "./CloseSpaceDialog";
 import { openNewSpaceDialog } from "../lib/newSpaceDialogState";
+import { Button } from "./ui/button";
+
+/**
+ * C7 (finding 6d): what `<Button>`'s base and the `default` size would change on
+ * the TAB LABEL, undone. Both axes are named explicitly at the site
+ * (`variant="link" size="default"`) because `ui/button.tsx:40` sets
+ * `defaultVariants {variant: "default"}` and a bare `<Button>` would paint every
+ * tab `bg-primary text-primary-foreground` on a fixed `h-7 px-2` box.
+ *
+ * Measured with the real `cn()` (the utility SET of the rendered class attribute
+ * is exactly what the label spelled — zero lost tokens in both states) and with
+ * a headless-browser layout probe against the compiled sheet (box 156×32,
+ * `font-size: 14px`, `line-height: 21px`, `flex-shrink: 1`, and the inner
+ * `truncate` span eliding, byte-for-byte the same before and after). What each
+ * entry removes:
+ *  - `border-0`        — the base's `border` is a 1px ring (preflight sets
+ *                        `border: 0 solid`, so the label has none today); it
+ *                        would inset the label 1px inside the pill and shift the
+ *                        `pl-3` text by the same amount. With the width at zero
+ *                        the base's `bg-clip-padding` is a no-op besides.
+ *  - `h-auto`          — the size's `h-7` is a FIXED 28px. The label is the
+ *                        element that `self-stretch`es to own the pill's `h-8`,
+ *                        and a fixed height would override that: 28px inside a
+ *                        32px pill is exactly the dead-pixel gap the pill's own
+ *                        comment records fixing.
+ *  - `px-0`            — the size's `px-2` would add 8px the pill does not have
+ *                        (`pl-3` is the label's whole leading inset and the ✕'s
+ *                        `mr-3` its trailing one). It does NOT touch `pl-3`:
+ *                        measured through `cn()`, `px-0` and `pl-3` are BOTH
+ *                        kept (`pl-3` is a different tailwind-merge group and
+ *                        comes last), and the probe confirms the inset renders.
+ *  - `justify-start`   — the base centres on the main axis; the label is a
+ *                        left-aligned browser tab.
+ *  - `shrink`          — the base's `shrink-0` is `flex-shrink: 0` and the label
+ *                        IS a flex item of the pill. The probe caught this one:
+ *                        with the base in place the label refused to shrink and
+ *                        overflowed the `max-w-48` cap to 447.8px instead of
+ *                        eliding at 156px, so long folder names would push the ✕
+ *                        out of the pill instead of showing `…`. `shrink` is the
+ *                        `flex-shrink: 1` the label has today.
+ *  - `whitespace-normal` — the base's `whitespace-nowrap` (the label inherits
+ *                        `normal`; the elision lives on the inner `truncate`
+ *                        span, which needs the normal wrapping context).
+ *  - `select-auto`     — the base's `select-none` would make a Space's name
+ *                        unselectable. This one is settled by the MERGE, not by
+ *                        the sheet: `mergeUiClasses` treats `select-auto` and
+ *                        `select-none` as ONE group and keeps the LAST, i.e. this
+ *                        wall's utility, so the base's never reaches the
+ *                        attribute. Worth stating precisely because the cascade
+ *                        would NOT have rescued it — in the built sheet
+ *                        `.select-auto` is emitted BEFORE `.select-none`
+ *                        (offsets 45726 / 45781, measured), so had both survived
+ *                        into one class list the base would have won. (The
+ *                        `[user-select:auto]` form two sibling C7 walls use lands
+ *                        at 45906, after both, and wins either way.)
+ *  - `transition-none` — the base's `transition-colors` would fade the
+ *                        active/inactive ink swap over 150 ms. Selecting a tab
+ *                        is instant today, and a fade on the tab you just
+ *                        clicked reads as lag.
+ *  - `hover:no-underline` — `link`'s `hover:underline` would underline the tab
+ *                        name on hover. `link` is the variant because it is the
+ *                        only arm with no hover BACKGROUND (the pill owns the
+ *                        fill; a `ghost` arm's `hover:bg-hover` would paint a
+ *                        second surface inside the pill and could only be
+ *                        displaced by re-spelling a `hover:bg-*`). Its
+ *                        `text-primary` loses the text-colour group to the
+ *                        label's own `text-foreground`/`text-foreground-subtle`,
+ *                        and its `underline-offset-4` survives but is inert —
+ *                        with no underline there is nothing to offset.
+ * NOT in the wall, because the label spells the group and comes LAST, so the
+ * label wins it outright (each measured): `flex` over the base's `inline-flex`,
+ * `items-center`, `gap-1.5` over `gap-1`, `text-ui-base` over BOTH the size's
+ * `text-ui-base` and the base's `text-ui-base/relaxed` (one utility survives, so
+ * no `line-height` is declared and the label keeps preflight's 1.5 — and,
+ * critically, the label GAINS no second `.text-ui-base` for
+ * `ChatStream.test.tsx`'s `primaryLines()` to mistake for a picker row), and
+ * `min-w-0`/`self-stretch`/`pl-3`, which the base does not spell at all.
+ * Inert additions: `rounded-md` (the label paints no background and no border,
+ * so a 6px radius has nothing to clip); `bg-clip-padding` (same reason);
+ * `outline-none` (`base.css:53-57` forces `outline: none !important` on every
+ * focus, in every browser and again under `forced-colors`); `disabled:*` (a tab
+ * is never disabled); `aria-invalid:*` (nothing sets it on a `role="tab"`);
+ * `group/button` (nothing reads that group — grep-verified);
+ * `has-data-[icon=inline-*]:pr/pl` (lucide sets no `data-icon`);
+ * `[&_svg]:pointer-events-none` (the click handler is on the label, and the
+ * `SessionStatusMark` glyph is decoration, not a target); `[&_svg]:shrink-0`; and
+ * `[&_svg:not([class*='size-'])]:size-3.5` — the icon-resize hazard, checked
+ * rather than assumed, and it does NOT reach the 14px slot by a different route
+ * for each of the two glyphs the tab can draw: the `running` SPINNER's own class
+ * list contains `size-4` (`ui/spinner.tsx`), so the `:not([class*='size-'])`
+ * guard excludes it outright, and the `waiting` `?` carries no `size-` class so
+ * the rule DOES match it — but `SessionStatusMark` writes its box as an INLINE
+ * `style` (`width`/`height` in px, that component's own design), and an inline
+ * style outranks a class rule, so the mark stays 14px either way.
+ * `data-slot`/`data-variant`/`data-size` are new attributes; no test reads them
+ * on this element, and `role="tab"` + `aria-selected` pass through `...rest`.
+ */
+const TAB_LABEL_WALL =
+  "border-0 h-auto px-0 justify-start shrink whitespace-normal select-auto transition-none hover:no-underline";
+
+/**
+ * C7: the same undo for the `+` New-Space button (`variant="ghost"
+ * size="icon-lg"`), whose own class list is kept VERBATIM and last.
+ *  - `border-0` — the base's 1px ring would grow the 32px square to 34px (the
+ *                 chrome strip's second cluster is a `size-8` box by decision —
+ *                 see the ✕'s comment and `chromeButton.test.ts`).
+ *  - `inline-block` — the base's `inline-flex` + `items-center` +
+ *                 `justify-center` would CENTRE the `+` glyph. Measured in a
+ *                 browser against the compiled sheet: today the glyph sits at
+ *                 the box's left edge (16px of bare hover patch to its right)
+ *                 and the conversion would slide it 8px right. That is a real
+ *                 repaint, so the display is restored here rather than smuggled
+ *                 into a refactor commit; the left-edge reading itself is
+ *                 reported as a separate finding, not silently "fixed".
+ *  - `whitespace-normal` / `select-auto` — the base's `whitespace-nowrap` and
+ *                 `select-none` (the button spells neither group).
+ *  - `text-[length:inherit]` — `icon-lg` spells no font size, but the BASE does
+ *                 (`text-ui-base/relaxed` = 14px + 1.625), and the button today
+ *                 inherits 16px. Provably inert for a lone block `<svg>` child,
+ *                 restored anyway so the site ends up declaring no font-size at
+ *                 all — the same rule C7 group 4 learned from
+ *                 `ChatStream.test.tsx`'s `.text-ui-base` picker query.
+ *  - `transition-none` — the base's `transition-colors` would fade the hover
+ *                 fill in over 150 ms. This cluster's fill is always-on
+ *                 (`bg-surface-hover`, no transition) by the ADR 0038 split that
+ *                 `chromeButton.test.ts` guards — which is also why the `ghost`
+ *                 arm's `hover:bg-hover` is displaced by the site's own
+ *                 `hover:bg-surface-hover` (the same group, spelled last).
+ *  - `hover:text-foreground-subtle` — `ghost` carries
+ *                 `hover:text-foreground`, and this `+` has never brightened its
+ *                 glyph on hover (only its fill). Naming the SAME utility the
+ *                 site spells at rest is how the hover pair is neutralised
+ *                 without touching the variant.
+ * Inert here: `size-8` from `icon-lg` is the size the site already spells (one
+ * `size-*` survives); its `rounded-lg` LOSES the border-radius group to the
+ * site's `rounded-md` (measured: `rounded-md` is the only radius left), which is
+ * the `className`-wins-the-group case the brief asked to confirm;
+ * `items-center`/`justify-center` have no flex container once `inline-block`
+ * wins; `text-foreground` and `aria-expanded:*` (never expanded);
+ * `disabled:*`; `outline-none`; `group/button`; `has-data-[icon=inline-*]`;
+ * `[&_svg]:pointer-events-none` / `[&_svg]:shrink-0` / and
+ * `[&_svg:not([class*='size-'])]:size-4` — the glyph carries an explicit
+ * `size-4`, so the `:not([class*='size-'])` guard excludes it (the icon-resize
+ * hazard, checked).
+ */
+const NEW_SPACE_BUTTON_WALL =
+  "border-0 inline-block whitespace-normal select-auto transition-none text-[length:inherit] hover:text-foreground-subtle";
 
 /**
  * A Space's own status, folded out of its live Sessions' statuses with the SAME
@@ -24,7 +172,7 @@ import { openNewSpaceDialog } from "../lib/newSpaceDialogState";
  * Pure and exported so the precedence is assertable without the tab strip's
  * store fixtures.
  */
-export function tabStatusOf(
+function tabStatusOf(
   statuses: (SessionStatus | undefined)[],
 ): SessionStatus | null {
   if (statuses.includes("waiting")) return "waiting";
@@ -141,7 +289,32 @@ export default function SpaceTabs() {
     // the empty strip after the `+` is just a spacer (the CHROME BAR
     // container itself is the drag region — the browser's empty tab
     // strip drags the window; double-click maximizes).
+    //
+    // THE TABLIST (finding 18). Marked on THIS existing container — the element
+    // that already carries `data-testid="space-tabs"` — because it *is* the tab
+    // strip. Deliberately NOT a new wrapper around `spaces.map()`: the pill
+    // inside that block holds both the `role="tab"` label and the ✕, so a fresh
+    // `role="tablist"` level would own generic `div` children plus two buttons
+    // (`SpaceTabs.test.tsx` pins `close.parentElement === tab.parentElement`),
+    // i.e. a worse ARIA tree than the one it replaced. Two attributes, no new DOM
+    // level.
+    //
+    // ACCEPTED ARIA LIMITATION — record, do NOT "fix". The per-tab ✕ and the
+    // `New space` button stay SIBLINGS of the tabs inside this tablist, and the
+    // pill `div`s are generic children of it. The ARIA tabs pattern has no owned
+    // slot for a per-tab close button: a `tab` may not hold an interactive child
+    // (it is dropped from the accessibility tree and `<button>`'s content model
+    // forbids it — see the note at the top of this file), so there is nowhere
+    // legal to put the ✕ *inside* its tab. This UI is deliberately browser-style
+    // closable tabs, and every browser-tab UI makes the same trade. A tablist
+    // with sibling controls is strictly better than orphaned `role="tab"`s with
+    // no tablist parent. So this is NOT to be revisited by restructuring the pill,
+    // wrapping children in `role="presentation"`, or adopting Radix Tabs —
+    // `ui/tabs.tsx`'s segmented-control geometry is wrong for this strip and it
+    // has no place for the ✕ or the `+` either.
     <div
+      role="tablist"
+      aria-orientation="horizontal"
       className="flex h-full min-w-0 flex-1 items-center gap-1 pl-px pr-2"
       data-testid="space-tabs"
     >
@@ -196,11 +369,17 @@ export default function SpaceTabs() {
             // every pixel of the pill the label does not cover was window-drag
             // surface. A tab is a control, not chrome: every pixel of the pill
             // selects or closes, and never drags.
-            className={`flex h-8 max-w-48 items-center rounded-md ${
-              active
-                ? "bg-surface-hover"
-                : "bg-surface hover:bg-surface-hover"
-            }`}
+            className={cn(
+              // `bg-surface hover:bg-surface-hover` and `bg-surface-hover` are
+              // mutually exclusive arms of one background group, so the merge is
+              // the identity. `SpaceTabs.test.tsx:350` pins
+              // `inactive.className === active.className` for the ✕ (a different
+              // element, untouched here) and `SpaceTabs.pill.test.tsx` reduces
+              // class lists to geometry — a merge that only drops a losing arm
+              // cannot move either.
+              "flex h-8 max-w-48 items-center rounded-md",
+              active ? "bg-surface-hover" : "bg-surface hover:bg-surface-hover",
+            )}
             data-tauri-drag-region="false"
             onMouseDown={(e) => {
               // Middle-click anywhere on the pill closes the tab, as in every
@@ -227,10 +406,12 @@ export default function SpaceTabs() {
               requestClose(s.path, name);
             }}
           >
-            <button
+            <Button
               type="button"
               role="tab"
               aria-selected={active}
+              variant="link"
+              size="default"
               onClick={() => selectSpace(s.path)}
               title={
                 tabStatus === "waiting"
@@ -249,11 +430,11 @@ export default function SpaceTabs() {
               // content, and a flex container's bare text child is an anonymous
               // BLOCK item, so `truncate` here would clip long folder names
               // without ever showing the `…`.
-              className={`flex min-w-0 self-stretch items-center gap-1.5 pl-3 text-ui-base ${
-                active
-                  ? "font-medium text-foreground"
-                  : "text-foreground-subtle"
-              }`}
+              className={cn(
+                TAB_LABEL_WALL,
+                "flex min-w-0 self-stretch items-center gap-1.5 pl-3 text-ui-base",
+                active ? "font-medium text-foreground" : "text-foreground-subtle",
+              )}
             >
               {tabStatus !== null && (
                 // The SAME glyph the sidebar row and the collapsed rail draw,
@@ -285,12 +466,25 @@ export default function SpaceTabs() {
                 />
               )}
               <span className="truncate">{name}</span>
-            </button>
+            </Button>
             <button
               type="button"
               aria-label={`Close ${name}`}
               title="Close tab"
               onClick={() => requestClose(s.path, name)}
+              // NOT `CHROME_BUTTON` (the chrome bar's shared button grammar,
+              // `./chromeButton.ts`) and NOT a shared component — deliberately.
+              // This ✕ and the `+` below are the SECOND chrome cluster, and per
+              // CONTEXT.md **Chrome controls** + ADR 0038 the two clusters differ
+              // ON PURPOSE: this is a 20px (`size-5`) square with `rounded` and an
+              // ALWAYS-ON `bg-surface-hover` fill, not the chrome bar's 28px
+              // (`h-7 w-7`) `rounded-md` button that fills `bg-hover` and
+              // colour-TRANSITIONS in (`transition-colors`). It also sits inside
+              // the drag region and inside the pill, so it is inset by `ml-1 mr-3`
+              // to match the label's own inset. Folding these two onto that
+              // constant would repaint the strip and pull the tab controls into
+              // the grammar ADR 0038 scopes to the top-right cluster — and
+              // `chromeButton.test.ts` reddens the import that would do it.
               // ALWAYS there — on the active tab and on every other one. The
               // first version drew it TRANSPARENT until the pointer reached the
               // pill, which made an un-hovered tab look un-closable (and left a
@@ -300,6 +494,21 @@ export default function SpaceTabs() {
               // and the pill centres the square — no self-centring to get wrong.
               // `focus-visible:` mirrors the hover fill, so tabbing to the ✕
               // shows the same patch the pointer gets.
+              //
+              // STILL A RAW `<button>` AFTER C7, and that is a measured blocker
+              // rather than an omission: `Button`'s base carries
+              // `disabled:opacity-50`, and `SpaceTabs.test.tsx` ("the ✕ sits on
+              // EVERY tab") asserts this element's class matches no
+              // `/opacity-/` at all. `tailwind-merge` can only drop a utility a
+              // LATER class in the same group names, and this class list spells
+              // no `opacity-*`, so the variant survives any `className` we could
+              // pass. PROVEN, not argued: converting this one site to
+              // `variant="ghost" size="icon-xs"` in a scratch tree reddened
+              // exactly that assertion (1 failed / 33 passed) with
+              // `disabled:opacity-50` still in the rendered class list. Removing
+              // the base's `disabled:` pair is a change to the shared primitive
+              // AND to that test's contract — both out of scope for a sweep whose
+              // rule is that no assertion moves.
               className="ml-1 mr-3 grid size-5 shrink-0 place-items-center rounded text-foreground-subtle hover:bg-surface-hover focus-visible:bg-surface-hover hover:text-foreground focus-visible:text-foreground"
             >
               <XIcon className="size-3.5" />
@@ -307,14 +516,28 @@ export default function SpaceTabs() {
           </div>
         );
       })}
-      <button
+      <Button
         type="button"
         aria-label="New space"
+        variant="ghost"
+        size="icon-lg"
         onClick={openNewSpaceDialog}
-        className="size-8 shrink-0 rounded-md text-foreground-subtle hover:bg-surface-hover"
+        // The `+` is the other half of the SECOND chrome cluster — see the
+        // ✕'s comment above for why this is not `CHROME_BUTTON` (`size-8`,
+        // `bg-surface-hover`, no `transition-colors`). C7 routes it through
+        // `Button` with both axes named; `NEW_SPACE_BUTTON_WALL` undoes the base
+        // utilities that would move the glyph or the box (in particular
+        // `inline-block`, which keeps the `+` where it sits today instead of
+        // centring it), and the site's own class list comes LAST so it wins
+        // every group it spells — including `rounded-md` over `icon-lg`'s
+        // `rounded-lg`.
+        className={cn(
+          NEW_SPACE_BUTTON_WALL,
+          "size-8 shrink-0 rounded-md text-foreground-subtle hover:bg-surface-hover",
+        )}
       >
         <PlusIcon className="size-4" />
-      </button>
+      </Button>
       {/* The empty strip after the `+` (the browser's empty tab strip —
           a plain spacer; the chrome bar container is the drag region).
           */}

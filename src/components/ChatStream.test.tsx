@@ -45,7 +45,10 @@ import type {
 import { setSidePaneCollapsed } from "../lib/sidePaneState";
 import * as chatAttachments from "../lib/chatAttachments";
 import { activeMentionToken, isOutsideSpaceQuery } from "../lib/skills";
+import { IPC_EVENTS } from "../lib/ipc/events";
 import { MAX_CHAT_ATTACHMENTS, type ChatComposerAttachment } from "../lib/chatAttachments";
+import { makeSessionRow, makeSettings, makeSpaceRow } from "../test/fixtures";
+import { resetStores } from "../test/resetStores";
 
 /**
  * The monospace advance as a fraction of font size, used to turn a braille
@@ -57,38 +60,11 @@ import { MAX_CHAT_ATTACHMENTS, type ChatComposerAttachment } from "../lib/chatAt
  */
 const MONO_ADVANCE_EM = 0.6;
 
-/** A full settings fixture (the spinner-style tests seed the store with it). */
-const SETTINGS_FIXTURE: AppSettings = {
-  theme: "dark",
-  palette: null,
-  paneLayout: {},
-  defaultTrustNewSpaces: false,
-  defaultModel: null,
-  defaultThinkingLevel: null,
-  enabledTools: [],
-  providers: [],
-  mcpServers: {},
-  font: { sizePx: 14, uiFamily: null, codeFamily: null },
-  defaultThinkingLevels: {},
-  agentOverrides: {},
-  spinnerStyle: null,
-  emptyStateAnimation: null,
-  filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
-  web: {
-    braveApiKey: "",
-    tavilyApiKey: "",
-    perplexityApiKey: "",
-    searxngUrl: "",
-    defaultProvider: "auto",
-    proxy: "",
-  },
-  mcpMentionsEnabled: false,
-  sessionNamingEnabled: true,
-  sessionNamingModel: null,
-  sessionNamingReasoning: null,
-  attentionAlertsEnabled: true,
-  attentionAlertDelaySecs: 15,
-};
+/** A full settings fixture (the spinner-style tests seed the store with it).
+ *  The shared fixture — this file's 22-field literal was byte-identical to
+ *  `DEFAULT_SETTINGS`, which is the drift `src/test/fixtures/settings.ts`
+ *  exists to make a compile error instead of a silent copy. */
+const SETTINGS_FIXTURE: AppSettings = makeSettings();
 
 /**
  * Seed the settings store with the `#` MCP-mention trigger ENABLED.
@@ -124,35 +100,33 @@ const PERSISTED_MCP_MESSAGE =
   "\nand use its tools. (Server summary: npx -y x-mcp.)" +
   "\n</mcp>";
 
-// jsdom exposes a non-callable `window.matchMedia` (the `"matchMedia" in
-// window` guard in the `BrailleLoader`'s `usePrefersReducedMotion` passes,
-// then the call throws) — stub a full MediaQueryList so the working
-// indicator renders (the `braille-loader` test's full-stub pattern).
+// The environment stubs `src/test/setup.tsx` does NOT provide.
+//
+// DELETED here by the rolling B4a migration (this file was touched by B2 for the
+// `IPC_EVENTS.insertSkill` fold): the `matchMedia` `stubGlobal`, the four
+// `Element.prototype` pointer-capture/`scrollIntoView` stubs. All five are
+// byte-equivalent to what `setup.tsx`'s own `beforeAll` installs, and this file
+// calls no `vi.unstubAllGlobals()`, so the shared stubs survive for the whole
+// file (that call is the ONLY thing that strips a setup-file `stubGlobal` — see
+// the guard list in `setup.tsx`).
+//
+// KEPT, and neither is redundancy:
+//  - the object-URL pair: `setup.tsx` stubs no `URL` API, and staged
+//    attachments need a deterministic `blob:` URL (Node's global `URL` reaches
+//    jsdom but rejects web `Blob`s).
+//  - the THREE `HTMLElement.prototype` stubs: `setup.tsx` puts `scrollIntoView`
+//    on `Element.prototype` only, and two tests below read
+//    `HTMLElement.prototype.scrollIntoView` directly and inspect
+//    `mock.contexts` to learn WHICH picker row scrolled. Without this own-property
+//    override that read is `undefined` and the calls land on the inherited
+//    `Element` stub — so this is a dependency, not a duplicate.
 beforeAll(() => {
-  // Node's global `URL` leaks into jsdom but only accepts Node `Blob`s —
-  // stub the object-URL APIs so staged attachments get deterministic URLs.
   URL.createObjectURL = vi.fn((file: File) => `blob:mock-${file.name}`);
   URL.revokeObjectURL = vi.fn();
-  Element.prototype.scrollIntoView = vi.fn();
-  Element.prototype.hasPointerCapture = vi.fn(() => false);
-  Element.prototype.setPointerCapture = vi.fn();
-  Element.prototype.releasePointerCapture = vi.fn();
   HTMLElement.prototype.scrollIntoView = vi.fn();
   HTMLElement.prototype.hasPointerCapture = vi.fn(() => false);
   HTMLElement.prototype.setPointerCapture = vi.fn();
   HTMLElement.prototype.releasePointerCapture = vi.fn();
-  vi.stubGlobal(
-    "matchMedia",
-    (q: string) => ({
-      matches: false,
-      media: q,
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-      addListener: vi.fn(),
-      removeListener: vi.fn(),
-      dispatchEvent: vi.fn(),
-    }),
-  );
 });
 
 // Mock the Tauri IPC layer; everything else (stores) is the real code.
@@ -252,14 +226,16 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 /**
  * Seed a live session (fresh transcript) in the sessions store.
+ *
+ * The rows and the Space come from `src/test/fixtures` (the rolling migration)
+ * — the literals they replace were byte-identical to the fixture defaults plus
+ * an override, so nothing about the seeded state changed.
  */
 function seedLiveSession(): void {
   useSessions.setState({
     activeSessionId: "s1",
-    sessions: [
-      { sessionId: "s1", cwd: "/home/u/proj", capabilities: {}, archived: false },
-    ],
-    spaces: [{ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1, trusted: false }],
+    sessions: [makeSessionRow({ sessionId: "s1", cwd: "/home/u/proj" })],
+    spaces: [makeSpaceRow({ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1 })],
     historySessions: [],
     messages: { s1: [] },
     inTurn: {},
@@ -281,9 +257,9 @@ function seedStoredSession(
   useSessions.setState({
     activeSessionId: "s1",
     sessions: [],
-    spaces: [{ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1, trusted: false }],
+    spaces: [makeSpaceRow({ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1 })],
     historySessions: [
-      { sessionId: "s1", cwd: "/home/u/proj", capabilities, archived: false },
+      makeSessionRow({ sessionId: "s1", cwd: "/home/u/proj", capabilities }),
     ],
     messages: { s1: [] },
     inTurn: {},
@@ -304,10 +280,15 @@ function seedArchivedSession(
   useSessions.setState({
     activeSessionId: "s9",
     sessions: [],
-    spaces: [{ path: "/home/u/arch", createdAt: 1, lastOpenedAt: 1, trusted: false }],
+    spaces: [makeSpaceRow({ path: "/home/u/arch", createdAt: 1, lastOpenedAt: 1 })],
     historySessions: [],
     archivedSessions: [
-      { sessionId: "s9", cwd: "/home/u/arch", capabilities, archived: true },
+      makeSessionRow({
+        sessionId: "s9",
+        cwd: "/home/u/arch",
+        capabilities,
+        archived: true,
+      }),
     ],
     messages: { s9: [] },
     inTurn: {},
@@ -325,14 +306,13 @@ function seedLiveSessionWithImages(): void {
   useSessions.setState({
     activeSessionId: "s1",
     sessions: [
-      {
+      makeSessionRow({
         sessionId: "s1",
         cwd: "/home/u/proj",
         capabilities: { promptCapabilities: { image: true } },
-        archived: false,
-      },
+      }),
     ],
-    spaces: [{ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1, trusted: false }],
+    spaces: [makeSpaceRow({ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1 })],
     historySessions: [],
     messages: { s1: [] },
     inTurn: {},
@@ -444,27 +424,17 @@ beforeEach(() => {
   // re-fetch).
   clearSkillCatalogCache();
   clearMentionCatalogsCache();
-  useSessions.setState({
-    activeSessionId: null,
-    sessions: [],
-    historySessions: [],
-    archivedSessions: [],
-    spaces: [],
-    messages: {},
-    inTurn: {},
-    stopReasons: {},
-    closeReasons: {},
-    configOptions: {},
-    compacting: {},
-  });
-  useInteractive.getState().dismissSession("s1");
-  usePermissions.getState().dismissSessionPrompts("s1");
-  for (const id of Object.keys(useSubagents.getState().entries)) {
-    useSubagents.getState().dismiss(id);
-  }
-  useInteractive.getState().dismissSession("sub1");
-  usePermissions.getState().dismissSessionPrompts("sub1");
-  useSettings.setState({ settings: null, loaded: false });
+  // Every store back to zustand's own captured initial state (the rolling
+  // migration). This replaces a hand-written 11-key `useSessions` reset — the
+  // store has SIXTEEN data fields, so `history`, `contextUsage`, `stalled`,
+  // `newSessionError` and friends used to leak from one test to the next — plus
+  // the per-id `dismiss*` calls (a whole-store replace already covers them) and
+  // the settings reset (whose values ARE the initial state).
+  //
+  // The queued-prompt loop ABOVE still runs first and is NOT redundant: its
+  // `clearSession` releases staged object URLs, a side effect a state replace
+  // cannot perform.
+  resetStores();
 });
 
 describe("ChatStream", () => {
@@ -1788,6 +1758,15 @@ describe("ChatStream", () => {
     expect(screen.queryByAltText("a.txt")).toBeNull();
     const errorLine = screen.getByText(/is not a supported image format/);
     expect(errorLine.className).toContain("text-destructive");
+    // Task C3 (finding 7): the composer's rejection line is now an announced
+    // live region. Asserted HERE (the site's existing error-line test) rather
+    // than in a new case, so the class pin and the role pin travel together.
+    expect(errorLine.getAttribute("role")).toBe("alert");
+    // Byte-identical to the hand-written `mb-2 px-3 text-ui-sm text-destructive`
+    // line this replaced, so the gap under the transcript does not move.
+    expect(errorLine.getAttribute("class")).toBe(
+      "text-ui-sm text-destructive mb-2 px-3",
+    );
   });
 
   it("SVG is rejected (allowlist)", () => {
@@ -3069,7 +3048,7 @@ describe("ChatStream", () => {
     // a raw `dispatchEvent` does not flush React's state updates.
     await act(async () => {
       window.dispatchEvent(
-        new CustomEvent("archimedes:insert-skill", { detail: "$beta " }),
+        new CustomEvent(IPC_EVENTS.insertSkill, { detail: "$beta " }),
       );
     });
     // The stale picker is CLOSED (no lingering popup until the next
@@ -3095,7 +3074,7 @@ describe("ChatStream", () => {
     // of `listSkills`.
     await act(async () => {
       window.dispatchEvent(
-        new CustomEvent("archimedes:insert-skill", { detail: "$debug " }),
+        new CustomEvent(IPC_EVENTS.insertSkill, { detail: "$debug " }),
       );
     });
     expect(textarea.value).toBe("hello $debug ");

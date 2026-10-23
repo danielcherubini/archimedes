@@ -5,12 +5,89 @@ import {
   type AskResponsePayload,
 } from "../lib/tauri";
 import { useInteractive } from "../store/interactive";
-import { describeIpcError } from "../lib/ipcError";
+import { useAsyncAction } from "../hooks/useAsyncAction";
 import { useSessions } from "../store/sessions";
+import { useSubagents } from "../store/subagents";
 import { Button } from "./ui/button";
+import { IpcErrorLine } from "./IpcErrorLine";
+import { MutedCaption } from "./MutedCaption";
+import { cn } from "./lib/utils";
 
 const OTHER_OPTION = "Other (type your own)";
 const RECOMMENDED_TAG = " (Recommended)";
+
+/**
+ * THE OPTION ROW and the `Other` row — the same box, drawn twice (C8 records
+ * them as two copies of one shape). `ASK_OPTION_WALL` undoes what `Button`'s
+ * base and the `default` size would change; `ASK_OPTION_ROW` is the class list
+ * both rows carried VERBATIM and it comes FIRST-BUT-LAST among the two, so the
+ * row wins every group it spells. The selected fill is appended after both, as
+ * it was before.
+ *
+ * What the wall undoes:
+ *  - `border-0` — the base's `border` is a 1px ring; the row had none, and
+ *    preflight sets `border: 0 solid`. It would grow a 21px row to 23px and
+ *    inset the ☐ by 1px. It also makes the base's `bg-clip-padding` a no-op:
+ *    with a zero-width border, `padding-box` and `border-box` are the same box,
+ *    which matters only on the SELECTED arm, where a background does paint.
+ *  - `h-auto` — the size's `h-7` is a fixed 28px. These rows are
+ *    `py-0.5`-high and GROW: an option label wraps onto two lines
+ *    (`[overflow-wrap:anywhere]` is on the label's own span precisely so a long
+ *    one can). A fixed height would clip the second line.
+ *  - `justify-start` — the size centres content on the main axis; these rows
+ *    are left-aligned lists and the row spells `text-left` but not `justify-*`.
+ *  - `whitespace-normal` — the base's `whitespace-nowrap` is a real repaint:
+ *    the row inherited `white-space: normal`, and the label's own
+ *    `[overflow-wrap:anywhere]` is only meaningful if wrapping is allowed.
+ *  - `[user-select:auto]` — the base's `select-none` would make an option's
+ *    text unselectable. `select-auto` would instead be the SAME tailwind-merge
+ *    group as `select-none` and get it dropped by the merge; the arbitrary
+ *    property is a different group, so both survive and the cascade decides —
+ *    `[user-select:auto]` is emitted after `.select-none` in the built sheet.
+ *    (`.select-auto` itself exists in the sheet, but BEFORE `.select-none`, so
+ *    the merge is what would have to carry it. See `SpacesList.tsx`'s same wall
+ *    for the measured offsets.)
+ *  - `disabled:pointer-events-auto` — the base's `disabled:pointer-events-none`
+ *    is a REAL change here and this is the one arm `Button` adds that a test
+ *    would never catch: these rows ARE disabled while `busy`, and in the
+ *    original a disabled row still matched `:hover`, so hovering it filled
+ *    `bg-surface-hover` under the 50% dimming. With `pointer-events: none` it
+ *    would not fill, and the pointer would fall through to the card behind.
+ *
+ * What the row wins by being LAST: `flex` (over the base's `inline-flex`),
+ * `gap-2` (over the size's `gap-1`), `px-1` (over `px-2`), `rounded-md`,
+ * `items-center`, `text-ui-base`, `hover:bg-surface-hover` (the ghost arm's
+ * `hover:bg-hover` is a different colour in zai-dark and Dracula — 5% against
+ * surface-hover's 10%), and `disabled:opacity-50`, which is byte-identical to
+ * the base's own so neither side can lose it.
+ *
+ * Inert additions, with the reason:
+ *  - the ghost arm's `text-foreground` / `hover:text-foreground` — the row
+ *    spells no colour, but it paints NO TEXT of its own: both children are
+ *    spans that spell their own (`text-interaction-ask-foreground` /
+ *    `text-foreground` / `text-foreground-subtlest`), and the row itself is
+ *    inside a card whose ink is `text-foreground` anyway;
+ *  - `text-ui-base/relaxed` never survives the merge at all — the row's own
+ *    `text-ui-base` deletes the base's compound utility, line-height included
+ *    (measured: `cn("text-ui-base/relaxed", "text-ui-base")` → `text-ui-base`),
+ *    so the row keeps the font-size it inherited and declares no line-height,
+ *    exactly as before;
+ *  - `outline-none` — `base.css:53-57` forces `outline: none !important` on
+ *    every `:focus`/`:focus-visible` regardless, in every browser and again
+ *    under `forced-colors`;
+ *  - `aria-invalid:*` / `aria-expanded:*` — nothing sets either attribute here;
+ *  - `shrink-0` — the rows are children of a `space-y-1` BLOCK container, so
+ *    `flex-shrink` never applies;
+ *  - `[&_svg]:pointer-events-none`, `[&_svg]:shrink-0`,
+ *    `[&_svg:not([class*='size-'])]:size-3.5` — there is no `<svg>` in either
+ *    row; the ☐/● marks are text in spans;
+ *  - `has-data-[icon=inline-*]:pr/pl` — no child carries `data-icon`;
+ *  - `group/button` — nothing reads that group.
+ */
+const ASK_OPTION_WALL =
+  "border-0 h-auto justify-start whitespace-normal [user-select:auto] disabled:pointer-events-auto";
+const ASK_OPTION_ROW =
+  "flex w-full items-center gap-2 rounded-md px-1 py-0.5 text-left text-ui-base hover:bg-surface-hover disabled:opacity-50";
 
 /**
  * Per-question draft: which option indexes are selected, whether `Other` is
@@ -69,11 +146,14 @@ function draftHasAnswer(draft: QuestionDraft): boolean {
  * **Correlation** is keyed by `(source, toolCallId)` or the frame UUID
  * `requestId` — never by bare `toolCallId` (the store keys by `requestId`;
  * the `toolCallId` is carried for anchoring to the ACP `tool_call` frame
- * when present). Subagent asks (`source` starts with `subagent:`) render a
- * labeled card anchored by `source` (the desktop has no ACP `tool_call`
- * frame for child tool calls). No emitter sends a `subagent:` source today —
- * `InteractiveRequestData.source` says what the transport really carries — so
- * this branch is live for a future emitter and for the fixtures that pin it,
+ * when present). The card's "who is asking" label is the RESOLVED agent
+ * name from `useSubagents` (keyed by this card's `sessionId`, which is the
+ * CHILD's id when a child's gate is rendered), never `request.source` — the
+ * only value the desktop's transport emits there is the transport label
+ * `native`, which names nobody. `isSubagent` survives ONLY as the `queued`
+ * placeholder's gate below (a child's ask never gets a `tool_call` frame, so
+ * it is never queued); no production emitter sends a `subagent:` source, so
+ * that gate is live for a future emitter and for the fixtures that pin it,
  * not for traffic. If the request arrives before its ACP
  * `tool_call` frame, the card renders queued (bounded ~1.5 s) then
  * unanchored/labeled.
@@ -129,14 +209,38 @@ export default function AskQuestionCard({
     );
   });
   const isSubagent = request?.source.startsWith("subagent:") ?? false;
+  // "Who is asking" comes from the RESOLVED agent name, never from
+  // `request.source`. Every `interactive-request` the desktop emits carries
+  // the transport label `"native"` (`ask_flow` in
+  // `src-tauri/src/agent/harness/ask.rs`, the sudo sub-prompts in
+  // `src-tauri/src/agent/interactive/mod.rs`) for a main session and a
+  // Subagent session alike, so `source` names no one — and `isSubagent`
+  // below, which needs a `subagent:` prefix no emitter sends, never fires
+  // in production. A child's card is mounted with the CHILD's session id
+  // (`TranscriptFooter` / `SubagentModals` pass `gate.childSessionId`),
+  // which is the key `useSubagents` stores entries under, so the child's
+  // own `agentName` resolves here. A main session has no entry under its id
+  // and keeps the generic copy. The fallback is a TRUTHINESS test, not a
+  // nullish coalesce: `agentName` is a required string and a config-less
+  // (label-only) dispatch stores `""` (`unwrap_or_default()` on the
+  // `agentName` param in `src-tauri/src/agent/harness/dispatch.rs`), which a
+  // `??` would render as an EMPTY label. The selector returns a PRIMITIVE, so
+  // no snapshot-equality churn (the store's stable-reference rule).
+  const agentName = useSubagents(
+    (state) => state.entries[sessionId]?.agentName,
+  );
   // Queued: the request arrived before its ACP `tool_call` frame — render a
   // bounded (~1.5 s) placeholder, then the full card (unanchored/labeled).
   // Subagent asks never get a `tool_call` frame, so they are never queued.
   const [queued, setQueued] = useState(
     () => !isSubagent && request?.toolCallId !== undefined,
   );
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // NO `guard`: this site has no `if (busy) return` today. Re-entrancy is held
+  // by the two keydown guards (`!busy` on Enter and on Esc) and the four
+  // `disabled={busy}` props below, all of which read this `busy` — the flag is
+  // still the same value from the same machine, so every one of them behaves as
+  // before. The `queued` pair and `drafts` are separate machines and stay here.
+  const { busy, error, run } = useAsyncAction();
   const [drafts, setDrafts] = useState<Record<string, QuestionDraft>>({});
 
   // Queued: the request arrived before its ACP `tool_call` frame — render a
@@ -238,9 +342,7 @@ export default function AskQuestionCard({
       return { ...d, other, selected };
     });
 
-  const respond = async (cancelled: boolean) => {
-    setBusy(true);
-    setError(null);
+  const respond = (cancelled: boolean) => {
     const payload: AskResponsePayload = cancelled
       ? { cancelled: true, results: [] }
       : {
@@ -256,14 +358,12 @@ export default function AskQuestionCard({
               : { id: q.id, selectedOptions: result.selectedOptions };
           }),
         };
-    try {
-      await respondInteractiveRequest(sessionId, requestId, payload);
-      removeRequest(sessionId, requestId);
-    } catch (err) {
-      setError(describeIpcError(err));
-    } finally {
-      setBusy(false);
-    }
+    return run(() =>
+      respondInteractiveRequest(sessionId, requestId, payload).then(() =>
+        // The card collapses on settle.
+        removeRequest(sessionId, requestId),
+      ),
+    );
   };
 
   // Queued: a bounded placeholder while the ACP `tool_call` frame is
@@ -272,7 +372,7 @@ export default function AskQuestionCard({
     return (
       <div className="rounded-xl border border-border bg-interaction-ask-surface px-3 py-2">
         <p className="text-ui-sm text-interaction-ask-foreground">
-          {isSubagent ? `${request.source} is asking…` : "Agent is asking…"}
+          {agentName ? `${agentName} is asking…` : "Agent is asking…"}
         </p>
       </div>
     );
@@ -304,7 +404,7 @@ export default function AskQuestionCard({
       <div className="flex items-center gap-2 bg-interaction-ask-surface px-3 py-2">
         <span className="h-px flex-1 bg-interaction-ask-foreground/60" aria-hidden />
         <span className="text-ui-xs text-interaction-ask-foreground">
-          {isSubagent ? request.source : "Agent question"}
+          {agentName || "Agent question"}
         </span>
         <span className="h-px flex-1 bg-interaction-ask-foreground/60" aria-hidden />
       </div>
@@ -348,13 +448,15 @@ export default function AskQuestionCard({
                     // the fix still replays options as bare STRINGS, which makes
                     // `option.label` — and therefore the key — `undefined`.
                     <div key={index}>
-                      <button
+                      <Button
                         type="button"
+                        variant="ghost"
+                        size="default"
                         disabled={busy}
                         onClick={() => toggleOption(question, index)}
-                        className={`flex w-full items-center gap-2 rounded-md px-1 py-0.5 text-left text-ui-base hover:bg-surface-hover disabled:opacity-50 ${
-                          selected ? "bg-interaction-ask-fill" : ""
-                        }`}
+                        className={cn(ASK_OPTION_WALL, ASK_OPTION_ROW, {
+                          "bg-interaction-ask-fill": selected,
+                        })}
                       >
                         {question.multi ? (
                           <span
@@ -380,16 +482,17 @@ export default function AskQuestionCard({
                           </span>
                         )}
                         <span
-                          className={`min-w-0 [overflow-wrap:anywhere] ${
+                          className={cn(
+                            "min-w-0 [overflow-wrap:anywhere]",
                             selected
                               ? "text-interaction-ask-foreground"
-                              : "text-foreground"
-                          }`}
+                              : "text-foreground",
+                          )}
                         >
                           {option.label}
                           {recommended && RECOMMENDED_TAG}
                         </span>
-                      </button>
+                      </Button>
                       {selected && (
                         <input
                           value={d.notes[index] ?? ""}
@@ -410,13 +513,15 @@ export default function AskQuestionCard({
                   );
                 })}
                 <div>
-                  <button
+                  <Button
                     type="button"
+                    variant="ghost"
+                    size="default"
                     disabled={busy}
                     onClick={() => toggleOther(question)}
-                    className={`flex w-full items-center gap-2 rounded-md px-1 py-0.5 text-left text-ui-base hover:bg-surface-hover disabled:opacity-50 ${
-                      d.other ? "bg-interaction-ask-fill" : ""
-                    }`}
+                    className={cn(ASK_OPTION_WALL, ASK_OPTION_ROW, {
+                      "bg-interaction-ask-fill": d.other,
+                    })}
                   >
                     {question.multi ? (
                       <span
@@ -442,13 +547,16 @@ export default function AskQuestionCard({
                       </span>
                     )}
                     <span
-                      className={`[overflow-wrap:anywhere] ${
-                        d.other ? "text-interaction-ask-foreground" : "text-foreground"
-                      }`}
+                      className={cn(
+                        "[overflow-wrap:anywhere]",
+                        d.other
+                          ? "text-interaction-ask-foreground"
+                          : "text-foreground",
+                      )}
                     >
                       {OTHER_OPTION}
                     </span>
-                  </button>
+                  </Button>
                   {d.other && (
                     <input
                       value={d.otherText}
@@ -507,9 +615,7 @@ export default function AskQuestionCard({
         data-testid="ask-footer"
         className="mt-3 flex items-center justify-between gap-2 px-3 pb-3"
       >
-        <p className="text-ui-xs text-foreground-subtlest">
-          Enter submit · Esc cancel
-        </p>
+        <MutedCaption as="p">Enter submit · Esc cancel</MutedCaption>
         <div className="flex gap-2">
           <Button
             variant="outline"
@@ -528,7 +634,7 @@ export default function AskQuestionCard({
           </Button>
         </div>
       </div>
-      {error && <p className="px-3 pb-2 text-ui-sm text-destructive">{error}</p>}
+      {error && <IpcErrorLine error={error} className="px-3 pb-2" />}
     </div>
   );
 }

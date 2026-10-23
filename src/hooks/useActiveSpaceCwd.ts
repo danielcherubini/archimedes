@@ -1,4 +1,5 @@
 import { useSessions } from "../store/sessions";
+import { sessionFieldOf } from "../lib/sessionLookup";
 
 /**
  * The active **Session**'s `cwd` — which IS its **Space**'s folder (CONTEXT.md) —
@@ -15,13 +16,14 @@ import { useSessions } from "../store/sessions";
  * consumer re-deriving it is how the two silently disagree, so the rule is one
  * module, not one selector per component.
  *
- * Live first, then stored — and the stored lookup covers BOTH stored lists: a
- * session opened from the Archived section lives only in `archivedSessions`, so
- * a `historySessions`-only lookup would resolve `null` for it and make every
- * relative path in its transcript unopenable (`external_open` refuses a
- * relative path with no cwd — the safe direction, but a needless dead surface).
- * A live session wins over a stored row with the same id: the live row is the
- * current truth.
+ * The WALK itself (live → stored → archived, live winning over a stored row with
+ * the same id, and BOTH stored lists covered) belongs to
+ * `lib/sessionLookup.ts` now — the same rule five other call sites needed. It
+ * matters here that archived is reached at all: a session opened from the
+ * Archived section lives only in `archivedSessions`, so a `historySessions`-only
+ * lookup would resolve `null` for it and make every relative path in its
+ * transcript unopenable (`external_open` refuses a relative path with no cwd —
+ * the safe direction, but a needless dead surface).
  *
  * A **Subagent session** needs no special case: its Worker runs with
  * `cwd = parent_cwd`, so the active Space's cwd is correct for its transcript
@@ -32,17 +34,11 @@ import { useSessions } from "../store/sessions";
  * The selector returns `string | null` DIRECTLY, never a fresh object or array:
  * a selector whose result is a new reference every call makes Zustand re-render
  * forever (the rule stated at `ChatStream.tsx:80-81`, and breaking it hangs the
- * test suite rather than failing it).
+ * test suite rather than failing it). `sessionFieldOf` returns the row's own
+ * field, so the `?? null` below is the only value this creates.
  */
 export function useActiveSpaceCwd(): string | null {
-  return useSessions((s) => {
-    if (!s.activeSessionId) return null;
-    const id = s.activeSessionId;
-    return (
-      s.sessions.find((x) => x.sessionId === id)?.cwd ??
-      s.historySessions.find((x) => x.sessionId === id)?.cwd ??
-      s.archivedSessions.find((x) => x.sessionId === id)?.cwd ??
-      null
-    );
-  });
+  return useSessions(
+    (s) => sessionFieldOf(s, s.activeSessionId, "cwd") ?? null,
+  );
 }

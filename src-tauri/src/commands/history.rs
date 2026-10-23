@@ -2,7 +2,7 @@
 //!
 //! History is owned by the client (this app): the frontend calls
 //! `list_sessions` on boot to populate the session list, `load_history`
-//! when a stored session is opened (or paged on scroll-up, ADR 0066),
+//! when a stored session is opened (or paged on scroll-up, ADR 0073),
 //! `set_session_archived` to archive / unarchive a session (ADR 0016), and
 //! `delete_session` to remove a session (and, via `ON DELETE CASCADE`, its
 //! messages).
@@ -52,7 +52,7 @@ pub async fn list_sessions(
         .map_err(|e| e.to_string())
 }
 
-/// A stored session's transcript page, in insertion order (ADR 0066).
+/// A stored session's transcript page, in insertion order (ADR 0073).
 ///
 /// Bounded by `limit` (newest rows first) and `before_id` (cursor for
 /// paging older rows). When omitted, returns all rows up to `before_id`

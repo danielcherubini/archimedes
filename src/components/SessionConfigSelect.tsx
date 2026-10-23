@@ -1,4 +1,4 @@
-import { memo, useState, useEffect } from "react";
+import { memo, useEffect } from "react";
 import { Bot } from "lucide-react";
 import {
   Select,
@@ -12,9 +12,10 @@ import {
 import ModelPicker from "./ModelPicker";
 import { modelItemsFromCatalog } from "./ModelPickerDialog";
 import { useSettings } from "../store/settings";
-import { SessionConfigOption } from "../lib/tauri";
+import type { SessionConfigOption } from "../lib/tauri";
 import { THINKING_GLYPHS } from "../lib/toolOutput";
-import { describeIpcError } from "../lib/ipcError";
+import { useAsyncAction } from "../hooks/useAsyncAction";
+import { cn } from "./lib/utils";
 
 type OnSet = (optionId: string, value: string) => Promise<void>;
 
@@ -124,8 +125,17 @@ function SessionConfigSelect({
   disabled,
   fullWidth,
 }: SessionConfigSelectProps) {
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // `pending` is the hook's `busy`, renamed at the destructure so every reader
+  // in this file keeps its name (the trigger's `disabled`, the `isDisabled`
+  // join, the guard below). `guard: true` because this site self-guarded
+  // (`if (pending) return` at the old `:217`): unlike the sudo/ask cards, this
+  // control is NOT protected by a `disabled` attribute on the element that
+  // fires it — the model option's picker rows live in a DIALOG that is already
+  // open, so a second pick reaches `onSelect` regardless of the trigger's
+  // disabled state, and only the JS guard stops a second `set_config_option`.
+  const { busy: pending, error, run, clearError } = useAsyncAction({
+    guard: true,
+  });
   // The base disabled state (the call site — a STORED session's selector
   // is populated but read-only: no agent process to deliver
   // `set_config_option` to) OR the in-flight `onSet` (one change at a
@@ -139,10 +149,13 @@ function SessionConfigSelect({
 
   useEffect(() => {
     if (error) {
-      const timer = setTimeout(() => setError(null), 5000);
+      // The 5s auto-clear stays, and it clears the MESSAGE ONLY: `clearError`
+      // never touches `busy`, so a timer can never re-enable a trigger whose
+      // `onSet` is still in flight.
+      const timer = setTimeout(clearError, 5000);
       return () => clearTimeout(timer);
     }
-  }, [error]);
+  }, [error, clearError]);
 
   const value = typeof option?.currentValue === "string" ? option.currentValue : "";
   // The two controls' indicators (the reference UI's placement): the model
@@ -168,8 +181,12 @@ function SessionConfigSelect({
   // missing one leaves that one trigger content-sized inside a line that is
   // supposed to be full-width.
   const width = fullWidth ? FULL_WIDTH_TRIGGER : COMPOSER_TRIGGER_WIDTH;
-  const modelEdge = fullWidth ? "" : ` ${COMPOSER_MODEL_EDGE}`;
-  const thinkingEdge = fullWidth ? "" : ` ${COMPOSER_THINKING_EDGE}`;
+  // Task C8 dropped the LEADING SPACE each of the two edge constants used to
+  // carry: it existed only so the hand-written template literal joined cleanly,
+  // and all three consumers now go through `cn()`, which joins for free (and
+  // drops the `""` full-width arm entirely).
+  const modelEdge = fullWidth ? "" : COMPOSER_MODEL_EDGE;
+  const thinkingEdge = fullWidth ? "" : COMPOSER_THINKING_EDGE;
   // A `null` option is MODEL-ONLY (the props union below says so): render the
   // DISABLED model stub — the control's identity, no data, the config re-emits
   // on resume. Thinking has no stub at all: `SessionConfigBlock` gates the
@@ -185,7 +202,7 @@ function SessionConfigSelect({
           items={[]}
           onSelect={() => {}}
           variant="ghost"
-          triggerClassName={`${width}${modelEdge}`}
+          triggerClassName={cn(width, modelEdge)}
           disabled
           icon={
             <Bot
@@ -213,18 +230,8 @@ function SessionConfigSelect({
     settings?.providers ?? [],
   );
 
-  const handleValueChange = async (val: string) => {
-    if (pending) return;
-    setPending(true);
-    setError(null);
-    try {
-      await onSet(option.id, val);
-    } catch (e) {
-      setError(describeIpcError(e));
-    } finally {
-      setPending(false);
-    }
-  };
+  const handleValueChange = (val: string) =>
+    run(() => onSet(option.id, val));
 
   // The MODEL option: the shared `ModelPicker` (a ghost trigger — the
   // bot icon + the current value + a chevron — opening the model picker
@@ -240,7 +247,7 @@ function SessionConfigSelect({
           items={modelItems}
           onSelect={(val) => void handleValueChange(val)}
           variant="ghost"
-          triggerClassName={`${width}${modelEdge}`}
+          triggerClassName={cn(width, modelEdge)}
           disabled={isDisabled}
           icon={
             <Bot
@@ -266,7 +273,20 @@ function SessionConfigSelect({
         <SelectTrigger
           variant="ghost"
           size="sm"
-          className={`${width}${thinkingEdge}`}
+          className={cn(
+            // The two constants are measured to merge to the same token set the
+            // concatenation produced (`thinkingEdge` used to carry a leading
+            // space purely so the two literals joined cleanly — `cn` joins for
+            // free, so it is gone from both arms). The seam-edge utility is a
+            // `pl-*`/`pr-*` and the trigger variant's own inset is `px-*`, which
+            // tailwind-merge keeps as separate groups, so
+            // `SessionConfigSelect.test.tsx`'s pins (`pl-1` present, `pl-2`
+            // absent; `w-full` present and `max-w-72` ABSENT at full width) all
+            // hold — that last one because `cn` is applied HERE to a string that
+            // already excludes the cap, exactly as before.
+            width,
+            thinkingEdge,
+          )}
           disabled={isDisabled}
           aria-label={option.name}
         >
@@ -275,7 +295,14 @@ function SessionConfigSelect({
               none) renders here. */}
           {isThinking && (
             <span
-              className={`text-ui-sm ${thinkingIndicator.className}`}
+              className={cn(
+                // Same reasoning as the trigger above: `thinkingIndicator.className`
+                // is a text COLOUR (`text-thinking-*`, or the fallback
+                // `text-foreground-subtle`) and `text-ui-sm` is a registered
+                // font-size group, so neither drops the other.
+                "text-ui-sm",
+                thinkingIndicator.className,
+              )}
               aria-hidden
               data-testid="thinking-level-icon"
             >

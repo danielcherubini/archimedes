@@ -1,5 +1,5 @@
 import type { AcpSessionUpdate } from "../tauri";
-import type { DiffRef, Message } from "../../store/sessions";
+import type { DiffRef, Message } from "../sessionTypes";
 
 export function diffMessages(diffs: DiffRef[], at: number): Message[] {
   return diffs.map((d) => ({ kind: "diff" as const, path: d.path, patch: d.patch, at }));

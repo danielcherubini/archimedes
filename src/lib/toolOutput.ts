@@ -1,5 +1,5 @@
 import { basenameOfPath } from "./paths";
-import type { ToolCallUiStatus } from "../store/sessions";
+import type { ToolCallUiStatus } from "./sessionTypes";
 import type { LucideIcon } from "lucide-react";
 import {
   SquareTerminalIcon,

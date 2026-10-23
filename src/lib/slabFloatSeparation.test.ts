@@ -181,115 +181,31 @@ describe("floats over the content slab (the accepted collision)", () => {
 });
 
 /**
- * SPACE TABS — ACTIVE AND INACTIVE ARE ONE KIND OF OBJECT. The active tab used
- * to BE the chat sheet's top edge: a full-height `h-10` tab with a hard 5px
- * same-colour shadow that extended its fill across the frame gap and merged
- * it into the slab (the "bridge" design). It worked, but next to its pill
- * siblings it read as a different kind of object — a tab that was not a tab —
- * and the user asked for it to be the same pill, lifted. It now is: the same
- * `h-8 rounded-md` inset pill, one step brighter (`bg-surface-hover` over the
- * inactive `bg-surface`), full-contrast text, `font-medium`. This block pins
- * that contract AND that the bridge geometry does not creep back in, because
- * the old seam logic is the sort of thing that looks "intentional" in a diff
- * review and survives a colour-only test.
+ * THE SPACE TABS MOVED OUT OF THIS FILE. Active and inactive used to be pinned
+ * here by READING THE TAB-STRIP COMPONENT'S SOURCE TEXT: lifting the pill's
+ * class literal out of the source with one regex, lifting every
+ * `active ? "…" : "…"` class ternary with another, and comparing the two — plus
+ * a hard failure raised when a ternary could not be found. That last part was
+ * the problem in miniature: a component that expressed the same correct pair as
+ * a lookup, a `cn()` call, or a variant failed at test time, so a build-green,
+ * pixel-identical component arrived with zero tests run. It also punished
+ * RELOCATION: moving the pill's geometry into a shared child reddened a gate
+ * about how a file is WRITTEN.
+ *
+ * Both invariants now live where they are observable, in the rendered DOM:
+ * `src/components/SpaceTabs.pill.test.tsx` renders the strip and asserts (a) the
+ * pill is the same `h-8` `rounded-md` inset for the active and the inactive tab,
+ * with the shape existing exactly once across the state pair, and (b) the state
+ * pair differs ONLY by fill and ink — a geometry difference in either direction
+ * fails it — plus the bridge ban (no `h-10`, no `rounded-t-md`, no bridge
+ * shadow, no paint-order hack) over every class the strip renders. The
+ * "one kind of object" claim is now STRONGER than the source gate managed: the
+ * text reader could not see a duplicated geometry string inside a ternary
+ * branch, whereas the rendered class list cannot contain one invisibly.
+ *
+ * This file keeps ONLY the gates no render can express: the palette collision
+ * measurements, and the float shadow/border gates. Those are textual on purpose
+ * — a `shadow-md` that a component must still CONTAIN for Tailwind's scanner to
+ * emit the rule at all is a source-text fact whether or not a given test mounts
+ * the component, so `FLOATS` and the tooltip's accepted casualty stay.
  */
-describe("the space tabs (active and inactive are one kind of object: pills)", () => {
-  const tabs = () => code("src/components/SpaceTabs.tsx");
-
-  /**
-   * The pill's OWN class string. The pill is a wrapper `div` carrying the
-   * geometry ONCE for both states (its two children are the label and the ✕),
-   * so "active and inactive are one kind of object" is now structural: there is
-   * literally one geometry string, not two that must be kept equal.
-   */
-  const pill = (): string => {
-    // The pill's STATIC prefix, found by the height it gives both states — not
-    // by a class that happens to come first, which a refactor is free to move.
-    const m = tabs().match(/className=\{`([^`$]*h-8[^`$]*)\$\{/);
-    if (!m) throw new Error("no active/inactive pill with a shared height exists — the one-kind-of-object contract is gone");
-    return m[1]!;
-  };
-
-  /** Every `active ? "…" : "…"` class ternary in the file, in source order. */
-  const ternaries = (): Array<[string, string]> =>
-    [...tabs().matchAll(/active\s*\?\s*"([^"]+)"\s*:\s*"([^"]+)"/g)].map(
-      (m) => [m[1]!, m[2]!],
-    );
-
-  /**
-   * The ternary whose ACTIVE branch carries `needle` (fill vs text vs ✕). A
-   * throw here is NOT a hint to go fix this file's regexes: it means the
-   * CONTRACT is gone — the state pair this block exists to pin is no longer
-   * written as a ternary, so the tab has stopped distinguishing active from
-   * inactive in the way the design says it must.
-   */
-  const ternaryWith = (needle: string, contract: string): [string, string] => {
-    const found = ternaries().find(([active]) => active.includes(needle));
-    if (!found)
-      throw new Error(
-        `${contract}: no \`active ? "…" : "…"\` class ternary in SpaceTabs.tsx has \`${needle}\` on its active side`,
-      );
-    return found;
-  };
-
-  it("active and inactive share the pill geometry (h-8, rounded-md, inset in the bar)", () => {
-    const cls = pill();
-    expect(cls, "the pill lost its inset height").toMatch(/(^|\s)h-8(\s|$)/);
-    expect(cls, "the pill lost its corners").toMatch(/(^|\s)rounded-md(\s|$)/);
-    // The reader above CAN only match a literal outside the ternary, but on its
-    // own that proves only "a shared geometry string exists" — it cannot see a
-    // SECOND copy of `h-8 rounded-md` smuggled into both branches of a state
-    // ternary, which is exactly how the pill's shape starts drifting again. The
-    // next test closes that hole by forbidding geometry in the branches.
-  });
-
-  /** The utilities that decide an object's SHAPE (as opposed to its fill). */
-  const GEOMETRY = /^(h-|w-|size-|rounded)/;
-
-  it("no state ternary carries geometry — the pill's shape exists exactly once", () => {
-    // POSITIVE half of the contract the reader above cannot express: the pill
-    // geometry lives in the one static literal, so a state ternary that
-    // repeats `h-8` / `rounded-md` / `size-*` / `w-*` — in ONE branch, which
-    // resizes the active tab, or in BOTH, which is the drift that stays green
-    // under the reader — is a failure here, not a review finding.
-    const seen = ternaries();
-    // Vacuity guard: with nothing matched, the loop below asserts nothing.
-    expect(seen.length, "the reader saw no active/inactive class ternary").toBeGreaterThan(0);
-    for (const [index, pair] of seen.entries()) {
-      for (const [state, cls] of [
-        ["active", pair[0]],
-        ["inactive", pair[1]],
-      ] as const) {
-        const offending = cls.split(/\s+/).filter((token) => GEOMETRY.test(token));
-        expect(
-          offending,
-          `ternary #${index + 1}'s ${state} branch carries geometry (${offending.join(", ")}) — the pill's shape belongs in the static literal, once`,
-        ).toEqual([]);
-      }
-    }
-  });
-
-  it("the active tab is the same pill one step lifted: surface-hover over surface, full-contrast text", () => {
-    const [activeFill, inactiveFill] = ternaryWith(
-      "bg-surface-hover",
-      "the lifted-pill fill ternary is gone",
-    );
-    expect(activeFill, "the active tab is not a lifted pill").toMatch(/(^|\s)bg-surface-hover(\s|$)/);
-    expect(inactiveFill, "the inactive pill changed its fill").toMatch(/(^|\s)bg-surface(\s|$)/);
-    const [activeText, inactiveText] = ternaryWith(
-      "font-medium",
-      "the full-contrast active-label ternary is gone",
-    );
-    expect(activeText).toMatch(/(^|\s)text-foreground(\s|$)/);
-    expect(activeText).toMatch(/(^|\s)font-medium(\s|$)/);
-    expect(inactiveText).toMatch(/(^|\s)text-foreground-subtle(\s|$)/);
-  });
-
-  it("the bridge is gone: no h-10, no rounded-top, no bridge shadow, no paint-order hack", () => {
-    const cls = tabs();
-    expect(cls, "the bridge shadow is back — the active tab is the sheet again").not.toMatch(/shadow-\[0_\d+px_0_0/);
-    expect(cls, "a full-height tab is not an inset pill").not.toMatch(/(^|\s)h-10(\s|$)/);
-    expect(cls, "a rounded-top tab is the sheet's edge, not a pill").not.toMatch(/rounded-t-md/);
-    expect(cls, "the paint-order hack is back with the bridge").not.toMatch(/relative z-\d+/);
-  });
-});

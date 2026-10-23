@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
-import { useSubagents } from "../store/subagents";
+import { useSubagents, type SubagentEntry } from "../store/subagents";
 import { useSubagentSelection } from "../store/subagentSelection";
 import { useInteractive } from "../store/interactive";
-import { useSessions, type Message, type ToolCallUiStatus } from "../store/sessions";
-import type { SubagentFailureReason } from "../lib/tauri";
+import { useSessions, type ToolCallUiStatus } from "../store/sessions";
 import {
   cleanModelName,
   extractThinkingFromModel,
@@ -12,327 +11,75 @@ import {
   formatThinkingIndicator,
   formatTokens,
   getModelContextWindow,
-  summarizeToolCall,
 } from "../lib/toolOutput";
+import {
+  estimateTokensFromMessages,
+  extractTargetInfo,
+  getActivityDisplay,
+} from "../lib/subagentActivity";
 import { StatusIcon } from "./SubagentStatusIcon";
+import { cn } from "./lib/utils";
+import { Button } from "./ui/button";
 import { ToolCallCardHeader } from "./ToolCallCardHeader";
 
-interface RawInputTaskItem {
-  task?: string;
-  agent?: string;
-  model?: string;
-  thinking?: string;
-}
-
-interface RawProgressItem {
-  agent?: string;
-  task?: string;
-  status?: "running" | "completed" | "failed";
-  currentTool?: string;
-  currentToolArgs?: string;
-  currentToolStartedAt?: number;
-  toolCount?: number;
-  inputTokens?: number;
-  outputTokens?: number;
-  tokens?: number;
-  cost?: number;
-  durationMs?: number;
-  error?: string;
-  model?: string;
-  output?: string;
-  recentOutput?: string[];
-  toolCalls?: Array<{ name?: string; argsPreview?: string; error?: boolean } | string>;
-  percent?: number;
-  contextPercent?: number;
-}
-
-interface RawResultItem {
-  agent?: string;
-  task?: string;
-  childSessionId?: string;
-  exitCode?: number;
-  usage?: {
-    input?: number;
-    output?: number;
-    cacheRead?: number;
-    cacheWrite?: number;
-    cost?: number;
-    turns?: number;
-  };
-  model?: string;
-  finalOutput?: string;
-  error?: string;
-  progressSummary?: { toolCount?: number; tokens?: number; durationMs?: number };
-}
-
-function extractTargetInfo(rawInput: unknown, rawOutput: unknown) {
-  const targetTasks: string[] = [];
-  const targetSessionIds: string[] = [];
-  const inputItems: RawInputTaskItem[] = [];
-
-  if (typeof rawInput === "object" && rawInput !== null) {
-    const input = rawInput as Record<string, unknown>;
-    if (typeof input.task === "string" && input.task) {
-      targetTasks.push(input.task);
-      inputItems.push({
-        task: input.task,
-        agent: typeof input.agent === "string" ? input.agent : undefined,
-        model: typeof input.model === "string" ? input.model : undefined,
-        thinking: typeof input.thinking === "string" ? input.thinking : undefined,
-      });
-    }
-    if (Array.isArray(input.tasks)) {
-      for (const t of input.tasks) {
-        if (typeof t === "string" && t) {
-          targetTasks.push(t);
-          inputItems.push({ task: t });
-        } else if (typeof t === "object" && t !== null) {
-          const obj = t as Record<string, unknown>;
-          if (typeof obj.task === "string" && obj.task) {
-            targetTasks.push(obj.task);
-            inputItems.push({
-              task: obj.task,
-              agent: typeof obj.agent === "string" ? obj.agent : undefined,
-              model: typeof obj.model === "string" ? obj.model : undefined,
-              thinking: typeof obj.thinking === "string" ? obj.thinking : undefined,
-            });
-          }
-        }
-      }
-    }
-  }
-
-  const output = rawOutput as Record<string, unknown> | undefined;
-  const details = output?.details as Record<string, unknown> | undefined;
-  const progressList: RawProgressItem[] = Array.isArray(details?.progress)
-    ? (details!.progress as RawProgressItem[])
-    : [];
-  const resultsList: RawResultItem[] = Array.isArray(details?.results)
-    ? (details!.results as RawResultItem[])
-    : [];
-
-  for (const p of progressList) {
-    if (p && typeof p.task === "string" && p.task) {
-      targetTasks.push(p.task);
-    }
-  }
-
-  for (const r of resultsList) {
-    if (r) {
-      if (typeof r.task === "string" && r.task) targetTasks.push(r.task);
-      if (typeof r.childSessionId === "string" && r.childSessionId) {
-        targetSessionIds.push(r.childSessionId);
-      }
-    }
-  }
-
-  return {
-    targetTasks: Array.from(new Set(targetTasks)),
-    targetSessionIds: Array.from(new Set(targetSessionIds)),
-    inputItems,
-    progressList,
-    resultsList,
-    details,
-  };
-}
-
-function estimateTokensFromMessages(messages: Message[]): number {
-  let totalChars = 0;
-  for (const m of messages) {
-    if (m.kind === "user" || m.kind === "agent-text" || m.kind === "agent-thought") {
-      totalChars += m.text.length;
-    } else if (m.kind === "tool-call") {
-      if (typeof m.rawInput === "string") totalChars += m.rawInput.length;
-      else if (typeof m.rawInput === "object" && m.rawInput !== null) {
-        totalChars += JSON.stringify(m.rawInput).length;
-      }
-      if (typeof m.rawOutput === "string") totalChars += m.rawOutput.length;
-      else if (typeof m.rawOutput === "object" && m.rawOutput !== null) {
-        totalChars += JSON.stringify(m.rawOutput).length;
-      }
-    } else if (m.kind === "diff") {
-      totalChars += m.patch.length;
-    }
-  }
-  return Math.round(totalChars / 4);
-}
-
-interface ActivityInfo {
-  glyph?: string;
-  text: string;
-  duration?: string;
-  colorClass: string;
-}
-
 /**
- * The card's short line for a **Dead / crashed / cancelled Subagent session**
- * (ADR 0055): a label per `SubagentFailureReason`, keyed to the four values the
- * Rust enum serialises to.
- *
- * It exists because `error` is NOT a display string: every failure path carries
- * SALVAGE prose addressed to the PARENT model ("subagent worker exited
- * unexpectedly (code 137)", "unresponsive"), and this row is one truncated line in
- * a compact list — the prose is unreadable there and duplicates what the
- * parent's own tool result already says. The code is data, so nothing here
- * string-matches `error`.
+ * C7: the subagent DIRECTORY row (the one clickable row inside the card's
+ * expanded list) is a `<Button variant="ghost" size="default">`, both named
+ * explicitly because `ui/button.tsx:40` sets `defaultVariants {variant:"default"}`
+ * and a bare `<Button>` would paint every row `bg-primary text-primary-foreground`
+ * at a fixed `h-7 px-2`. Measured with the real `cn()`, the rendered utility SET
+ * is exactly the string this row spelled. What `DIRECTORY_ROW_WALL` undoes:
+ *  - `border-0` — the base's `border` is a 1px ring the row never had (preflight
+ *    sets `border: 0 solid`); it would inset the status glyph by 1px inside the
+ *    card's own `px-4` and make the base's `bg-clip-padding` a no-op besides.
+ *  - `h-auto` — the size's `h-7` is a fixed 28px and this row is THREE lines
+ *    (name + metadata + activity) at `py-2`; a fixed height would clip lines two
+ *    and three. This is the single biggest hazard at this site.
+ *  - `justify-start` — the base centres on the main axis; at `h-auto` there is no
+ *    free space, so this is belt-and-braces.
+ *  - `whitespace-normal` — the base's `whitespace-nowrap` (the row inherited
+ *    `normal`; the spans that must elide spell `truncate` themselves, which is
+ *    what needs nowrap, and a row-level nowrap would defeat the label's
+ *    `[overflow-wrap]` behaviour in the activity line).
+ *  - `select-auto` — the base's `select-none` would make an agent name, a task
+ *    preview and the token/cost metadata unselectable.
+ *  - `transition-none` — the base's `transition-colors` would fade the
+ *    `hover:bg-surface-hover` band in over 150 ms; this row's band is instant.
+ *  - `text-[length:inherit]` — the size declares `text-ui-base` and the base
+ *    declares `text-ui-base/relaxed`; `cn()` keeps the LAST utility of the
+ *    font-size group, so this restores the font-size the row INHERITED (it spells
+ *    none) and, by collapsing both, declares no line-height either. Every text
+ *    child spells `text-ui-base` or `text-ui-xs` itself, so the row's own size is
+ *    invisible — but a `text-ui-base` the row GAINS is a class another selector
+ *    can read, and `ChatStream.test.tsx`'s `primaryLines()` helper (which finds
+ *    picker rows by `querySelectorAll(".text-ui-base")`) proves that is not
+ *    hypothetical: at this program's other picker it doubled a label list and
+ *    reddened six assertions. Restoring beats arguing away.
+ * Inert here: `shrink-0` (the rows are children of the card's `divide-y` BLOCK
+ * container, so `flex-shrink` never applies), `gap-1` (the row spells `gap-2.5`,
+ * which wins), `px-2`/`py-2` (the row spells `px-2 py-2`), `items-center` (the
+ * row spells `items-start`, later, same group), `rounded-md` (the row spells
+ * `rounded-lg`), `text-foreground` + `hover:text-foreground` from `ghost` (every
+ * piece of text in the row is a span/div that spells its own ink —
+ * `text-foreground`, `text-foreground-subtle`, `text-foreground-subtlest`,
+ * `text-destructive`, `text-success`, and the activity line's own `colorClass`),
+ * `text-ui-base` from the size (it collapses the base's `text-ui-base/relaxed` in
+ * the same font-size group so NO line-height is declared, and every text child
+ * spells `text-ui-base` or `text-ui-xs` itself), `bg-clip-padding` (no border →
+ * padding-box == border-box, so `hover:bg-surface-hover` fills the same box),
+ * `outline-none` (`base.css:53-57` forces `outline: none !important` on every
+ * focus, and again under `forced-colors`, which is also what makes the row's own
+ * `focus-visible:outline-none` redundant-but-harmless), `disabled:*` (a directory
+ * row is never disabled), `aria-invalid:*` / `aria-expanded:*` (Radix sets
+ * neither on a plain button), `group/button`, `has-data-[icon=inline-*]:pr/pl`
+ * (lucide sets no `data-icon`), `[&_svg]:pointer-events-none` (the click handler
+ * is on the button), `[&_svg]:shrink-0`, and
+ * `[&_svg:not([class*='size-'])]:size-3.5` — the row's only `<svg>`s are the
+ * `StatusIcon` glyphs, which carry an explicit `size-4`, so the
+ * `:not([class*='size-'])` guard excludes them (the icon-resize hazard, checked).
  */
-const FAILURE_LABELS: Record<SubagentFailureReason, string> = {
-  unresponsive: "Unresponsive — no output for a long period",
-  crashed: "Crashed",
-  cancelled: "Cancelled",
-  other: "Failed",
-};
-
-function getActivityDisplay(
-  row: {
-    status: "running" | "completed" | "failed";
-    error?: string;
-    reason?: SubagentFailureReason;
-    progress?: RawProgressItem;
-    result?: RawResultItem;
-  },
-  sessionMessages: Message[] | undefined,
-  now: number,
-): ActivityInfo | undefined {
-  // The short reason line (ADR 0055), and ONLY when there is something to say.
-  // `error` is the FALLBACK, not the primary: a payload from a backend that
-  // predates `reason` (or a `progress`/`result` row that never carried it) still
-  // shows why. Note the order — `reason` first, so the code wins over prose
-  // whenever both exist; `error` second, so a failed row with neither is not
-  // silently swallowed and falls through to the `status === "failed"` arm.
-  if (row.error || row.reason) {
-    const text = (row.reason && FAILURE_LABELS[row.reason]) || row.error;
-    if (text) {
-      return { glyph: "✗", text, colorClass: "text-destructive" };
-    }
-  }
-  if (row.status === "completed") {
-    return { glyph: "✓", text: "Done", colorClass: "text-success" };
-  }
-  if (row.status === "failed") {
-    return { glyph: "✗", text: "Failed", colorClass: "text-destructive" };
-  }
-
-  // 1. Check live subagent transcript messages if available
-  if (sessionMessages && sessionMessages.length > 0) {
-    // In-flight running tool call
-    const inFlightTool = sessionMessages.find(
-      (m): m is Extract<Message, { kind: "tool-call" }> =>
-        m.kind === "tool-call" && (m.status === "pending" || (m.status as string) === "running"),
-    );
-    if (inFlightTool) {
-      const summary = summarizeToolCall(inFlightTool.title, inFlightTool.rawInput);
-      const dur = inFlightTool.at ? ` · ${formatDuration(now - inFlightTool.at)}` : "";
-      return {
-        glyph: "▸",
-        text: `${inFlightTool.title}${summary ? `: ${summary}` : ""}`,
-        duration: dur,
-        colorClass: "text-foreground-subtle",
-      };
-    }
-
-    // Most recent transcript action
-    const lastMsg = sessionMessages[sessionMessages.length - 1];
-    if (lastMsg) {
-      if (lastMsg.kind === "tool-call") {
-        const summary = summarizeToolCall(lastMsg.title, lastMsg.rawInput);
-        const glyph = lastMsg.status === "failed" ? "✗" : "✓";
-        return {
-          glyph,
-          text: `${lastMsg.title}${summary ? `: ${summary}` : ""}`,
-          colorClass: lastMsg.status === "failed" ? "text-destructive" : "text-foreground-subtle",
-        };
-      }
-      if (lastMsg.kind === "agent-thought") {
-        const lines = lastMsg.text.split("\n").filter((l) => l.trim() !== "");
-        if (lines.length > 0) {
-          return {
-            glyph: "▸",
-            text: `[thinking] ${lines[lines.length - 1].trim()}`,
-            colorClass: "text-foreground-subtlest",
-          };
-        }
-      }
-      if (lastMsg.kind === "agent-text") {
-        const lines = lastMsg.text.split("\n").filter((l) => l.trim() !== "");
-        if (lines.length > 0) {
-          return {
-            glyph: "▸",
-            text: lines[lines.length - 1].trim(),
-            colorClass: "text-foreground-subtlest",
-          };
-        }
-      }
-    }
-  }
-
-  // 2. Fall back to progress from details envelope
-  const p = row.progress;
-  if (p?.currentTool) {
-    const args = p.currentToolArgs ? `: ${p.currentToolArgs}` : "";
-    const dur = p.currentToolStartedAt
-      ? ` · ${formatDuration(now - p.currentToolStartedAt)}`
-      : "";
-    return {
-      glyph: "▸",
-      text: `${p.currentTool}${args}`,
-      duration: dur,
-      colorClass: "text-foreground-subtle",
-    };
-  }
-  if (p?.toolCalls && p.toolCalls.length > 0) {
-    const last = p.toolCalls[p.toolCalls.length - 1];
-    if (typeof last === "string") {
-      return { glyph: "✓", text: last, colorClass: "text-foreground-subtle" };
-    }
-    if (last && typeof last === "object") {
-      const glyph = last.error ? "✗" : "✓";
-      const suffix = last.argsPreview ? `: ${last.argsPreview}` : "";
-      return {
-        glyph,
-        text: `${last.name ?? "tool"}${suffix}`,
-        colorClass: last.error ? "text-destructive" : "text-foreground-subtle",
-      };
-    }
-  }
-  if (p?.recentOutput && p.recentOutput.length > 0) {
-    const lastLine = p.recentOutput[p.recentOutput.length - 1];
-    if (lastLine) {
-      return { glyph: "▸", text: lastLine, colorClass: "text-foreground-subtlest" };
-    }
-  }
-  if (p?.output) {
-    const lines = p.output.split("\n").filter((l) => l.trim() !== "");
-    if (lines.length > 0) {
-      return { glyph: "▸", text: lines[lines.length - 1], colorClass: "text-foreground-subtlest" };
-    }
-  }
-
-  // 3. Fall back to result
-  if (row.result) {
-    const r = row.result;
-    if (r.exitCode !== 0 && r.error) {
-      return { glyph: "✗", text: r.error, colorClass: "text-destructive" };
-    }
-    if (r.finalOutput) {
-      const lines = r.finalOutput.split("\n").filter((l) => l.trim() !== "");
-      if (lines.length > 0) {
-        return { text: lines[lines.length - 1], colorClass: "text-foreground-subtle" };
-      }
-    }
-    return {
-      glyph: r.exitCode === 0 ? "✓" : "✗",
-      text: r.exitCode === 0 ? "Done" : "Failed",
-      colorClass: r.exitCode === 0 ? "text-success" : "text-destructive",
-    };
-  }
-
-  if (row.status === "running") {
-    return { glyph: "▸", text: "Starting...", colorClass: "text-foreground-subtlest" };
-  }
-
-  return undefined;
-}
+const DIRECTORY_ROW_WALL =
+  "border-0 h-auto justify-start whitespace-normal select-auto transition-none text-[length:inherit]";
 
 /**
  * The `subagent` tool's card (the "Delegating" card): the standard
@@ -402,250 +149,205 @@ export default function SubagentDelegatingCard({
       ? (rawInput as Record<string, unknown>)
       : undefined;
 
-  const rows =
-    taskKeys.length > 0
-      ? taskKeys.map((taskKey, idx) => {
-          const storeEntry = matchingStoreEntries.find(
-            (e) =>
-              e.task === taskKey ||
-              (e.sessionId &&
-                resultsList.some(
-                  (r) => r.task === taskKey && r.childSessionId === e.sessionId,
-                )),
-          );
-          const progress = progressList.find((p) => p.task === taskKey);
-          const result = resultsList.find(
-            (r) =>
-              r.task === taskKey ||
-              (storeEntry && r.childSessionId === storeEntry.sessionId),
-          );
-          const rawInputItem = inputItems.find((i) => i.task === taskKey);
+  /**
+   * The store entry a task key belongs to: the one with the SAME `task`, or one
+   * the tool envelope links to that task through `childSessionId`.
+   */
+  const entryForTask = (taskKey: string): SubagentEntry | undefined =>
+    matchingStoreEntries.find(
+      (e) =>
+        e.task === taskKey ||
+        (e.sessionId &&
+          resultsList.some(
+            (r) => r.task === taskKey && r.childSessionId === e.sessionId,
+          )),
+    );
 
-          const resolvedSessionId = storeEntry?.sessionId ?? result?.childSessionId;
-          const agentCandidate =
-            (progress?.agent && progress.agent.trim()) ||
-            (result?.agent && result.agent.trim()) ||
-            (storeEntry?.agentName && storeEntry.agentName.trim()) ||
-            (rawInputItem?.agent && rawInputItem.agent.trim()) ||
-            (typeof rawInputObj?.agent === "string" && rawInputObj.agent.trim());
-          const agentName = agentCandidate || "subagent";
+  /**
+   * ONE derivation for every row (D3). This used to be TWO: a `taskKeys.map`
+   * block and a second `matchingStoreEntries.map` block that ran only when the
+   * first produced no key at all, each carrying its own copy of every `??`
+   * chain. Copies drift — the second one had already lost the
+   * `result.progressSummary.tokens` arm, the `agent` / `model` / `thinking`
+   * fallbacks to the tool call's own `rawInput`, the envelope-first `model`
+   * precedence and the `exitCode` status rule, so the SAME child printed
+   * different numbers depending on which block happened to render it. One
+   * builder, one precedence order, no second copy to forget to update. Where
+   * the two disagreed the ENVELOPE-AWARE chain won: it is the one every row
+   * takes today (the other only ran for a store entry carrying no `task`), and
+   * the envelope is the richer source — the store entry holds only what
+   * `subagent-session-started` / `subagent-closed` happened to carry.
+   *
+   * What decides a row: the task keys (the tool call's own `rawInput` +
+   * `details.progress` + `details.results` + the store entries that carry a
+   * task) PLUS any store entry that carries NO task — the one job the deleted
+   * second block did in anger, now an ordinary source in the same list. (It
+   * used to be an exclusive `else`: while any task key existed, a task-less
+   * entry rendered no row at all.)
+   */
+  const rowSources: Array<{ task: string; entry?: SubagentEntry }> = taskKeys.map((task) => ({
+    task,
+    entry: entryForTask(task),
+  }));
+  // A task-less entry the envelope already names is on screen as that task's
+  // row — adding it again would duplicate the child AND collide on the row key.
+  const claimedSessionIds = new Set(
+    rowSources
+      .map((source) => source.entry?.sessionId)
+      .filter((id): id is string => Boolean(id)),
+  );
+  for (const e of matchingStoreEntries) {
+    if (e.task) continue;
+    if (e.sessionId && claimedSessionIds.has(e.sessionId)) continue;
+    rowSources.push({ task: "", entry: e });
+  }
 
-          const subStatus: "running" | "completed" | "failed" =
-            result?.exitCode !== undefined
-              ? (result.exitCode === 0 ? "completed" : "failed")
-              : storeEntry?.status ??
-                progress?.status ??
-                (status === "completed" ? "completed" : "running");
+  const rows = rowSources.map((source, idx) => {
+    const taskKey = source.task;
+    const storeEntry = source.entry;
+    // A `""` key matches NO envelope frame: the key is only ever empty for a
+    // store entry that has no task, and `p.task === ""` would then match a
+    // frame that simply OMITS `task` — some other child's progress.
+    const progress =
+      taskKey === "" ? undefined : progressList.find((p) => p.task === taskKey);
+    const result = resultsList.find(
+      (r) =>
+        (taskKey !== "" && r.task === taskKey) ||
+        (storeEntry !== undefined && r.childSessionId === storeEntry.sessionId),
+    );
+    const rawInputItem =
+      taskKey === "" ? undefined : inputItems.find((i) => i.task === taskKey);
 
-          const model =
-            progress?.model ??
-            result?.model ??
-            storeEntry?.model ??
-            rawInputItem?.model ??
-            (typeof rawInputObj?.model === "string" ? rawInputObj.model : undefined);
+    const resolvedSessionId = storeEntry?.sessionId ?? result?.childSessionId;
+    const agentCandidate =
+      (progress?.agent && progress.agent.trim()) ||
+      (result?.agent && result.agent.trim()) ||
+      (storeEntry?.agentName && storeEntry.agentName.trim()) ||
+      (rawInputItem?.agent && rawInputItem.agent.trim()) ||
+      (typeof rawInputObj?.agent === "string" && rawInputObj.agent.trim());
+    const agentName = agentCandidate || "subagent";
 
-          const thinkingLevel =
-            storeEntry?.thinkingLevel ??
-            rawInputItem?.thinking ??
-            (typeof rawInputObj?.thinking === "string"
-              ? rawInputObj.thinking
-              : undefined) ??
-            extractThinkingFromModel(model);
+    const subStatus: "running" | "completed" | "failed" =
+      result?.exitCode !== undefined
+        ? (result.exitCode === 0 ? "completed" : "failed")
+        : storeEntry?.status ??
+          progress?.status ??
+          (status === "completed" ? "completed" : "running");
 
-          const interactiveCost = resolvedSessionId
-            ? (allInteractiveCost[resolvedSessionId] as
-                | {
-                    inputTokens?: number;
-                    outputTokens?: number;
-                    tokens?: number;
-                    cost?: number;
-                    percent?: number;
-                    contextPercent?: number;
-                  }
-                | undefined)
-            : undefined;
+    const model =
+      progress?.model ??
+      result?.model ??
+      storeEntry?.model ??
+      rawInputItem?.model ??
+      (typeof rawInputObj?.model === "string" ? rawInputObj.model : undefined);
 
-          const sessionMessages = resolvedSessionId ? allMessages[resolvedSessionId] : undefined;
+    const thinkingLevel =
+      storeEntry?.thinkingLevel ??
+      rawInputItem?.thinking ??
+      (typeof rawInputObj?.thinking === "string" ? rawInputObj.thinking : undefined) ??
+      extractThinkingFromModel(model);
 
-          const explicitTokens =
-            progress?.tokens ??
-            (interactiveCost &&
-            (interactiveCost.inputTokens !== undefined || interactiveCost.outputTokens !== undefined || interactiveCost.tokens !== undefined)
-              ? (interactiveCost.tokens ?? (interactiveCost.inputTokens ?? 0) + (interactiveCost.outputTokens ?? 0))
-              : undefined) ??
-            (result?.usage
-              ? (result.usage.input ?? 0) + (result.usage.output ?? 0)
-              : undefined) ??
-            result?.progressSummary?.tokens ??
-            (storeEntry?.metrics &&
-            (storeEntry.metrics.inputTokens > 0 || storeEntry.metrics.outputTokens > 0)
-              ? storeEntry.metrics.inputTokens + storeEntry.metrics.outputTokens
-              : undefined);
+    const interactiveCost = resolvedSessionId
+      ? (allInteractiveCost[resolvedSessionId] as
+          | {
+              inputTokens?: number;
+              outputTokens?: number;
+              tokens?: number;
+              cost?: number;
+              percent?: number;
+              contextPercent?: number;
+            }
+          | undefined)
+      : undefined;
 
-          const estimatedTokens =
-            sessionMessages && sessionMessages.length > 0
-              ? estimateTokensFromMessages(sessionMessages)
-              : undefined;
+    const sessionMessages = resolvedSessionId ? allMessages[resolvedSessionId] : undefined;
 
-          const tokens =
-            (explicitTokens && explicitTokens > 0 ? explicitTokens : undefined) ??
-            estimatedTokens;
+    const explicitTokens =
+      progress?.tokens ??
+      (interactiveCost &&
+      (interactiveCost.inputTokens !== undefined || interactiveCost.outputTokens !== undefined || interactiveCost.tokens !== undefined)
+        ? (interactiveCost.tokens ?? (interactiveCost.inputTokens ?? 0) + (interactiveCost.outputTokens ?? 0))
+        : undefined) ??
+      (result?.usage
+        ? (result.usage.input ?? 0) + (result.usage.output ?? 0)
+        : undefined) ??
+      result?.progressSummary?.tokens ??
+      (storeEntry?.metrics &&
+      (storeEntry.metrics.inputTokens > 0 || storeEntry.metrics.outputTokens > 0)
+        ? storeEntry.metrics.inputTokens + storeEntry.metrics.outputTokens
+        : undefined);
 
-          const modelContextWindow = getModelContextWindow(model);
-          const calculatedPct =
-            tokens && modelContextWindow > 0 ? (tokens / modelContextWindow) * 100 : undefined;
+    const estimatedTokens =
+      sessionMessages && sessionMessages.length > 0
+        ? estimateTokensFromMessages(sessionMessages)
+        : undefined;
 
-          const contextPercent =
-            progress?.percent ??
-            progress?.contextPercent ??
-            interactiveCost?.percent ??
-            interactiveCost?.contextPercent ??
-            calculatedPct;
+    const tokens =
+      (explicitTokens && explicitTokens > 0 ? explicitTokens : undefined) ??
+      estimatedTokens;
 
-          const cost =
-            progress?.cost ??
-            interactiveCost?.cost ??
-            result?.usage?.cost ??
-            storeEntry?.metrics?.cost;
+    const modelContextWindow = getModelContextWindow(model);
+    const calculatedPct =
+      tokens && modelContextWindow > 0 ? (tokens / modelContextWindow) * 100 : undefined;
 
-          const sessionToolCount = sessionMessages
-            ? sessionMessages.filter((m) => m.kind === "tool-call").length
-            : undefined;
-          const toolCount =
-            (sessionToolCount && sessionToolCount > 0 ? sessionToolCount : undefined) ??
-            progress?.toolCount ??
-            result?.progressSummary?.toolCount;
+    const contextPercent =
+      progress?.percent ??
+      progress?.contextPercent ??
+      interactiveCost?.percent ??
+      interactiveCost?.contextPercent ??
+      calculatedPct;
 
-          const isRunning = subStatus === "running";
-          const durationMs = isRunning
-            ? (storeEntry?.startedAt ? now - storeEntry.startedAt : progress?.durationMs)
-            : (result?.progressSummary?.durationMs ??
-              storeEntry?.metrics?.durationMs ??
-              (storeEntry?.endedAt && storeEntry?.startedAt
-                ? storeEntry.endedAt - storeEntry.startedAt
-                : undefined));
+    const cost =
+      progress?.cost ??
+      interactiveCost?.cost ??
+      result?.usage?.cost ??
+      storeEntry?.metrics?.cost;
 
-          const error = storeEntry?.error ?? result?.error ?? progress?.error;
-          // `reason` exists ONLY on the store entry (the `subagent-closed`
-          // payload): the `progress` / `result` shapes are the older tool-result
-          // detail stream and never carried a code.
-          const reason = storeEntry?.reason;
+    const sessionToolCount = sessionMessages
+      ? sessionMessages.filter((m) => m.kind === "tool-call").length
+      : undefined;
+    const toolCount =
+      (sessionToolCount && sessionToolCount > 0 ? sessionToolCount : undefined) ??
+      progress?.toolCount ??
+      result?.progressSummary?.toolCount;
 
-          return {
-            key: resolvedSessionId ?? `${taskKey}-${idx}`,
-            sessionId: resolvedSessionId,
-            agentName,
-            task: taskKey,
-            status: subStatus,
-            model: cleanModelName(model),
-            thinkingLevel,
-            tokens,
-            contextPercent,
-            cost,
-            toolCount,
-            durationMs,
-            error,
-            reason,
-            progress,
-            result,
-            sessionMessages,
-          };
-        })
-      : matchingStoreEntries.map((storeEntry, idx) => {
-          const progress = progressList.find(
-            (p) => p.task === storeEntry.task,
-          );
-          const result = resultsList.find(
-            (r) =>
-              r.childSessionId === storeEntry.sessionId ||
-              r.task === storeEntry.task,
-          );
-          const isRunning = storeEntry.status === "running";
-          const durationMs = isRunning
-            ? now - storeEntry.startedAt
-            : (result?.progressSummary?.durationMs ??
-              storeEntry.metrics?.durationMs ??
-              (storeEntry.endedAt ? storeEntry.endedAt - storeEntry.startedAt : undefined));
+    const isRunning = subStatus === "running";
+    const durationMs = isRunning
+      ? (storeEntry?.startedAt ? now - storeEntry.startedAt : progress?.durationMs)
+      : (result?.progressSummary?.durationMs ??
+        storeEntry?.metrics?.durationMs ??
+        (storeEntry?.endedAt && storeEntry?.startedAt
+          ? storeEntry.endedAt - storeEntry.startedAt
+          : undefined));
 
-          const sessionMessages = storeEntry.sessionId ? allMessages[storeEntry.sessionId] : undefined;
-          const sessionToolCount = sessionMessages
-            ? sessionMessages.filter((m) => m.kind === "tool-call").length
-            : undefined;
-          const toolCount =
-            (sessionToolCount && sessionToolCount > 0 ? sessionToolCount : undefined) ??
-            progress?.toolCount ??
-            result?.progressSummary?.toolCount;
+    const error = storeEntry?.error ?? result?.error ?? progress?.error;
+    // `reason` exists ONLY on the store entry (the `subagent-closed`
+    // payload): the `progress` / `result` shapes are the older tool-result
+    // detail stream and never carried a code.
+    const reason = storeEntry?.reason;
 
-          const interactiveCost = storeEntry.sessionId
-            ? (allInteractiveCost[storeEntry.sessionId] as
-                | {
-                    inputTokens?: number;
-                    outputTokens?: number;
-                    tokens?: number;
-                    cost?: number;
-                    percent?: number;
-                    contextPercent?: number;
-                  }
-                | undefined)
-            : undefined;
-
-          const explicitTokens =
-            progress?.tokens ??
-            (interactiveCost &&
-            (interactiveCost.inputTokens !== undefined || interactiveCost.outputTokens !== undefined || interactiveCost.tokens !== undefined)
-              ? (interactiveCost.tokens ?? (interactiveCost.inputTokens ?? 0) + (interactiveCost.outputTokens ?? 0))
-              : undefined) ??
-            (result?.usage
-              ? (result.usage.input ?? 0) + (result.usage.output ?? 0)
-              : undefined) ??
-            (storeEntry.metrics &&
-            (storeEntry.metrics.inputTokens > 0 || storeEntry.metrics.outputTokens > 0)
-              ? storeEntry.metrics.inputTokens + storeEntry.metrics.outputTokens
-              : undefined);
-
-          const estimatedTokens =
-            sessionMessages && sessionMessages.length > 0
-              ? estimateTokensFromMessages(sessionMessages)
-              : undefined;
-
-          const tokens =
-            (explicitTokens && explicitTokens > 0 ? explicitTokens : undefined) ??
-            estimatedTokens;
-
-          const rawModel = storeEntry.model ?? progress?.model ?? result?.model;
-          const modelContextWindow = getModelContextWindow(rawModel);
-          const calculatedPct =
-            tokens && modelContextWindow > 0 ? (tokens / modelContextWindow) * 100 : undefined;
-
-          const contextPercent =
-            progress?.percent ??
-            progress?.contextPercent ??
-            interactiveCost?.percent ??
-            interactiveCost?.contextPercent ??
-            calculatedPct;
-
-          return {
-            key: storeEntry.sessionId ?? `entry-${idx}`,
-            sessionId: storeEntry.sessionId,
-            agentName: storeEntry.agentName || "subagent",
-            task: storeEntry.task,
-            status: storeEntry.status,
-            model: cleanModelName(rawModel),
-            thinkingLevel:
-              storeEntry.thinkingLevel ??
-              extractThinkingFromModel(rawModel),
-            tokens,
-            contextPercent,
-            cost: progress?.cost ?? interactiveCost?.cost ?? result?.usage?.cost ?? storeEntry.metrics?.cost,
-            toolCount,
-            durationMs,
-            error: storeEntry.error ?? result?.error ?? progress?.error,
-            reason: storeEntry.reason,
-            progress,
-            result,
-            sessionMessages,
-          };
-        });
+    return {
+      // `entry-${idx}` keeps the deleted block's fallback key for a task-less
+      // entry with no session id; a task key keeps its own.
+      key: resolvedSessionId ?? `${taskKey || "entry"}-${idx}`,
+      sessionId: resolvedSessionId,
+      agentName,
+      task: taskKey,
+      status: subStatus,
+      model: cleanModelName(model),
+      thinkingLevel,
+      tokens,
+      contextPercent,
+      cost,
+      toolCount,
+      durationMs,
+      error,
+      reason,
+      progress,
+      result,
+      sessionMessages,
+    };
+  });
 
   const hasRunning =
     status === "pending" || rows.some((r) => r.status === "running");
@@ -729,12 +431,14 @@ export default function SubagentDelegatingCard({
             }
 
             return (
-              <button
+              <Button
                 key={row.key}
                 type="button"
+                variant="ghost"
+                size="default"
                 onClick={() => row.sessionId && select(row.sessionId)}
                 aria-label={`Open ${row.agentName} transcript`}
-                className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                className={cn(DIRECTORY_ROW_WALL, "flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring")}
               >
                 <span className="mt-1">
                   <StatusIcon status={row.status} />
@@ -769,14 +473,14 @@ export default function SubagentDelegatingCard({
 
                   {/* Line 3: Activity / Current Action */}
                   {activity && (
-                    <p className={`truncate text-ui-xs font-mono ${activity.colorClass}`}>
+                    <p className={cn("truncate text-ui-xs font-mono", activity.colorClass)}>
                       {activity.glyph && <span className="mr-1">{activity.glyph}</span>}
                       <span>{activity.text}</span>
                       {activity.duration && <span className="opacity-75">{activity.duration}</span>}
                     </p>
                   )}
                 </div>
-              </button>
+              </Button>
             );
           })}
         </div>

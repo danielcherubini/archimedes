@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import AskQuestionCard from "./AskQuestionCard";
 import { useInteractive } from "../store/interactive";
+import { useSubagents } from "../store/subagents";
+import { resetStores } from "../test/resetStores";
 
 // Mock the Tauri IPC layer; everything else (stores) is the real code.
 vi.mock("../lib/tauri", async () => {
@@ -34,9 +36,16 @@ const singleRequest = {
 const originalScrollIntoView = Element.prototype.scrollIntoView;
 
 beforeEach(() => {
-  useInteractive.getState().dismissSession("s1");
+  // Every store back to its own initial state. The hand-written version named
+  // three sessions to dismiss (`s1`, `child1` twice); `resetStores` covers those
+  // plus every key this file never thought to clear.
+  resetStores();
   mockedRespond.mockReset();
   mockedRespond.mockResolvedValue(undefined);
+  // NOT the shared `setup.tsx` stub: this file asserts on the MOCK CONTEXTS of
+  // `scrollIntoView`, so each case needs a FRESH mock, and the `afterEach`
+  // below restores what was there at import. `src/test/setup.tsx`'s own
+  // deletion checklist names this file for exactly that reason.
   Element.prototype.scrollIntoView = vi.fn();
 });
 
@@ -188,7 +197,7 @@ describe("AskQuestionCard", () => {
     // value the desktop's transport really emits is `native` — `main` and `sudo`
     // exist only in fixtures, `bin/fake_worker.rs` and the Rust gate fixtures — so
     // a `subagent:<name>` test value here exercises the store's shape and the
-    // label branch, not a string the transport sends.)
+    // `queued` gate's `isSubagent` arm, not a string the transport sends.)
     useInteractive.getState().addRequest("s1", {
       ...singleRequest,
       source: "subagent:reviewer",
@@ -204,11 +213,32 @@ describe("AskQuestionCard", () => {
     input.remove();
   });
 
-  it("labels a subagent request by its source", () => {
-    useInteractive.getState().addRequest("s1", {
+  it("labels a child's ask by its RESOLVED agent name, never by the transport label", () => {
+    // The label is keyed on the resolved name, NOT on `request.source`.
+    // `source: "native"` is the value production actually emits — every
+    // `interactive-request` the desktop builds carries it (`ask_flow` in
+    // `src-tauri/src/agent/harness/ask.rs`, and the sudo sub-prompts in
+    // `src-tauri/src/agent/interactive/mod.rs`), for a main session and a
+    // Subagent session alike. A child's card is mounted with the CHILD's
+    // session id (`TranscriptFooter` / `SubagentModals` pass
+    // `gate.childSessionId`), which is exactly the key `useSubagents`
+    // entries are stored under, so the name resolves from there.
+    //
+    // This is the ONLY shape that can prove the fix: the old
+    // `"subagent:x"` fixture exercised a branch production never enters
+    // (`isSubagent` needs a `subagent:` prefix no emitter sends), so a test
+    // built on it would stay green even if the label resolved nothing.
+    useSubagents.getState().addSession({
+      sessionId: "child1",
+      parentSessionId: "s1",
+      agentName: "scout",
+      task: "recon the auth code",
+      status: "running",
+    });
+    useInteractive.getState().addRequest("child1", {
       requestId: "r1",
       method: "ask",
-      source: "subagent:x",
+      source: "native",
       params: {
         questions: [
           {
@@ -219,8 +249,105 @@ describe("AskQuestionCard", () => {
         ],
       },
     });
-    render(<AskQuestionCard sessionId="s1" requestId="r1" />);
-    expect(screen.getByText("subagent:x")).toBeTruthy();
+    const { container } = render(
+      <AskQuestionCard sessionId="child1" requestId="r1" autoFocus={false} />,
+    );
+    expect(screen.getByText("scout")).toBeTruthy();
+    // The transport label is never user-facing copy (`native` is a transport
+    // detail, never a name — CONTEXT.md's Todo board `_Avoid_` list).
+    expect(container.textContent).not.toContain("native");
+    expect(screen.queryByText("Agent question")).toBeNull();
+  });
+
+  it("labels the queued placeholder of a child's ask by the resolved name too", () => {
+    // The queued arm (the request arrived before any `tool_call` frame) is a
+    // second label site, and it has the same problem: it rendered
+    // `${request.source} is asking…` behind the dead `isSubagent` gate. A
+    // `native` frame with a `toolCallId` is exactly what reaches it.
+    useSubagents.getState().addSession({
+      sessionId: "child1",
+      parentSessionId: "s1",
+      agentName: "scout",
+      task: "recon the auth code",
+      status: "running",
+    });
+    useInteractive.getState().addRequest("child1", {
+      requestId: "r1",
+      method: "ask",
+      source: "native",
+      toolCallId: "t1",
+      params: {
+        questions: [
+          {
+            id: "q1",
+            question: "Which color?",
+            options: [{ label: "Red" }],
+          },
+        ],
+      },
+    });
+    const { container } = render(
+      <AskQuestionCard sessionId="child1" requestId="r1" autoFocus={false} />,
+    );
+    expect(screen.getByText("scout is asking…")).toBeTruthy();
+    expect(container.textContent).not.toContain("native");
+  });
+
+  it("falls back to the generic label when the child has NO agent name (a config-less dispatch)", () => {
+    // `SubagentEntry.agentName` is a required string and the Rust dispatch
+    // writes `""` for an omitted/unknown `agentName`
+    // (`src-tauri/src/agent/harness/dispatch.rs`, `unwrap_or_default()` — a
+    // config-less, label-only dispatch). So a nullish coalesce would render
+    // an EMPTY label between the accent rules; the check must be truthiness.
+    useSubagents.getState().addSession({
+      sessionId: "child1",
+      parentSessionId: "s1",
+      agentName: "",
+      task: "recon the auth code",
+      status: "running",
+    });
+    useInteractive.getState().addRequest("child1", {
+      requestId: "r1",
+      method: "ask",
+      source: "native",
+      params: {
+        questions: [
+          {
+            id: "q1",
+            question: "Which color?",
+            options: [{ label: "Red" }],
+          },
+        ],
+      },
+    });
+    const { container } = render(
+      <AskQuestionCard sessionId="child1" requestId="r1" autoFocus={false} />,
+    );
+    expect(screen.getByText("Agent question")).toBeTruthy();
+    expect(container.textContent).not.toContain("native");
+  });
+
+  it("falls back to a generic Agent label when no agent name resolves", () => {
+    // A MAIN session's own ask has no `useSubagents` entry under its id, so
+    // nothing resolves and the generic copy renders — the fallback is the
+    // normal path for a main session, not an error state.
+    useInteractive.getState().addRequest("s1", {
+      requestId: "r1",
+      method: "ask",
+      source: "native",
+      params: {
+        questions: [
+          {
+            id: "q1",
+            question: "Which color?",
+            options: [{ label: "Red" }],
+          },
+        ],
+      },
+    });
+    const { container } = render(<AskQuestionCard sessionId="s1" requestId="r1" />);
+    expect(screen.getByText("Agent question")).toBeTruthy();
+    expect(container.textContent).not.toContain("native");
   });
 
   it("cancels with cancelled=true and empty results, and collapses", async () => {
@@ -373,5 +500,32 @@ describe("AskQuestionCard", () => {
       requestAnimationFrame(() => requestAnimationFrame(resolve)),
     );
     expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
+  });
+
+  it("announces a failed submit through role=\"alert\" with the pre-migration classes", async () => {
+    // Task C3 (finding 7): the failure line was a bare `<p>`, so a
+    // screen-reader user who submitted an answer into a dead IPC channel heard
+    // nothing at all.
+    useInteractive.getState().addRequest("s1", singleRequest);
+    mockedRespond.mockRejectedValueOnce("ask-response failed");
+    render(<AskQuestionCard sessionId="s1" requestId="r1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Red" }));
+    fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe("ask-response failed");
+    // Byte-identical to the hand-written `px-3 pb-2 text-ui-sm text-destructive`
+    // line this replaced, so the card's height and padding do not move.
+    expect(alert.getAttribute("class")).toBe(
+      "text-ui-sm text-destructive px-3 pb-2",
+    );
+    // And a failed answer keeps the card: the request is NOT removed, so the
+    // gate stays answerable (ADR 0040 — a gate rendered nowhere strands the run).
+    expect(useInteractive.getState().requests["s1"]).toHaveLength(1);
+  });
+
+  it("renders no alert region while nothing has failed", () => {
+    useInteractive.getState().addRequest("s1", singleRequest);
+    render(<AskQuestionCard sessionId="s1" requestId="r1" />);
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

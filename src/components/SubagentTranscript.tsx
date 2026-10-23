@@ -1,12 +1,18 @@
 import { useSubagents } from "../store/subagents";
 import { useSessions } from "../store/sessions";
 import { groupConsecutiveFileWrites } from "../lib/toolGroups";
-import { summarizeSubagentFor } from "../lib/toolOutput";
+import {
+  formatCost,
+  formatDuration,
+  formatTokens,
+  summarizeSubagentFor,
+} from "../lib/toolOutput";
 import { Reasoning, ReasoningTrigger, ReasoningContent } from "./Reasoning";
 import MessageBubble from "./MessageBubble";
 import ChangesGroupCard from "./ChangesGroupCard";
 import ToolCallCard from "./ToolCallCard";
 import DiffBlock from "./DiffBlock";
+import { MutedCaption } from "./MutedCaption";
 
 /**
  * Shared empty fallback (a STABLE reference — a `?? []` at the call site
@@ -50,7 +56,9 @@ const EMPTY: never[] = [];
  *   `message_update` frames, which the router does not forward to the UI, and
  *   `durationMs` is that task's wall clock), and no close clears it either:
  *   `session-closed` never names a child id, so `dismissSession` never runs
- *   for one.
+ *   for one. The numbers go through the SHARED `formatTokens` / `formatCost` /
+ *   `formatDuration` (`lib/toolOutput`) — the same rule every other surface
+ *   prints with; a zero cost prints nothing.
  */
 export function SubagentTranscript({ sessionId }: { sessionId: string }) {
   // Read FROM THE STORE (not a prop — see the component doc): the entry
@@ -158,17 +166,32 @@ export function SubagentTranscript({ sessionId }: { sessionId: string }) {
           — see the component doc. */}
       {/* The metrics line on close (see the component doc). */}
       {entry.status !== "running" && (entry.metrics || entry.error) && (
-        <p className="text-ui-xs text-foreground-subtlest">
+        <MutedCaption as="p">
           {entry.status === "failed" && entry.error && (
             <span className="text-destructive">{entry.error}</span>
           )}
           {entry.metrics && (
             <span>
-              {entry.metrics.inputTokens} in · {entry.metrics.outputTokens} out · $
-              {entry.metrics.cost.toFixed(2)} · {entry.metrics.durationMs} ms
+              {/* The SHARED formatters (`formatTokens` / `formatCost` /
+                  `formatDuration` in `lib/toolOutput`) — the same rule every
+                  other surface uses, so a subagent's cost/duration read the
+                  same wherever they appear. USER-VISIBLE by design: this line
+                  used to print the raw `{durationMs} ms` and
+                  `cost.toFixed(2)`, so `1234` now reads `1s`, and a zero cost
+                  prints nothing (`formatCost(0)` → `""`). Only the NON-EMPTY
+                  segments are joined, so an absent cost never leaves a
+                  dangling ` · `. */}
+              {[
+                `${formatTokens(entry.metrics.inputTokens)} in`,
+                `${formatTokens(entry.metrics.outputTokens)} out`,
+                formatCost(entry.metrics.cost),
+                formatDuration(entry.metrics.durationMs),
+              ]
+                .filter(Boolean)
+                .join(" · ")}
             </span>
           )}
-        </p>
+        </MutedCaption>
       )}
     </div>
   );

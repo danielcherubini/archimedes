@@ -2,7 +2,6 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
   useSyncExternalStore,
 } from "react";
@@ -20,22 +19,20 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import {
-  type AppSettings,
-  type AgentOverrides,
   type ModelDto,
   type SessionInfo,
-  getSettings,
   listModels,
   listTools,
-  saveSettings,
 } from "../lib/tauri";
 import { basenameOfPath } from "../lib/paths";
+import { sessionFieldOf } from "../lib/sessionLookup";
 import {
   activityFromKey,
   activityKeyOf,
   sortByActivity,
 } from "../lib/sessionActivity";
 import { titleFor } from "../lib/sessionTitle";
+import { relativeTimeFor } from "../lib/sessionTime";
 import {
   getLeftPaneCollapsed,
   LEFT_PANE_RAIL,
@@ -43,24 +40,24 @@ import {
   subscribeLeftPane,
 } from "../lib/leftPaneState";
 import { openNewSpaceDialog } from "../lib/newSpaceDialogState";
-import {
-  useSessions,
-  spaceViewFor,
-  type Message,
-} from "../store/sessions";
+import { useSessions, spaceViewFor } from "../store/sessions";
 import { useSessionStatus } from "../hooks/useSessionStatus";
 import { useSessionStatuses } from "../hooks/useSessionStatus";
 import { useSkillCatalog } from "../hooks/useSkillCatalog";
-import {
-  clearAgentCatalogCache,
-  useAgentCatalog,
-} from "../hooks/useAgentCatalog";
-import { useSettings } from "../store/settings";
+import { useAgentCatalog } from "../hooks/useAgentCatalog";
+// The Agents modal's write chain (D2): the optimistic publish, the serialized
+// saves, the publish epoch and the rollback-on-failure, with the settings
+// document the dialog's render gate reads.
+import { useAgentOverridesWrites } from "../hooks/useAgentOverridesWrites";
 import SkillsDialog from "./SkillsDialog";
 import AgentsDialog from "./AgentsDialog";
 import DeleteSessionDialog from "./DeleteSessionDialog";
 import SessionRail, { type SessionRailAction } from "./SessionRail";
 import { SessionStatusMark } from "./SessionStatusMark";
+import { SessionListRow } from "./SessionListRow";
+import { RowButton } from "./RowButton";
+import { EmptyListLine } from "./EmptyListLine";
+import { cn } from "./lib/utils";
 import { Kbd } from "./ui/kbd";
 import { Button } from "./ui/button";
 import {
@@ -70,142 +67,175 @@ import {
   DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
 
-/**
- * The relative time of a session's last activity, derived ONLY from the
- * latest message's `at` when the transcript is loaded this boot
- * (`useSessions.messages[sessionId]`): `<60s` → `now`, `<60m` → `Nm`,
- * else `Nh`. `SessionInfo` has NO `createdAt` field (the store's ordering
- * note says so explicitly), so a stored session not opened this boot has
- * no loaded messages → `null` (the row renders an empty slot).
- */
-function relativeTimeFor(
-  messages: Message[] | undefined,
-  now: number = Date.now(),
-): string | null {
-  const latest = messages?.[messages.length - 1];
-  if (!latest) return null;
-  const diff = now - latest.at;
-  if (diff < 60_000) return "now";
-  if (diff < 60 * 60_000) return `${Math.floor(diff / 60_000)}m`;
-  return `${Math.floor(diff / (60 * 60_000))}h`;
-}
-
 function spaceNameFor(cwd: string, spaces: { path: string }[]): string {
   const match = spaces.find((s) => s.path === cwd);
   return match ? basenameOfPath(match.path) : basenameOfPath(cwd);
 }
 
 /**
- * ONE link of the `agentOverrides` write chain (see `patchAgentOverrides` in the
- * component): read the document, replace the map, write it back.
+ * THE SIDEBAR'S FOUR LABELLED COMMAND BUTTONS (Open Space, New Session, Skills,
+ * Agents) — one ghost `<Button>` recipe, spelled ONCE because all four drew the
+ * identical box.
  *
- * Its failure arm does TWO things — log, then RE-FETCH into the store — and the
- * re-fetch is the load-bearing one for the user: without it the store keeps an
- * optimistic map the file never saw, and the next edit composes on that. Keeping the
- * failure inside this body (rather than re-throwing) is what lets it finish that job;
- * it is NOT what protects the chain any more — the chain's `.catch`es do that
- * (see `patchAgentOverrides`), which is the point of making the swallow STRUCTURAL:
- * an error handler that can itself throw (a `console.error` that throws, a store that
- * throws while re-seeding) used to reintroduce the very poisoning the swallow exists
- * to prevent, silently disabling every later write.
+ * The FIRST argument is what `Button`'s base and the `default` size would add
+ * that these four never had, and each entry only names a group the row below
+ * does NOT spell (so the row always wins a group it owns — see C7's recipe):
+ *  - `border-0` — the base's `border` is a 1px ring; with `h-8` it would make
+ *    the row 34px and inset the label by 1px. `border-0` removes the width
+ *    outright (the base's `border-transparent` alone keeps 28px→30px).
+ *  - `justify-start` — the size centres content; these rows are labelled and
+ *    read left-to-right (the `Kbd` sits at the end via its own `flex-1` label).
+ *  - `transition-none` — the base fades hover colour over 150 ms; this band
+ *    has never had a fade, and it stays as drawn.
+ *  - `select-auto` — the base makes the label unselectable.
+ *  - `whitespace-normal` — the base's `whitespace-nowrap` is a REAL repaint
+ *    here, not a cosmetic one: the original row inherited `white-space: normal`
+ *    from its container, so a label long enough for a narrow pane wrapped. The
+ *    base would force it onto one line and overflow the 244px column.
+ *  - `shrink` — the base's `shrink-0` is `flex-shrink: 0`. The parent is a
+ *    `flex flex-col` box, so shrink applies to HEIGHT here, and a short pane
+ *    would otherwise stop these four from compressing as they always have.
+ *    `shrink` is `flex-shrink: 1`, i.e. the value they had before.
+ *  - `[user-select:auto]` — the base's `select-none` makes the label
+ *    unselectable. The two spellings are NOT interchangeable and the difference
+ *    is which mechanism resolves it (measured against the built sheet and the
+ *    real `cn()`): `select-auto` is the SAME tailwind-merge group as
+ *    `select-none`, so naming it makes the merge DROP `select-none` — the merge
+ *    decides. `[user-select:auto]` is an arbitrary property, a different group,
+ *    so BOTH survive the merge and the CASCADE decides; `.select-none` sits at
+ *    offset ~45.8k in the built sheet and `[user-select:auto]` is emitted after
+ *    it (~45.9k), so this wins. Note `.select-auto` is emitted BEFORE
+ *    `.select-none` (~45.7k) — so if the merge ever stopped dropping
+ *    `select-none`, the plain `select-auto` spelling would lose the cascade and
+ *    the label would go unselectable with nothing failing in jsdom.
  *
- * `epoch` is the publish epoch this link captured at its own optimistic publish
- * (see `patchAgentOverrides`). Every link mirrors the store with ITS OWN snapshot,
- * so a link finishing after a newer edit was published would hand the store back
- * the OLDER map; `isStale()` is when to leave the store to the newer answer.
+ * NO line-height negation is needed, and adding one would be dead code: the
+ * base's `text-ui-base/relaxed` carries BOTH the size and `line-height: 1.625`,
+ * and the row spells `text-ui-base` — measured, `cn("text-ui-base/relaxed",
+ * "text-ui-base")` keeps only `text-ui-base`, i.e. the row's utility deletes
+ * the base's whole compound, line-height included. So the row ends up with no
+ * `line-height` declared at all and inherits preflight's
+ * `html{line-height:1.5}` — exactly what it inherited before. (A
+ * `leading-[1.5]` placed before the row is itself deleted by that same
+ * `text-ui-base`, which is why it is absent rather than redundant.)
  *
- * BOTH arms ask `isStale()` at COMMIT — immediately before the `setSettings` that
- * publishes — and not merely at the top of the arm. That distinction is the whole
- * point for the failure arm: its publish is a `getSettings` ROUND TRIP, so a
- * start-time check says nothing about who owns the store when the read answers. A
- * re-seed that lands after a later edit has published must be thrown away, not
- * trusted: writing the file's older map into a store the newer edit owns leaves the
- * store permanently behind the file (no later link republishes over it), and the
- * next `patch` composes from that mirror and deletes fields the file still holds.
+ * NOT in the wall, because the row string spells it and comes LAST, so the row
+ * already wins it: `hover:bg-surface-hover` (the ghost arm's `hover:bg-hover`
+ * is a DIFFERENT colour in three palettes — zai-dark and Dracula read 5%
+ * against surface-hover's 10% — so this is exactly the conflict the recipe
+ * exists for, and the row resolves it).
  *
- * The re-fetch on failure is also what rolls back the optimistic publish: the
- * store ends up holding the FILE's map, not the one that never landed. That
- * rollback is TRANSIENT once a queue exists — a later queued link whose composed
- * map still carries the failed field re-applies it when it completes — and that is
- * the accepted semantics, not a hole: the map IS the user's last composed intent,
- * and dropping the field from it would be the drop-a-write class of bug.
- *
- * `onRolledBack` reports that the rollback actually RAN — at COMMIT, beside the
- * publish that constitutes it (it is skipped for a stale link, whose store mirror a
- * newer publish owns). The modal needs the fact because
- * its stored-pin cue suppresses fields the user has edited on the theory that the
- * backend has the newer value — a theory a rolled-back write takes back.
+ * The rest of the base is inert HERE, and the reason per token:
+ *  - `bg-clip-padding` — no background is painted at rest;
+ *  - `outline-none` — `base.css:53-57` already forces
+ *    `outline: none !important` on every `:focus`/`:focus-visible`, in every
+ *    browser and again under `forced-colors`;
+ *  - `disabled:*` / `aria-invalid:*` / `aria-expanded:*` — none of these four
+ *    is ever disabled, nothing sets `aria-invalid` on them, and none carries
+ *    `aria-expanded` (the `DropdownMenuTrigger` beside them does; these do not),
+ *    so the arm's `aria-expanded:bg-hover` has no element to fire on;
+ *  - `[&_svg]:pointer-events-none` — the handler is on the button, so the click
+ *    is handled either way;
+ *  - `[&_svg]:shrink-0` — the icons are fixed `size-4`;
+ *  - `[&_svg:not([class*='size-'])]:size-3.5` — every icon here is created with
+ *    an explicit `size-4`, so the `:not([class*=size-])` guard excludes all of
+ *    them (this is the C2 chrome-bar trap, and it does not bite here);
+ *  - `has-data-[icon=inline-*]:pr/pl` — no child carries `data-icon`
+ *    (lucide-react v1.47's `createLucideIcon` sets no such attribute, and
+ *    `Kbd`'s slot attribute is `data-slot="kbd"`, which that selector does not
+ *    match).
  */
-async function writeAgentOverrides(
-  next: AgentOverrides,
-  epoch: number,
-  epochRef: { current: number },
-  onRolledBack: () => void,
-): Promise<void> {
-  // A newer optimistic publish has mirrored a NEWER map into the store since this
-  // link published, so this link's snapshot is the older answer.
-  const isStale = () => epochRef.current !== epoch;
-  let freshDocument: AppSettings;
-  try {
-    const fresh = await getSettings();
-    freshDocument = { ...fresh, agentOverrides: next };
-    await saveSettings(freshDocument);
-  } catch (err) {
-    // The ONLY thing this catch covers is the save. Publishing to the store lives
-    // below it on purpose: a `setSettings` that throws while sitting in this try
-    // would be logged as "Failed to save" for a save that LANDED.
-    console.error("Failed to save agent overrides:", err);
-    // Roll the optimistic publish back — but decide THAT at COMMIT, not here.
-    // The rollback IS a publish, and its own `getSettings` round trip is the part
-    // that can outlive a start-time check: a newer edit may publish while this read
-    // is in flight. So the read runs unconditionally and `isStale()` is asked again
-    // when the answer arrives. A still-fresh link's re-seed IS the rollback; a
-    // stale link's re-seed is DISCARDED entirely, because newer optimistic state
-    // owns the store now — publishing the file's OLDER map into it would leave the
-    // store permanently behind the file (nothing later republishes over it), and the
-    // next `patch` composes from that stale mirror and DELETES fields the file still
-    // holds: the drop-a-write class this chain exists to prevent.
-    //
-    // `loadSettings()` is not used here because it publishes inside itself — the
-    // same fetch with no commit-time check available to the caller. The store's own
-    // `loadSettings` is unchanged for its other callers.
-    //
-    // DETACHED (`void`ed, never awaited by the link): the chain must keep moving
-    // while a hung `get_settings` is outstanding — a failure arm that awaits would
-    // strand every later write, which is the very poisoning the swallow exists to
-    // prevent. The inner `catch` keeps this detached promise settled for the same
-    // reason (an error handler that can throw is how the poisoning came back).
-    void (async () => {
-      try {
-        const reseeded = await getSettings();
-        if (isStale()) return;
-        // Reported at COMMIT, next to the publish it describes: for a stale link
-        // NOTHING was rolled back — the newer link's own write is what the file
-        // holds — so the modal's suppression must survive.
-        onRolledBack();
-        useSettings.getState().setSettings(reseeded);
-      } catch {
-        // The re-seed itself failed: the store keeps the last optimistic value, and
-        // no second log — the failure above is the save's, and stays the honest one.
-      }
-    })();
-    return;
-  }
-  // The save LANDED, so the catalog the modal's `runs` columns came from is
-  // resolved against a map that no longer exists — evict it.
-  // Ahead of the store publish and OUTSIDE its outcome on purpose: eviction answers
-  // "the file changed", which stays true even if mirroring the store is what fails.
-  // The next fetch goes back to Rust instead of serving the settled promise this
-  // edit invalidated. Clearing the WHOLE cache (not just this Space's key) is the
-  // honest scope — the override map is global, so an edit changes the answer for
-  // every Space's rows, not just the one on screen.
-  clearAgentCatalogCache();
-  // The store mirror is the ONLY thing the epoch guards. The chain's file writes
-  // were already correctly ordered by the queue; this is the one step that could
-  // still publish an older snapshot into a store a newer edit has moved on from.
-  if (isStale()) return;
-  useSettings.getState().setSettings(freshDocument);
-}
+const SIDEBAR_COMMAND_BUTTON =
+  "border-0 justify-start transition-none whitespace-normal shrink [user-select:auto]";
+
+/**
+ * The box all four sidebar command buttons drew, VERBATIM, before C7 routed
+ * them through `<Button>`. It is the SECOND argument to `cn()` at every one of
+ * the four sites, so it wins every tailwind-merge group it spells against
+ * `Button`'s base and the `default` size — that ordering is what makes the swap
+ * paint-neutral, and it is why this string is kept whole rather than folded
+ * into the constant above. `hover:bg-surface-hover` is one of them: the ghost
+ * arm's `hover:bg-hover` is a DIFFERENT colour in three palettes (zai-dark and
+ * Dracula read 5% where `--color-surface-hover` reads 10%), so letting the arm
+ * win that group would repaint the hover fill.
+ */
+const PANE_COMMAND_ROW =
+  "flex h-8 w-full items-center gap-2 rounded-lg px-2 text-ui-base hover:bg-surface-hover";
+
+/**
+ * THE HOVER-REVEALED SESSION-ROW ACTIONS — Stop / Archive on a live or stored
+ * row, Unarchive / Delete on an archived one. Four affordances, one box, drawn
+ * by three different components (`SessionRow` and `ArchivedRow`), so the recipe
+ * lives here once.
+ *
+ * `ROW_HOVER_ACTION` is the negation wall (groups the row does NOT spell, and
+ * which `Button`'s base or the `icon-sm` size would otherwise change);
+ * `SESSION_ROW_ACTION_ROW` is the row's own class list VERBATIM and comes LAST,
+ * so it wins every group it spells. Both go to `cn()` at all four sites.
+ *
+ * What the wall undoes:
+ *  - `border-0` — the base's `border` is a 1px ring; on a `size-6` box that is
+ *    a 26px hit target where 24px was measured and pinned by the row's
+ *    alignment, and it shifts the glyph 1px.
+ *  - `transition-none` — the base fades hover colour over 150 ms. These appear
+ *    on row hover ALREADY (`group-hover:flex`); layering a second fade on the
+ *    fill would change what a hovering pointer sees.
+ *  - `shrink` — the base's `shrink-0` is `flex-shrink: 0`. These four are flex
+ *    ITEMS of the row (`RowButton` is a `flex` box), so the base would stop a
+ *    long title from squeezing them the way it always could. `shrink` is
+ *    `flex-shrink: 1` — the value they had.
+ *
+ * What the row itself wins by being LAST, and why that matters here:
+ *  - `hover:bg-surface-hover` over the ghost arm's `hover:bg-hover` (different
+ *    colours in zai-dark and Dracula — 5% vs 10%);
+ *  - `hidden` + `group-hover:flex` over the base's `inline-flex` — the
+ *    hover-reveal mechanism is the whole design of this affordance and it has
+ *    to survive;
+ *  - `items-center`, `justify-center`, `rounded-md`, `size-6`.
+ *
+ * Inert additions, with the reason:
+ *  - `text-foreground` and `hover:text-foreground` (the ghost arm) — the row
+ *    spells NO colour and inherits one anyway: `App.tsx:360`'s root is
+ *    `bg-frame text-foreground`, and nothing between it and this button sets a
+ *    colour, so the arm's ink IS the inherited ink. Same computed colour;
+ *  - `bg-clip-padding` — `padding-box` is CSS's initial `background-clip`, so
+ *    declaring it changes nothing;
+ *  - `outline-none` — `base.css:53-57` forces `outline: none !important` on
+ *    every `:focus`/`:focus-visible` anyway, in every browser and again under
+ *    `forced-colors`;
+ *  - `disabled:*` / `aria-invalid:*` / `aria-expanded:*` — none of the four is
+ *    ever disabled, and nothing sets `aria-invalid` or `aria-expanded` on it
+ *    (the `aria-pressed` pane toggles in `ChromeControls` do; these do not);
+ *  - `text-ui-base/relaxed` — 14px/1.625 declared where the button previously
+ *    inherited the UA's 16px (this app never sets a root `font-size`; it sizes
+ *    text only through `--ui-font-size` and the `text-ui-*` utilities, and
+ *    neither this button nor the `RowButton` it sits in spells one). Inert
+ *    because there is no text: the only child is an `<svg class="size-4">`, and
+ *    `size-4` is `calc(var(--spacing) * 4)` — rem, not em — inside a fixed
+ *    `size-6` box. `whitespace-nowrap` and `select-none` have no text to act
+ *    on either;
+ *  - `[&_svg]:pointer-events-none` — the click handler is on the button, so the
+ *    event is handled whether it lands on the button or is retargeted to it;
+ *  - `[&_svg]:shrink-0` — the glyph is a fixed `size-4`;
+ *  - `[&_svg:not([class*='size-'])]:size-3` — every icon here is created with
+ *    an explicit `size-4` (`SquareIcon`, `ArchiveIcon`, `ArchiveXIcon`,
+ *    `Trash2Icon`), so the `:not([class*=size-])` guard excludes all of them.
+ *    This is the C2 chrome-bar trap, and it does not bite here;
+ *  - `has-data-[icon=inline-*]:pr/pl` — no child carries `data-icon`
+ *    (lucide-react v1.47's `createLucideIcon` sets no such attribute);
+ *  - `group/button` — nothing in the tree reads that group.
+ *
+ * NOT `RowButton`, and this is the C4 rule, not an oversight: these are real
+ * `<button>`s. A second `role="button"` inside the row would resolve every
+ * `.closest('[role="button"]')` read in `SpacesList.test.tsx` to the action
+ * instead of the row, and `ToolCallCard.test.tsx`'s nesting pin keeps the
+ * `button`-in-`button` count at zero — `Button` renders a `<button>`, which is
+ * what the row's `div[role=button]` already expects as a child.
+ */
+const ROW_HOVER_ACTION = "border-0 transition-none shrink";
+const SESSION_ROW_ACTION_ROW =
+  "hidden size-6 items-center justify-center rounded-md group-hover:flex hover:bg-surface-hover";
+
 
 export default function SpacesList() {
   // No `onOpenSettings` prop any more: the Settings gear moved to the chrome
@@ -237,9 +267,9 @@ export default function SpacesList() {
   const [skillsOpen, setSkillsOpen] = useState(false);
   // The Agents modal (ADR 0066 / ADR 0068) — the ONE Agent surface, mounted
   // beside Skills with the SAME shape: the fetch lives in `useAgentCatalog`, the
-  // dialog takes rows as props. The settings document is read here too, because
-  // the dialog edits `agentOverrides` and the mount is the only place that owns a
-  // write path.
+  // dialog takes rows as props. The settings document and the `agentOverrides`
+  // write path come from `useAgentOverridesWrites` below — this mount is still the
+  // only place that owns a write path, the hook is where that path now lives.
   const [agentsOpen, setAgentsOpen] = useState(false);
 
   // Keep the `spaces` list order (`lastOpenedAt` desc from `list_spaces`):
@@ -326,11 +356,10 @@ export default function SpacesList() {
   // set). The override map the modal edits is GLOBAL and identical from every
   // Space — the Space decides only which definitions get LISTED.
   const agentRows = useAgentCatalog(activeSpacePath);
-  // The settings document, from the app-wide store (`useSettings` is already read
-  // by non-Settings components — `MessageBubble`, `SessionConfigSelect`,
-  // `ChatStream` — so this is not new plumbing, though this pane did not read it
-  // until the Agents modal mounted here).
-  const settings = useSettings((s) => s.settings);
+  // The settings document used to be read here (`useSettings((s) => s.settings)`);
+  // it now comes back from `useAgentOverridesWrites` below, which reads the same
+  // store through the same selector — the dialog's render gate and its write path
+  // are one owner.
   // The Agents modal's two catalogs, fetched ONCE on mount into local state —
   // the `SettingsPage.tsx` pattern, deliberately with no cache of its own (a
   // second module-level cache for two lists the modal reads on open would be
@@ -346,146 +375,22 @@ export default function SpacesList() {
       .catch(() => {});
   }, []);
 
-  /**
-   * The ONE write path for `agentOverrides` (ADR 0066's store) — a
-   * READ-MODIFY-WRITE, never composed from the store.
-   *
-   * The re-read is load-bearing, not paranoia: the store's copy is seeded at
-   * boot and by the Settings page, but the Rust side writes `settings.json` on
-   * its own — `agent/session/mod.rs:1678` persists a remembered thinking level
-   * through `load_settings` + mutate + `write_settings` — so a modal opened at an
-   * arbitrary moment can be holding a stale document, and composing from the store
-   * would silently clobber a concurrent change. EVERY Rust writer does
-   * load-mutate-write; this has to match or the desktop becomes the one writer
-   * that can lose someone else's field.
-   *
-   * On failure, log and RE-FETCH into the store: a save that did not land means
-   * the file and the UI disagree, and the file is right (and the optimistic
-   * publish below is rolled back — the store ends up holding the FILE's map, not
-   * the one that was never written, PROVIDED the re-fetch is still the newest
-   * answer when it lands; see the commit-time epoch check in `writeAgentOverrides`).
-   * That rollback is TRANSIENT once the queue
-   * below holds a link whose composed map still carries the failed field: when
-   * that link completes it re-applies the field. Accepted semantics, not a hole —
-   * the map IS the user's last composed intent, and dropping the field out of it
-   * would be the drop-a-write class of bug this whole seam exists to prevent.
-   *
-   * Note what is replaced and what is preserved: the OTHER fields come from the
-   * re-read document, and `agentOverrides` is the map the dialog handed over
-   * wholesale (it edited that map, so it is the newer answer). That is safe for
-   * exactly one reason — apart from ONE named exception, this modal is the only
-   * writer of the map in the app, so no concurrent write can be sitting inside it
-   * while this replace is in flight.
-   *
-   * THE EXCEPTION, and it is a real one: `SettingsPage.tsx`'s Provider-rename
-   * handler is a SECOND writer of `agentOverrides` (it walks the map remapping
-   * each entry's `.model` when a Provider is renamed — ADR 0066 records it). So
-   * the sentence above holds for the modal versus RUST, not absolutely. A rename
-   * landing concurrently with a modal write can be clobbered: the modal's whole-map
-   * replace writes back the pre-rename refs, so the remapped refs revert and the
-   * overrides re-orphan. Accepted as a narrow window because opening Settings
-   * UNMOUNTS this pane — and with it this modal and its queue — so the two writers
-   * cannot be live in the same screen; the queued-epoch guard below covers this
-   * file's own links and does NOT reach that writer. (The follow-up idea, not
-   * taken here: route the rename remap through the same helper, which would need
-   * it lifted out of this component because the two live on different lifecycles.)
-   *
-   * Why the two halves below exist. A rapid pair of edits (pick a model, then pick
-   * a thinking level — one ~300ms gesture) issues two `onPatch` calls, and the
-   * second one is built from the map the dialog was RENDERED with: the store only
-   * caught up after `getSettings` → `saveSettings` resolved, so the second map has
-   * never seen the first edit's field, and handing over a whole map means the
-   * second write deletes the first pick from `settings.json` with no feedback.
-   * Neither half of the fix alone closes that:
-   *
-   * - PUBLISH the incoming map into the store immediately (the store's own
-   *   `setSettings` is documented as the settings UI's optimistic write, and the
-   *   success path writes this same map anyway). The dialog re-renders off it, so
-   *   the next edit is composed on the pending map instead of on a snapshot that
-   *   predates it — the maps stay cumulative.
-   * - SERIALIZE the saves on a promise held in a ref, so "the last write wins"
-   *   means the LAST map the user produced and not whichever `saveSettings`
-   *   happened to resolve first.
-   *
-   * …and a THIRD half, because the first two interact badly. Serializing the FILE
-   * writes says nothing about the store MIRROR: each link still publishes its own
-   * snapshot on completion, so the link for edit A finishing after edit B was
-   * published hands the store the {A}-only map — B's pick visibly flickers back to
-   * "Inherits", and an edit C composed inside that window builds on {A} and drops
-   * B from the file. Hence the PUBLISH EPOCH: `epochRef` counts optimistic
-   * publishes, each link captures the count at its own publish, and a link mirrors
-   * the store only while nothing newer has published since — checked at COMMIT, in
-   * BOTH arms, right before the `setSettings` that publishes (`writeAgentOverrides`
-   * holds the success map in hand, so its check is naturally adjacent to the
-   * publish; the FAILURE arm's publish is a `getSettings` round trip, so it has to
-   * ask again after the read answers — a check taken before that read would let a
-   * late re-seed repaint the store with the file's older map after the last link
-   * had already run, which is the store-behind-the-file state the next `patch` then
-   * composes from). The file writes needed no guard — the queue already orders them
-   * — this is only the store catching up with an old answer.
-   *
-   * The chain never carries a rejection: `writeAgentOverrides` logs its own error
-   * (log + re-seed) AND the link is `.catch`-swallowed here, so a failed link — or
-   * a throwing error handler inside it — cannot strand every write after it.
-   *
-   * What is deliberately NOT done here is a field-level merge of the incoming map
-   * with the re-read one. The map carries no intent: an absent field is BOTH "the
-   * user just cleared it" and "nobody ever set it", so merging would resurrect a
-   * field the user just unticked (ADR 0067 — absence is the only meaning of
-   * "does not speak").
-   */
-  const writeChainRef = useRef<Promise<void>>(Promise.resolve());
-  // How many optimistic publishes this modal has made. A write link captures the
-  // value at its own publish and compares on completion (see the doc comment).
-  const publishEpochRef = useRef(0);
-  // How many of this modal's writes FAILED and rolled the store back. A counter, not
-  // a boolean, so a second failure still reads as a change to the modal. Handed to
-  // `AgentsDialog` as `rolledBackWrites`: the mount owns the save, and the dialog owns
-  // the `edited` suppression that a rollback invalidates.
-  const [rolledBackWrites, setRolledBackWrites] = useState(0);
-  const noteRolledBack = useCallback(() => setRolledBackWrites((n) => n + 1), []);
-  const patchAgentOverrides = useCallback(
-    (next: AgentOverrides) => {
-      const current = useSettings.getState().settings;
-      // Publish first (before the awaits), so the dialog's next render — and thus
-      // its next edit — sees this one. The epoch moves WITH the publish attempt: one
-      // count per patch the user COMMITS, whether or not it reaches the store mirror
-      // (the `current === null` guard below can skip the publish, and it still counts
-      // — the guard makes that unreachable from this render site, but the count is
-      // deliberately not tied to the mirror). That is exactly what a completing link
-      // has to compare against to know whether it is still the newest answer.
-      publishEpochRef.current += 1;
-      const epoch = publishEpochRef.current;
-      if (current !== null) {
-        useSettings.getState().setSettings({ ...current, agentOverrides: next });
-      }
-      // SWALLOW STRUCTURALLY, at both ends of the link, because the two halves do
-      // different work:
-      // - the LEADING `.catch` turns a rejected held promise back into a resolved one
-      //   before the `.then`, so a poisoned link can never make the NEXT write skip
-      //   (a bare trailing swallow would swallow the error and still skip the write);
-      // - the TRAILING `.catch` is the LOAD-BEARING half: the rejected link is what
-      //   the call site `void`s, and the mount has nowhere to attach a handler, so
-      //   without it a poisoned save is an unhandled rejection in the webview (this
-      //   is exactly what the suite reported before it was added). It also covers the
-      //   NEXT link, because the promise stored in the ref is the swallowed one.
-      // The leading `.catch` is therefore not what saves the next write today — it is
-      // here so the invariant does not depend on remembering the trailing half: the
-      // held promise stays clean whatever order the two links are written in.
-      // Neither half relies on the helper's error HANDLER being infallible, which is
-      // the point: a `console.error` that throws, or a store that throws while
-      // mirroring, used to leave the held promise rejected and silently disable every
-      // later write while the modal kept looking like it saved.
-      writeChainRef.current = writeChainRef.current
-        .catch(() => {})
-        .then(() =>
-          writeAgentOverrides(next, epoch, publishEpochRef, noteRolledBack),
-        )
-        .catch(() => {});
-      return writeChainRef.current;
-    },
-    [noteRolledBack],
-  );
+  // The Agents modal's ONE write path for `agentOverrides` — D2 moved the chain
+  // (optimistic publish, serialized saves, the publish epoch, the rollback) into
+  // `useAgentOverridesWrites`, because the chain is the modal's contract and not
+  // this pane's: it is pinned property-by-property in
+  // `hooks/useAgentOverridesWrites.test.ts`, and `SpacesList.test.tsx` (with the
+  // two characterisation pins at the end of its Agents block) is the proof the
+  // move preserved the behaviour. The hook also owns the settings document this
+  // pane reads for the dialog's render gate — same store, same selector, one
+  // fewer place that knows where the document comes from.
+  //
+  // What is NOT in the hook and stays named here: nothing. The epoch capture
+  // moved with the chain rather than staying at a call site, because the link
+  // that reads it moved too — splitting the two would put the counter and its
+  // consumer in different files for no gain.
+  const { settings, rolledBackWrites, patchAgentOverrides } =
+    useAgentOverridesWrites();
 
   // The session awaiting delete confirmation (the ONLY destructive
   // action in the sidebar — archive/unarchive are reversible and have
@@ -602,46 +507,54 @@ export default function SpacesList() {
           the scroller and bled just the same. The session marks below are what
           shows instead. */}
       <div
-        className={`flex min-h-0 flex-1 flex-col ${collapsed ? "invisible" : ""}`}
+        className={cn("flex min-h-0 flex-1 flex-col", collapsed && "invisible")}
       >
       <div className="flex flex-col gap-2 p-3">
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="default"
           onClick={handleOpenSpace}
-          className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-ui-base hover:bg-surface-hover"
+          className={cn(SIDEBAR_COMMAND_BUTTON, PANE_COMMAND_ROW)}
         >
           <FolderOpenIcon className="size-4" />
           <span className="flex-1 text-left">Open Space</span>
           <Kbd className="text-foreground-subtlest">⌘O</Kbd>
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
+          variant="ghost"
+          size="default"
           onClick={handleNewSession}
-          className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-ui-base hover:bg-surface-hover"
+          className={cn(SIDEBAR_COMMAND_BUTTON, PANE_COMMAND_ROW)}
         >
           <MessageCirclePlusIcon className="size-4" />
           <span className="flex-1 text-left">New Session</span>
           <Kbd className="text-foreground-subtlest">⌘N</Kbd>
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
+          variant="ghost"
+          size="default"
           onClick={() => setSkillsOpen(true)}
-          className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-ui-base hover:bg-surface-hover"
+          className={cn(SIDEBAR_COMMAND_BUTTON, PANE_COMMAND_ROW)}
         >
           <SparklesIcon className="size-4" />
           <span className="flex-1 text-left">Skills</span>
-        </button>
+        </Button>
         {/* The Agents modal (the ONE Agent surface — Settings has no Agents
             section). No `Kbd`, matching `Skills`: neither is a chord. `BotIcon`
             moved here from the deleted Settings nav entry. */}
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="default"
           onClick={() => setAgentsOpen(true)}
-          className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-ui-base hover:bg-surface-hover"
+          className={cn(SIDEBAR_COMMAND_BUTTON, PANE_COMMAND_ROW)}
         >
           <BotIcon className="size-4" />
           <span className="flex-1 text-left">Agents</span>
-        </button>
+        </Button>
       </div>
       {/* The Sessions header: the label + the `...` menu (the old tab
           bar's `...` menu moved here — right-aligned, next to the word
@@ -677,9 +590,7 @@ export default function SpacesList() {
           hides it while collapsed — see the note there). */}
       <div className="flex-1 overflow-y-auto">
         {views.length === 0 && (
-          <p className="p-3 text-ui-sm text-foreground-subtlest">
-            No spaces yet. Open a folder to get started.
-          </p>
+          <EmptyListLine>No spaces yet. Open a folder to get started.</EmptyListLine>
         )}
         {/* The ACTIVE space's sessions (the Spaces are the top TABS —
             the sidebar is sessions-only: no group headers, no folder
@@ -833,20 +744,13 @@ function SessionRow({
   // The row's generated title, read by id: `SessionRow` is given an id (by
   // design — its parent holds `liveSessionIds` / `storedSessionIds`, never the
   // rows), so no `SessionInfo` is threaded through `SpaceView` for it. The
-  // selector returns a PRIMITIVE over the three-list walk (a `sessions` /
-  // history / archived row): zustand v5 re-runs a selector that yields a
-  // fresh OBJECT on every snapshot read, so `{ … }` here would re-render the
-  // row forever — and it is the SAME walk the `cwd` lookups use.
-  const storedTitle = useSessions((s) => {
-    const titleOf = (rows: SessionInfo[]) =>
-      rows.find((x) => x.sessionId === sessionId)?.title;
-    return (
-      titleOf(s.sessions) ??
-      titleOf(s.historySessions) ??
-      titleOf(s.archivedSessions) ??
-      null
-    );
-  });
+  // selector returns a PRIMITIVE via the ONE three-list walk
+  // (`lib/sessionLookup.ts` — live / history / archived, live first): zustand
+  // v5 re-runs a selector that yields a fresh OBJECT on every snapshot read, so
+  // `{ … }` here would re-render the row forever.
+  const storedTitle = useSessions(
+    (s) => sessionFieldOf(s, sessionId, "title") ?? null,
+  );
   // The row's mark (spinner / `?` / ring) comes from the SAME rule the
   // collapsed rail and the tab use — see `useSessionStatus`.
   const status = useSessionStatus(sessionId);
@@ -859,69 +763,23 @@ function SessionRow({
   const time = relativeTimeFor(messages);
   const title = titleFor(messages, spaceName, storedTitle);
 
-  const rightSlot =
-    time !== null ? (
-      <span className="text-ui-sm text-foreground-subtle">{time}</span>
-    ) : (
-      // Empty slot — keeps alignment when there is no loaded transcript.
-      <span className="size-4" />
-    );
-
-  return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={() => onOpen(sessionId)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") onOpen(sessionId);
-      }}
-      className={`group flex cursor-pointer items-center gap-2 rounded-lg pl-2.5 pr-1 py-1 ${
-        active ? "bg-selected" : "hover:bg-surface-hover"
-      }`}
-    >
-      {/* The state glyph, in the slot the spinner already owned: a session that
-          is idle now wears a RING rather than nothing, which is the cue the
-          collapsed rail has always had and the expanded list has never shown.
-          16px = the slot's old `size-4`, so the title's indent is unchanged and
-          these rows still line up with `ArchivedSessionRow`, whose leading slot
-          is the same 16px. `dotSize={8}` halves the RING alone: the three
-          states are three different amounts of ink, and the ring is the only
-          one that reads as a solid chunk of paint, so at a shared 16px the
-          idle state outshouted the working state above it — inverting their
-          importance. The spinner and the `?` are outlines whose weight is what
-          makes them readable, and they keep the full slot. No `testId`: the
-          tests reach the mark through the STATE it paints (`[data-dot="…"]`) —
-          the hook that asserts what the user sees rather than which node
-          carried it. NO ink class either: the mark owns the ink
-          (`text-foreground` on the active row, `text-foreground-subtlest`
-          otherwise), and passing one from the row would fight it — which of two
-          same-specificity utility classes wins is a CSS source-order fact this
-          row cannot control. */}
-      <SessionStatusMark status={status} active={active} size={16} dotSize={8} />
-      <span
-        className="min-w-0 flex-1 overflow-hidden whitespace-nowrap text-ui-base text-foreground"
-        style={{
-          maskImage:
-            "linear-gradient(to right, black calc(100% - 1.5rem), transparent)",
-          WebkitMaskImage:
-            "linear-gradient(to right, black calc(100% - 1.5rem), transparent)",
-        }}
-      >
-        {title}
-      </span>
-      {/* Every row — live or stored — swaps the time for its actions at hover. The
-          live row used to render the time with no swap at all: the Pause button
-          was deleted and nothing replaced it, so a running Session had no way to
-          be stopped or put away without opening it first. */}
-      <span className="group-hover:hidden">{rightSlot}</span>
-      {/* Stop first: it is the action that pertains to a session that is RUNNING, so the
-          row reads left-to-right as "stop what's running, then put it away". The Archived
-          row keeps its destructive control OUTERMOST (Unarchive then Delete); this row
-          deliberately does not copy that — Archive is not destructive (ADR 0016:
-          reversible, and it never destroys a transcript). */}
+  // Stop first: it is the action that pertains to a session that is RUNNING, so the
+  // row reads left-to-right as "stop what's running, then put it away". The Archived
+  // row keeps its destructive control OUTERMOST (Unarchive then Delete); this row
+  // deliberately does not copy that — Archive is not destructive (ADR 0016:
+  // reversible, and it never destroys a transcript).
+  //
+  // The actions are plain `<button>`s, NOT `RowButton`: a `role="button"` inside
+  // the row would resolve every `.closest('[role="button"]')` read in
+  // `SpacesList.test.tsx` to the button instead of the row, and would turn each
+  // `rowOf(…).getByRole("button", …)` into a multiple-match throw.
+  const actions = (
+    <>
       {isLive && (
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="icon-sm"
           title={inTurn ? "Stop this turn" : "Stop this session"}
           aria-label={`Stop ${title}`}
           onClick={(e) => {
@@ -930,13 +788,15 @@ function SessionRow({
               console.error("Failed to stop session:", err);
             });
           }}
-          className="hidden size-6 items-center justify-center rounded-md group-hover:flex hover:bg-surface-hover"
+          className={cn(ROW_HOVER_ACTION, SESSION_ROW_ACTION_ROW)}
         >
           <SquareIcon className="size-4" />
-        </button>
+        </Button>
       )}
-      <button
+      <Button
         type="button"
+        variant="ghost"
+        size="icon-sm"
         title="Archive"
         aria-label={`Archive ${title}`}
         onClick={(e) => {
@@ -945,11 +805,37 @@ function SessionRow({
             console.error("Failed to archive session:", err);
           });
         }}
-        className="hidden size-6 items-center justify-center rounded-md group-hover:flex hover:bg-surface-hover"
+        className={cn(ROW_HOVER_ACTION, SESSION_ROW_ACTION_ROW)}
       >
         <ArchiveIcon className="size-4" />
-      </button>
-    </div>
+      </Button>
+    </>
+  );
+
+  // The state glyph, in the slot the spinner already owned: a session that
+  // is idle now wears a RING rather than nothing, which is the cue the
+  // collapsed rail has always had and the expanded list has never shown.
+  // `dotSize={8}` halves the RING alone: the three states are three different
+  // amounts of ink, and the ring is the only one that reads as a solid chunk of
+  // paint, so at a shared 16px the idle state outshouted the working state
+  // above it — inverting their importance. The spinner and the `?` are outlines
+  // whose weight is what makes them readable, and they keep the full slot. No
+  // `testId`: the tests reach the mark through the STATE it paints
+  // (`[data-dot="…"]`) — the hook that asserts what the user sees rather than
+  // which node carried it. The mark owns its own ink (`text-foreground` on the
+  // active row, `text-foreground-subtlest` otherwise) — see
+  // `SessionListRow`'s note on why the row must not pass one.
+  return (
+    <SessionListRow
+      title={title}
+      active={active}
+      time={time}
+      onOpen={() => onOpen(sessionId)}
+      leading={
+        <SessionStatusMark status={status} active={active} size={16} dotSize={8} />
+      }
+      actions={actions}
+    />
   );
 }
 
@@ -992,13 +878,8 @@ function ArchivedSection({
   );
   return (
     <div className="px-2.5 py-1">
-      <div
-        role="button"
-        tabIndex={0}
+      <RowButton
         onClick={() => setOpen(!open)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") setOpen(!open);
-        }}
         className="group flex cursor-pointer items-center gap-1 rounded-lg px-1 hover:bg-surface-hover"
       >
         <ArchiveIcon className="size-4 shrink-0 text-foreground-subtlest" />
@@ -1013,7 +894,7 @@ function ArchivedSection({
         ) : (
           <ChevronRightIcon className="size-4 shrink-0 text-foreground-subtlest" />
         )}
-      </div>
+      </RowButton>
       {open && (
         <div className="mt-1 flex flex-col gap-0.5">
           {visible.length === 0 ? (
@@ -1067,64 +948,54 @@ function ArchivedSessionRow({
   const spaceName = spaceNameFor(session.cwd, spaces);
   const title = titleFor(messages, spaceName, session.title);
   const time = relativeTimeFor(messages);
+  // Unarchive first, Delete OUTERMOST: Delete is the only destructive action on
+  // this row (confirm dialog), so it sits furthest from the content. The live
+  // row deliberately does NOT copy this rule — Archive there is reversible and
+  // never destroys a transcript (ADR 0016), so it can sit outside Stop.
+  //
+  // NO `leading` prop: an archived Session is NEVER live, so the leading slot is
+  // `SessionListRow`'s empty 16px spacer — the same width the status mark
+  // occupies, which is what keeps these rows aligned with the ones above.
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={() => onOpen(session.sessionId)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") onOpen(session.sessionId);
-      }}
-      className={`group flex cursor-pointer items-center gap-2 rounded-lg pl-2.5 pr-1 py-1 ${
-        active ? "bg-selected" : "hover:bg-surface-hover"
-      }`}
-    >
-      <span className="size-4 shrink-0" />
-      <span
-        className="min-w-0 flex-1 overflow-hidden whitespace-nowrap text-ui-base text-foreground"
-        style={{
-          maskImage:
-            "linear-gradient(to right, black calc(100% - 1.5rem), transparent)",
-          WebkitMaskImage:
-            "linear-gradient(to right, black calc(100% - 1.5rem), transparent)",
-        }}
-      >
-        {title}
-      </span>
-      <span className="group-hover:hidden">
-        {time !== null ? (
-          <span className="text-ui-sm text-foreground-subtle">{time}</span>
-        ) : (
-          // Empty slot — keeps alignment when there is no loaded transcript.
-          <span className="size-4" />
-        )}
-      </span>
-      <button
-        type="button"
-        title="Unarchive"
-        aria-label={`Unarchive ${title}`}
-        onClick={(e) => {
-          e.stopPropagation();
-          void unarchiveSession(session.sessionId).catch((err) => {
-            console.error("Failed to unarchive session:", err);
-          });
-        }}
-        className="hidden size-6 items-center justify-center rounded-md group-hover:flex hover:bg-surface-hover"
-      >
-        <ArchiveXIcon className="size-4" />
-      </button>
-      <button
-        type="button"
-        title="Delete"
-        aria-label={`Delete ${title}`}
-        onClick={(e) => {
-          e.stopPropagation();
-          onDelete(session);
-        }}
-        className="hidden size-6 items-center justify-center rounded-md group-hover:flex hover:bg-surface-hover"
-      >
-        <Trash2Icon className="size-4" />
-      </button>
-    </div>
+    <SessionListRow
+      title={title}
+      active={active}
+      time={time}
+      onOpen={() => onOpen(session.sessionId)}
+      actions={
+        <>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            title="Unarchive"
+            aria-label={`Unarchive ${title}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              void unarchiveSession(session.sessionId).catch((err) => {
+                console.error("Failed to unarchive session:", err);
+              });
+            }}
+            className={cn(ROW_HOVER_ACTION, SESSION_ROW_ACTION_ROW)}
+          >
+            <ArchiveXIcon className="size-4" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            title="Delete"
+            aria-label={`Delete ${title}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(session);
+            }}
+            className={cn(ROW_HOVER_ACTION, SESSION_ROW_ACTION_ROW)}
+          >
+            <Trash2Icon className="size-4" />
+          </Button>
+        </>
+      }
+    />
   );
 }

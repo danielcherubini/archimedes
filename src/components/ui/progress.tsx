@@ -10,7 +10,7 @@ type ProgressProps = React.ComponentProps<typeof ProgressPrimitive.Root> & {
   segments?: readonly ProgressSegment[];
 };
 
-export interface ProgressSegment {
+interface ProgressSegment {
   className?: string;
   id: string;
   percent: number;

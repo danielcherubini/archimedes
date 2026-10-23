@@ -1,9 +1,11 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { describe, it, expect, beforeAll, afterEach, vi } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import MessageBubble, { shikiThemeFor } from "./MessageBubble";
-import { Message } from "../store/sessions";
+import type { Message } from "../store/sessions";
 import { useSettings } from "../store/settings";
 import type { AppSettings } from "../lib/tauri";
+import { makeSettings } from "../test/fixtures";
+import { resetStores } from "../test/resetStores";
 
 /**
  * The fenced-code block's header (the ZCode model: file-type glyph + hue +
@@ -29,63 +31,18 @@ function renderAgentText(text: string) {
 }
 
 /**
- * A full `AppSettings` document to seed the settings store with (the shape
- * `ChatStream.test.tsx`'s `SETTINGS_FIXTURE` uses). `palette` is a REQUIRED
- * member of the type (ADR 0027), so the fixture has to carry it rather than
- * omit it — the tests below overwrite just that one field.
+ * Seed the settings store with a complete `AppSettings` under the given
+ * palette. The 22 required fields come from `makeSettings()`. This file's
+ * literal and `ChatStream.test.tsx`'s `SETTINGS_FIXTURE` were byte-identical
+ * 30-line hand-copies; this one is gone, and the other goes when that file is
+ * next touched (the rolling migration). A field added to the real `AppSettings`
+ * is now one compile error in `src/test/fixtures/settings.ts` instead of a key
+ * silently missing from every copy — `App.test.tsx`'s copy had already lost
+ * `palette` and nothing noticed.
  */
-const SETTINGS_FIXTURE: AppSettings = {
-  theme: "dark",
-  palette: null,
-  paneLayout: {},
-  defaultTrustNewSpaces: false,
-  defaultModel: null,
-  defaultThinkingLevel: null,
-  enabledTools: [],
-  providers: [],
-  mcpServers: {},
-  font: { sizePx: 14, uiFamily: null, codeFamily: null },
-  defaultThinkingLevels: {},
-  agentOverrides: {},
-  spinnerStyle: null,
-  emptyStateAnimation: null,
-  filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
-  web: {
-    braveApiKey: "",
-    tavilyApiKey: "",
-    perplexityApiKey: "",
-    searxngUrl: "",
-    defaultProvider: "auto",
-    proxy: "",
-  },
-  mcpMentionsEnabled: false,
-  sessionNamingEnabled: true,
-  sessionNamingModel: null,
-  sessionNamingReasoning: null,
-  attentionAlertsEnabled: true,
-  attentionAlertDelaySecs: 15,
-};
-
-/** Seed the settings store with the fixture under the given palette. */
 function seedPalette(palette: AppSettings["palette"]) {
-  useSettings.getState().setSettings({ ...SETTINGS_FIXTURE, palette });
+  useSettings.getState().setSettings(makeSettings({ palette }));
 }
-
-beforeAll(() => {
-  Object.defineProperty(window, "matchMedia", {
-    writable: true,
-    value: vi.fn().mockImplementation((query) => ({
-      matches: false,
-      media: query,
-      onchange: null,
-      addListener: vi.fn(),
-      removeListener: vi.fn(),
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-      dispatchEvent: vi.fn(),
-    })),
-  });
-});
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -96,8 +53,10 @@ afterEach(() => {
   // The palette tests seed the settings store; the OTHER tests in this file
   // assert the default (zai / `github-dark`) paper, so the store MUST go back
   // to "nothing loaded" between tests or they would inherit Dracula and pass
-  // for the wrong reason.
-  useSettings.setState({ settings: null, loaded: false });
+  // for the wrong reason. `resetStores()` installs each store's own captured
+  // initial state (settings: null, loaded: false) with replace=true, so the
+  // reset is not a list of keys this file has to remember.
+  resetStores();
 });
 
 describe("CodeBlock header (the ZCode code-block model)", () => {

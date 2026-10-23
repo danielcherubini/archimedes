@@ -1,11 +1,8 @@
-import type { SessionConfigOption, SessionInfo } from "./tauri";
-
-/** The rows the walk touches — only these three fields of `SessionInfo` are
- *  read, and naming them (instead of `SessionInfo[]`) lets a caller pass the
- *  real lists AND lets a test build a row without inventing `capabilities` /
- *  `archived` it does not care about. Structurally compatible with the store's
- *  `SessionInfo[]`, so the call sites pass `s.sessions` unchanged. */
-type SessionRow = Pick<SessionInfo, "sessionId" | "configOptions" | "contextUsage">;
+import type { SessionConfigOption } from "./tauri";
+import {
+  sessionFieldOf,
+  type SessionConfigSource,
+} from "./sessionLookup";
 
 /**
  * The SHARED derivation behind the session's config controls (the model
@@ -28,19 +25,17 @@ type SessionRow = Pick<SessionInfo, "sessionId" | "configOptions" | "contextUsag
  * `sessions` (live this app run), `historySessions` (stored, archived flag
  * off) and `archivedSessions` (stored, archived flag on — opened from the
  * Archived section). Missing the last one is the bug where an archived
- * session's bar reads 0% and its selectors fall back to empty stubs.
+ * session's bar reads 0% and its selectors fall back to empty stubs. THAT walk
+ * is no longer spelled here — it is `lib/sessionLookup.ts`'s `sessionFieldOf`,
+ * the one owner shared by the six places that needed it; this module keeps only
+ * the map-first half of the fallback, which is the part specific to config.
  */
 
-/** The slice of `useSessions` state these derivations walk. Structural (not
- *  `SessionsState`, which the store does not export): a component passes its
- *  whole state object from inside a selector, and a test can build a plain one. */
-export interface SessionConfigSource {
-  configOptions: Record<string, SessionConfigOption[]>;
-  contextUsage: Record<string, { used: number; window: number } | undefined>;
-  sessions: SessionRow[];
-  historySessions: SessionRow[];
-  archivedSessions: SessionRow[];
-}
+/** The slice of `useSessions` state these derivations walk: the three lists
+ *  (declared once, in `sessionLookup.ts`) plus the two per-id maps preferred
+ *  over any row. Re-exported so `SessionConfigBlock` and the fixtures keep
+ *  importing it from here. */
+export type { SessionConfigSource };
 
 /**
  * The session's config options (model / thinking-level): the store's map
@@ -52,20 +47,17 @@ export interface SessionConfigSource {
  * can't set config; a resume re-emits the fresh values).
  *
  * `null` (not `[]`) when nothing knows the id, so "no config" stays
- * distinguishable from "config with zero options".
+ * distinguishable from "config with zero options". That is why the `?? null`
+ * tail lives HERE and is not delegated to `sessionFieldOf`, whose empty case is
+ * `undefined`: the walk must not decide what "missing" means for its caller, or
+ * the two states collapse into one.
  */
 export function sessionConfigOptionsOf(
   s: SessionConfigSource,
   id: string | null,
 ): SessionConfigOption[] | null {
   if (!id) return null;
-  return (
-    s.configOptions[id] ??
-    s.sessions.find((x) => x.sessionId === id)?.configOptions ??
-    s.historySessions.find((x) => x.sessionId === id)?.configOptions ??
-    s.archivedSessions.find((x) => x.sessionId === id)?.configOptions ??
-    null
-  );
+  return s.configOptions[id] ?? sessionFieldOf(s, id, "configOptions") ?? null;
 }
 
 /**
@@ -75,21 +67,17 @@ export function sessionConfigOptionsOf(
  * persisted on every frame): `undefined` until the first frame, so a fresh
  * session shows no percentage.
  *
- * The `??` chain deliberately falls THROUGH an entry that exists but holds
+ * The chain deliberately falls THROUGH an entry that exists but holds
  * `undefined` (the map's value type allows it) — which is also the behaviour
- * these functions were lifted from.
+ * these functions were lifted from, and what `sessionFieldOf`'s `??`-style gap
+ * test preserves on the row side of the fallback.
  */
 export function contextUsageOf(
   s: SessionConfigSource,
   id: string | null,
 ): { used: number; window: number } | undefined {
   if (!id) return undefined;
-  return (
-    s.contextUsage[id] ??
-    s.sessions.find((x) => x.sessionId === id)?.contextUsage ??
-    s.historySessions.find((x) => x.sessionId === id)?.contextUsage ??
-    s.archivedSessions.find((x) => x.sessionId === id)?.contextUsage
-  );
+  return s.contextUsage[id] ?? sessionFieldOf(s, id, "contextUsage");
 }
 
 /**

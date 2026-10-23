@@ -1,8 +1,8 @@
-import { useState } from "react";
 import { respondPermission, type PermissionOutcome } from "../lib/tauri";
-import { describeIpcError } from "../lib/ipcError";
+import { useAsyncAction } from "../hooks/useAsyncAction";
 import { usePermissions } from "../store/permissions";
 import { Button } from "./ui/button";
+import { IpcErrorLine } from "./IpcErrorLine";
 
 /**
  * Inline card shown when a `permission-request` event arrives for the active
@@ -28,23 +28,21 @@ export default function PermissionPrompt({
     (state.prompts[sessionId] ?? []).find((p) => p.requestId === requestId),
   );
   const removePrompt = usePermissions((state) => state.removePrompt);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // NO `guard`: this site has never had re-entrancy protection — the only thing
+  // standing between a fast double click and a second `respond_permission` is
+  // the `disabled={busy}` on every button below, exactly as before.
+  const { busy, error, run } = useAsyncAction();
 
   if (!prompt) return null;
 
-  const respond = async (outcome: PermissionOutcome) => {
-    setBusy(true);
-    setError(null);
-    try {
-      await respondPermission(sessionId, requestId, outcome);
-      removePrompt(sessionId, requestId);
-    } catch (err) {
-      setError(describeIpcError(err));
-    } finally {
-      setBusy(false);
-    }
-  };
+  const respond = (outcome: PermissionOutcome) =>
+    run(() =>
+      respondPermission(sessionId, requestId, outcome).then(() =>
+        // The prompt is removed locally on success (and auto-dismissed on
+        // session-closed by the store — a MAIN session only).
+        removePrompt(sessionId, requestId),
+      ),
+    );
 
   return (
     <div className="overflow-hidden rounded-xl border border-border">
@@ -79,7 +77,7 @@ export default function PermissionPrompt({
         </Button>
       </div>
       {error && (
-        <p className="px-3 pb-2 text-ui-sm text-destructive">{error}</p>
+        <IpcErrorLine error={error} className="px-3 pb-2" />
       )}
     </div>
   );

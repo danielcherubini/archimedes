@@ -18,15 +18,4 @@ function Kbd({ className, ...props }: React.ComponentProps<"kbd">) {
   );
 }
 
-/** 键帽组合容器：把一次组合的多个键横排（gap-1），如 ⌘ + K。 */
-function KbdGroup({ className, ...props }: React.ComponentProps<"div">) {
-  return (
-    <div
-      data-slot="kbd-group"
-      className={cn("inline-flex items-center gap-1", className)}
-      {...props}
-    />
-  );
-}
-
-export { Kbd, KbdGroup };
+export { Kbd };

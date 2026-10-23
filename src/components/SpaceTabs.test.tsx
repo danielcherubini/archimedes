@@ -1,33 +1,16 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { closeSession, deleteSpace } from "../lib/tauri";
 import { useSessions } from "../store/sessions";
 import { usePermissions } from "../store/permissions";
-import {
-  getNewSpaceDialogOpen,
-  setNewSpaceDialogOpen,
-} from "../lib/newSpaceDialogState";
-import type { SessionInfo, SpaceRow } from "../lib/tauri";
+import { getNewSpaceDialogOpen } from "../lib/newSpaceDialogState";
+import { makeSessionRow, makeSpaceRow } from "../test/fixtures";
+import { resetModuleFlags, resetStores } from "../test/resetStores";
 import SpaceTabs from "./SpaceTabs";
 
 // Radix (the `DropdownMenu` + `NewSpaceDialog`'s `Dialog`) needs the
-// pointer-capture stubs in jsdom (the ChatStream / SettingsPage tests'
-// `beforeAll`, verbatim) + `matchMedia`.
-beforeAll(() => {
-  Element.prototype.scrollIntoView = vi.fn();
-  Element.prototype.hasPointerCapture = vi.fn(() => false);
-  Element.prototype.setPointerCapture = vi.fn();
-  Element.prototype.releasePointerCapture = vi.fn();
-  vi.stubGlobal("matchMedia", (q: string) => ({
-    matches: false,
-    media: q,
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
-    addListener: vi.fn(),
-    removeListener: vi.fn(),
-    dispatchEvent: vi.fn(),
-  }));
-});
+// pointer-capture stubs jsdom lacks + `matchMedia`; `src/test/setup.tsx` installs
+// all of them for every file, so this file's own `beforeAll` block is gone.
 
 vi.mock("../lib/tauri", async () => {
   const actual = await vi.importActual<Record<string, unknown>>("../lib/tauri");
@@ -47,37 +30,19 @@ vi.mock("../lib/tauri", async () => {
   };
 });
 
-const space = (path: string): SpaceRow => ({
-  path,
-  createdAt: 0,
-  lastOpenedAt: 0,
-  trusted: false,
-});
+const space = (path: string) => makeSpaceRow({ path });
 
-const info = (sessionId: string, cwd: string): SessionInfo => ({
-  sessionId,
-  cwd,
-  capabilities: {},
-  archived: false,
-});
+const info = (sessionId: string, cwd: string) => makeSessionRow({ sessionId, cwd });
 
 beforeEach(() => {
-  useSessions.setState({
-    sessions: [],
-    historySessions: [],
-    archivedSessions: [],
-    activeSessionId: null,
-    activeSpacePath: null,
-    spaces: [],
-    closeReasons: {},
-    messages: {},
-    configOptions: {},
-  });
-  usePermissions.setState({ prompts: {} });
+  // Every store back to its own initial state — the hand-written version named
+  // nine `useSessions` keys + `usePermissions.prompts`, and the store has
+  // sixteen data fields (see `src/test/resetStores.ts`).
+  resetStores();
   // The Open-Space-dialog flag is module-scoped and the `+` raises it: a
   // leaked `true` would auto-mount a real Radix modal in every later render
   // here (which `aria-hidden`s the rest of the document).
-  setNewSpaceDialogOpen(false);
+  resetModuleFlags();
   // Closing tabs is asserted with `not.toHaveBeenCalled()` too, so the command
   // mocks must not carry calls across cases.
   vi.clearAllMocks();
@@ -94,6 +59,57 @@ describe("SpaceTabs (the Spaces as browser-style tabs at the top of the chat)", 
     const beta = screen.getByRole("tab", { name: "beta" });
     expect(alpha.getAttribute("aria-selected")).toBe("false");
     expect(beta.getAttribute("aria-selected")).toBe("true");
+  });
+
+  // -- The accessibility tree: the strip IS a tablist (finding 18) ---------
+
+  /**
+   * The labels carry `role="tab"` + `aria-selected`, and a `tab` with no
+   * `tablist` ancestor is an ORPHAN: a screen reader announces "tab" against
+   * nothing, cannot report the group, and cannot report its orientation. These
+   * assertions read the RENDERED a11y tree through `getByRole` (the queries the
+   * rest of the file already uses) — not the source, so they cannot pass on a
+   * comment that merely claims the attribute is there.
+   */
+  it("the tab strip is a horizontal tablist and every tab lives inside it", () => {
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta"), space("/w/gamma")],
+      activeSpacePath: "/w/beta",
+    });
+    render(<SpaceTabs />);
+    const tablist = screen.getByRole("tablist");
+    expect(tablist.getAttribute("aria-orientation"), "the orientation").toBe(
+      "horizontal",
+    );
+    // THE SAME ELEMENT the tests and the drag-region pins already address — so
+    // the tablist was marked on the existing container and no DOM level was
+    // introduced (`getByTestId` would find a second element if it had been).
+    expect(tablist).toBe(screen.getByTestId("space-tabs"));
+    // One tab per Space, ALL inside the tablist (a `role="tab"` outside it is
+    // exactly the orphan this task exists to remove).
+    const tabs = screen.getAllByRole("tab");
+    expect(tabs).toHaveLength(3);
+    for (const tab of tabs) {
+      expect(tablist.contains(tab), tab.textContent ?? "(no text)").toBe(true);
+    }
+  });
+
+  it("the `New space` control is not exposed as a tab (the tablist's tabs are Spaces only)", () => {
+    // The `+` is a sibling control inside the tablist (see the accepted
+    // limitation documented on the container in `SpaceTabs.tsx`). It must stay
+    // a plain button: if it ever picked up `role="tab"` it would announce itself
+    // as a fourth Space you can select, and `getAllByRole("tab")` above would
+    // silently stop meaning "one per Space".
+    useSessions.setState({ spaces: [space("/w/alpha")], activeSpacePath: "/w/alpha" });
+    render(<SpaceTabs />);
+    const tablist = screen.getByRole("tablist");
+    const names = within(tablist)
+      .queryAllByRole("tab")
+      .map((el) => el.getAttribute("aria-label") ?? el.textContent?.trim());
+    expect(names).not.toContain("New space");
+    // And it is still reachable as what it is — a button, not a tab.
+    expect(screen.getByRole("button", { name: "New space" })).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "New space" })).toBeNull();
   });
 
   it("renders a spinner on the tab when a space has an active running session", () => {
@@ -241,10 +257,13 @@ describe("SpaceTabs (the Spaces as browser-style tabs at the top of the chat)", 
     ).toBeNull();
     // The pane toggles live in the chrome bar's `ChromeControls` (`App.test.tsx`
     // pins that), never in the tab strip: the tabs are Spaces, and a strip that
-    // also held window furniture would read as a second titlebar. ALL four
-    // names, because the old assertion here queried a label that had since been
-    // renamed and so could never fail.
+    // also held window furniture would read as a second titlebar. EVERY label
+    // the left toggle has ever carried plus the current one, because the old
+    // assertion here queried a label that had since been renamed and so could
+    // never fail.
     for (const label of [
+      "Collapse session list",
+      "Expand session list",
       "Collapse sidebar",
       "Expand sidebar",
       "Collapse side pane",
@@ -623,5 +642,189 @@ describe("SpaceTabs (the Spaces as browser-style tabs at the top of the chat)", 
     await waitFor(() => expect(consoleError).toHaveBeenCalled());
     expect(useSessions.getState().spaces).toHaveLength(2);
     consoleError.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C7 (finding 6d): the tab label and the `+` are `<Button>`s.
+//
+// These two sites are the tab strip's share of the raw-`<button>` sweep. The ✕
+// is deliberately NOT one of them and is NOT asserted here: `Button`'s base
+// carries `disabled:opacity-50`, which the assertion above ("no opacity
+// machinery at all") forbids and which `className` cannot strip — it names no
+// `opacity-*` utility for `tailwind-merge` to drop, so the variant survives the
+// merge. That blocker is recorded on the component.
+//
+// WHY A SET COMPARISON AND A PINNED ADDITION LIST (the shape C7 group 3
+// introduced, and for the same reason): the byte-exact `toBe` on a class
+// attribute is unsatisfiable once `Button` contributes utilities, but "every
+// token still present" plus "the additions are EXACTLY this literal" is the
+// stronger claim — it fails on a repaint in either direction, and it does not
+// move when `buttonVariants` is edited, because the list is a literal rather
+// than a recomputation from the component under test.
+//
+// Every entry in the addition lists is inert HERE, and the wall constants on
+// the component carry the per-token reasoning. What these tests guard is the
+// two properties the strip's own contract depends on: the label still owns the
+// pill's height and its leading inset, and the `+` is still a `rounded-md`
+// 32px square in the second chrome cluster.
+// ---------------------------------------------------------------------------
+
+/** Class attributes are SETS, not strings — `cn()` reorders on conflict. */
+const tokensOf = (className: string): string[] =>
+  [...new Set(className.split(/\s+/).filter(Boolean))].sort();
+
+/** What `<Button variant="link" size="default">` adds to the tab label. */
+const TAB_ADDITIONS = [
+  "[&_svg:not([class*='size-'])]:size-3.5",
+  "[&_svg]:pointer-events-none",
+  "[&_svg]:shrink-0",
+  "aria-invalid:border-destructive",
+  "aria-invalid:ring-2",
+  "aria-invalid:ring-destructive/20",
+  "bg-clip-padding",
+  "border-0",
+  "border-transparent",
+  "dark:aria-invalid:border-destructive/50",
+  "dark:aria-invalid:ring-destructive/40",
+  "disabled:opacity-50",
+  "disabled:pointer-events-none",
+  "group/button",
+  "h-auto",
+  "has-data-[icon=inline-end]:pr-1.5",
+  "has-data-[icon=inline-start]:pl-1.5",
+  "hover:no-underline",
+  "justify-start",
+  "outline-none",
+  "px-0",
+  "rounded-md",
+  "select-auto",
+  "shrink",
+  "transition-none",
+  "underline-offset-4",
+  "whitespace-normal",
+].sort();
+
+/** What `<Button variant="ghost" size="icon-lg">` adds to the `+`. */
+const NEW_SPACE_ADDITIONS = [
+  "[&_svg:not([class*='size-'])]:size-4",
+  "[&_svg]:pointer-events-none",
+  "[&_svg]:shrink-0",
+  "aria-expanded:bg-hover",
+  "aria-expanded:text-foreground",
+  "aria-invalid:border-destructive",
+  "aria-invalid:ring-2",
+  "aria-invalid:ring-destructive/20",
+  "bg-clip-padding",
+  "border-0",
+  "border-transparent",
+  "dark:aria-invalid:border-destructive/50",
+  "dark:aria-invalid:ring-destructive/40",
+  "disabled:opacity-50",
+  "disabled:pointer-events-none",
+  "group/button",
+  "hover:text-foreground-subtle",
+  "inline-block",
+  "items-center",
+  "justify-center",
+  "outline-none",
+  "select-auto",
+  "text-[length:inherit]",
+  "transition-none",
+  "whitespace-normal",
+].sort();
+
+describe("the tab label and the `+` route through <Button> (C7)", () => {
+  /** The label's class list BEFORE the sweep, spelled as a literal rather than
+   *  recomputed: `classNameConvention.test.ts` records why a pin must not go
+   *  through `cn()` — a merge could hide a change from the assertion meant to
+   *  catch it. (These two strings are the identity under `cn()`; they are here
+   *  as the pre-extraction record, exactly as `ChromeControls.test.tsx` keeps
+   *  its `CONTROL_BUTTON` literal.) */
+  const LABEL_WAS_ACTIVE =
+    "flex min-w-0 self-stretch items-center gap-1.5 pl-3 text-ui-base font-medium text-foreground";
+  const LABEL_WAS_INACTIVE =
+    "flex min-w-0 self-stretch items-center gap-1.5 pl-3 text-ui-base text-foreground-subtle";
+  const labelWas = (active: boolean): string[] =>
+    tokensOf(active ? LABEL_WAS_ACTIVE : LABEL_WAS_INACTIVE);
+
+  it("the tab label is a <Button variant=\"link\" size=\"default\"> that loses nothing", () => {
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta")],
+      activeSpacePath: "/w/alpha",
+    });
+    render(<SpaceTabs />);
+    for (const [name, active] of [
+      ["alpha", true],
+      ["beta", false],
+    ] as const) {
+      const tab = screen.getByRole("tab", { name });
+      expect(tab.tagName, `${name}: the tab is not a <button>`).toBe("BUTTON");
+      expect(tab.getAttribute("data-slot"), `${name}: not a Button`).toBe(
+        "button",
+      );
+      expect(tab.getAttribute("data-variant"), `${name}: variant`).toBe("link");
+      expect(tab.getAttribute("data-size"), `${name}: size`).toBe("default");
+      const painted = tokensOf(tab.className);
+      for (const token of labelWas(active)) {
+        expect(painted, `${name}'s tab lost ${token}`).toContain(token);
+      }
+      expect(
+        painted.filter((t) => !labelWas(active).includes(t)),
+        `${name}: the additions are not the pinned inert set`,
+      ).toEqual(TAB_ADDITIONS);
+      // The strip's own geometry contract, restated so a future wall edit that
+      // removes one of these cannot pass on the set comparison alone.
+      expect(painted).toContain("self-stretch");
+      expect(painted).toContain("pl-3");
+      expect(painted).toContain("items-center");
+      // Exactly ONE font-size utility: the label spelled `text-ui-base` and
+      // must not gain a second one (`ChatStream.test.tsx`'s `primaryLines()`
+      // finds rows by `.text-ui-base`, so a gained token is selectable code).
+      expect(painted.filter((t) => /^text-ui-/.test(t))).toEqual([
+        "text-ui-base",
+      ]);
+    }
+  });
+
+  it("the `+` is a <Button variant=\"ghost\" size=\"icon-lg\"> that stays a rounded-md square", () => {
+    useSessions.setState({ spaces: [space("/w/alpha")], activeSpacePath: "/w/alpha" });
+    render(<SpaceTabs />);
+    const plus = screen.getByRole("button", { name: "New space" });
+    expect(plus.getAttribute("data-slot")).toBe("button");
+    expect(plus.getAttribute("data-variant")).toBe("ghost");
+    expect(plus.getAttribute("data-size")).toBe("icon-lg");
+    const was = tokensOf(
+      "size-8 shrink-0 rounded-md text-foreground-subtle hover:bg-surface-hover",
+    );
+    const painted = tokensOf(plus.className);
+    for (const token of was) {
+      expect(painted, `the + lost ${token}`).toContain(token);
+    }
+    expect(painted.filter((t) => !was.includes(t))).toEqual(
+      NEW_SPACE_ADDITIONS,
+    );
+    // The second chrome cluster's corners survive: `icon-lg` contributes
+    // `rounded-lg`, and the site's own `rounded-md` must be the one that wins
+    // the border-radius group (tailwind-merge keeps the LAST, i.e. the site).
+    expect(painted.filter((t) => /^rounded(-|$)/.test(t))).toEqual([
+      "rounded-md",
+    ]);
+    // And the box: `icon-lg`'s `size-8` is the same 32px the site spelled, so
+    // exactly one size utility is declared.
+    expect(painted.filter((t) => /^size-/.test(t))).toEqual(["size-8"]);
+  });
+
+  it("neither conversion puts a control inside a control (the pill's two stay siblings)", () => {
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta")],
+      activeSpacePath: "/w/alpha",
+    });
+    const { container } = render(<SpaceTabs />);
+    // `Button` renders a `<button>`, so a `role="tab"` that became one is still
+    // not allowed to hold the ✕ (`SpaceTabs.test.tsx` above pins this for the
+    // raw shape; this is the same claim, re-asserted after the sweep).
+    expect(screen.getByRole("tab", { name: "alpha" }).querySelector("button")).toBeNull();
+    expect(container.querySelectorAll("button button")).toHaveLength(0);
   });
 });

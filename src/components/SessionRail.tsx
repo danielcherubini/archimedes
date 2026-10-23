@@ -1,4 +1,6 @@
 import { SessionStatusMark } from "./SessionStatusMark";
+import { Button } from "./ui/button";
+import { cn } from "./lib/utils";
 import type { SessionStatus } from "../hooks/useSessionStatus";
 
 /** One command, offered as an icon button at the head of the rail. */
@@ -155,18 +157,73 @@ export default function SessionRail({
           className="flex shrink-0 flex-col items-center gap-1"
         >
           {actions.map((a) => (
-            <button
+            <Button
               key={a.id}
               type="button"
+              variant="ghost"
+              size="icon-sm"
               // `aria-label` AND `title`: the rail has no room for a label, so
               // the hover text is the only thing naming the icon.
               aria-label={a.label}
               title={a.label}
               onClick={a.onClick}
-              className="flex size-6 shrink-0 items-center justify-center rounded-md text-foreground-subtlest hover:bg-surface-hover hover:text-foreground-subtle"
+              className={cn(
+                // C7: the two utilities that UNDO `Button`'s base, both of
+                // which would change what this 24px icon button paints. They
+                // come BEFORE the row's own classes so the row wins every group
+                // it spells; these two are groups it does not spell at all.
+                //   `border-0`        — the base's `border` is a 1px ring that
+                //                       would grow the 24px box to 26px (the
+                //                       base's `border-transparent` alone keeps
+                //                       the width, `border-0` removes it);
+                //   `transition-none` — the base's `transition-colors` adds a
+                //                       150 ms hover fade this strip never had.
+                //                       `chromeButton.ts` WANTS that fade; the
+                //                       rail does not, and it stays as drawn.
+                // Everything else the base adds is inert HERE:
+                //   `bg-clip-padding` — no background to clip;
+                //   `outline-none`    — `base.css:53-57` already kills every
+                //                       outline and focus ring with `!important`
+                //                       in every browser and in forced-colors;
+                //   `disabled:*`      — this control is never disabled;
+                //   `aria-invalid:*`  — nothing ever sets `aria-invalid` here;
+                //   `group/button`    — nothing in the tree reads that group;
+                //   `text-ui-base/relaxed` — this IS a change to the declared
+                //                       value, and it is inert only because the
+                //                       button has no text at all: its one
+                //                       child is an `<svg class="size-4">`, and
+                //                       `size-4` is `calc(var(--spacing) * 4)`
+                //                       — rem, not em — so neither the
+                //                       font-size nor the line-height can reach
+                //                       it. Before, the button inherited the UA
+                //                       16px (the app never sets a root
+                //                       `font-size`; it sizes text only through
+                //                       `--ui-font-size` and the `text-ui-*`
+                //                       utilities). After, it declares 14px.
+                //                       A box that is `size-6` with
+                //                       `items-center` and one fixed-size icon
+                //                       renders the same either way. Same for
+                //                       `whitespace-nowrap` and `select-none`:
+                //                       there is no text to wrap or select.
+                //   `whitespace-nowrap` — the content is one icon, no text;
+                //   `select-none`     — there is no text to select;
+                //   `has-data-[icon=…]:pr/pl` — no child carries `data-icon`
+                //                       (lucide icons set no such attribute);
+                //   `[&_svg]:pointer-events-none` — the click lands on the
+                //                       button either way (the handler is on
+                //                       the button and jsdom dispatches there);
+                //   `[&_svg]:shrink-0` — the glyph is a fixed `size-4`;
+                //   `[&_svg:not([class*='size-'])]:size-3` — every `a.icon` is
+                //                       built with an explicit `size-4` in
+                //                       `SpacesList`'s `railActions`, so the
+                //                       `:not([class*=size-])` guard excludes
+                //                       all of them.
+                "border-0 transition-none",
+                "flex size-6 shrink-0 items-center justify-center rounded-md text-foreground-subtlest hover:bg-surface-hover hover:text-foreground-subtle",
+              )}
             >
               {a.icon}
-            </button>
+            </Button>
           ))}
         </div>
       )}

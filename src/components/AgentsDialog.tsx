@@ -12,15 +12,10 @@ import type {
 } from "../lib/tauri";
 import { foldAscii, orphanedOverrides, withOverride } from "../lib/agentOverrides";
 import ModelPicker from "./ModelPicker";
+import { CatalogSearchDialog } from "./CatalogSearchDialog";
+import { MutedCaption } from "./MutedCaption";
 import { modelItemsFromCatalog } from "./ModelPickerDialog";
 import { Button } from "./ui/button";
-import { Input } from "./ui/input";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "./ui/dialog";
 import {
   Select,
   SelectContent,
@@ -285,110 +280,130 @@ export default function AgentsDialog({
     onPatch(next);
   };
 
+  /**
+   * The rows' two reads of the settings document, resolved HERE rather than
+   * inside `renderRow` below.
+   *
+   * Not a style choice: `renderRow` is a callback, and the `settings === null`
+   * arm of the ladder beneath it does not narrow a variable captured by one, so
+   * the document reads would not typecheck from inside the row. Resolving them
+   * up here keeps the guard exactly where it was — the loading arm renders
+   * whenever the document is absent, so the row never renders without it — and
+   * keeps the fold-lookup's FIRST-match rule verbatim, inline in the map above.
+   */
+  const views =
+    settings === null
+      ? []
+      : filtered.map((row) => ({
+          row,
+          // The stored entry, looked up through the ASCII fold: the
+          // backend resolves the map's keys case-insensitively, so a
+          // hand-edited `"Scout"` for `scout` IS this agent's override
+          // — an exact-case lookup would show the "Inherits"
+          // placeholder and misrepresent the saved state (the rule the
+          // deleted `SubagentSection` was reviewed for). FIRST match,
+          // mirroring the backend's `.find`.
+          stored: Object.entries(settings.agentOverrides).find(
+            ([key]) => foldAscii(key) === foldAscii(row.name),
+          )?.[1],
+        }));
+  // Reachable only while `settings` is `null`, and the loading arm renders in
+  // that state, so this `[]` is markup the row never sees — it exists to keep
+  // the row's `providers` prop typed, not to be a fallback anyone should rely on.
+  const providers = settings?.providers ?? [];
+
   return (
-    <Dialog open onOpenChange={(nextOpen) => !nextOpen && onClose()}>
-      <DialogContent className="max-h-[70vh] sm:max-w-3xl">
-        <DialogHeader>
-          <DialogTitle>Agents</DialogTitle>
-        </DialogHeader>
-        <div className="flex max-h-[calc(70vh-7.5rem)] min-w-0 flex-col gap-3">
-          {noSpaceOpen && (
-            // The copy, not a disabled control: the override map is global, so
-            // there IS always a correct thing to write. This line only says
-            // which definitions the list can see.
-            //
-            // Rendered ONCE above the rows rather than on every row (the plan's
-            // wording is "every row carries the copy"): the sentence is a fact
-            // about the LIST — which roots discovery was allowed to read — not
-            // about a definition, and repeating it N times would bury the rows
-            // under N identical lines for no added truth. Flagged in the task
-            // report rather than silently reworded.
-            <p className="text-ui-sm text-foreground-subtlest">
-              No Space open — showing your global Agent definitions
-            </p>
-          )}
-          <Input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search agents…"
-          />
-          {settings === null ? (
-            // The mount guards on `settings` too; this arm only exists so the
+    <CatalogSearchDialog<(typeof views)[number]>
+      open
+      onOpenChange={(nextOpen) => !nextOpen && onClose()}
+      title="Agents"
+      searchPlaceholder="Search agents…"
+      query={query}
+      onQueryChange={setQuery}
+      rows={views}
+      keyOf={(view) => view.row.path}
+      // The scroller's gap is `gap-2` here and `gap-0.5` in the other two: an
+      // Agent row is a bordered card with three field lines, not a two-line
+      // label, so it needs the wider inter-row air.
+      rowGapClassName="gap-2"
+      emptyMessage={
+        settings === null
+          ? // The mount guards on `settings` too; this arm only exists so the
             // dialog can never read `settings.agentOverrides` off `null`.
-            <p className="p-3 text-ui-sm text-foreground-subtlest">Loading…</p>
-          ) : rows.length === 0 ? (
-            <p className="p-3 text-ui-sm text-foreground-subtlest">
-              No Agent definitions found.
-            </p>
-          ) : filtered.length === 0 ? (
-            <p className="p-3 text-ui-sm text-foreground-subtlest">
-              No agents match "{query}".
-            </p>
-          ) : (
-            <div className="flex min-w-0 flex-col gap-2 overflow-y-auto pr-2">
-              {filtered.map((row) => (
-                <AgentRow
-                  key={row.path}
-                  row={row}
-                  needle={needle}
-                  stored={
-                    // The stored entry, looked up through the ASCII fold: the
-                    // backend resolves the map's keys case-insensitively, so a
-                    // hand-edited `"Scout"` for `scout` IS this agent's override
-                    // — an exact-case lookup would show the "Inherits"
-                    // placeholder and misrepresent the saved state (the rule the
-                    // deleted `SubagentSection` was reviewed for). FIRST match,
-                    // mirroring the backend's `.find`.
-                    Object.entries(settings.agentOverrides).find(
-                      ([key]) => foldAscii(key) === foldAscii(row.name),
-                    )?.[1]
-                  }
-                  models={models}
-                  providers={settings.providers}
-                  thinkingLevelUnion={thinkingLevelUnion}
-                  tools={tools}
-                  edited={edited}
-                  onPatch={patch}
-                />
-              ))}
+            "Loading…"
+          : rows.length === 0
+            ? "No Agent definitions found."
+            : filtered.length === 0
+              ? `No agents match "${query}".`
+              : null
+      }
+      beforeSearch={
+        noSpaceOpen ? (
+          // The copy, not a disabled control: the override map is global, so
+          // there IS always a correct thing to write. This line only says
+          // which definitions the list can see.
+          //
+          // Rendered ONCE above the rows rather than on every row (the plan's
+          // wording is "every row carries the copy"): the sentence is a fact
+          // about the LIST — which roots discovery was allowed to read — not
+          // about a definition, and repeating it N times would bury the rows
+          // under N identical lines for no added truth. Flagged in the task
+          // report rather than silently reworded.
+          //
+          // `beforeSearch`, NOT `children`: this line renders ABOVE the search
+          // field. The shell's trailing slot would have moved it below the
+          // input, and no test in the repo reads that order.
+          <p className="text-ui-sm text-foreground-subtlest">
+            No Space open — showing your global Agent definitions
+          </p>
+        ) : null
+      }
+      renderRow={(view) => (
+        <AgentRow
+          row={view.row}
+          needle={needle}
+          stored={view.stored}
+          models={models}
+          providers={providers}
+          thinkingLevelUnion={thinkingLevelUnion}
+          tools={tools}
+          edited={edited}
+          onPatch={patch}
+        />
+      )}
+    >
+      {/* Orphaned overrides — muted rows with a remove button, the shape the
+          deleted Settings section used (ADR 0023's only cleanup path). The
+          `noSpaceOpen` case renders NOTHING here: see `orphans` above — with no
+          Space the list is user-level only, so an override for a project-only
+          definition would be labelled stale and armed with this ADR's only
+          cleanup button, and the modal has no signal to tell that apart from a
+          genuinely dead key. */}
+      {orphans.length > 0 && (
+        <div className="flex min-w-0 flex-col gap-0.5 border-t border-border pt-2">
+          {orphans.map((name) => (
+            <div
+              key={name}
+              className="flex min-w-0 items-center gap-2 text-ui-sm"
+            >
+              <span className="min-w-0 flex-1 truncate text-foreground-subtle">
+                {name}
+              </span>
+              <MutedCaption>No longer discovered (stale override)</MutedCaption>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                aria-label={`Remove ${name} override`}
+                onClick={() => removeOrphan(name)}
+              >
+                <TrashIcon className="size-3.5" />
+              </Button>
             </div>
-          )}
-          {/* Orphaned overrides — muted rows with a remove button, the shape the
-              deleted Settings section used (ADR 0023's only cleanup path). The
-              `noSpaceOpen` case renders NOTHING here: see `orphans` above — with no
-              Space the list is user-level only, so an override for a project-only
-              definition would be labelled stale and armed with this ADR's only
-              cleanup button, and the modal has no signal to tell that apart from a
-              genuinely dead key. */}
-          {orphans.length > 0 && (
-            <div className="flex min-w-0 flex-col gap-0.5 border-t border-border pt-2">
-              {orphans.map((name) => (
-                <div
-                  key={name}
-                  className="flex min-w-0 items-center gap-2 text-ui-sm"
-                >
-                  <span className="min-w-0 flex-1 truncate text-foreground-subtle">
-                    {name}
-                  </span>
-                  <span className="text-ui-xs text-foreground-subtlest">
-                    No longer discovered (stale override)
-                  </span>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label={`Remove ${name} override`}
-                    onClick={() => removeOrphan(name)}
-                  >
-                    <TrashIcon className="size-3.5" />
-                  </Button>
-                </div>
-              ))}
-            </div>
-          )}
+          ))}
         </div>
-      </DialogContent>
-    </Dialog>
+      )}
+    </CatalogSearchDialog>
   );
 }
 
@@ -536,14 +551,11 @@ function AgentRow({
       <div className="flex min-w-0 items-center gap-2">
         <span className="min-w-0 truncate text-ui-base">{row.name}</span>
         {row.scope === "user" && (
-          <span className="text-ui-xs text-foreground-subtlest">global</span>
+          <MutedCaption>global</MutedCaption>
         )}
-        <span
-          className="min-w-0 flex-1 truncate text-ui-xs text-foreground-subtlest"
-          title={row.path}
-        >
+        <MutedCaption className="min-w-0 flex-1 truncate" title={row.path}>
           {row.path}
-        </span>
+        </MutedCaption>
       </div>
       {row.description !== "" && (
         <span
@@ -561,9 +573,9 @@ function AgentRow({
           fix is to set the field again from the picker), and a button would promise
           a repair this component cannot perform. */}
       {pinDiff.length > 0 && (
-        <span className="min-w-0 truncate text-ui-xs text-foreground-subtlest">
+        <MutedCaption className="min-w-0 truncate">
           stored pin the last fetch saw differs — {pinDiff.join(", ")}
-        </span>
+        </MutedCaption>
       )}
 
       {/* MODEL. The three spans are SEPARATE nodes on purpose: the source label
@@ -577,13 +589,13 @@ function AgentRow({
         <span className="w-16 shrink-0 text-ui-sm text-foreground-subtlest">
           Model
         </span>
-        <span className="min-w-0 truncate text-ui-xs text-foreground-subtlest">
+        <MutedCaption className="min-w-0 truncate">
           runs {row.effective.model ?? "—"}
-        </span>
+        </MutedCaption>
         <LayerTag>{sourceLabel(row.source.model, "model")}</LayerTag>
-        <span className="min-w-0 truncate text-ui-xs text-foreground-subtlest">
+        <MutedCaption className="min-w-0 truncate">
           in the file {row.file.model ?? "—"}
-        </span>
+        </MutedCaption>
         <ModelPicker
           label={`Model for ${row.name}`}
           value={stored?.model ?? ""}
@@ -615,13 +627,13 @@ function AgentRow({
         <span className="w-16 shrink-0 text-ui-sm text-foreground-subtlest">
           Thinking
         </span>
-        <span className="min-w-0 truncate text-ui-xs text-foreground-subtlest">
+        <MutedCaption className="min-w-0 truncate">
           runs {row.effective.thinking ?? "—"}
-        </span>
+        </MutedCaption>
         <LayerTag>{sourceLabel(row.source.thinking, "thinking")}</LayerTag>
-        <span className="min-w-0 truncate text-ui-xs text-foreground-subtlest">
+        <MutedCaption className="min-w-0 truncate">
           in the file {row.file.thinking ?? "—"}
-        </span>
+        </MutedCaption>
         <Select
           value={stored?.thinking ?? ""}
           onValueChange={(value) =>
@@ -664,7 +676,7 @@ function AgentRow({
             Tools
           </span>
           {stored?.tools === undefined ? (
-            <span className="min-w-0 truncate text-ui-xs text-foreground-subtlest">
+            <MutedCaption className="min-w-0 truncate">
               {/* Two spans, not one interpolated sentence: ADR 0067's labelled
                   empty state has to be findable as ITS OWN text (the
                   `Inherits parent tools` string is what the ADR names, and the
@@ -673,13 +685,13 @@ function AgentRow({
               <span>file: {(row.file.tools ?? []).join(", ") || "—"}</span>
               <span> · </span>
               <span>{toolsInheritLabel(row.source.tools)}</span>
-            </span>
+            </MutedCaption>
           ) : (
-            <span className="min-w-0 truncate text-ui-xs text-foreground-subtlest">
+            <MutedCaption className="min-w-0 truncate">
               file: {(row.file.tools ?? []).join(", ") || "—"} · runs:{" "}
               {(row.effective.tools ?? []).join(", ") || "—"} (
               {sourceLabel(row.source.tools, "tools")})
-            </span>
+            </MutedCaption>
           )}
         </div>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pl-16">
@@ -741,9 +753,9 @@ function ShadowReport({
   if (losers.length === 0) return null;
   return (
     <div className="flex min-w-0 flex-col gap-0.5 pt-1">
-      <p className="text-ui-xs text-foreground-subtlest">
+      <MutedCaption as="p">
         {shadowHeading(row.scope, losers.length)}
-      </p>
+      </MutedCaption>
       {losers.map((loser) => (
         <div
           key={loser.path}

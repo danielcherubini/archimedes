@@ -797,8 +797,17 @@ describe("the row token family (--color-row-icon / --color-row-verb, ADR 0062)",
     // by nothing is the exact mistake this task deletes the old family for. So
     // each of the three components is required to carry BOTH utilities on the
     // glyph and the verb, and to have DROPPED the old muted utility there.
+    //
+    // READ FROM THE COMMENT-STRIPPED SOURCE, the same treatment the utility count
+    // below gets and for the same documented reason: these components explain
+    // their own class choices in block comments that NAME `text-row-verb` and
+    // `animated-gradient-text`, so a raw read is satisfied by PROSE after the
+    // class has been deleted from the markup. Verified by mutation: deleting the
+    // verb from the verb expression left this gate green on the raw read, which is
+    // the landmine shape `src/lib/skills.test.ts:16-24` warns about — a gate that
+    // passes for a reason unrelated to what ships.
     for (const file of ROW_CONSUMER_FILES) {
-      const source = readTextFile(file);
+      const source = stripJsComments(readTextFile(file));
       expect(source, `${file} must colour its glyph with text-row-icon`).toContain(
         "text-row-icon",
       );
@@ -809,43 +818,89 @@ describe("the row token family (--color-row-icon / --color-row-verb, ADR 0062)",
     // And the pending call keeps the shimmer: `--color-row-verb` is the SETTLED
     // reading (ADR 0062's consequence), so the conditional must survive a
     // "simplify the verb to one colour" refactor.
-    const header = readTextFile("src/components/ToolCallCardHeader.tsx");
+    //
+    // ASSERTED STRUCTURALLY, NOT POSITIONALLY. This used to be
+    // `/status === "pending"[\s\S]{0,120}text-row-verb/` — a 120-byte window that
+    // pinned the pairing by BYTE PROXIMITY. That is a claim about where two
+    // strings sit in a file, so it broke on a JSX re-ordering, a wrapped line, or
+    // an extracted class helper that put the condition and the class on opposite
+    // sides of a component, while the shipped behaviour was unchanged. The three
+    // presence assertions below carry the same guarantee in the shape the
+    // invariant actually has: the file reads the pending state, it uses the
+    // settled verb token, and it keeps the shimmer class the pending branch
+    // paints.
+    //
+    // What the window could see and these cannot is that the three are wired to
+    // EACH OTHER by adjacency — so that half is pinned where it is OBSERVABLE, by
+    // the render tests that already own it: `ToolCallCard.test.tsx`'s "shows the
+    // running verb with the shimmer while pending" and "colours the SETTLED verb
+    // with the row token, and the pending one not at all" both grade the rendered
+    // verb's class list per status, and both were confirmed by mutation to fail
+    // when the shimmer or the token is removed from the expression. A source grep
+    // was never the stronger check for a per-status class (same reasoning that
+    // retired this file's sibling pin in `src/lib/skills.test.ts:16-24`).
+    const header = stripJsComments(readTextFile("src/components/ToolCallCardHeader.tsx"));
     expect(header).toContain("animated-gradient-text");
-    expect(header).toMatch(/status === "pending"[\s\S]{0,120}text-row-verb/);
+    expect(header).toContain('status === "pending"');
+    expect(header).toContain("text-row-verb");
   });
 
   it("leaves the row's OTHER muted spans on the foreground utilities", () => {
     // The repaint touches a glyph and a verb and nothing else. Each row also
     // carries separators, durations, counts and ranges that are de-emphasis
     // TEXT, not row decoration — repainting those would make a timestamp the
-    // same cyan as the verb. Pinned by counting: the number of
-    // `text-foreground-subtle*` utilities still present in each of the three
-    // files, so deleting one (rather than retargeting it) fails by file.
-    const expected: Record<string, number> = {
-      // 7 before, less the icon and the verb: the range, command and summary
-      // spans, the copy-button icon and the hover chevron.
-      "src/components/ToolCallCardHeader.tsx": 5,
-      // 6 before, less the icon and the label: filesCountLabel, one separator,
-      // the pending chip and the hover chevron.
-      "src/components/ChangesGroupCard.tsx": 4,
-      // 12 before, less the brain icon and the two `Thought` spans: the
-      // separators, the two duration spans, the summary separator, the streaming
-      // summary, the chevron and the two body-copy spans.
-      "src/components/Reasoning.tsx": 9,
-    };
-    for (const [file, count] of Object.entries(expected)) {
-      // COMMENTS STRIPPED FIRST, for the same reason the CSS tests do it: a
-      // doc-comment that NAMES a utility is prose, not a consumer, and counting
-      // it would make an explanatory comment fail a gate about the rendered
-      // classes. (This file's own comment about the `Thought` glyph is exactly
-      // that case, and it did fail this assertion until the strip went in.)
-      const source = stripJsComments(readTextFile(file));
-      const found = source.match(/text-foreground-subtle(?:st)?\b/g) ?? [];
-      expect(
-        found.length,
-        `${file} should still carry ${count} de-emphasis text utilities (found ${found.length}) — a row repaint takes the glyph and the verb only`,
-      ).toBe(count);
-    }
+    // same cyan as the verb. Pinned by COUNTING the `text-foreground-subtle*`
+    // utilities that survive, so deleting one (rather than retargeting it) fails.
+    //
+    // COUNTED AS A TOTAL ACROSS THE THREE FILES, not per file — and that is a
+    // deliberate change of scope, not a loosening. The invariant this gate owns
+    // is "de-emphasis TEXT utilities were not deleted by the row repaint". That
+    // is a TOTAL. Where the total is DISTRIBUTED across files is a property of
+    // the file layout, and the file layout is exactly what this program's Phase
+    // C is going to change: the byte-identical hover chevron in
+    // `ToolCallCardHeader.tsx` and `ChangesGroupCard.tsx` is scheduled to become
+    // one shared child component, and moving a muted span into that child
+    // changes two per-file counts while deleting nothing. A per-file count here
+    // would therefore redden an extraction for the crime of existing — the same
+    // landmine `src/lib/skills.test.ts:16-24` records retiring a source-reading
+    // pin over, and the reason the count moved to the union.
+    //
+    // What is kept, and why the gate still has force: the number is still
+    // EXACT (not `>=`), so deleting one utility anywhere in the three files
+    // fails it by the same margin it used to, and the failure message still
+    // names the repaint. What is lost is only the ability to say WHICH file
+    // lost it — a worse error message, deliberately traded for the ability to
+    // refactor. (A retarget, i.e. swapping a muted span onto `text-row-icon`,
+    // fails here too: the total drops.)
+    //
+    // Vacuity guard: a `reduce` over an empty file list is a `0` that would
+    // fail the total for the wrong reason — the message would read "a row
+    // repaint took the glyph and the verb" when in fact the file list was
+    // emptied. Pin the input first.
+    expect(ROW_CONSUMER_FILES, "the row consumer list was emptied").toHaveLength(3);
+    const total = ROW_CONSUMER_FILES.reduce(
+      (n, file) =>
+        // COMMENTS STRIPPED FIRST, for the same reason the CSS tests do it: a
+        // doc-comment that NAMES a utility is prose, not a consumer, and counting
+        // it would make an explanatory comment fail a gate about the rendered
+        // classes. (This file's own comment about the `Thought` glyph is exactly
+        // that case, and it did fail this assertion until the strip went in.)
+        n +
+        ((stripJsComments(readTextFile(file)).match(
+          /text-foreground-subtle(?:st)?\b/g,
+        )) ?? []).length,
+      0,
+    );
+    // 5 (`ToolCallCardHeader`: the range, command and summary spans, the
+    // copy-button icon, the hover chevron) + 4 (`ChangesGroupCard`:
+    // filesCountLabel, one separator, the pending chip, the hover chevron) + 9
+    // (`Reasoning`: the separators, the two duration spans, the summary
+    // separator, the streaming summary, the chevron, the two body-copy spans).
+    // Re-measured from the reader on 2026-10-22.
+    expect(
+      total,
+      `the three row files should still carry 18 de-emphasis text utilities between them (found ${total}) — a row repaint takes the glyph and the verb only`,
+    ).toBe(18);
   });
 
   it("declares no dead row-kind token, in any layer", () => {

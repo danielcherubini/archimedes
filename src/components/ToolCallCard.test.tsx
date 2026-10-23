@@ -442,6 +442,45 @@ describe("ToolCallCard (rendering)", () => {
 // Every header-row filter below is a prefix regex with an OPTIONAL space: the
 // toggle button's accessible name is its inline spans concatenated verbatim
 // ("Ranls", "Readc.ts"), so a natural-phrase name would not match.
+/**
+ * C7: the exact set `<Button variant="ghost" size="default">` adds to the
+ * failure tooltip's copy button, PINNED as a literal (see the test at the bottom
+ * of this block for why it is not recomputed from `buttonVariants`).
+ */
+const COPY_BUTTON_ADDITIONS = [
+  "[&_svg:not([class*='size-'])]:size-3.5",
+  "[&_svg]:pointer-events-none",
+  "[&_svg]:shrink-0",
+  "aria-expanded:bg-hover",
+  "aria-expanded:text-foreground",
+  "aria-invalid:border-destructive",
+  "aria-invalid:ring-2",
+  "aria-invalid:ring-destructive/20",
+  "bg-clip-padding",
+  "border-0",
+  "border-transparent",
+  "dark:aria-invalid:border-destructive/50",
+  "dark:aria-invalid:ring-destructive/40",
+  "disabled:opacity-50",
+  "disabled:pointer-events-none",
+  "gap-1",
+  "group/button",
+  "h-auto",
+  "has-data-[icon=inline-end]:pr-1.5",
+  "has-data-[icon=inline-start]:pl-1.5",
+  "hover:bg-transparent",
+  "inline-flex",
+  "items-center",
+  "justify-center",
+  "outline-none",
+  "px-0",
+  "rounded-md",
+  "select-auto",
+  "text-[length:inherit]",
+  "transition-none",
+  "whitespace-normal",
+].sort();
+
 describe("ToolCallCard (External open)", () => {
   it("linkifies a URL in the expanded output and External-opens it with the Space cwd", () => {
     render(
@@ -613,5 +652,74 @@ describe("ToolCallCard (External open)", () => {
     // main text, not in the edit view.
     expect(screen.getByText("+go to https://x.test/a")).toBeTruthy();
     expect(screen.queryAllByRole("link")).toHaveLength(0);
+  });
+
+  // C7 (finding 6d): the failure tooltip's copy button is a `<Button>`.
+  //
+  // The nesting pin above (`container.querySelectorAll("button button")`) runs
+  // on the CARD's container, and this button lives in a Radix `Tooltip` PORTAL
+  // mounted on `document.body` — verified, not assumed: with the tooltip open
+  // the copy button's nearest ancestor `<button>` is `null` and the document
+  // total for `button button` is 0. So routing it through `Button` (which
+  // renders a `<button>`) cannot re-nest it inside the header row. The
+  // assertion below repeats that check so the fact is pinned rather than
+  // commented.
+  //
+  // The set comparison is the same shape C7 group 3 introduced: every
+  // pre-extraction token survives, and the additions are a PINNED literal (not
+  // recomputed from `buttonVariants`, so a repaint of the primitive moves one
+  // side and fails).
+  it("the tooltip's copy button is a <Button variant=\"ghost\" size=\"default\">, portal-rendered and never nested", () => {    const { container } = render(
+      <ToolCallCard
+        title="bash"
+        status="failed"
+        rawInput={{ command: "ls" }}
+        rawOutput={{
+          content: [{ type: "text", text: "" }],
+          details: { error: "command not found" },
+        }}
+      />,
+    );
+    fireEvent.focus(screen.getByText("Failed"));
+    const copy = screen.getByRole("button", { name: "Copy error" });
+
+    // It is a `Button`, with both axes named (a bare `<Button>` would report
+    // `default`/`default` and paint `bg-primary text-primary-foreground`).
+    expect(copy.getAttribute("data-slot")).toBe("button");
+    expect(copy.getAttribute("data-variant")).toBe("ghost");
+    expect(copy.getAttribute("data-size")).toBe("default");
+
+    // The portal: outside the card's container, with no `<button>` ancestor.
+    expect(container.contains(copy), "the copy button is no longer portalled").toBe(
+      false,
+    );
+    expect(copy.parentElement?.closest("button")).toBeNull();
+    expect(document.querySelectorAll("button button")).toHaveLength(0);
+
+    const WAS = [
+      "shrink-0",
+      "text-foreground-subtle",
+      "hover:text-foreground",
+    ].sort();
+    const painted = [
+      ...new Set(copy.className.split(/\s+/).filter(Boolean)),
+    ].sort();
+    for (const token of WAS) {
+      expect(painted, `the copy button lost ${token}`).toContain(token);
+    }
+    expect(
+      painted.filter((t) => !WAS.includes(t)),
+      "the copy button's additions are not the pinned inert set",
+    ).toEqual(COPY_BUTTON_ADDITIONS);
+
+    // The icon-resize hazard, checked: the glyph sizes itself by CLASS
+    // (`size-3`), so the base's `[&_svg:not([class*='size-'])]:size-3.5` cannot
+    // select it (the `:not([class*='size-'])` guard) and it stays 12px.
+    const svg = copy.querySelector("svg")!;
+    expect(svg.getAttribute("class")).toContain("size-3");
+    // Lucide's own `width`/`height` ATTRIBUTES are the viewBox size (24) and are
+    // unchanged by the sweep — the class is what sizes the glyph, which is why
+    // the guard, not the attribute, is the thing this site depends on.
+    expect(svg.getAttribute("width")).toBe("24");
   });
 });

@@ -228,7 +228,7 @@ impl Db {
         // One-time migration for pre-existing databases: add `todos_json`
         // to `sessions` (fresh databases already have it from SCHEMA) and
         // backfill each non-subagent session's newest `manage_todo_list` write
-        // (ADR 0066). The ALTER and the backfill run in ONE transaction, so a
+        // (ADR 0073). The ALTER and the backfill run in ONE transaction, so a
         // crash rolls both back and retries on next open.
         let has_todos_json: i64 = conn.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'todos_json'",
@@ -375,7 +375,7 @@ impl Db {
         Ok(())
     }
 
-    /// Update a session's persisted todos JSON (ADR 0066).
+    /// Update a session's persisted todos JSON (ADR 0073).
     ///
     /// A missing session row is a no-op; returns `Ok(())`.
     pub fn record_session_todos(&self, id: &str, todos_json: Option<&str>) -> Result<(), DbError> {
@@ -569,7 +569,7 @@ impl Db {
 
     /// A page of a session's messages, newest-first by id up to `limit`
     /// rows, returned in ascending transcript order, with `has_more`
-    /// indicating whether older messages exist (ADR 0066).
+    /// indicating whether older messages exist (ADR 0073).
     ///
     /// When `limit` is `None`, all messages (prior to `before_id`, if specified)
     /// are returned in insertion order and `has_more` is `false`.
@@ -848,7 +848,7 @@ fn space_key(path: impl AsRef<std::path::Path>) -> Option<String> {
 }
 
 /// One-time backfill of `sessions.todos_json` from the newest non-read
-/// `manage_todo_list` write in `messages` (ADR 0066).
+/// `manage_todo_list` write in `messages` (ADR 0073).
 fn backfill_session_todos(conn: &Connection) -> Result<(), DbError> {
     let mut session_stmt = conn.prepare("SELECT id FROM sessions WHERE is_subagent = 0")?;
     let session_ids = session_stmt

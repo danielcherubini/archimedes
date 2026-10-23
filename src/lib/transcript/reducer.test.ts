@@ -8,7 +8,7 @@ import {
 } from "./reducer";
 import { isStaleCompactionStart } from "./identity";
 import type { AcpSessionUpdate, MessageRow } from "../tauri";
-import type { Message } from "../../store/sessions";
+import type { Message } from "../sessionTypes";
 
 describe("src/lib/transcript", () => {
   describe("mapStatus", () => {

@@ -75,7 +75,7 @@ describe("MessageList", () => {
     expect(screen.queryByText("Send a prompt to start")).toBeNull();
   });
 
-  it("renders Start of conversation header when !hasMore", () => {
+  it("renders Start of session header when !hasMore", () => {
     render(
       <MessageList
         units={[single(textMsg("m1"))]}
@@ -97,7 +97,7 @@ describe("MessageList", () => {
       />,
     );
 
-    expect(screen.getByText("Start of conversation")).toBeTruthy();
+    expect(screen.getByText("Start of session")).toBeTruthy();
     expect(screen.getByText("hello")).toBeTruthy();
   });
 
@@ -123,7 +123,7 @@ describe("MessageList", () => {
       />,
     );
 
-    expect(screen.queryByText("Start of conversation")).toBeNull();
+    expect(screen.queryByText("Start of session")).toBeNull();
     expect(screen.getByRole("status")).toBeTruthy();
   });
 
@@ -149,7 +149,7 @@ describe("MessageList", () => {
       />,
     );
 
-    expect(screen.queryByText("Start of conversation")).toBeNull();
+    expect(screen.queryByText("Start of session")).toBeNull();
     expect(screen.queryByRole("status")).toBeNull();
     const headerWrapper = container.querySelector(".pt-4");
     expect(headerWrapper).toBeTruthy();

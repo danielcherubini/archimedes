@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { Message } from "../../store/sessions";
+import type { Message } from "../sessionTypes";
 import type { RenderUnit, ToolCallMessage } from "../toolGroups";
 import {
   messageKey,

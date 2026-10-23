@@ -308,9 +308,10 @@ describe("App (the gear icon + settings view swap)", () => {
     // The controls live at the bar's right end, in one cluster, immediately
     // left of the window controls: `Settings` + the two pane toggles, and
     // exactly one of each. Query the toggles by their STABLE hook, not their
-    // labels — the labels FLIP with the state (`Collapse sidebar` ↔ `Expand
-    // sidebar`), so a name-based query would silently stop matching on one
-    // side of a collapse, the exact vacuity this file has been bitten by twice.
+    // labels — the labels FLIP with the state (`Collapse session list` ↔
+    // `Expand session list`), so a name-based query would silently stop
+    // matching on one side of a collapse, the exact vacuity this file has
+    // been bitten by twice.
     const cluster = screen.getByTestId("chrome-controls");
     expect(chrome.contains(cluster)).toBe(true);
     expect(
@@ -342,7 +343,7 @@ describe("App (the gear icon + settings view swap)", () => {
       within(cluster).getAllByRole("button", { name: "Settings" }),
     ).toHaveLength(1);
     // The labels flip to name the direction they now perform.
-    expect(screen.getByTestId("left-pane-toggle").getAttribute("aria-label")).toBe("Expand sidebar");
+    expect(screen.getByTestId("left-pane-toggle").getAttribute("aria-label")).toBe("Expand session list");
     expect(screen.getByTestId("right-pane-toggle").getAttribute("aria-label")).toBe("Expand side pane");
   });
 
@@ -379,18 +380,18 @@ describe("App (the gear icon + settings view swap)", () => {
   it("one toggle does both jobs from the same place, and its aria-label flips with the state", () => {
     render(<App />);
     const left = screen.getByTestId("left-pane-toggle");
-    expect(left.getAttribute("aria-label")).toBe("Collapse sidebar");
+    expect(left.getAttribute("aria-label")).toBe("Collapse session list");
     expect(left.getAttribute("aria-pressed")).toBe("true"); // pressed = open
     fireEvent.click(left);
     expect(getLeftPaneCollapsed()).toBe(true);
     // The SAME element — no second control to hand off to, and no keyboard
     // shortcut exists, so one control must do both jobs from the bottom.
     expect(screen.getByTestId("left-pane-toggle")).toBe(left);
-    expect(left.getAttribute("aria-label")).toBe("Expand sidebar");
+    expect(left.getAttribute("aria-label")).toBe("Expand session list");
     expect(left.getAttribute("aria-pressed")).toBe("false");
     fireEvent.click(left);
     expect(getLeftPaneCollapsed()).toBe(false);
-    expect(left.getAttribute("aria-label")).toBe("Collapse sidebar");
+    expect(left.getAttribute("aria-label")).toBe("Collapse session list");
   });
 
   it("the right pane's toggle does both jobs from the same place too", () => {

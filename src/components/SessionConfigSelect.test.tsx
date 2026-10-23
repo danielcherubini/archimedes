@@ -1,50 +1,34 @@
-import { describe, expect, it, vi, beforeAll, afterEach } from "vitest";
+import { describe, expect, it, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import SessionConfigSelect from "./SessionConfigSelect";
-import { SessionConfigOption } from "../lib/tauri";
+import { makeConfigOption } from "../test/fixtures";
 
-beforeAll(() => {
-  Element.prototype.scrollIntoView = vi.fn();
-  Element.prototype.hasPointerCapture = vi.fn(() => false);
-  Element.prototype.setPointerCapture = vi.fn();
-  Element.prototype.releasePointerCapture = vi.fn();
-  vi.stubGlobal("matchMedia", (q: string) => ({
-    matches: false,
-    media: q,
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
-    addListener: vi.fn(),
-    removeListener: vi.fn(),
-    dispatchEvent: vi.fn(),
-  }));
-});
+// The `matchMedia` + scroll + pointer-capture stubs this file used to install
+// in a `beforeAll` come from `src/test/setup.tsx` now (Task B4a's shared
+// environment) — same values, one owner.
 
 afterEach(() => {
   vi.useRealTimers();
 });
 
-const mockOption: SessionConfigOption = {
-  id: "model",
-  name: "Model",
-  type: "select",
+const mockOption = makeConfigOption({
   currentValue: "acme/alpha",
   options: [
     { value: "acme/alpha", name: "acme/Alpha" },
     { value: "acme/beta", name: "acme/Beta" },
   ],
-};
+});
 
-const thinkingOption: SessionConfigOption = {
+const thinkingOption = makeConfigOption({
   id: "thought_level",
   name: "Thinking",
   category: "thought_level",
-  type: "select",
   currentValue: "medium",
   options: [
     { value: "low", name: "Low" },
     { value: "medium", name: "Medium" },
   ],
-};
+});
 
 describe("SessionConfigSelect", () => {
   it("renders the current model's BARE id + the provider as a muted suffix (never the redundant `provider/id` prefix)", () => {
@@ -306,6 +290,46 @@ describe("SessionConfigSelect", () => {
     await waitForElementToBeRemoved(() => screen.queryByRole("alert"), { timeout: 8000 });
   }, 10000);
 
+  it("the 5s auto-clear removes the alert while leaving the control usable", async () => {
+    // Task C1 characterization: the auto-clear at `:141-144` clears ONLY the
+    // error. It must not be allowed to touch the busy/pending half of the
+    // machine — a flag that could go false from a timer would re-enable a
+    // trigger mid-flight. Pinned here so `useAsyncAction`'s `clearError()` (the
+    // message-only clear) is provably the right seam. Real timers, like the
+    // auto-clear test above.
+    const onSet = vi.fn().mockRejectedValue(new Error("boom"));
+    render(<SessionConfigSelect option={mockOption} onSet={onSet} />);
+    const trigger = screen.getByRole("button", { name: "Model" });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByText("beta"));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("boom"));
+    expect(trigger.hasAttribute("disabled")).toBe(false);
+    const { waitForElementToBeRemoved } = await import("@testing-library/react");
+    await waitForElementToBeRemoved(() => screen.queryByRole("alert"), {
+      timeout: 8000,
+    });
+    // Still enabled — the timer cleared the message and nothing else.
+    expect(trigger.hasAttribute("disabled")).toBe(false);
+  }, 10000);
+
+  it("a second selection after a FAILED one is sent (the pending guard is not sticky)", async () => {
+    // The other half of the guard question: `if (pending) return` at `:217`
+    // blocks a change while one is in flight, but nothing latches — after a
+    // rejection the trigger is live again and the next pick goes through.
+    const onSet = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValue(undefined);
+    render(<SessionConfigSelect option={mockOption} onSet={onSet} />);
+    fireEvent.click(screen.getByRole("button", { name: "Model" }));
+    fireEvent.click(screen.getByText("beta"));
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: "Model" }));
+    fireEvent.click(screen.getByText("beta"));
+    await waitFor(() => expect(onSet).toHaveBeenCalledTimes(2));
+    expect(onSet).toHaveBeenLastCalledWith("model", "acme/beta");
+  });
+
   it("a null model option renders a disabled stub (the control's identity, no data — the session's config is dropped on close)", () => {
     render(
       <SessionConfigSelect kind="model" option={null} onSet={vi.fn()} />,
@@ -320,10 +344,7 @@ describe("SessionConfigSelect", () => {
   });
 
   it("the model picker dialog flattens grouped options (the value prefix is the provider cue)", async () => {
-    const groupedOption: SessionConfigOption = {
-      id: "model",
-      name: "Model",
-      type: "select",
+    const groupedOption = makeConfigOption({
       currentValue: "anthropic/claude",
       options: [
         {
@@ -335,7 +356,7 @@ describe("SessionConfigSelect", () => {
         },
         { value: "anthropic/claude", name: "Claude" },
       ],
-    };
+    });
     const onSet = vi.fn().mockResolvedValue(undefined);
     render(<SessionConfigSelect option={groupedOption} onSet={onSet} />);
 

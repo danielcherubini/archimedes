@@ -1,4 +1,4 @@
-import type { Message } from "../store/sessions";
+import type { Message } from "./sessionTypes";
 
 export type ToolCallMessage = Extract<Message, { kind: "tool-call" }>;
 

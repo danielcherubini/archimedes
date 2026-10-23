@@ -1,6 +1,65 @@
 import { useCallback } from "react";
 import { Brain } from "lucide-react";
 import SessionConfigSelect from "./SessionConfigSelect";
+import { cn } from "./lib/utils";
+import { Button } from "./ui/button";
+
+/**
+ * C7: the context PERCENTAGE (the hover trigger for the token counts) is a
+ * `<Button variant="link" size="default">`, both named explicitly because
+ * `ui/button.tsx:40` sets `defaultVariants {variant:"default"}`, which would
+ * otherwise paint the number on a `bg-primary` plate. `link` is the variant that
+ * matches what this trigger already was — bare text that changes colour — and it
+ * is the only variant with no hover background; its `hover:underline` is
+ * cancelled by `hover:no-underline`, and its `text-primary` loses the text-colour
+ * group to the ramp's `text-*` label. Its `underline-offset-4` DOES survive (the
+ * trigger spells no offset of its own) and is inert: with `hover:no-underline`
+ * there is never an underline for an offset to move. Measured with the real
+ * `cn()`, the rendered utility SET is exactly what this trigger spelled —
+ * including `border-0`, `bg-transparent`, `p-0`, `appearance-none` and
+ * `text-ui-sm`, all of which the trigger spells itself and which therefore beat
+ * or simply coexist with the base. What `PERCENT_TRIGGER_WALL` undoes:
+ *  - `inline-block` — the base's `inline-flex` replaces the UA `inline-block` a
+ *    bare `<button>` has. Provably inert at THIS site (the trigger is a flex item
+ *    of the bar's `flex min-w-0 items-center gap-2` row, and flex items are
+ *    blockified: `inline-block` → `block`, `inline-flex` → `flex`), but the
+ *    display group is the one thing here that could move the number on the bar's
+ *    line, so the original display is restored explicitly rather than argued
+ *    away — and with it the base's `items-center`/`justify-center` have no flex
+ *    container to distribute in.
+ *  - `h-auto` — the size's `h-7` is a fixed 28px, taller than the `h-1.5` bar it
+ *    sits beside; the trigger is text-height today.
+ *  - `whitespace-normal` — the base's `whitespace-nowrap` (the trigger inherited
+ *    `normal`).
+ *  - `select-auto` — the base's `select-none` would make the token percentage
+ *    unselectable.
+ *  - `transition-none` — the base's `transition-colors` would fade the ramp
+ *    colour over 150 ms whenever the band changes (green → caution → warning →
+ *    red). The trigger changes colour instantly today.
+ *  - `hover:no-underline` — `link`'s `hover:underline` would underline the number
+ *    on hover, which it never was.
+ * Inert here: `border-0` is the trigger's OWN class and the base's
+ * `border-transparent` is left with nothing to draw, which also makes
+ * `bg-clip-padding` a no-op (zero-width border ⇒ padding-box == border-box) and
+ * `rounded-md` irrelevant under the trigger's own `rounded-sm`; `shrink-0` is the
+ * trigger's own; `gap-1` (not a flex container once `inline-block` wins);
+ * `text-ui-sm` wins the font-size group over both the size's `text-ui-base` and
+ * the base's `text-ui-base/relaxed`, so no line-height is declared either — the
+ * same `text-ui-*`-versus-colour pairing the site already documents for
+ * `mergeUiClasses`; `outline-none` (`base.css:53-57` forces `outline: none
+ * !important` on every focus, and again under `forced-colors`, which is also why
+ * the trigger's own `focus-visible:outline-none` stays harmless); `disabled:*` /
+ * `aria-invalid:*` / `aria-expanded:*` (a tooltip trigger is none of those —
+ * Radix's Tooltip sets `aria-describedby`, never `aria-expanded`);
+ * `group/button`; `has-data-[icon=inline-*]:pr/pl` (no child carries
+ * `data-icon`); and the three `[&_svg…]` rules — the trigger's only child is the
+ * text node `42%`, so there is no `<svg>` for the icon-resize hazard to reach.
+ * The `data-slot`/`data-variant`/`data-size` attributes are new, and no test
+ * reads them here; `SidePane.test.tsx` finds this node by
+ * `data-testid="context-usage"` and pins `text-success` on it, which survives.
+ */
+const PERCENT_TRIGGER_WALL =
+  "inline-block h-auto whitespace-normal select-auto transition-none hover:no-underline";
 import {
   Tooltip,
   TooltipContent,
@@ -127,7 +186,7 @@ export default function SessionConfigBlock({ collapsed }: { collapsed: boolean }
     // (`ChromeControls`), so the block keeps ordinary padding.
     <div
       data-testid="session-config-block"
-      className={`shrink-0 px-3 pb-3 pt-2 ${collapsed ? "invisible" : ""}`}
+      className={cn("shrink-0 px-3 pb-3 pt-2", collapsed && "invisible")}
     >
       <div className="flex flex-col gap-1.5" data-testid="session-config-controls">
         {/* Model, then Reasoning, then Context: one control per line, each
@@ -211,7 +270,10 @@ export default function SessionConfigBlock({ collapsed }: { collapsed: boolean }
             className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-context-track"
           >
             <div
-              className={`h-full rounded-full transition-[width] duration-500 ${contextRamp.fill}`}
+              className={cn(
+                "h-full rounded-full transition-[width] duration-500",
+                contextRamp.fill,
+              )}
               style={{ width: `${contextPercent ?? 0}%` }}
             />
           </div>
@@ -226,14 +288,24 @@ export default function SessionConfigBlock({ collapsed }: { collapsed: boolean }
                     unchanged — the reset classes keep the bare-number
                     look. */}
                 <TooltipTrigger asChild>
-                  <button
+                  <Button
                     type="button"
+                    variant="link"
+                    size="default"
                     data-testid="context-usage"
                     aria-label={countsLabel}
-                    className={`shrink-0 cursor-help appearance-none rounded-sm border-0 bg-transparent p-0 text-ui-sm tabular-nums focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${contextRamp.label}`}
+                    className={cn(
+                      PERCENT_TRIGGER_WALL,
+                      // The ramp's `label` is a text COLOUR and the base spells
+                      // `text-ui-sm`, a font size: `mergeUiClasses` registers
+                      // `text-ui-*` as its own group precisely so these two do
+                      // not fight. Measured — both survive the merge.
+                      "shrink-0 cursor-help appearance-none rounded-sm border-0 bg-transparent p-0 text-ui-sm tabular-nums focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                      contextRamp.label,
+                    )}
                   >
                     {contextPercent}%
-                  </button>
+                  </Button>
                 </TooltipTrigger>
                 <TooltipContent side="top" align="end">
                   {contextUsage.used.toLocaleString()} /{" "}

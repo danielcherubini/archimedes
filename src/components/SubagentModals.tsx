@@ -15,8 +15,8 @@ import {
 } from "../lib/subagentSheetLayout";
 import SudoConfirmModal from "./SudoConfirmModal";
 import SudoPasswordModal from "./SudoPasswordModal";
-import AskQuestionCard from "./AskQuestionCard";
-import PermissionPrompt from "./PermissionPrompt";
+import { InlineGateRow } from "./InlineGateRow";
+import { cn } from "./lib/utils";
 
 /**
  * The overlay's half of the ONE-SITE-PER-GATE partition. A Subagent session's
@@ -349,44 +349,51 @@ export function SubagentModals({ sheetMounted = true }: { sheetMounted?: boolean
           onKeyDown={(e) => {
             if (e.key === "Escape") e.stopPropagation();
           }}
-          className={
+          className={cn(
             // The corner geometry is the BASE (see the geometry comment above):
             // the dodge is layered on top of it, and only from the breakpoint
             // up. `pointer-events-none` here, re-armed per card below. The width
             // and the dodge pair are the layout module's own literals.
-            "fixed bottom-0 z-40 flex max-h-[70vh] flex-col gap-3 overflow-y-auto p-3 " +
-            "pointer-events-none right-0 " +
-            SHEET_WIDTH_CLASS +
-            " max-w-[90vw] " +
-            (sheetOpen
+            //
+            // Merged rather than concatenated (Task C8), and measured to be the
+            // same utility SET on both arms: the dodge pair carries a min-width
+            // variant prefix, which puts it in different tailwind-merge groups
+            // from the base's own right-offset and width-cap utilities, so
+            // nothing is dropped. The pair that `SubagentModals.test.tsx` pins as
+            // a set therefore survives the merge intact.
+            "fixed bottom-0 z-40 flex max-h-[70vh] flex-col gap-3 overflow-y-auto p-3 pointer-events-none right-0",
+            SHEET_WIDTH_CLASS,
+            "max-w-[90vw]",
+            // ONE ternary, not two: the pair travels together (an offset with no
+            // width cap hangs the panel off the viewport's left edge on the
+            // default 800px window — see `subagentSheetLayout.ts`), and splitting
+            // them into two arms is how one gets deleted without the other.
+            sheetOpen
               ? GATE_PANEL_DODGE_OFFSET_CLASS + " " + GATE_PANEL_DODGE_MAX_WIDTH_CLASS
-              : "")
-          }
+              : "",
+          )}
         >
           {cardGates.map((g) => (
+            // The card's own wrapper: `pointer-events-auto` re-arms the pointer
+            // for one card inside the click-transparent region (see the region
+            // comment above), so this box belongs HERE, not in the shared card.
+            // Keyed by `childGateKey` (child id + request id) — a child's
+            // `requestId` is the model's tool-call id, which some
+            // OpenAI-compatible gateways reuse per response, so a bare
+            // `requestId` collides across children and drops one card.
             <div key={childGateKey(g)} className="pointer-events-auto">
-              {/* The attribution chip lives HERE, not inside the card
-                  components: those stay parent/child-agnostic and are reused
-                  unchanged by the main chat. A child's `requestId` is the
-                  model's tool-call id, which some OpenAI-compatible gateways
-                  reuse per response, so the key is `childGateKey` (child id +
-                  request id) — a bare `requestId` collides across children and
-                  drops one card. */}
-              <p className="mb-1 text-ui-xs text-foreground-subtle">
-                ↳ {g.agentName}
-              </p>
-              {g.kind === "ask" ? (
-                <AskQuestionCard
-                  sessionId={g.childSessionId}
-                  requestId={g.requestId}
-                  autoFocus={false}
-                />
-              ) : (
-                <PermissionPrompt
-                  sessionId={g.childSessionId}
-                  requestId={g.requestId}
-                />
-              )}
+              {/* The shared card (`↳ {agentName}` chip + the `ask`/permission
+                  card) — the SAME component the transcript renders for a gate
+                  whose parent IS the active session. Which site draws which gate
+                  is the ONE-SITE-PER-GATE partition this component's doc and
+                  ADR 0040 state; the card itself decides nothing about kinds.
+                  `autoFocus` is not passed: the component's default is `false`,
+                  and a gate that appears while the user is typing must not take
+                  the caret. Escape is stopped by the REGION above, once — not
+                  per card: the region's padding and the gaps between cards are
+                  also "between a card and the window", which a card-level stop
+                  could not cover (see the Escape section on `InlineGateRow`). */}
+              <InlineGateRow gate={g} />
             </div>
           ))}
         </div>

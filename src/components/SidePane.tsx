@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { useTodoBoards } from "../hooks/useTodoBoards";
 import { basenameOfPath } from "../lib/paths";
+import { sessionFieldOf } from "../lib/sessionLookup";
 import { useSessions } from "../store/sessions";
 import {
   getSidePaneCollapsed,
@@ -10,6 +11,7 @@ import {
   subscribeSidePane,
 } from "../lib/sidePaneState";
 import TodoBoardPanel, { useBoardOpenCount, useMainTodoItems } from "./TodoBoardPanel";
+import { cn } from "./lib/utils";
 import TodoRail from "./TodoRail";
 import SessionConfigBlock from "./SessionConfigBlock";
 
@@ -229,33 +231,24 @@ export default function SidePane() {
   const activeMessages = useSessions((s) =>
     s.activeSessionId ? s.messages[s.activeSessionId] : undefined,
   );
-  const activeCwd = useSessions((s) => {
-    if (!s.activeSessionId) return undefined;
-    const live = s.sessions.find((x) => x.sessionId === s.activeSessionId);
-    return (
-      live?.cwd ??
-      s.historySessions.find((x) => x.sessionId === s.activeSessionId)?.cwd ??
-      s.archivedSessions.find((x) => x.sessionId === s.activeSessionId)?.cwd
-    );
-  });
-  // The generated title, read by its OWN selector that returns a PRIMITIVE
-  // (`string | null`) over the same three-list walk as `activeCwd` above.
-  // It is NOT folded into `activeCwd` as `{ cwd, title }`: zustand v5
-  // re-runs a selector that yields a FRESH OBJECT on every snapshot read, so
-  // the pane would re-render forever (`useShallow` would fix it; a second
-  // primitive selector is cheaper and matches the shape of this file).
-  const storedTitle = useSessions((s) => {
-    if (!s.activeSessionId) return null;
-    const id = s.activeSessionId;
-    const titleOf = (rows: typeof s.sessions) =>
-      rows.find((x) => x.sessionId === id)?.title;
-    return (
-      titleOf(s.sessions) ??
-      titleOf(s.historySessions) ??
-      titleOf(s.archivedSessions) ??
-      null
-    );
-  });
+  // The active session's `cwd` and its generated `title`, each read by its OWN
+  // selector over the ONE three-list walk (`lib/sessionLookup.ts`). They are
+  // deliberately TWO selectors and not one returning `{ cwd, title }`: zustand
+  // v5 re-runs a selector that yields a FRESH OBJECT on every snapshot read, so
+  // the pane would re-render forever (`useShallow` would fix it; two primitive
+  // selectors are cheaper and match the shape of this file).
+  const activeCwd = useSessions((s) =>
+    sessionFieldOf(s, s.activeSessionId, "cwd"),
+  );
+  // `?? null` is KEPT, not delegated: `sessionFieldOf`'s empty case is
+  // `undefined` and this selector's contract was `string | null` — the header's
+  // `sessionTitle` chain below tests `storedTitle !== null` to tell "no title"
+  // apart from nothing else. Collapsing the two would change what the guard
+  // means, so the null stays owned here (the same reason
+  // `sessionConfigOptionsOf` keeps its own `?? null` tail).
+  const storedTitle = useSessions(
+    (s) => sessionFieldOf(s, s.activeSessionId, "title") ?? null,
+  );
   // (`find` does not narrow its result — the `kind` check on the found
   // value, THEN the `text` access, is the ChatStream pattern.)
   const firstUserMessage = activeMessages?.find((m) => m.kind === "user");
@@ -383,9 +376,15 @@ export default function SidePane() {
           onPointerDown={onPointerDown}
         >
           <div
-            className={`h-full w-0.5 bg-foreground-subtlest/50 ${
-              dragging ? "opacity-100" : "opacity-0 hover:opacity-100"
-            }`}
+            // `opacity-100` / `opacity-0` are one tailwind-merge group and the two
+            // arms are mutually exclusive, so the merge is the identity here
+            // (`SidePane.test.tsx` anchors on the END of the attribute —
+            // `/ opacity-100$/` — and `cn` emits no trailing space, so that pin
+            // holds either way).
+            className={cn(
+              "h-full w-0.5 bg-foreground-subtlest/50",
+              dragging ? "opacity-100" : "opacity-0 hover:opacity-100",
+            )}
           />
         </div>
       )}
@@ -404,7 +403,13 @@ export default function SidePane() {
           survives) — `hidden` would unlayout it. The rail's per-board marks
           (below) are what show in its place. */}
       <div
-        className={`flex-1 overflow-y-auto p-3 ${collapsed ? "invisible" : ""}`}
+        className={cn(
+          "flex-1 overflow-y-auto p-3",
+          // `invisible` (visibility) is its own tailwind-merge group, so nothing
+          // here is dropped; see the long comment above the wrapper for why the
+          // utility is `invisible` and not `hidden`.
+          collapsed && "invisible",
+        )}
       >
         <div className="flex flex-col gap-4">
           {/* The session title (the old header's title — the header is

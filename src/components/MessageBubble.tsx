@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { createHighlighter, type Highlighter } from "shiki";
@@ -19,7 +19,89 @@ import ToolCallCard from "./ToolCallCard";
 import SubagentDelegatingCard from "./SubagentDelegatingCard";
 import DiffBlock from "./DiffBlock";
 import OpenAnchor from "./OpenAnchor";
+import { MutedCaption } from "./MutedCaption";
+import { cn } from "./lib/utils";
+import { useCopyButton } from "../hooks/useCopyButton";
 import { Reasoning, ReasoningTrigger, ReasoningContent } from "./Reasoning";
+import { Button } from "./ui/button";
+
+/**
+ * C7: what `<Button>`'s base and the `ghost`/`default` arms would change at the
+ * three `MessageBubble` sites, undone. A bare `<Button>` renders
+ * `bg-primary text-primary-foreground h-7 px-2` (`ui/button.tsx:40` sets
+ * `defaultVariants {variant:"default"}`), so every site names
+ * `variant="ghost"` AND a `size`, and carries its own wall. `ghost` is the arm
+ * that matches what all three already were — ink that changes on hover, no fill.
+ * Measured with the real `cn()`: for each site the rendered utility SET contains
+ * every utility the site spelled before the conversion (nothing lost), and the
+ * additions below are the only ones that would have painted.
+ *
+ * SHARED by all three (`SKILL_HEADER_WALL`, `COPY_GLYPH_WALL`):
+ *  - `border-0` — the base's `border` is a 1px ring; preflight sets
+ *                 `border: 0 solid`, so none of these sites has one today. It
+ *                 would grow every box 2px. With the width at zero the base's
+ *                 `bg-clip-padding` is a no-op (padding-box == border-box), so it
+ *                 needs no negation even where a background paints.
+ *  - `h-auto` / `px-0` — the size's `h-7 px-2` is a fixed 28px tall, 8px-inset
+ *                 box. All three sites are content-sized: the header is exactly
+ *                 as tall as its label row, the two glyphs are 12px icons.
+ *  - `text-[length:inherit]` — the size declares `text-ui-base` and the base
+ *                 declares `text-ui-base/relaxed`; `cn` keeps the LAST of the
+ *                 font-size group, so this arbitrary-value utility wins BOTH and
+ *                 the site keeps the font-size AND the line-height it inherits
+ *                 (this is the hazard C7 records: `ChatStream.test.tsx`'s
+ *                 `primaryLines()` finds picker rows with
+ *                 `querySelectorAll(".text-ui-base")`, so a site that GAINS the
+ *                 token is selected by a test that never saw it).
+ *  - `transition-none` — the base's `transition-colors` would fade an ink change
+ *                 over 150ms; all three change instantly today. (At the
+ *                 attachment badge the base's `transition-colors` is displaced by
+ *                 that badge's own `transition-opacity`, which is why no wall
+ *                 there spells this.)
+ *  - `hover:bg-transparent` — `ghost` adds `hover:bg-hover` and none of these
+ *                 sites fills on hover.
+ *
+ * Provably INERT at all three, so NOT negated: `rounded-md` (no background, no
+ * border, so nothing to round — and each site that has a radius spells its own);
+ * `outline-none` (`base.css:53-57` forces `outline: none !important` on every
+ * focus in every browser, and again under `forced-colors`); `disabled:*` (none of
+ * these buttons is ever disabled); `aria-invalid:*` (a `<button>` is never
+ * `aria-invalid` here — no form, no field); `group/button` (grep-verified:
+ * nothing in the tree reads that group); `has-data-[icon=inline-*]:pr/pl`
+ * (lucide sets no `data-icon` attribute); `[&_svg]:pointer-events-none` (the
+ * handler is on the button, so the click target moving off the `<svg>` cannot
+ * change what runs); `[&_svg]:shrink-0` (every glyph here already spells
+ * `shrink-0` or is the only child); `gap-1` (the header spells `gap-2`, which
+ * wins; the two glyph sites have exactly one child, so there is no gap to draw);
+ * `shrink-0` (the header's parent is a plain block `div`, and the two glyph sites
+ * spell `shrink-0` themselves); `whitespace-nowrap` at the glyph sites (a 12px
+ * icon has no text to wrap); `select-none` at the glyph sites (an icon carries no
+ * selectable text); `justify-center`/`items-center` at the two glyph sites (the
+ * wall restores a BLOCK display, so there is no flex container to distribute in);
+ * `bg-clip-padding` (no border, and where a background does paint the clip is
+ * padding-box == border-box); `text-foreground`/`hover:text-foreground` and
+ * `aria-expanded:text-foreground` at the header (it has no direct text node —
+ * both its spans and both glyphs spell their own ink, so the colour it declares
+ * is never what paints); `gap-1` at the header (`gap-2` wins);
+ * `aria-expanded:bg-hover` at the two glyph sites and the badge (neither is ever
+ * `aria-expanded` — only the skill header is, and that one negates it).
+ */
+const SKILL_HEADER_WALL =
+  "border-0 h-auto px-0 justify-start whitespace-normal transition-none select-auto text-[length:inherit] hover:bg-transparent aria-expanded:bg-transparent";
+
+/**
+ * C7 wall for the two always-visible 12px copy glyphs (the code fence's
+ * `Copy code` and the reply's `Copy response`). Both are the same shape — an
+ * icon-only button whose display is the UA's `inline-block` — so one wall serves
+ * both. `inline-block` is restored rather than argued away because the display
+ * group is the one thing that could move the glyph inside its own box: under
+ * flex the base's `items-center justify-center` would centre, and at the
+ * `copy-response` site the button is a flex ITEM of a `flex-col`, where
+ * `inline-block` blockifies to `block` and `self-end` shrinks it to the icon.
+ * `justify-start` is spelled because the base centres on the main axis.
+ */
+const COPY_GLYPH_WALL =
+  "border-0 inline-block h-auto px-0 justify-start transition-none text-[length:inherit] hover:bg-transparent";
 
 /**
  * One `<skill>` block injected into a user message: a collapsible card
@@ -31,11 +113,13 @@ function SkillBlockCard({ block }: { block: SkillBlock }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="rounded-lg bg-input px-3 py-2">
-      <button
+      <Button
         type="button"
+        variant="ghost"
+        size="default"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        className="flex w-full items-center gap-2 text-left"
+        className={cn(SKILL_HEADER_WALL, "flex w-full items-center gap-2 text-left")}
       >
         <WandSparklesIcon className="size-4 shrink-0 text-foreground-subtle" />
         <span className="shrink-0 whitespace-nowrap font-medium text-foreground-subtlest">
@@ -46,11 +130,12 @@ function SkillBlockCard({ block }: { block: SkillBlock }) {
         </span>
         <ChevronRightIcon
           aria-hidden
-          className={`ml-auto size-4 shrink-0 text-foreground-subtlest transition-transform ${
-            open ? "rotate-90" : "rotate-0"
-          }`}
+          className={cn(
+            "ml-auto size-4 shrink-0 text-foreground-subtlest transition-transform",
+            open ? "rotate-90" : "rotate-0",
+          )}
         />
-      </button>
+      </Button>
       {open && (
         <div className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-ui-sm text-foreground-subtle">
           {block.body}
@@ -84,9 +169,7 @@ function NamedResourceChip({ block }: { block: MentionBlock }) {
       <span className="min-w-0 truncate font-mono text-ui-sm text-foreground-subtle">
         {block.name}
       </span>
-      <span className="text-ui-xs text-foreground-subtlest">
-        named by the user
-      </span>
+      <MutedCaption>named by the user</MutedCaption>
     </div>
   );
 }
@@ -204,8 +287,8 @@ const CODE_BODY_CLASS = "overflow-x-auto p-3 font-mono text-sm";
  *
  * Ported from ZCode's code block, HEADER ONLY: line numbers, the wrap toggle,
  * Mermaid, the fullscreen viewer and i18n are all out of scope here, and the
- * copy interaction reuses this repo's own `ToolCallCardHeader` pattern
- * (copy → check for 1.5s, timer cleared on unmount) rather than ZCode's.
+ * copy interaction is this repo's own copy→confirm machine (`useCopyButton`:
+ * copy → check for 1.5s, timer cleared on unmount) rather than ZCode's.
  *
  * The header renders whether or not the highlight succeeded — the block must
  * never change shape between highlighted and fallback rendering.
@@ -220,24 +303,10 @@ function CodeBlock({ code, lang }: { code: string; lang?: string }) {
   // stored default) is the zai default.
   const palette = useSettings((s) => s.settings?.palette ?? "zai");
 
-  // Copy → confirm for 1.5s (the `ToolCallCardHeader` pattern verbatim: a
-  // ref holds the pending timer so a second click restarts it, and the
-  // unmount cleanup clears it — no `setState` on an unmounted bubble).
-  const [copied, setCopied] = useState(false);
-  const resetRef = useRef<number | null>(null);
-  const handleCopy = () => {
-    void navigator.clipboard?.writeText(code)?.then(() => {
-      setCopied(true);
-      if (resetRef.current !== null) window.clearTimeout(resetRef.current);
-      resetRef.current = window.setTimeout(() => setCopied(false), 1500);
-    });
-  };
-  useEffect(
-    () => () => {
-      if (resetRef.current !== null) window.clearTimeout(resetRef.current);
-    },
-    [],
-  );
+  // Copy → confirm for 1.5s, owned by `useCopyButton` (the timer, the
+  // restart-on-second-click and the unmount cleanup all live there now). The
+  // BUTTON stays below, at the call site — see the hook's doc-comment for why.
+  const { copied, copy: handleCopy } = useCopyButton(code);
 
   // The identity is derived from a synthetic filename so the fence shares the
   // extension table the file chips use. An absent language is `text` (plain
@@ -262,27 +331,29 @@ function CodeBlock({ code, lang }: { code: string; lang?: string }) {
       className="flex items-center justify-between gap-2 border-b border-border bg-panel px-3 py-1.5"
     >
       <span className="flex min-w-0 items-center gap-1.5">
-        <Icon className={`size-3.5 shrink-0 ${descriptor.className}`} />
+        <Icon className={cn("size-3.5 shrink-0", descriptor.className)} />
         <span
           data-testid="code-block-lang"
-          className={`${descriptor.className} font-mono text-ui-caption lowercase`}
+          className={cn(descriptor.className, "font-mono text-ui-caption lowercase")}
         >
           {label}
         </span>
       </span>
-      <button
+      <Button
         type="button"
+        variant="ghost"
+        size="default"
         onClick={handleCopy}
         aria-label={copied ? "Copied" : "Copy code"}
         title={copied ? "Copied" : "Copy code"}
-        className="shrink-0 text-foreground-subtle hover:text-foreground"
+        className={cn(COPY_GLYPH_WALL, "shrink-0 text-foreground-subtle hover:text-foreground")}
       >
         {copied ? (
           <CheckIcon className="size-3" />
         ) : (
           <CopyIcon className="size-3" />
         )}
-      </button>
+      </Button>
     </div>
   );
 
@@ -524,7 +595,8 @@ function AgentMarkdown({ text }: { text: string }) {
  * The agent's reply: the text on a BAND, with a copy button below it.
  *
  * A NAMED component (not inline JSX in the `switch`) because it holds hooks —
- * a `useState`/`useRef`/`useEffect` trio cannot live in a `switch` arm of a
+ * the `useCopyButton` call (which owns what used to be a local
+ * `useState`/`useRef`/`useEffect` trio) cannot live in a `switch` arm of a
  * component whose other arms return early (`MessageBubble` itself may render a
  * `user` / `tool-call` / `diff` bubble and skip the call entirely, which would
  * change the hook count between renders).
@@ -545,27 +617,13 @@ function AgentMarkdown({ text }: { text: string }) {
  * path would shift every one of those assertions.
  */
 function AgentText({ text }: { text: string }) {
-  // Copy → confirm for 1.5s: the `ToolCallCardHeader` / `CodeBlock` pattern
-  // verbatim (a ref holds the pending timer so a second click restarts it, and
-  // the unmount cleanup clears it — no `setState` on an unmounted bubble).
-  const [copied, setCopied] = useState(false);
-  const resetRef = useRef<number | null>(null);
-  const handleCopy = () => {
-    // The PROP, so the clipboard gets the markdown SOURCE — backticks, table
-    // pipes and all. Reading the rendered DOM back would hand over the text
-    // with its markup stripped.
-    void navigator.clipboard?.writeText(text)?.then(() => {
-      setCopied(true);
-      if (resetRef.current !== null) window.clearTimeout(resetRef.current);
-      resetRef.current = window.setTimeout(() => setCopied(false), 1500);
-    });
-  };
-  useEffect(
-    () => () => {
-      if (resetRef.current !== null) window.clearTimeout(resetRef.current);
-    },
-    [],
-  );
+  // Copy → confirm for 1.5s, owned by `useCopyButton` (the timer, the
+  // restart-on-second-click and the unmount cleanup all live there now). The
+  // BUTTON stays below, at the call site — see the hook's doc-comment for why.
+  // The PROP is what gets copied, so the clipboard receives the markdown
+  // SOURCE — backticks, table pipes and all. Reading the rendered DOM back
+  // would hand over the text with its markup stripped.
+  const { copied, copy: handleCopy } = useCopyButton(text);
 
   return (
     <>
@@ -597,8 +655,10 @@ function AgentText({ text }: { text: string }) {
           what it produced, not a control before it. The distinct accessible
           name (`Copy code` belongs to a code fence) is what lets a test tell
           the two buttons apart in one render. */}
-      <button
+      <Button
         type="button"
+        variant="ghost"
+        size="default"
         onClick={handleCopy}
         aria-label={copied ? "Copied" : "Copy response"}
         title={copied ? "Copied" : "Copy response"}
@@ -608,15 +668,23 @@ function AgentText({ text }: { text: string }) {
         // the START of a button as wide as the column. Aligning to the cross-
         // axis end both shrinks the hit area to the icon and right-aligns it —
         // `w-fit` alone would have kept it on the left, and `ml-auto` is a
-        // margin fighting stretch where alignment is the lever.
-        className="self-end shrink-0 text-foreground-subtle hover:text-foreground"
+        // margin fighting stretch where alignment is the lever. `<Button>`'s
+        // base spells no `self-*`, so this survives the merge untouched, and
+        // `MessageBubble.test.tsx` reads it straight off this node's className.
+        // C7: `COPY_GLYPH_WALL` is what keeps the box the size of the icon — the
+        // size's `h-7 px-2` would have made it a 28px tall plate with the glyph
+        // centred in it, and `self-end` alone cannot undo that.
+        className={cn(
+          COPY_GLYPH_WALL,
+          "self-end shrink-0 text-foreground-subtle hover:text-foreground",
+        )}
       >
         {copied ? (
           <CheckIcon className="size-3" />
         ) : (
           <CopyIcon className="size-3" />
         )}
-      </button>
+      </Button>
     </>
   );
 }

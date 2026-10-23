@@ -11,6 +11,9 @@ import {
   getSidePaneCollapsed,
   setSidePaneCollapsed,
 } from "../lib/sidePaneState";
+import { CHROME_BUTTON } from "./chromeButton";
+import { makeSessionRow } from "../test/fixtures";
+import { resetModuleFlags, resetStores } from "../test/resetStores";
 
 /**
  * The chrome bar's control cluster: the Settings gear and the two pane
@@ -22,18 +25,60 @@ import {
  * "behind a hidden pane".
  */
 
+/** The exact class string every control rendered BEFORE `CHROME_BUTTON`
+ *  existed — `WindowControls`' grammar plus this cluster's `relative` (the
+ *  pending dot is `absolute`, so the anchor is the caller's). A LITERAL, not a
+ *  `cn("relative", CHROME_BUTTON)` recomputation: comparing the render to an
+ *  expression built from the same constant would move both sides on a repaint. */
+const CONTROL_BUTTON =
+  "relative flex h-7 w-7 items-center justify-center rounded-md text-foreground-subtle transition-colors hover:bg-hover hover:text-foreground";
+
+/**
+ * C7 moved these three controls onto `<Button variant="ghost" size="icon">`, so
+ * the rendered attribute is the constant (merged LAST, so it still wins every
+ * group it spells) plus what the base and the `ghost`/`icon` arms contribute.
+ * The byte-exact `toBe` below therefore becomes a SET comparison — lost-tokens
+ * empty, gained-tokens exactly this list — which is the same claim `
+ * WindowControls.test.tsx`'s `BUTTON_ADDITIONS` makes, token for token: the two
+ * clusters are one grammar, so they gain the identical set. Each addition is
+ * inert here (no text, no `aria-invalid`/`aria-expanded`, never disabled, no
+ * competing flex pressure); the reasoning is on the component. `border-0` is the
+ * component's own wall against the base's 1px `border`.
+ */
+const BUTTON_ADDITIONS = [
+  "[&_svg:not([class*='size-'])]:size-4",
+  "[&_svg]:pointer-events-none",
+  "[&_svg]:shrink-0",
+  "aria-expanded:bg-hover",
+  "aria-expanded:text-foreground",
+  "aria-invalid:border-destructive",
+  "aria-invalid:ring-2",
+  "aria-invalid:ring-destructive/20",
+  "bg-clip-padding",
+  "border-0",
+  "border-transparent",
+  "dark:aria-invalid:border-destructive/50",
+  "dark:aria-invalid:ring-destructive/40",
+  "disabled:opacity-50",
+  "disabled:pointer-events-none",
+  "group/button",
+  "outline-none",
+  "select-none",
+  "shrink-0",
+  "size-7",
+  "text-ui-base/relaxed",
+  "whitespace-nowrap",
+].sort();
+
+/** Class attributes are SETS, not strings — `cn()` reorders on conflict. */
+const tokens = (className: string): string[] =>
+  [...new Set(className.split(/\s+/).filter(Boolean))].sort();
+
 /** Seed an ACTIVE session holding one permission prompt — the cheapest way to
  * make `useHasPendingRequest()` true, which is what the dot reads. */
 function seedPendingPrompt(): void {
   useSessions.setState({
-    sessions: [
-      {
-        sessionId: "s1",
-        cwd: "/tmp/alpha",
-        capabilities: {},
-        archived: false,
-      },
-    ],
+    sessions: [makeSessionRow({ sessionId: "s1", cwd: "/tmp/alpha" })],
     activeSessionId: "s1",
   });
   usePermissions.setState({
@@ -42,10 +87,13 @@ function seedPendingPrompt(): void {
 }
 
 beforeEach(() => {
-  setLeftPaneCollapsed(false);
-  setSidePaneCollapsed(false);
-  useSessions.setState({ sessions: [], activeSessionId: null });
-  usePermissions.setState({ prompts: {} });
+  // Every store back to its own initial state — the hand-written version named
+  // `useSessions.{sessions,activeSessionId}` + `usePermissions.prompts` and
+  // left the store's other fourteen data fields to leak between cases.
+  resetStores();
+  // The two pane flags are module-scope (and persist to localStorage), so they
+  // are `resetModuleFlags`' job, not the store's.
+  resetModuleFlags();
 });
 
 describe("ChromeControls", () => {
@@ -90,11 +138,11 @@ describe("ChromeControls", () => {
     const left = screen.getByTestId("left-pane-toggle");
     const right = screen.getByTestId("right-pane-toggle");
 
-    expect(left.getAttribute("aria-label")).toBe("Collapse sidebar");
+    expect(left.getAttribute("aria-label")).toBe("Collapse session list");
     expect(left.getAttribute("aria-pressed")).toBe("true"); // pressed = open
     fireEvent.click(left);
     expect(getLeftPaneCollapsed()).toBe(true);
-    expect(left.getAttribute("aria-label")).toBe("Expand sidebar");
+    expect(left.getAttribute("aria-label")).toBe("Expand session list");
     expect(left.getAttribute("aria-pressed")).toBe("false");
     fireEvent.click(left);
     expect(getLeftPaneCollapsed()).toBe(false);
@@ -108,6 +156,55 @@ describe("ChromeControls", () => {
     // there is no second button to hand off to anywhere in the shell.
     expect(screen.getByTestId("left-pane-toggle")).toBe(left);
     expect(screen.getByTestId("right-pane-toggle")).toBe(right);
+  });
+
+  it("every control keeps the shared CHROME_BUTTON grammar plus this cluster's `relative`", () => {
+    // Finding 6a: this cluster's `BTN` and `WindowControls`' two literals were
+    // the same string spelled three times, and they still wear the same
+    // constant. Under C7 that constant is `className` on a `<Button>`, so the
+    // pin is a SET comparison — every pre-extraction token survives, and the
+    // additions are exactly the inert set (see `BUTTON_ADDITIONS`). `relative`
+    // stays HERE, not in the constant: the pending dot is `absolute`, and
+    // `WindowControls`' three buttons must not gain a positioning context.
+    render(<ChromeControls onOpenSettings={() => {}} />);
+    const controls = [
+      screen.getByRole("button", { name: "Settings" }),
+      screen.getByTestId("left-pane-toggle"),
+      screen.getByTestId("right-pane-toggle"),
+    ];
+    for (const control of controls) {
+      const painted = tokens(control.className);
+      for (const token of tokens(CONTROL_BUTTON)) {
+        expect(painted, `control lost ${token}`).toContain(token);
+      }
+      expect(
+        painted.filter((t) => !tokens(CONTROL_BUTTON).includes(t)),
+      ).toEqual(BUTTON_ADDITIONS);
+      expect(control.className).toContain(`relative ${CHROME_BUTTON}`);
+    }
+    // The two clusters are ONE grammar: the left toggle and `WindowControls`'
+    // Minimize differ by exactly `relative` and nothing else.
+    expect(tokens(screen.getByTestId("left-pane-toggle").className)).toEqual(
+      [...tokens(CHROME_BUTTON), "relative", ...BUTTON_ADDITIONS].sort(),
+    );
+  });
+
+  it("each glyph carries an explicit `size-*` CLASS matching its `size` PROP (the Button base would otherwise force 16px)", () => {
+    // The same hazard `WindowControls.test.tsx` pins for the window cluster:
+    // `buttonVariants`' `[&_svg:not([class*='size-'])]:size-4` selects svgs that
+    // size themselves by PROP, and CSS beats the presentation attribute. All
+    // three of these glyphs were `size={14}`, so all three carry `size-3.5`.
+    render(<ChromeControls onOpenSettings={() => {}} />);
+    const svgs = [
+      screen.getByRole("button", { name: "Settings" }),
+      screen.getByTestId("left-pane-toggle"),
+      screen.getByTestId("right-pane-toggle"),
+    ].map((b) => b.querySelector("svg") as SVGSVGElement | null);
+    expect(svgs.every((s) => s !== null)).toBe(true);
+    for (const svg of svgs as SVGSVGElement[]) {
+      expect(svg.getAttribute("class")).toContain("size-3.5");
+      expect(svg.getAttribute("width")).toBe("14");
+    }
   });
 
   it("holds no pending dot while BOTH panes are open, even with a pending prompt", () => {

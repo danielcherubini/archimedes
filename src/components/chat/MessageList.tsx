@@ -6,6 +6,7 @@ import AskQuestionCard from "../AskQuestionCard";
 import TranscriptFooter, { transcriptFooterIsEmpty } from "./TranscriptFooter";
 import EmptyStateFilm from "./EmptyStateFilm";
 import { Spinner } from "../ui/spinner";
+import { cn } from "../lib/utils";
 import type { RenderUnit } from "../../lib/toolGroups";
 import type { PermissionPromptData } from "../../store/permissions";
 import type { InteractiveRequestData } from "../../store/interactive";
@@ -41,7 +42,7 @@ function TranscriptHeader({ context }: { context?: VirtuosoContext }) {
           <Spinner className="size-4 text-foreground-subtle" />
         ) : !context.hasMore ? (
           <p className="text-ui-sm text-foreground-subtlest">
-            Start of conversation
+            Start of session
           </p>
         ) : null}
       </div>
@@ -274,10 +275,19 @@ export default function MessageList({
         const prev = units[i - 1];
         const breathes = i > 0 && prev !== undefined && (isToolUnit(prev) || isToolUnit(unit));
         const paddingClass = i === 0 ? "" : breathes ? "pt-7" : "pt-3";
+        // The row wrapper. `paddingClass` is `""` for the FIRST unit, so the old
+        // hand-rolled version needed `.trim()` to keep a trailing space out of
+        // the attribute. `cn` supplies that for free — `clsx` drops the empty
+        // string and `tailwind-merge` emits no gap — which is why the `.trim()`
+        // is gone rather than carried over. `MessageList.gap.test.tsx:123` reads
+        // this list through `split(/\s+/).filter((c) => /^pt-/)`; a stray leading
+        // or trailing space would arrive there as an empty token and the filter
+        // would still be right, but the attribute would be dirty for a human
+        // reading devtools, so it is asserted below that nothing regressed.
         const wrap = (child: ReactNode) => (
           <div
             data-testid="message-row"
-            className={`flex min-w-0 max-w-full flex-col px-4 ${paddingClass}`.trim()}
+            className={cn("flex min-w-0 max-w-full flex-col px-4", paddingClass)}
           >
             {child}
           </div>

@@ -15,7 +15,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { SettingsGroupCard, SettingsRow } from "./primitives";
+import { SettingsDataRow, SettingsGroupCard, SettingsRow } from "./primitives";
 
 /** The General section's props (every piece of state stays in `SettingsPage`). */
 interface GeneralSectionProps {
@@ -196,7 +196,7 @@ export default function GeneralSection({
             this policy). The default, "Don't ask me", runs commands anywhere on
             the machine with no prompt.
             {shellSandboxAvailable && shellSandboxSupported
-              ? " Sandboxed runs them inside an OS sandbox (Landlock) confined to your project folder and the system temp dirs (/tmp, /var/tmp): writes stay inside those, system files stay readable, and there are no network rules."
+              ? " Sandboxed runs them inside an OS sandbox (Landlock) confined to your Space folder and the system temp dirs (/tmp, /var/tmp): writes stay inside those, system files stay readable, and there are no network rules."
               : null}
             {/* (ADR 0030 Task 5) Linux without Landlock: the tier is greyed
                 out and the reason is stated — the honest sentence is that
@@ -414,8 +414,14 @@ export default function GeneralSection({
         }
       />
       {/* The enabled-tools list (the harness-level tool filter — `[]` = all
-          tools: "none checked" is a valid, meaningful state, it means all). */}
-      <div className="border-t border-border px-4 py-3">
+          tools: "none checked" is a valid, meaningful state, it means all).
+          Task C8: this row hand-rolled the settings data-row shell WITHOUT
+          `first:border-t-0`, which C2 recorded as the reason it was not a
+          drop-in `SettingsDataRow`. Checked rather than assumed: this row is the
+          card's LAST child (after three `PolicyRow`s and eight `SettingsRow`s),
+          so `first:` (`:first-child`) could never match and the missing reset was
+          inert. The primitive's shell is therefore identical here. */}
+      <SettingsDataRow>
         <div className="text-ui-base font-medium text-foreground">
           Enabled tools
         </div>
@@ -444,7 +450,7 @@ export default function GeneralSection({
             ))}
           </div>
         )}
-      </div>
+      </SettingsDataRow>
     </SettingsGroupCard>
   );
 }

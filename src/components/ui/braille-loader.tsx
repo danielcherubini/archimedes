@@ -2,6 +2,8 @@
 
 import * as React from "react";
 
+import { cn } from "@/components/lib/utils";
+
 import {
   type BrailleLoaderSpeed,
   type BrailleLoaderVariant,
@@ -96,7 +98,7 @@ function BrailleLoader({
     <div
       role="status"
       aria-live="polite"
-      className={["inline-flex items-center text-current", className].filter(Boolean).join(" ")}
+      className={cn("inline-flex items-center text-current", className)}
       style={style}
       {...props}
     >
@@ -118,4 +120,4 @@ function BrailleLoader({
   );
 }
 
-export { BrailleLoader, type BrailleLoaderProps };
+export { BrailleLoader };

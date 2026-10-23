@@ -1,5 +1,70 @@
 import { useEffect, useRef } from "react";
 import type { ComposerPrefix } from "../../lib/skills";
+import { cn } from "../lib/utils";
+import { Button } from "../ui/button";
+
+/**
+ * C7: the picker row is a `<Button variant="ghost" size="default">` — both named
+ * explicitly, because `ui/button.tsx:40` sets `defaultVariants {variant:"default"}`
+ * and a bare `<Button>` would paint every row `bg-primary text-primary-foreground`
+ * at a fixed `h-7 px-2`. Measured with the real `cn()`, each row renders the exact
+ * utility set it spelled before. What `PICKER_ROW_WALL` undoes:
+ *  - `border-0` — the base's `border` is a 1px ring the row never had (preflight
+ *    sets `border: 0 solid`); it would inset the label by 1px inside the
+ *    picker's own `p-1`.
+ *  - `h-auto` — the size's `h-7` is a fixed 28px; a row is `py-1`-high and can be
+ *    TWO lines (the description line), which a fixed height would clip.
+ *  - `items-stretch` — the base's `items-center` is the dangerous one here: the
+ *    row is `flex-col`, so it centers on the CROSS axis, i.e. it would shrink
+ *    each line to its content width instead of stretching it to the row. A
+ *    stretched line is precisely what makes the label's `min-w-0 truncate` pair
+ *    elide — a content-width line never overflows, so it would stop truncating
+ *    and start pushing the row wider.
+ *  - `justify-start` — the base centres on the main axis; at `h-auto` there is no
+ *    free space, so this is belt-and-braces.
+ *  - `whitespace-normal` — the base's `whitespace-nowrap` (the row inherited
+ *    `normal`).
+ *  - `select-auto` — the base's `select-none` would make a picked path
+ *    unselectable text.
+ *  - `transition-none` — the base's `transition-colors` would fade the
+ *    `bg-surface-hover` highlight in over 150 ms. Keyboard `activeIndex` moves
+ *    this fill with the arrow keys; a fade would lag every keystroke.
+ *  - `text-[length:inherit]` — the size declares `text-ui-base` (14px through
+ *    `--ui-font-size`) and the base declares `text-ui-base/relaxed`; `cn()` keeps
+ *    the LAST utility of the font-size group, so this restores the font-size the
+ *    row INHERITED and, by collapsing both, declares no line-height either. Two
+ *    reasons, and the second is the one that bites: the row's own font-size is
+ *    invisible (every line is a span that spells its own size), BUT
+ *    `ChatStream.test.tsx` locates the picker's primary lines with
+ *    `picker.querySelectorAll(".text-ui-base")` — so a row that GAINS
+ *    `text-ui-base` adds itself to that list and every filter/sort assertion
+ *    doubles. That is not a brittle test, it is the class-set collision telling
+ *    the truth: `Button`'s size utilities are not free on a surface another
+ *    selector already reads.
+ *  - `hover:bg-transparent` — `ghost` adds `hover:bg-hover`, and this row's only
+ *    fill is the ACTIVE row. `--color-hover` and `--color-surface-hover` are the
+ *    same value in two palettes but NOT in the others, so this is a real repaint.
+ *  - `text-inherit` + `hover:text-inherit` — `ghost` declares
+ *    `text-foreground`/`hover:text-foreground`, and the row DOES paint text
+ *    indirectly: the primary line's span spells `text-ui-base` but NO colour, so
+ *    its ink is whatever it inherits. Left alone, `ghost` would recolour the
+ *    label of every row in the picker. Both are restored to inherit.
+ * Inert here: `shrink-0` (a block child of the picker's `p-1` div — and the row
+ * is `w-full` anyway), `gap-1` (the row spells `gap-0.5`, which wins),
+ * `px-2`/`py-1` (the row spells both), `text-ui-base` from the size (it collapses
+ * the base's `text-ui-base/relaxed` in the same font-size group, so no
+ * line-height is declared either; and the row's only text is in spans that spell
+ * their own size), `rounded-md` (the row spells it), `bg-clip-padding` (no border,
+ * so padding-box == border-box), `outline-none` (`base.css:53-57` forces
+ * `outline: none !important` on every focus, and again under `forced-colors`),
+ * `disabled:*` / `aria-invalid:*` / `aria-expanded:*` (a picker row is none of
+ * those), `group/button`, `has-data-[icon=inline-*]:pr/pl` (lucide sets no
+ * `data-icon`), `[&_svg]:pointer-events-none` (the row fires on `onMouseDown`,
+ * which is on the button and still receives the event), `[&_svg]:shrink-0`, and
+ * `[&_svg:not([class*='size-'])]:size-3.5` — there is no `<svg>` in a row at all.
+ */
+const PICKER_ROW_WALL =
+  "border-0 h-auto items-stretch justify-start whitespace-normal select-auto transition-none text-[length:inherit] hover:bg-transparent hover:text-inherit";
 
 /**
  * One row in the composer's picker (the floating row list above the
@@ -65,12 +130,13 @@ function primaryLabel(row: MentionRow): string {
  * prefix. Plus an optional non-selectable `note` line (the `?` truncation
  * explanation).
  *
- * WHERE THE STATE LIVES: the `useMentionCatalogs` hook, the `picker` state
- * (incl. the active `prefix`), the `filtered`/`activeIndex` derivations and
- * `selectMention` all stay in `ChatStream` — the `picker` state is
- * coordinated with the textarea's `onChange` / `onKeyDown` (the token
- * re-evaluation, the arrow/Enter/Tab/Escape branches) and the send path, so
- * it cannot move here. Renders nothing while closed.
+ * WHERE THE STATE LIVES: the `useMentionCatalogs` hook and the `picker` state
+ * stay in `ChatStream`; the `filtered`/`activeIndex` derivations and
+ * `selectMention` moved to `hooks/useMentionPicker.ts`, which `ChatStream` calls
+ * and threads through as props (Phase D / Task D4) — still NOT here, because the
+ * `picker` state is coordinated with the textarea's `onChange` / `onKeyDown` (the
+ * token re-evaluation, the arrow/Enter/Tab/Escape branches) and the send path.
+ * Renders nothing while closed.
  *
  * It is therefore NOT props-only in the literal sense — it calls TWO hooks,
  * `useRef` and the ONE `useEffect` below, and that single effect is
@@ -157,15 +223,21 @@ export default function ComposerMentions({
           className="absolute left-3 right-3 -top-2 z-10 -translate-y-full max-h-[calc(var(--ui-font-size)*22)] overflow-y-auto rounded-lg border border-input-border bg-input p-1 shadow-lg"
         >
           {filtered.map((row, i) => (
-            <button
+            <Button
               key={row.key}
               ref={i === activeIndex ? activeRowRef : undefined}
               type="button"
+              variant="ghost"
+              size="default"
               onMouseDown={(e) => {
                 e.preventDefault();
                 onSelect(row);
               }}
-              className={`flex w-full flex-col gap-0.5 rounded-md px-2 py-1 text-left ${i === activeIndex ? "bg-surface-hover" : ""}`}
+              className={cn(
+                PICKER_ROW_WALL,
+                "flex w-full flex-col gap-0.5 rounded-md px-2 py-1 text-left",
+                i === activeIndex && "bg-surface-hover",
+              )}
             >
               <span className="flex items-baseline gap-1.5">
                 <span
@@ -214,7 +286,7 @@ export default function ComposerMentions({
                   {row.description}
                 </span>
               )}
-            </button>
+            </Button>
           ))}
           {/* The note (the `?` truncation explanation). A plain `<div>`:
               never a `<button>`, never focusable, never part of `filtered` —

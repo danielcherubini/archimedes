@@ -10,8 +10,10 @@ import {
 } from "@/lib/update";
 import { describeIpcError } from "@/lib/ipcError";
 import { Button } from "@/components/ui/button";
+import { IpcErrorLine } from "@/components/IpcErrorLine";
 import {
   SettingsBadge,
+  SettingsDataRow,
   SettingsGroupCard,
   SettingsRow,
 } from "./primitives";
@@ -278,9 +280,10 @@ function UpdateStatus({ phase }: { phase: Phase }): ReactElement | null {
           {phase.error ? (
             // Distinct from a failed CHECK: the endpoint answered, the install
             // is what broke (a deb transaction, a signature, a full disk).
-            <p className="text-ui-base text-destructive">
-              Installing the update failed: {phase.error}
-            </p>
+            <IpcErrorLine
+              error={`Installing the update failed: ${phase.error}`}
+              className="text-ui-base"
+            />
           ) : null}
         </div>
       );
@@ -288,9 +291,10 @@ function UpdateStatus({ phase }: { phase: Phase }): ReactElement | null {
       // The conflation the type exists to prevent, made visible: "I could not
       // ask" is never worded like "it said no".
       return (
-        <p className="text-ui-base text-destructive">
-          Could not reach the update server: {phase.error}
-        </p>
+        <IpcErrorLine
+          error={`Could not reach the update server: ${phase.error}`}
+          className="text-ui-base"
+        />
       );
     case "downloaded":
       return (
@@ -389,7 +393,11 @@ function UpdateProgressRow({
   const percent = total && total > 0 ? Math.min(100, Math.floor((downloaded / total) * 100)) : null;
 
   return (
-    <div className="border-t border-border px-4 py-3">
+    // Task C8: like `GeneralSection`'s enabled-tools row, this hand-rolled the
+    // shell without `first:border-t-0` — and for the same reason the reset is
+    // inert here: the progress row is the card's LAST child, rendered after the
+    // section's two `SettingsRow`s, so `:first-child` never matched it.
+    <SettingsDataRow>
       <p className="text-ui-base text-foreground-subtle">{announced}</p>
       <div
         className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-surface"
@@ -414,6 +422,6 @@ function UpdateProgressRow({
           ? `${bytes(downloaded)} downloaded`
           : `${percent}% of ${bytes(total as number)}`}
       </p>
-    </div>
+    </SettingsDataRow>
   );
 }

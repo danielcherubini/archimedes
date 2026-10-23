@@ -1,5 +1,6 @@
 import { Check } from "lucide-react";
 import { Progress } from "./ui/progress";
+import { MutedCaption } from "./MutedCaption";
 import { useInteractive, type TodoItem } from "../store/interactive";
 import { useSubagentSelection } from "../store/subagentSelection";
 import { useTodoBoards, type TodoBoard } from "../hooks/useTodoBoards";
@@ -291,12 +292,12 @@ function ChildBoard({ board, full }: { board: TodoBoard; full: boolean }) {
         }}
         className="flex w-full items-center gap-1.5 rounded-md text-left focus-visible:outline-1"
       >
-        <p className="flex items-center gap-1.5 text-ui-xs text-foreground-subtlest">
+        <MutedCaption as="p" className="flex items-center gap-1.5">
           <span className="truncate">{board.label}</span>
           <span>
             {board.completed}/{board.items.length}
           </span>
-        </p>
+        </MutedCaption>
       </div>
       {/* The counts, for assistive tech: inside the control they are swallowed
           by its `aria-label`, so they need this sibling to be readable at all.
@@ -384,9 +385,9 @@ export default function TodoBoardPanel({
               label for empty space. */}
           <div className="flex items-center gap-2">
             <p className="text-ui-base font-medium">Todos</p>
-            <span className="text-ui-xs text-foreground-subtlest">
+            <MutedCaption>
               {completed}/{mainItems.length}
-            </span>
+            </MutedCaption>
           </div>
           <Progress value={(completed / mainItems.length) * 100} />
         </div>

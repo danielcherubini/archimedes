@@ -46,15 +46,9 @@ export const brailleLoaderVariants = [
 export type BrailleLoaderVariant = (typeof brailleLoaderVariants)[number];
 export type BrailleLoaderSpeed = "slow" | "normal" | "fast";
 
-export const speedToDuration: Record<BrailleLoaderSpeed, number> = {
-  slow: 3000,
-  normal: 2400,
-  fast: 1200,
-};
-
 const contextCache = new Map<string, PrecomputeContext>();
 
-export function getPrecomputeContext(width: number, height: number): PrecomputeContext {
+function getPrecomputeContext(width: number, height: number): PrecomputeContext {
   const key = `${width}x${height}`;
   let ctx = contextCache.get(key);
   if (!ctx) {

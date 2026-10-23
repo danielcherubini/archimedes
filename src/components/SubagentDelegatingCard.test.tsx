@@ -563,3 +563,128 @@ describe("SubagentDelegatingCard (the subagent tool card with the nested list)",
     expect(screen.getByText("[thinking] Checking UserDao implementation")).toBeTruthy();
   });
 });
+
+/**
+ * D3 — the two row derivations must agree.
+ *
+ * Until this task the card built its rows TWICE: the `taskKeys.map` block and a
+ * second `matchingStoreEntries.map` block with its own, DRIFTED copy of every
+ * `??` chain. The second block only runs when the first produced no key at all,
+ * which in practice means "the store entry carries no `task`" — so one child,
+ * reached through the two derivations, rendered different numbers.
+ *
+ * These tests drive the SAME delegation (same child, same metrics, same tool
+ * envelope) through both derivations and pin that the metadata line is now the
+ * SAME string. The session ids are unique to this block: the file has no
+ * `useSessions` reset, and the metadata line reads that store.
+ */
+describe("SubagentDelegatingCard (D3: one row derivation, no drift)", () => {
+  const METRICS = { inputTokens: 500, outputTokens: 400, cost: 0.02, durationMs: 5000 };
+
+  const metadataLine = () => {
+    const lines = Array.from(
+      document.querySelectorAll("div.font-mono.text-ui-xs"),
+    ).map((n) => n.textContent);
+    expect(lines).toHaveLength(1);
+    return lines[0];
+  };
+
+  const child = (over: Partial<SubagentEntry>) =>
+    useSubagents.getState().addSession(
+      entry({
+        sessionId: "d3-child",
+        agentName: "coder",
+        task: "run tests",
+        status: "running",
+        model: "protector/gemini-3.8-flash",
+        ...over,
+      }),
+    );
+
+  beforeEach(() => {
+    for (const id of Object.keys(useSubagents.getState().entries)) {
+      useSubagents.getState().dismiss(id);
+    }
+    useInteractive.setState({ cost: {} });
+  });
+
+  /**
+   * The `progressSummary.tokens` arm: `result.usage` is absent and the child's
+   * `subagent-closed` metrics snapshot says 900, so the two chains disagree on
+   * which number the row prints. The `taskKeys` chain reads `progressSummary`
+   * and wins 700; the `matchingStoreEntries` chain skipped that arm and fell
+   * through to the snapshot, printing 900.
+   */
+  it("reads result.progressSummary.tokens when the row comes from the tool envelope", () => {
+    child({ sessionId: "d3-env" });
+    useSubagents.getState().markClosed("d3-env", "completed", undefined, METRICS);
+    render(
+      <SubagentDelegatingCard
+        title="subagent"
+        status="completed"
+        rawInput={{ task: "run tests" }}
+        rawOutput={{
+          details: {
+            results: [
+              {
+                agent: "coder",
+                task: "run tests",
+                childSessionId: "d3-env",
+                exitCode: 0,
+                progressSummary: { tokens: 700 },
+              },
+            ],
+          },
+        }}
+        sessionId="main1"
+      />,
+    );
+    expect(metadataLine()).toBe("protector/gemini-3.8-flash·700 tok (0.1%)·5s·$0.02");
+  });
+
+  it("reads the same tokens when the row comes from the store entry alone", () => {
+    // The same child and the same envelope, but the store entry carries no
+    // `task` and the envelope addresses the child by `childSessionId` only —
+    // the one shape that used to fall through to the SECOND derivation.
+    child({ sessionId: "d3-orphan", task: "" });
+    useSubagents.getState().markClosed("d3-orphan", "completed", undefined, METRICS);
+    render(
+      <SubagentDelegatingCard
+        title="subagent"
+        status="completed"
+        rawOutput={{
+          details: {
+            results: [
+              {
+                agent: "coder",
+                childSessionId: "d3-orphan",
+                exitCode: 0,
+                progressSummary: { tokens: 700 },
+              },
+            ],
+          },
+        }}
+        sessionId="main1"
+      />,
+    );
+    // IDENTICAL to the envelope-driven row above — one derivation, one answer.
+    expect(metadataLine()).toBe("protector/gemini-3.8-flash·700 tok (0.1%)·5s·$0.02");
+  });
+
+  it("still renders a row for a store entry that carries no task", () => {
+    // The ONLY job the deleted second derivation did in anger: a delegation
+    // with no `task` produces no task key, so it must still get a row.
+    child({ sessionId: "d3-blank", task: "" });
+    render(
+      <SubagentDelegatingCard title="subagent" status="pending" sessionId="main1" />,
+    );
+    expect(screen.getByRole("button", { name: "Open coder transcript" })).toBeTruthy();
+  });
+
+  it("renders no rows and the empty state when nothing was delegated", () => {
+    render(
+      <SubagentDelegatingCard title="subagent" status="pending" sessionId="main1" />,
+    );
+    expect(screen.getByText("No subagents yet.")).toBeTruthy();
+  });
+});

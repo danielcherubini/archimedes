@@ -38,7 +38,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { SettingsBadge, SettingsGroupCard } from "./primitives";
+import { SettingsBadge, SettingsDataRow, SettingsGroupCard } from "./primitives";
 import { Field } from "./controls";
 
 /** The MCP section's props (every piece of state stays in `SettingsPage`). */
@@ -114,7 +114,7 @@ function McpRow({
     result !== null && "error" in result && result.error.includes("needs-auth");
 
   return (
-    <div className="border-t border-border px-4 py-3 first:border-t-0">
+    <SettingsDataRow>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
@@ -197,7 +197,7 @@ function McpRow({
           </AlertDialogContent>
         </AlertDialog>
       </div>
-    </div>
+    </SettingsDataRow>
   );
 }
 
@@ -297,9 +297,9 @@ function McpDialog({
               : `Edit MCP server ${initial.name}`}
           </DialogTitle>
           <DialogDescription>
-            Stored in the desktop's settings.json (pi's entry shape — it
-            copy-pastes to a mcp.json). Merged with pi's mcp.json files at
-            global precedence (project &gt; desktop &gt; pi-global).
+            Stored in the desktop's settings.json. A Space's own MCP config
+            overrides an entry here, and an entry here overrides the
+            user-level config (Space &gt; desktop &gt; user).
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-3">
