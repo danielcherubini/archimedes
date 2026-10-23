@@ -659,13 +659,17 @@ take the next task or stop.**
 ## Blockers / open questions (resolve by deciding, not by asking)
 
 **Nothing blocks the merge.** The open decisions live in
-`frontend-component-extraction-follow-ups.md` — nine of them, each with its status and the reason it was
+`frontend-component-extraction-follow-ups.md`, each with its status and the reason it was
 left. That file exists because this one and the plan are **deleted on ship**, and until now every
 "deliberately not fixed" note in this file was scheduled to vanish with it. Precedent:
 `compaction-recovery-hardening-follow-ups.md`, which has been carrying resolved and accepted items since
 2026-10-14 and names the same symbol-not-line citation rule this file's review round arrived at.
 
-Do not restate those nine items here. This file is the loop's working memory and it is already the worst
+**No item count here, on purpose** — this line used to say "nine of them", which my own 2026-10-23
+commit adding item 10 made false while it was being written. That is the exact defect follow-up item 9
+records. The file is the list; count it there.
+
+Do not restate those items here. This file is the loop's working memory and it is already the worst
 evidence in the repo of what happens when a fact is written down in six places.
 
 ## Changelog

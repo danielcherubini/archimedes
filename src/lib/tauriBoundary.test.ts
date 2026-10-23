@@ -237,6 +237,66 @@ describe("the Tauri IPC boundary (finding 12)", () => {
   });
 });
 
+describe("the boundary holds against the shapes a reader would not notice", () => {
+  it("no production file outside the allowlist even NAMES the wire packages", () => {
+    // WHY THIS IS STRICTER THAN THE RULE ABOVE, and why the stricter version is
+    // the one that matters. The first version of this file matched the import
+    // SHAPE (`from "@tauri-apps/api/core"`). That was demonstrated to be
+    // bypassable by the idiom this repo's OWN scanners use to reach `node:fs`:
+    //
+    //     const CORE = "@tauri-apps/api/" + "core";
+    //     const { invoke } = await import(CORE);
+    //
+    // That compiles, `pnpm build` is green, and it matched nothing — the
+    // specifier is no longer a literal in the source. A guard that can be walked
+    // past by concatenating a string is not a guard, so the rule is now about the
+    // PACKAGE NAME APPEARING AT ALL, in any form, not about how it is imported.
+    //
+    // What this cannot catch is a specifier assembled from fragments that never
+    // individually spell the package (`"@tauri-apps/" + verb + "core"`), or any
+    // other deliberate obfuscation. That is the honest ceiling of a source
+    // scanner: it defends against a mistake and against someone not thinking
+    // about the seam, not against someone determined to hide a call. The
+    // deliberate case is what the PR review is for; the accidental case is 100%
+    // of the history this file was written for.
+    //
+    // ONE PREDICATE, used twice — over the offenders and over the allowed files.
+    // The first version asserted over a literal here and a *second copy* of the
+    // literal in the guard below, and a mutation test proved the consequence:
+    // corrupting the offender predicate left all seven tests green, because the
+    // guard was checking its own untouched copy rather than the thing under test.
+    // A vacuity guard that does not share the predicate is decoration.
+    //
+    // `@tauri-apps/api/window` is removed first (see the scope test below) so
+    // that the two components legitimately importing it do not make this red.
+    const namesWirePackages = (file: string): boolean =>
+      stripJsComments(readFileSync(file, "utf8"))
+        .replace(/@tauri-apps\/api\/window|@tauri-apps\/plugin-[a-z-]+/g, "")
+        .includes("@tauri-apps/api/");
+
+    const offenders = SOURCES.filter(
+      (f) =>
+        !/\.test\.tsx?$/.test(f) &&
+        !f.startsWith(DOMAIN_DIR) &&
+        !PARALLEL_IPC_MODULES.includes(f) &&
+        namesWirePackages(f),
+    ).sort();
+    expect(offenders, "talk to Tauri through @/lib/tauri").toEqual([]);
+
+    // Vacuity guard, in the direction the allowlist makes it easy to get wrong:
+    // the SAME predicate run over the ALLOWED files must find them. If it finds
+    // nothing, it matches nothing anywhere and the assertion above is green
+    // because it is blind — the failure `themeTokens.test.ts` records being
+    // bitten by.
+    const allowed = [...SOURCES.filter((f) => f.startsWith(DOMAIN_DIR)), ...PARALLEL_IPC_MODULES].filter(
+      namesWirePackages,
+    );
+    expect(allowed.length, "the predicate matches nothing — it is blind, not satisfied").toBeGreaterThan(
+      0,
+    );
+  });
+});
+
 describe("the boundary's declared scope (so its silence is not an accident)", () => {
   it("the window shell and plugin packages stay out of scope, on purpose", () => {
     // Asserted, not asserted-away: these DO reach Tauri from components, and this
