@@ -425,6 +425,24 @@ fn parse_tools(raw: &str) -> Option<Vec<String>> {
 /// NBSP/dedent byte-offset guard documented below), it must be applied to
 /// BOTH copies.)
 ///
+/// ONE CARVE-OUT to that "both copies" rule, and it is not a shape bug: the
+/// trailing `#`-comment strip that `skills.rs`'s `parse_value` gained for issue
+/// #11 belongs HERE NOT. The two copies mirror DIFFERENT upstream readers.
+/// `skills.rs` mirrors pi's `parseFrontmatter`, which parses with the `yaml`
+/// package — a plain scalar ENDS at a `#` preceded by a space or tab, so pi
+/// strips it. This copy mirrors the reader ADR 0020 names for Agent
+/// definitions: pi's subagent extension (`pi-subagents`,
+/// `src/agents/frontmatter.ts`), whose `parseFrontmatter` is a hand-rolled
+/// `/^([\w-]+):\s*(.*)$/` regex reader. Measured against it, that reader KEEPS
+/// the comment — `name: a # note` → `"a # note"` and `description: Do the thing
+/// # internal` → `"Do the thing # internal"`. Stripping here would therefore
+/// move the desktop AWAY from the only pi-side reader of Agent definitions and
+/// MANUFACTURE the divergence ADR 0036 exists to prevent. So: the "both copies"
+/// rule binds for SHAPE bugs (the NBSP/dedent guard, the quote pair, the `: `
+/// guard — where both copies read the same thing) and does NOT bind for this
+/// strip. Should that scoping ever be revisited, it needs its own parity target
+/// decided first, plus a truth table here — issue #11 is about Skills only.
+///
 /// - inline: the rest of the line, trimmed; strip one pair of matching
 ///   surrounding quotes; an empty inline value means "no value".
 /// - block: the inline value is exactly `|` or `>` (optionally followed

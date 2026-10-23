@@ -485,7 +485,8 @@ fn parse_skill_file(content: &str, fallback_name: &str) -> Option<(String, Strin
                     // read differently from pi would make the desktop and pi
                     // disagree on the same file (ADR 0036).
                     //
-                    // ASCII SPACE AND TAB ONLY, at both trims. YAML separates
+                    // ASCII SPACE AND TAB ONLY — at the trim and in the shared
+                    // comment strip. YAML separates
                     // a plain scalar on space and tab alone, so `true\u{A0}` /
                     // `true\u{3000}` / `true\u{B}` / `true\u{85}` are STRINGS
                     // to pi and stay model-VISIBLE there; a bare `trim()` /
@@ -500,25 +501,17 @@ fn parse_skill_file(content: &str, fallback_name: &str) -> Option<(String, Strin
                     // same rule `parse_value`'s dedent states for the same
                     // reason.
                     let value = rest.trim_matches([' ', '\t']);
-                    let value = match value.find('#') {
-                        // A `#` only opens a comment when a space or a tab
-                        // precedes it; glued to the token it is scalar text.
-                        Some(i) if value[..i].ends_with([' ', '\t']) => {
-                            value[..i].trim_end_matches([' ', '\t'])
-                        }
-                        _ => value,
-                    };
+                    let value = strip_trailing_comment(value);
                     disable = Some(matches!(value, "true" | "True" | "TRUE"));
-                    // ASYMMETRY, deliberate and SCOPED OUT: this branch strips
-                    // a ` #` comment, `parse_value` (which reads `name` and
-                    // `description`) does NOT — so `description: Do the thing #
-                    // note` is advertised here WITH the comment pi strips, and
-                    // `name: a # note` becomes a literal name no `$` token can
-                    // address. Fixing that would change the advertised text of
-                    // every commented `SKILL.md` in the wild, which is a larger
-                    // and separately-reviewable change; the flag branch strips
-                    // because a wrong BOOLEAN here changes ENFORCEMENT, not
-                    // prose. Do not "unify" the two readers by reflex.
+                    // ONE reader, deliberately: this branch and `parse_value`
+                    // (which reads `name` and `description`) strip the comment
+                    // through the SAME `strip_trailing_comment`, so the same
+                    // `SKILL.md` cannot be advertised with different prose by the
+                    // two keys. Issue #11 closed the asymmetry this branch used to
+                    // document; do not re-split the rule into two copies. What
+                    // still differs is the TRIM above (`trim_matches([' ', '\t'])`
+                    // here, `trim()` in `parse_value`) and that is deliberate —
+                    // see the ASCII-only paragraph above.
                 }
             }
         }
@@ -656,10 +649,74 @@ pub(crate) fn is_mentionable_name(name: &str) -> bool {
     !expect_segment
 }
 
+/// A trailing `#` comment ends an inline frontmatter value, the way pi's `yaml`
+/// ends a plain scalar at one (`name: a # note` is `a` to pi, not `a # note`).
+///
+/// A comment is introduced by an ASCII SPACE or a TAB — `has#nospace` is one plain
+/// scalar, and so is anything preceded by U+00A0 / U+3000 / VT / FF / NEL, which
+/// are NOT YAML separators. ASCII-only for the same reason the
+/// `disable-model-invocation` branch and the block dedent give theirs:
+/// `char::is_whitespace` includes NBSP, so a bare `trim()` / `trim_end()` would cut
+/// text pi keeps (and, in the dedent, would slice mid-character). A `#` that OPENS
+/// the value is a comment too (`description: # internal` is `null` to pi, not the
+/// string `# internal`).
+///
+/// A LEADING QUOTE is respected: the comment only starts after the CLOSING quote,
+/// so `"# keep"` survives and `"a # b" # note` is `a # b`. A double-quoted scalar
+/// escapes with a backslash (`\"`); a single-quoted one does not, so the escape is
+/// only consumed for `"`.
+///
+/// TOTAL, like every other reader here: every offset it slices at is either the
+/// byte index of an ASCII `#` or a boundary advanced by `char::len_utf8()`, so it
+/// can never land mid-character. An unterminated quote (pi's `yaml` throws
+/// `MISSING_CHAR` / `Missing closing "quote` there and drops the file) is read as
+/// an unquoted scalar — fail-open, the tolerant reader's standing direction.
+fn strip_trailing_comment(inline: &str) -> &str {
+    if let Some(quote) = inline.chars().next().filter(|c| *c == '"' || *c == '\'') {
+        let mut skip_next = false;
+        // `.skip(1)` starts the scan AFTER the opening quote (`skip` counts
+        // items, not bytes, and both quote chars are one byte).
+        for (i, c) in inline.char_indices().skip(1) {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if quote == '"' && c == '\\' {
+                skip_next = true;
+                continue;
+            }
+            if c == quote {
+                let close = i + c.len_utf8();
+                let tail = &inline[close..];
+                return if tail.starts_with([' ', '\t'])
+                    && tail.trim_start_matches([' ', '\t']).starts_with('#')
+                {
+                    &inline[..close]
+                } else {
+                    inline
+                };
+            }
+        }
+        // No matching close quote: not a quoted scalar. Fall through and read
+        // the text as the plain scalar it looks like.
+    }
+    match inline
+        .match_indices('#')
+        .find(|(i, _)| *i == 0 || inline[..*i].ends_with([' ', '\t']))
+        .map(|(i, _)| i)
+    {
+        Some(0) => "",
+        Some(i) => inline[..i].trim_end_matches([' ', '\t']),
+        None => inline,
+    }
+}
+
 /// Parse the value of a top-level `key: <rest>` line (step 3).
 ///
-/// - inline: the rest of the line, trimmed; strip one pair of matching
-///   surrounding quotes; an empty inline value means "no value".
+/// - inline: the rest of the line, trimmed; a trailing `#` comment introduced
+///   by an ASCII space or tab is stripped first, and a `#` that opens the value
+///   makes the whole value empty — see [`strip_trailing_comment`]; strip one
+///   pair of matching surrounding quotes; an empty inline value means "no value".
 /// - block: the inline value is exactly `|` or `>` (optionally followed
 ///   by ONE chomping/indent indicator — `-` or `+ — with any further
 ///   trailing whitespace: the value is the following indented lines
@@ -669,6 +726,14 @@ pub(crate) fn is_mentionable_name(name: &str) -> bool {
 ///   ambiguity) → no value (tolerant, no crash).
 fn parse_value(fm: &[&str], idx: usize, rest: &str) -> Option<String> {
     let inline = rest.trim();
+    if inline.is_empty() {
+        return None;
+    }
+    // A trailing `#` comment is not part of the value (issue #11: pi strips it,
+    // and a `name: a # note` left whole is a name no `$` token can address).
+    // BEFORE the block-indicator match, so `description: > # note` still reads
+    // as the block scalar pi reads it there.
+    let inline = strip_trailing_comment(inline);
     if inline.is_empty() {
         return None;
     }
@@ -1337,5 +1402,37 @@ mod tests {
         );
         assert_eq!(out[0].shadowed[0].scope, SkillScope::Space);
         assert_eq!(out[0].shadowed[1].scope, SkillScope::User);
+    }
+
+    #[test]
+    fn parse_value_is_total_over_multibyte_whitespace_and_hashes() {
+        // Discovery never panics (the same contract the block-dedent comment
+        // protects): every offset `strip_trailing_comment` slices at is an ASCII
+        // `#` index or a boundary advanced by `char::len_utf8()`, never a
+        // mid-character byte.
+        for rest in [
+            " a \u{A0}# note",
+            " a\u{A0}# note",
+            " \u{1F600}#\u{1F600}",
+            " a \u{3000}# x",
+            " a \u{B}# x",
+            " \"a \\\" # b\"",
+            " \"unclosed # keep",
+            " #",
+            " \"",
+            " a\t# b",
+        ] {
+            let _ = parse_value(&[], 0, rest); // totality: whatever it returns, it must not panic
+        }
+        assert_eq!(parse_value(&[], 0, " a # note").as_deref(), Some("a"));
+        assert_eq!(
+            parse_value(&[], 0, " \u{1F600}#\u{1F600}").as_deref(),
+            Some("\u{1F600}#\u{1F600}")
+        );
+        assert_eq!(
+            parse_value(&[], 0, " \"# keep\"").as_deref(),
+            Some("# keep")
+        );
+        assert_eq!(parse_value(&[], 0, " # note").as_deref(), None);
     }
 }
