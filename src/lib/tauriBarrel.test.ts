@@ -57,10 +57,20 @@ const { readFileSync, readdirSync, existsSync } = (await import(NODE_FS)) as {
 const BARREL = "src/lib/tauri.ts";
 const DIR = "src/lib/tauri";
 
+/** Normalise a `readdirSync` result to the `/`-spelled repo-relative paths every
+ *  path this file compares is written in. On Windows `readdirSync` returns
+ *  BACKSLASH paths, so the bare `src/${p}` mapping produced
+ *  `src\lib\tauri.ts` and the vacuity guard's `toContain(BARREL)` reddened on a
+ *  tree nothing had changed; `resolve()` also splits importers on `/`, so a
+ *  backslash importer resolved to the wrong module and would have made the
+ *  bypass guard itself blind. POSIX never emits `\` in a path, so this is a
+ *  no-op there. CI caught it; every local run is POSIX. */
+const relPath = (dir: string, p: string): string => `${dir}/${p.replace(/\\/g, "/")}`;
+
 /** EVERY `.ts`/`.tsx` under `src/` — tests INCLUDED, see the header. */
 const SOURCES = readdirSync("src", { recursive: true, encoding: "utf8" })
   .filter((p) => /\.tsx?$/.test(p))
-  .map((p) => `src/${p}`)
+  .map((p) => relPath("src", p))
   .sort();
 
 /** Strip comments before scanning: a doc-comment that MENTIONS
@@ -153,7 +163,7 @@ const domainModules = (): string[] =>
   existsSync(DIR)
     ? readdirSync(DIR, { recursive: true, encoding: "utf8" })
         .filter((p) => /\.tsx?$/.test(p) && !/\.test\.tsx?$/.test(p))
-        .map((p) => `${DIR}/${p}`)
+        .map((p) => relPath(DIR, p))
         .sort()
     : [];
 

@@ -49,9 +49,27 @@ const { existsSync, readFileSync } = (await import(NODE_FS)) as {
   readFileSync: (path: string, encoding: string) => string;
 };
 
-/** Resolve a sibling module's path (no `@types/node` here, so `URL.pathname`). */
+// `fileURLToPath` through the same computed-specifier idiom (no `@types/node`).
+const NODE_URL = "node:" + "url";
+const { fileURLToPath } = (await import(NODE_URL)) as {
+  fileURLToPath: (url: string | URL) => string;
+};
+
+/**
+ * Resolve a sibling module's path.
+ *
+ * `fileURLToPath`, NOT `URL#pathname`. The latter is a URL-path reader and it
+ * keeps the leading slash of a Windows drive path: on a Windows runner
+ * `new URL("./useSkillCatalog.ts", import.meta.url).pathname` is
+ * `/D:/a/archimedes/archimedes/src/hooks/useSkillCatalog.ts`, and `readFileSync`
+ * then reports `ENOENT … 'D:\D:\a\archimedes\…'` — the doubled drive letter is
+ * Node resolving the leading slash against the current drive. `fileURLToPath`
+ * is the function that actually converts a `file:` URL to a native path, and it
+ * returns `/a/b` on POSIX and `D:\a\b` on Windows. (CI caught this; every local
+ * run is POSIX, where the two agree.)
+ */
 function pathOf(file: string): string {
-  return new URL(file, import.meta.url).pathname;
+  return fileURLToPath(new URL(file, import.meta.url));
 }
 
 /** Read a sibling module's SOURCE (the scanner's subject). */

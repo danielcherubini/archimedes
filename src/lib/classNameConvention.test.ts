@@ -115,6 +115,15 @@ const { readFileSync, readdirSync } = (await import(NODE_FS)) as {
  * filter is there so a future font or image under `src/` cannot turn this into a
  * binary read.
  *
+ * THE SEPARATORS ARE NORMALISED, and CI is why. On Windows `readdirSync` returns
+ * BACKSLASH paths, so the bare mapping produced `src/components\Foo.tsx` and
+ * every assertion below that compares against a `/`-spelled literal
+ * (`toContain("src/components/SpacesList.tsx")`, and the two allowlist `toEqual`
+ * sets) reddened on a tree nothing had changed. POSIX never emits `\` in a path,
+ * so the replace is a no-op there and the two platforms now report the same
+ * strings. Every path this file compares — the allowlists, the offender keys —
+ * is spelled with `/`, so this is the single place the fix belongs.
+ *
  * TESTS ARE OUT OF SCOPE ON PURPOSE. A test file hand-writing a class string is
  * usually the PIN itself — `WindowControls.test.tsx` compares against a literal
  * `SUBTLE_BUTTON`, and `primitives.test.tsx` re-spells the row shell precisely so
@@ -123,7 +132,7 @@ const { readFileSync, readdirSync } = (await import(NODE_FS)) as {
  * assertion meant to catch it. The convention is about SHIPPED markup. */
 const SOURCES = readdirSync("src", { recursive: true, encoding: "utf8" })
   .filter((p) => /\.tsx?$/.test(p) && !/\.test\.tsx?$/.test(p))
-  .map((p) => `src/${p}`)
+  .map((p) => `src/${p.replace(/\\/g, "/")}`)
   .sort();
 
 /** Strip JS comments before scanning. A class name that appears only in a
