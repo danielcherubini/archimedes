@@ -141,7 +141,8 @@ describe("the catalog cache has one owner", () => {
 describe("the two catalogs stay independent caches", () => {
   it("clearSkillCatalogCache does not evict the agent cache (and vice versa)", async () => {
     // Behaviour, not shape. `clearAgentCatalogCache` is invalidation-on-write
-    // for the agent override map (`SpacesList`'s `writeAgentOverrides`); if the
+    // for the agent override map (`useAgentOverridesWrites`'s `writeAgentOverrides`,
+    // reached from `SpacesList`'s Agents modal); if the
     // two catalogs shared one Map, saving an override would also throw away the
     // skill listing that `App` and `ChatStream` share, and the composer's `$`
     // mentions would go blank behind a keystroke.

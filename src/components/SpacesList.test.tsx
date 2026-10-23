@@ -377,6 +377,10 @@ beforeEach(() => {
 // broken" when the real cause is an empty store. The same seeding pattern
 // `ChatStream.test.tsx` uses. Reset to `null` first: the store is module-scoped,
 // so a test that writes settings must not leak them into the next one.
+// (Since D2 the read travels through `useAgentOverridesWrites`, which selects
+// `settings` off this same store — so the seeding below is still exactly what the
+// gate reads, and `holds the Agents dialog back while there is no settings
+// document` is the pin that keeps it honest.)
 beforeEach(() => {
   useSettings.setState({ settings: null, loaded: false });
   useSettings.getState().setSettings(SETTINGS_FIXTURE);
@@ -955,7 +959,8 @@ describe("SpacesList", () => {
     // Its `agentOverrides` carries a SECOND agent on purpose: that entry is
     // expected to be REPLACED away, because the map is the one field the user is
     // editing and the dialog hands over the whole edited map (see the write
-    // helper's comment in `SpacesList.tsx` — sound because no writer outside this
+    // helper's comment in `hooks/useAgentOverridesWrites.ts`, where the chain moved
+    // for D2 — sound because no writer outside this
     // modal is live while the modal is, the one exception being `SettingsPage`'s
     // Provider-rename remap, which cannot overlap because Settings unmounts this pane).
     const fresh: AppSettings = {
@@ -1664,6 +1669,76 @@ describe("SpacesList", () => {
     // …and the catalog is re-fetched rather than served from the entry the write
     // invalidated.
     await waitFor(() => expect(mockedListAgentConfig).toHaveBeenCalledTimes(2));
+  });
+
+  // ---------------------------------------------------------------------------
+  // D2's MIGRATION PINS (characterisation tests, written against the code as it
+  // stood BEFORE `useAgentOverridesWrites` was wired in).
+  //
+  // The modal-level suite above already pins the write chain's ordering (read-
+  // modify-write, serialization, the epoch in both arms, the swallow, eviction).
+  // These two pin the ONLY two facts about that chain that no test above reads —
+  // and both are things a hook extraction can move without reddening anything
+  // else: the counter the dialog's suppression is stamped against, and the
+  // document the render gate reads. They are written against today's behaviour
+  // and must stay green across the migration; `useAgentOverridesWrites.test.ts`
+  // pins the same properties at hook level, so a loss in either direction shows.
+  // ---------------------------------------------------------------------------
+
+  it("a rolled-back write moves the counter the dialog's suppression is stamped against", async () => {
+    // The chain's failure arm does two observable things: log (pinned above) and
+    // re-seed the store (pinned above). What nothing above reads is the THIRD: the
+    // `rolledBackWrites` counter the mount hands the dialog. `a failure re-seed …
+    // is discarded at commit` pins that it does NOT move for a STALE link, and the
+    // stored-pin-cue test pins its downstream effect in the DOM — but the fresh
+    // link's increment, the case the dialog's `edits` stamp is invalidated by, was
+    // never read. Without it, a migration that dropped `onRolledBack` would leave
+    // the cue test green (its rows carry the column disagreement the cue reads
+    // directly) while the suppression stamp silently stops moving.
+    const fresh: AppSettings = {
+      ...SETTINGS_FIXTURE,
+      agentOverrides: { plan: { thinking: "high" } },
+    };
+    mockedGetSettings.mockResolvedValue(fresh);
+    mockedSaveSettings.mockRejectedValueOnce(new Error("boom"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    resetRolledBackWritesRecord();
+    render(<SpacesList />);
+    const dialog = await openAgentsModal();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Model for scout" }),
+    );
+    fireEvent.click(await screen.findByText("Qwen3.8"));
+    await waitFor(() =>
+      expect(consoleError).toHaveBeenCalledWith(
+        "Failed to save agent overrides:",
+        expect.anything(),
+      ),
+    );
+    // The rollback's re-seed is what the counter reports, so it moves WITH the
+    // publish — i.e. only after the store has gone back to the file's map.
+    await waitFor(() => expect(useSettings.getState().settings).toEqual(fresh));
+    await waitFor(() => expect(rollsSeen).toEqual([0, 1]));
+  });
+
+  it("holds the Agents dialog back while there is no settings document, and keeps the button clickable", async () => {
+    // The render gate `agentsOpen && settings &&`. It is a behaviour of the
+    // document read, and after D2 that read is the hook's `settings` field, so it
+    // is pinned here rather than assumed: with no document the modal has nothing
+    // correct to edit (it reads `agentOverrides` off the document), so NOTHING
+    // mounts — while the button stays a live control, because disabling it would
+    // make a boot-load failure look like a dead pane.
+    useSettings.setState({ settings: null });
+    render(<SpacesList />);
+    const button = screen.getByRole("button", { name: "Agents" });
+    fireEvent.click(button);
+    expect(button.hasAttribute("disabled")).toBe(false);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // Drain the mount's two catalog fetches INSIDE `act` so this test adds no
+    // "not wrapped in act" stderr of its own (the pane's `listModels`/`listTools`
+    // promises settle after the assertions above, and a late `setModels` outside
+    // `act` is noise a new test should not leave behind).
+    await act(async () => {});
   });
 });
 

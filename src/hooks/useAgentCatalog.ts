@@ -24,8 +24,9 @@ import { useCatalogRow } from "./useCatalogRow";
  * Rule 3 keeps this a DELIBERATE SHALLOW CACHE, and it still holds: the eviction
  * happens on a SPACE SWITCH and on a WRITE, never on a plain remount, so two
  * consumers opening the modal in one pane mount still share one (network-bound)
- * discovery. What was added is invalidation-on-write — `SpacesList`'s
- * `writeAgentOverrides` calls `clearAgentCatalogCache()` after a successful save,
+ * discovery. What was added is invalidation-on-write — the Agents modal's write
+ * chain (`hooks/useAgentOverridesWrites.ts`, `writeAgentOverrides`) calls
+ * `clearAgentCatalogCache()` after a successful save,
  * because `effective.thinking` / `.model` / `.tools` are the resolver's answer for
  * the map that was just replaced. That is exactly what rule 3 assumed someone would
  * add if a writer ever appeared: without it, the modal reopens showing the
@@ -75,7 +76,8 @@ export function useAgentCatalog(spacePath: string | null): AgentConfigDto[] {
 /**
  * Evict the whole module-level catalog cache.
  *
- * TWO callers, deliberately: `SpacesList`'s `writeAgentOverrides` after a
+ * TWO callers, deliberately: the Agents modal's write chain
+ * (`hooks/useAgentOverridesWrites.ts`) after a
  * SUCCESSFUL `agentOverrides` save (invalidation-on-write — see rule 3 above), and
  * every test file that mounts the hook, in `beforeEach`. Clearing everything rather
  * than one key is right for both: the override map is global, so a save changes the

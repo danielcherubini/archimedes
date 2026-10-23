@@ -43,7 +43,8 @@ import { useEffect, useRef, useState } from "react";
  * Every cache Map is created by the CALLING module and passed in. That is not
  * incidental: the two standalone catalogs must keep INDEPENDENT Maps, because
  * `clearAgentCatalogCache()` is invalidation-on-write for the global agent
- * override map (`SpacesList`'s `writeAgentOverrides`) and must not also throw
+ * override map (`useAgentOverridesWrites`'s `writeAgentOverrides`, reached from
+ * `SpacesList`'s Agents modal) and must not also throw
  * away the skill listing that `App` and `ChatStream` share.
  */
 

@@ -20,8 +20,8 @@ import type { AppSettings } from "../lib/tauri";
  * save → re-theme`) exists once.
  *
  * THE OTHER OWNER, surveyed before designing this (the audit named only
- * `SettingsPage`). `SpacesList.tsx` reads the document at `:480` and writes it at
- * `:333`, `:354`, `:596`, `:607` — but those writes are NOT this shape. They are
+ * `SettingsPage`). `SpacesList.tsx` read the document and wrote it at four places
+ * — but those writes are NOT this shape. They are
  * a READ-MODIFY-WRITE of ONE field (`agentOverrides`) against the FILE, because
  * Rust writes `settings.json` on its own, so composing from the store would
  * clobber a concurrent change; and they carry an optimistic publish, a serialized

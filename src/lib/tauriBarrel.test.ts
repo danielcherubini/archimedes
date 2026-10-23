@@ -10,10 +10,12 @@ import { describe, expect, it } from "vitest";
  * ---------------------------------------------------------------------------
  *
  * `src/lib/tauri.ts` was split by domain into `src/lib/tauri/*.ts`. It survives
- * as a RE-EXPORT BARREL for one reason: **33 test files `vi.mock` `@/lib/tauri`
- * BY MODULE PATH** (32 spreading `vi.importActual`, 121 named `vi.fn()`
- * overrides between them). A `vi.mock` on a module path intercepts only the
- * calls that travel THROUGH that path. So the moment any consumer imports a
+ * as a RE-EXPORT BARREL for one reason: **35 test files `vi.mock` `@/lib/tauri`
+ * BY MODULE PATH** (34 spreading `vi.importActual` — both counts pinned by the
+ * assertion below rather than carried by hand; the header used to also state how
+ * many named `vi.fn()` overrides sit inside those factories, and had gone stale,
+ * so it no longer does). A `vi.mock` on a module path intercepts only the calls
+ * that travel THROUGH that path. So the moment any consumer imports a
  * moved function from `lib/tauri/sessions.ts` directly, every test that mocked
  * it through `@/lib/tauri` **silently stops intercepting — and still passes,
  * against real IPC.** That is the worst possible failure mode of this refactor:
@@ -361,12 +363,12 @@ describe("the scanner actually reads the tree", () => {
           stripJsComments(readFileSync(f, "utf8")),
         ),
     );
-    // SET SIZE, pinned: 34 files mock the barrel by path. The number may only
+    // SET SIZE, pinned: 35 files mock the barrel by path. The number may only
     // move when a test file is added or removed, in a commit that says so — this
-    // one moved 33 -> 34 when D2 added `useSettingsDocument.test.ts`, which mocks
-    // the barrel the documented way.
-    expect(mockers).toHaveLength(34);
-    // 33 of the 34 SPREAD `vi.importActual`, which is the shape that makes the
+    // one moved 34 -> 35 when D2 wired `useAgentOverridesWrites` into `SpacesList`
+    // and landed its test file, which mocks the barrel the documented way.
+    expect(mockers).toHaveLength(35);
+    // 34 of the 35 SPREAD `vi.importActual`, which is the shape that makes the
     // seam forgiving: an unlisted export still resolves. The remaining one replaces
     // the module wholesale, so a name it forgets is `undefined` — the case the
     // pinned-surface assertion below covers.
@@ -374,7 +376,7 @@ describe("the scanner actually reads the tree", () => {
       mockers.filter((f) =>
         /vi\.importActual/.test(readFileSync(f, "utf8")),
       ).length,
-    ).toBe(33);
+    ).toBe(34);
   });
 });
 
@@ -395,7 +397,7 @@ describe("nothing bypasses the lib/tauri barrel (D1's mock seam)", () => {
 
   it("the runtime export set of the barrel is exactly the pinned 49", async () => {
     // The strongest form: what the module ACTUALLY exposes at runtime, which is
-    // what `vi.importActual` spreads into the 34 mock factories. A forgotten
+    // what `vi.importActual` spreads into the 35 mock factories. A forgotten
     // `export { fn }` here is a `undefined is not a function` in the app and a
     // silently-unmocked IPC call in a test — this catches it at the seam.
     const mod = await import("./tauri");
