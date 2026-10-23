@@ -29,52 +29,32 @@ import {
 } from "../lib/newSpaceDialogState";
 import { clearSkillCatalogCache } from "../hooks/useSkillCatalog";
 import { clearAgentCatalogCache } from "../hooks/useAgentCatalog";
+import {
+  makeMessage,
+  makeSessionRow,
+  makeSettings,
+  makeSpaceRow,
+} from "../test/fixtures";
+import { resetModuleFlags, resetStores } from "../test/resetStores";
 import SpacesList from "./SpacesList";
 
 /**
  * The settings document the STORE is seeded with (see the `beforeEach` below).
  *
- * TYPED as `AppSettings`, which is deliberate: the `getSettings` mock factory's
- * literal below is untyped (a hoisted `vi.mock` factory cannot reference an outer
- * const), so `tsc` cannot check that document for a missing key. This one is
- * checked, and `AgentsDialog` reads `settings.agentOverrides` off the STORE — so
- * if this fixture ever lacks the field, the build catches it instead of the modal
- * throwing for a key that only shows up at runtime.
+ * The shared `makeSettings()` fixture (Task B4a), with the ONE field this file
+ * overrides: `defaultModel` is `"stale/model"` here because the read-modify-write
+ * test below makes the RE-READ return a different value, which is what proves the
+ * save composes from the fresh document and not from this copy.
+ *
+ * TYPED as `AppSettings` through the fixture, which is the point of it: the
+ * `getSettings` mock factory's literal used to be an untyped hand-copy of all 22
+ * required fields, and a field added to the real type would miss every copy at
+ * once. `makeSettings` is `AppSettings`-typed, so it is now a compile error in
+ * the one file that has to change.
  */
-const SETTINGS_FIXTURE: AppSettings = {
-  theme: "dark",
-  palette: null,
-  paneLayout: {},
-  defaultTrustNewSpaces: false,
-  // The value the STORE holds. The read-modify-write test below makes the
-  // RE-READ return a different one, which is what proves the save composes from
-  // the fresh document and not from this copy.
+const SETTINGS_FIXTURE: AppSettings = makeSettings({
   defaultModel: "stale/model",
-  defaultThinkingLevel: null,
-  enabledTools: [],
-  providers: [],
-  mcpServers: {},
-  font: { sizePx: 14, uiFamily: null, codeFamily: null },
-  defaultThinkingLevels: {},
-  agentOverrides: {},
-  spinnerStyle: null,
-  emptyStateAnimation: null,
-  filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
-  web: {
-    braveApiKey: "",
-    tavilyApiKey: "",
-    perplexityApiKey: "",
-    searxngUrl: "",
-    defaultProvider: "auto",
-    proxy: "",
-  },
-  mcpMentionsEnabled: false,
-  sessionNamingEnabled: true,
-  sessionNamingModel: null,
-  sessionNamingReasoning: null,
-  attentionAlertsEnabled: true,
-  attentionAlertDelaySecs: 15,
-};
+});
 
 /** One `list_agent_config` row (the Agents modal's data). */
 function agentRow(overrides: Partial<AgentConfigDto> = {}): AgentConfigDto {
@@ -95,44 +75,20 @@ function agentRow(overrides: Partial<AgentConfigDto> = {}): AgentConfigDto {
 // Mock the Tauri IPC layer; everything else (stores) is the real code.
 vi.mock("../lib/tauri", async () => {
   const actual = await vi.importActual<Record<string, unknown>>("../lib/tauri");
+  // The shared settings fixture, reached through a DYNAMIC import inside the
+  // factory — the route `src/test/fixtures/settings.ts` documents and
+  // `src/test/fixtures.test.ts` proves: `vi.hoisted()` is per-file and does NOT
+  // make a module importable from a hoisted `vi.mock` factory, but every factory
+  // here is already `async`, so `await import()` runs at factory time, after the
+  // module graph exists. This replaces a 30-line untyped hand-copy of all 22
+  // required `AppSettings` fields whose only guard was a comment.
+  const { makeSettings } = await import("../test/fixtures/settings");
   return {
     ...actual,
-    // `AppSettings` document (a full shape — the `AppSettings` interface
-    // mirrors the Rust `Settings` struct exactly). UNtyped, because a hoisted
-    // `vi.mock` factory cannot reference the typed `SETTINGS_FIXTURE` above —
-    // which is exactly why `agentOverrides: {}` had to be added to this literal
-    // BY HAND and why the store seeding below uses the typed one instead.
-    getSettings: vi.fn().mockResolvedValue({
-      theme: "dark",
-      palette: null,
-      paneLayout: {},
-      defaultTrustNewSpaces: false,
-      defaultModel: null,
-      defaultThinkingLevel: null,
-      enabledTools: [],
-      providers: [],
-      mcpServers: {},
-      font: { sizePx: 14, uiFamily: null, codeFamily: null },
-      defaultThinkingLevels: {},
-      agentOverrides: {},
-      spinnerStyle: null,
-      emptyStateAnimation: null,
-      filePolicy: { reads: "allow", writes: "allow", shell: "allow" },
-      web: {
-        braveApiKey: "",
-        tavilyApiKey: "",
-        perplexityApiKey: "",
-        searxngUrl: "",
-        defaultProvider: "auto",
-        proxy: "",
-      },
-      mcpMentionsEnabled: false,
-      sessionNamingEnabled: true,
-      sessionNamingModel: null,
-      sessionNamingReasoning: null,
-      attentionAlertsEnabled: true,
-      attentionAlertDelaySecs: 15,
-    }),
+    // `AppSettings` document: the fresh-install defaults (`defaultModel: null`
+    // included — the store's copy of the document differs by that field alone,
+    // which is why the `beforeEach` re-arm restates it).
+    getSettings: vi.fn().mockResolvedValue(makeSettings()),
     startSession: vi.fn().mockResolvedValue({
       sessionId: "new1",
       cwd: "/tmp/ws",
@@ -327,48 +283,48 @@ function traceAgentOverrides(): { seen: () => string[]; stop: () => void } {
  */
 function seed(): void {
   const now = Date.now();
+  // THE ISOLATION HALF, now the shared helper's job: every store back to the
+  // state zustand captured at creation, BEFORE this fixture writes its keys.
+  // This file used to hand-list the keys it happened to remember —
+  // `archivedSessions: []`, `closeReasons: {}`, `stopReasons: {}`, plus a whole
+  // `setState` on each of the permissions and interactive stores — and
+  // `useSessions` has SIXTEEN data fields, so the ten a hand-written reset omits
+  // leak from one test to the next. `resetStores()` installs the WHOLE captured
+  // state (with `replace = true`, so nothing shallow-merges over it), which
+  // includes the archived list the comment below used to guard by hand.
+  // What stays below is therefore the FIXTURE, not the hygiene.
+  resetStores();
   // Seed via `setState` directly — NOT `getState().setSpaces(…)` (that
   // triggers boot auto-selection + `openSession` → `loadHistory` IPC).
   useSessions.setState({
     spaces: [
-      { path: "/tmp/alpha", createdAt: now, lastOpenedAt: now, trusted: false },
-      { path: "/tmp/beta", createdAt: now, lastOpenedAt: now, trusted: true },
+      makeSpaceRow({ path: "/tmp/alpha", createdAt: now, lastOpenedAt: now }),
+      makeSpaceRow({
+        path: "/tmp/beta",
+        createdAt: now,
+        lastOpenedAt: now,
+        trusted: true,
+      }),
     ],
-    sessions: [
-      { sessionId: "s1", cwd: "/tmp/alpha", capabilities: {}, archived: false },
-    ],
+    sessions: [makeSessionRow({ sessionId: "s1", cwd: "/tmp/alpha" })],
     historySessions: [
-      { sessionId: "h1", cwd: "/tmp/alpha", capabilities: {}, archived: false },
-      { sessionId: "h2", cwd: "/tmp/beta", capabilities: {}, archived: false },
+      makeSessionRow({ sessionId: "h1", cwd: "/tmp/alpha" }),
+      makeSessionRow({ sessionId: "h2", cwd: "/tmp/beta" }),
     ],
-    // Reset ALONGSIDE the other lists. `seedArchivedElsewhere` APPENDS archived
-    // rows (it is the file's first appending seed), so without this line a test's
-    // `/tmp/beta` rows leak into every later test — and because the Archived
-    // section now filters by the active Space, a leaked row of another Space is
-    // filtered OUT rather than surfacing as a stray row, so the leak would be
-    // invisible exactly when it starts to bite.
-    archivedSessions: [],
     activeSessionId: "s1",
     // The selected space (the top tabs' state): `alpha` — the active
     // session's space (the sidebar lists THIS space's sessions).
     activeSpacePath: "/tmp/alpha",
-    closeReasons: {},
     messages: {
-      s1: [{ kind: "user", text: "Fix the login bug", at: now - 10_000 }],
+      s1: [makeMessage("user", { text: "Fix the login bug", at: now - 10_000 })],
       h1: [
-        { kind: "user", text: "Refactor the parser", at: now - 3_600_000 },
+        makeMessage("user", {
+          text: "Refactor the parser",
+          at: now - 3_600_000,
+        }),
       ],
     },
     inTurn: { s1: true },
-    stopReasons: {},
-  });
-  usePermissions.setState({ prompts: {} });
-  useInteractive.setState({
-    requests: {},
-    todos: {},
-    agentState: {},
-    cost: {},
-    session: {},
   });
 }
 
@@ -433,30 +389,22 @@ beforeEach(clearSkillCatalogCache);
 // …and the same for the Agent catalog's module-level cache (the Agents modal
 // fetches through `useAgentCatalog`, keyed by the `seed()` fixture's Space).
 beforeEach(clearAgentCatalogCache);
-// The left-pane collapsed flag is module-scoped: reset it between tests
-// (the module is the single persistence owner — `setLeftPaneCollapsed`
-// writes localStorage itself).
-beforeEach(() => {
-  setLeftPaneCollapsed(false);
-});
-// jsdom has no layout, so Radix's `Select` throws on the focus-first-option
-// scroll (`candidate?.scrollIntoView is not a function`). The repo-wide
-// convention for this in every file that mounts a `Select`
-// (`SettingsPage.test.tsx`, `SessionConfigSelect.test.tsx`, …) — this file
-// needed it the moment a test opened the Agents modal's Thinking select.
-beforeEach(() => {
-  Element.prototype.scrollIntoView = vi.fn();
-});
-// The Open-Space-dialog flag is module-scoped too, and THIS file can raise
-// it (the `Open Space` button, the rail icon, `⌘O`, the `…` menu). A leaked
-// `true` makes every later `render(<SpacesList/>)` auto-mount a real Radix
-// modal, which sets `document.body.style.pointerEvents = "none"` and
-// `aria-hidden`s its siblings — so unrelated `getByRole` queries further down
-// this file throw for a reason that has nothing to do with them. Reset at
-// FILE scope, not inside one `describe`.
-beforeEach(() => {
-  setNewSpaceDialogOpen(false);
-});
+// The two module-scoped pane/dialog flags this file can raise, back to their
+// value at import — the shared helper (Task B4a) instead of two hand-written
+// `beforeEach` blocks. `resetModuleFlags()` restores the left pane, the side
+// pane and the Open-Space flag; the side pane is a no-op here (this component
+// never reads it) and the other two are exactly what these blocks reset. The
+// dialog flag is the one that bites: a leaked `true` auto-mounts a real Radix
+// modal in every later `render(<SpacesList/>)`, which sets
+// `document.body.style.pointerEvents = "none"` and `aria-hidden`s its siblings —
+// so unrelated `getByRole` queries further down this file throw for a reason
+// that has nothing to do with them.
+beforeEach(resetModuleFlags);
+// DELETED here, and now owned by `src/test/setup.tsx`: this file's hand-written
+// `Element.prototype.scrollIntoView = vi.fn()` (jsdom has no layout, so Radix's
+// `Select` throws on the focus-first-option scroll). The setup file installs the
+// same plain prototype assignment for every file, and this one is NOT among the
+// four `vi.unstubAllGlobals()` files the deletion checklist excludes.
 // The mount probe above is a module-level switch: a test that asks for it must
 // not leak it into the tests after it.
 beforeEach(() => {
@@ -528,12 +476,7 @@ describe("SpacesList", () => {
     // the selected space, not the orphan's cwd (and not the dialog).
     useSessions.setState({
       sessions: [
-        {
-          sessionId: "s-orphan",
-          cwd: "/tmp/gamma",
-          capabilities: {},
-          archived: false,
-        },
+        makeSessionRow({ sessionId: "s-orphan", cwd: "/tmp/gamma" }),
       ],
       activeSessionId: "s-orphan",
       activeSpacePath: "/tmp/beta",
@@ -567,8 +510,8 @@ describe("SpacesList", () => {
     // the space's base name (`alpha`) and the time slot is empty.
     useSessions.setState({
       historySessions: [
-        { sessionId: "h1", cwd: "/tmp/alpha", capabilities: {}, archived: false },
-        { sessionId: "h3", cwd: "/tmp/alpha", capabilities: {}, archived: false },
+        makeSessionRow({ sessionId: "h1", cwd: "/tmp/alpha" }),
+        makeSessionRow({ sessionId: "h3", cwd: "/tmp/alpha" }),
       ],
     });
     render(<SpacesList />);
@@ -642,12 +585,12 @@ describe("SpacesList", () => {
     // see when it was collapsed.
     useSessions.setState({
       sessions: [
-        { sessionId: "s1", cwd: "/tmp/alpha", capabilities: {}, archived: false },
+        makeSessionRow({ sessionId: "s1", cwd: "/tmp/alpha" }),
       ],
       activeSessionId: "s1",
       inTurn: {},
       messages: {
-        s1: [{ kind: "user", text: "Fix the login bug", at: Date.now() - 10_000 }],
+        s1: [makeMessage("user", { text: "Fix the login bug", at: Date.now() - 10_000 })],
       },
     });
     render(<SpacesList />);
@@ -661,16 +604,16 @@ describe("SpacesList", () => {
 
   it("orders the LIVE group by last activity, above the STORED group", () => {
     const now = Date.now();
-    const s1 = { sessionId: "s1", cwd: "/tmp/alpha", capabilities: {}, archived: false };
-    const s2 = { sessionId: "s2", cwd: "/tmp/alpha", capabilities: {}, archived: false };
+    const s1 = makeSessionRow({ sessionId: "s1", cwd: "/tmp/alpha" });
+    const s2 = makeSessionRow({ sessionId: "s2", cwd: "/tmp/alpha" });
     useSessions.setState({
       sessions: [s1, s2],
       activeSpacePath: "/tmp/alpha",
       activeSessionId: "s2",
       messages: {
-        s1: [{ kind: "user", text: "Task 1", at: now - 20_000 }],
-        s2: [{ kind: "user", text: "Task 2", at: now - 10_000 }],
-        h1: [{ kind: "user", text: "Refactor the parser", at: now - 3_600_000 }],
+        s1: [makeMessage("user", { text: "Task 1", at: now - 20_000 })],
+        s2: [makeMessage("user", { text: "Task 2", at: now - 10_000 })],
+        h1: [makeMessage("user", { text: "Refactor the parser", at: now - 3_600_000 })],
       },
     });
 
@@ -706,14 +649,14 @@ describe("SpacesList", () => {
     const now = Date.now();
     useSessions.setState({
       sessions: [
-        { sessionId: "s1", cwd: "/tmp/alpha", capabilities: {}, archived: false },
-        { sessionId: "s2", cwd: "/tmp/alpha", capabilities: {}, archived: false },
+        makeSessionRow({ sessionId: "s1", cwd: "/tmp/alpha" }),
+        makeSessionRow({ sessionId: "s2", cwd: "/tmp/alpha" }),
       ],
       activeSpacePath: "/tmp/alpha",
       activeSessionId: "s2",
       messages: {
-        s1: [{ kind: "user", text: "Busy moments ago", at: now - 5_000 }],
-        s2: [{ kind: "user", text: "Started later, idle for hours", at: now - 7_200_000 }],
+        s1: [makeMessage("user", { text: "Busy moments ago", at: now - 5_000 })],
+        s2: [makeMessage("user", { text: "Started later, idle for hours", at: now - 7_200_000 })],
       },
     });
     render(<SpacesList />);
@@ -735,19 +678,13 @@ describe("SpacesList", () => {
     const now = Date.now();
     useSessions.setState({
       sessions: [
-        { sessionId: "s1", cwd: "/tmp/alpha", capabilities: {}, archived: false },
-        {
-          sessionId: "s-new",
-          cwd: "/tmp/alpha",
-          capabilities: {},
-          archived: false,
-          title: "Just created",
-        },
+        makeSessionRow({ sessionId: "s1", cwd: "/tmp/alpha" }),
+        makeSessionRow({ sessionId: "s-new", cwd: "/tmp/alpha", title: "Just created" }),
       ],
       activeSpacePath: "/tmp/alpha",
       activeSessionId: "s-new",
       messages: {
-        s1: [{ kind: "user", text: "Idle for an hour", at: now - 3_600_000 }],
+        s1: [makeMessage("user", { text: "Idle for an hour", at: now - 3_600_000 })],
         "s-new": [],
       },
     });
@@ -773,14 +710,14 @@ describe("SpacesList", () => {
     useSessions.setState({
       sessions: [],
       historySessions: [
-        { sessionId: "h1", cwd: "/tmp/alpha", capabilities: {}, archived: false },
-        { sessionId: "h9", cwd: "/tmp/alpha", capabilities: {}, archived: false },
+        makeSessionRow({ sessionId: "h1", cwd: "/tmp/alpha" }),
+        makeSessionRow({ sessionId: "h9", cwd: "/tmp/alpha" }),
       ],
       activeSpacePath: "/tmp/alpha",
       activeSessionId: "h9",
       messages: {
-        h1: [{ kind: "user", text: "Used an hour ago", at: now - 3_600_000 }],
-        h9: [{ kind: "user", text: "Used a second ago", at: now - 1_000 }],
+        h1: [makeMessage("user", { text: "Used an hour ago", at: now - 3_600_000 })],
+        h9: [makeMessage("user", { text: "Used a second ago", at: now - 1_000 })],
       },
     });
     render(<SpacesList />);
@@ -797,7 +734,7 @@ describe("SpacesList", () => {
     // fade instead of wrapping.
     useSessions.setState({
       messages: {
-        s1: [{ kind: "user", text: "x".repeat(120), at: Date.now() - 10_000 }],
+        s1: [makeMessage("user", { text: "x".repeat(120), at: Date.now() - 10_000 })],
       },
     });
     render(<SpacesList />);
@@ -1737,18 +1674,17 @@ describe("SpacesList (archive, ADR 0016)", () => {
     id: string = "a1",
     opts: { live?: boolean; messages?: { text: string; at: number } } = {},
   ): void {
-    const row = {
+    const row = makeSessionRow({
       sessionId: id,
       cwd: "/tmp/alpha",
-      capabilities: {},
       archived: true,
-    };
+    });
     useSessions.setState({
       sessions: opts.live ? [row] : [],
       archivedSessions: [row],
       activeSessionId: id,
       ...(opts.messages
-        ? { messages: { [id]: [{ kind: "user" as const, ...opts.messages }] } }
+        ? { messages: { [id]: [makeMessage("user", opts.messages)] } }
         : {}),
     });
   }
@@ -1953,7 +1889,7 @@ describe("SpacesList (archive, ADR 0016)", () => {
     useSessions.setState((s) => ({
       archivedSessions: [
         ...s.archivedSessions,
-        { sessionId: id, cwd, capabilities: {}, archived: true, title },
+        makeSessionRow({ sessionId: id, cwd, archived: true, title }),
       ],
     }));
   }
@@ -2299,7 +2235,7 @@ describe("SpacesList (archive, ADR 0016)", () => {
     // dot would have been.
     useSessions.setState({
       sessions: [
-        { sessionId: "s1", cwd: "/tmp/alpha", capabilities: {}, archived: false },
+        makeSessionRow({ sessionId: "s1", cwd: "/tmp/alpha" }),
       ],
       activeSessionId: "s1",
     });
@@ -2378,8 +2314,8 @@ describe("SpacesList (archive, ADR 0016)", () => {
     const now = Date.now();
     useSessions.setState({
       sessions: [
-        { sessionId: "s1", cwd: "/tmp/alpha", capabilities: {}, archived: false },
-        { sessionId: "s2", cwd: "/tmp/alpha", capabilities: {}, archived: false },
+        makeSessionRow({ sessionId: "s1", cwd: "/tmp/alpha" }),
+        makeSessionRow({ sessionId: "s2", cwd: "/tmp/alpha" }),
       ],
       activeSpacePath: "/tmp/alpha",
       activeSessionId: "s2",
@@ -2389,9 +2325,9 @@ describe("SpacesList (archive, ADR 0016)", () => {
       // orders — a rail that sorted itself differently shows `running` first.
       inTurn: { s2: true },
       messages: {
-        s1: [{ kind: "user", text: "Row one", at: now - 5_000 }],
-        s2: [{ kind: "user", text: "Row two", at: now - 90_000 }],
-        h1: [{ kind: "user", text: "Row three", at: now - 3_600_000 }],
+        s1: [makeMessage("user", { text: "Row one", at: now - 5_000 })],
+        s2: [makeMessage("user", { text: "Row two", at: now - 90_000 })],
+        h1: [makeMessage("user", { text: "Row three", at: now - 3_600_000 })],
       },
     });
     usePermissions.setState({
@@ -2598,13 +2534,7 @@ describe("SpacesList (the generated session title)", () => {
       sessions: [],
       historySessions: [],
       archivedSessions: [
-        {
-          sessionId: "a1",
-          cwd: "/tmp/alpha",
-          capabilities: {},
-          archived: true,
-          title,
-        },
+        makeSessionRow({ sessionId: "a1", cwd: "/tmp/alpha", archived: true, title }),
       ],
       messages: {},
     });
@@ -2615,23 +2545,11 @@ describe("SpacesList (the generated session title)", () => {
     // `title: null`, which must keep the OLD message-derived label.
     useSessions.setState({
       sessions: [
-        {
-          sessionId: "s1",
-          cwd: "/tmp/alpha",
-          capabilities: {},
-          archived: false,
-          title: null,
-        },
+        makeSessionRow({ sessionId: "s1", cwd: "/tmp/alpha", title: null }),
       ],
       historySessions: [
-        {
-          sessionId: "h1",
-          cwd: "/tmp/alpha",
-          capabilities: {},
-          archived: false,
-          title: "Rewriting the parser",
-        },
-        { sessionId: "h2", cwd: "/tmp/beta", capabilities: {}, archived: false },
+        makeSessionRow({ sessionId: "h1", cwd: "/tmp/alpha", title: "Rewriting the parser" }),
+        makeSessionRow({ sessionId: "h2", cwd: "/tmp/beta" }),
       ],
     });
     render(<SpacesList />);
@@ -2647,13 +2565,7 @@ describe("SpacesList (the generated session title)", () => {
     // `SessionInfo` is the entry in `sessions`, which the push rewrites.
     useSessions.setState({
       sessions: [
-        {
-          sessionId: "s1",
-          cwd: "/tmp/alpha",
-          capabilities: {},
-          archived: false,
-          title: "Porting the session namer",
-        },
+        makeSessionRow({ sessionId: "s1", cwd: "/tmp/alpha", title: "Porting the session namer" }),
       ],
     });
     render(<SpacesList />);
