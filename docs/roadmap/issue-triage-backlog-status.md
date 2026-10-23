@@ -49,10 +49,10 @@ Windows-arm check (only T8 needs it; see the T8 note):
 Baseline measured at `a6e3f02` (branch `main`, v0.6.0): ALL FIVE GREEN — 3049 FE tests / 149 files,
 1355 Rust tests, clippy 0 warnings, fmt clean. Nothing was red before this work started.
 
-**CURRENT figures (update on every task):** Rust 1393 / 0 failed / 4 ignored, clippy 0 warnings, fmt
-clean, `cargo check --target x86_64-pc-windows-gnu --all-targets` green; FE 3052 tests / 149 files;
-build exit 0. The `agent::hostenv` module's test count is platform-split (16 Linux / 7 elsewhere) —
-pinned by its own module doc, read it there.
+**CURRENT figures (update on every task):** Rust 1399 / 0 failed / 4 ignored, clippy 0 warnings, fmt
+clean, `cargo check --target x86_64-pc-windows-gnu --all-targets` green; FE 3052 tests / 149 files
+(T9 was the last FE-touching task); build exit 0. The `agent::hostenv` module's test count is
+platform-split (16 Linux / 7 elsewhere) — pinned by its own module doc, read it there.
 
 ## Why the waves collapsed to serial — DO NOT "fix" this by re-parallelising
 
@@ -98,7 +98,7 @@ Consequences, all deliberate:
 | T7 | MCP bare-call false success + token expiry/refresh | #68 | serial | `agent/mcp/tool.rs`, `agent/mcp/oauth.rs`, `agent/mcp/manager.rs` (after T4) | `done` `d2cb1fa` |
 | T8 | Windows `cmd /C` via `raw_arg` + truthful bash tool description | #79 | serial | `agent/childproc.rs`, `agent/tools/exec/bash.rs`, `agent/tools/exec/tests/bash.rs`, `agent/harness/tool_specs.rs`, ADR 0060 | `done` `70bffe1` |
 | T9 | `unknown_param_warning` + `SUBAGENT_GUIDANCE` + advertise `thinking` | #78 | serial | `agent/harness/tool_specs.rs`, `agent/harness/prompt.rs`, `agent/harness/loop/turn.rs`, `agent/harness/loop/tests/subagents.rs`, `src/lib/toolOutput.test.ts` | `done` `a9b2347` |
-| T10 | A child start signal that never reaches the main-prompt arm | #9 | serial | `agent/worker/protocol.rs`, `agent/worker/core.rs`, `agent/worker/manager/subagent_flow.rs`, `agent/worker/manager/tests/mod.rs` | `todo` |
+| T10 | A child start signal that never reaches the main-prompt arm | #9 | serial | `agent/worker/protocol.rs`, `agent/worker/core.rs`, `agent/worker/manager/subagent_flow.rs`, `agent/worker/manager/mod.rs` (doc), `agent/harness/prompt.rs` (doc), `agent/subagent.rs` (doc), `tests/worker_stdin.rs`, `tests/worker_e2e.rs`, ADR 0036 | `done` `fb33e59` |
 | T11 | A resolve miss is observable on `subagent-session-started` | #47 → #78 | serial | `agent/harness/launch.rs`, `agent/worker/protocol.rs`, `agent/worker/manager/subagent_flow.rs`, `src/store/subagents.ts`, `src/components/SubagentDelegatingCard.tsx` | `todo` |
 | T12 | Streaming-subagent test margin + honest panic text + doc wording | #34 | serial | `agent/worker/manager/tests/mod.rs`, `src/bin/fake_worker.rs`, `agent/worker/manager/mod.rs` | `todo` |
 
@@ -200,4 +200,7 @@ was deliberately NOT done, including the two items needing a human decision.
 - `a9b2347` — T9 (#78) `unknown_param_warning` above the join_all; guidance + description rewritten;
   `thinking` advertised; #82 interim (web specs advertise exactly what handlers read, census-pinned).
   Gate after: Rust **1393** / 0 / 4 (+8), FE **3052** / 149 (+1), clippy 0, fmt clean, gnu green.
+- `fb33e59` — T10 (#9) `StartMode::FreshChild`; `(FreshChild, None)` prepends nothing; test G's RED was
+  the issue's own shape (the narrowed child's seq-0 WAS the main prompt). Gate after: Rust **1399** /
+  0 / 4 (+6: A,B,C,E,F,G), clippy 0, fmt clean, gnu green, FE unchanged.
 - Current gate figures live in the Gate section above; the numbers here are what they were then.
