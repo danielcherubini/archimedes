@@ -37,7 +37,6 @@
  * place belongs in a domain module, not back in this file.
  */
 
-import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { IPC_EVENTS } from "./ipc/events";
 import type {
@@ -176,6 +175,10 @@ export {
   externalOpen,
 } from "./tauri/commands/external";
 
+export {
+  getWindowState,
+} from "./tauri/commands/window";
+
 
 // ---------------------------------------------------------------------------
 // Events (listen) — register once in App.tsx and dispatch into the stores
@@ -275,11 +278,6 @@ export function listenSubagentClosed(
   return listen<SubagentClosedPayload>(IPC_EVENTS.subagentClosed, (event) =>
     callback(event.payload),
   );
-}
-
-
-export async function getWindowState(): Promise<WindowFrameState> {
-  return invoke<WindowFrameState>("get_window_state");
 }
 
 
