@@ -102,10 +102,17 @@ function spaceNameFor(cwd: string, spaces: { path: string }[]): string {
  *    would otherwise stop these four from compressing as they always have.
  *    `shrink` is `flex-shrink: 1`, i.e. the value they had before.
  *  - `[user-select:auto]` — the base's `select-none` makes the label
- *    unselectable. Written as the arbitrary property rather than `select-auto`
- *    because this app's compiled sheet has no `.select-auto` rule (only
- *    `.select-none`), and a class Tailwind never emits negates nothing. In the
- *    built sheet it lands AFTER `.select-none`, so it wins the cascade.
+ *    unselectable. The two spellings are NOT interchangeable and the difference
+ *    is which mechanism resolves it (measured against the built sheet and the
+ *    real `cn()`): `select-auto` is the SAME tailwind-merge group as
+ *    `select-none`, so naming it makes the merge DROP `select-none` — the merge
+ *    decides. `[user-select:auto]` is an arbitrary property, a different group,
+ *    so BOTH survive the merge and the CASCADE decides; `.select-none` sits at
+ *    offset ~45.8k in the built sheet and `[user-select:auto]` is emitted after
+ *    it (~45.9k), so this wins. Note `.select-auto` is emitted BEFORE
+ *    `.select-none` (~45.7k) — so if the merge ever stopped dropping
+ *    `select-none`, the plain `select-auto` spelling would lose the cascade and
+ *    the label would go unselectable with nothing failing in jsdom.
  *
  * NO line-height negation is needed, and adding one would be dead code: the
  * base's `text-ui-base/relaxed` carries BOTH the size and `line-height: 1.625`,

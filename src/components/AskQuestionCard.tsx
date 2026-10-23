@@ -40,9 +40,13 @@ const RECOMMENDED_TAG = " (Recommended)";
  *    the row inherited `white-space: normal`, and the label's own
  *    `[overflow-wrap:anywhere]` is only meaningful if wrapping is allowed.
  *  - `[user-select:auto]` — the base's `select-none` would make an option's
- *    text unselectable. Written as the arbitrary property because this app's
- *    compiled sheet has no `.select-auto` rule (only `.select-none`); in the
- *    built sheet it lands after `.select-none`, so it wins the cascade.
+ *    text unselectable. `select-auto` would instead be the SAME tailwind-merge
+ *    group as `select-none` and get it dropped by the merge; the arbitrary
+ *    property is a different group, so both survive and the cascade decides —
+ *    `[user-select:auto]` is emitted after `.select-none` in the built sheet.
+ *    (`.select-auto` itself exists in the sheet, but BEFORE `.select-none`, so
+ *    the merge is what would have to carry it. See `SpacesList.tsx`'s same wall
+ *    for the measured offsets.)
  *  - `disabled:pointer-events-auto` — the base's `disabled:pointer-events-none`
  *    is a REAL change here and this is the one arm `Button` adds that a test
  *    would never catch: these rows ARE disabled while `busy`, and in the
