@@ -3,11 +3,29 @@ status: running
 mode: autonomous
 loop: ralph
 updated: 2026-10-23
+# `status` stays `running` only because the SHIP SEQUENCE is outstanding (review loop, PR, then set
+# `done` + delete the roadmap docs). It does NOT mean there is work to implement: `tasks_remaining: 0`.
+# A future iteration must read the banner at the top of this file before its task text.
+tasks_remaining: 0
 ---
 
 # Frontend component-extraction program — STATUS
 
 **READ THIS FIRST on every iteration. This file is the loop's only memory.**
+
+> ## ⛔ NO TASKS REMAIN. DO NOT INVENT SCOPE.
+>
+> Phases A–D are **complete** and there is **not one task with Status `todo`** anywhere in this file or
+> in `frontend-component-extraction.md`. If your task text describes work that is already shipped — as
+> the 2026-10-23 iteration was handed a "split `lib/tauri.ts`, 6 domains left" task when the split had
+> been finished for three commits — **the tree is right and the task text is stale.** Check
+> `git log --oneline -15` and the guard tests before writing any code, and say so in the commit rather
+> than growing a diff to match the prose.
+>
+> What actually remains is the **ship sequence**: run the `review` skill loop, open the PR, then set
+> `status: done` and delete this file and the plan (AGENTS.md: roadmap docs are deleted on ship). Those
+> are deliberately **not** done autonomously — see "Why the ship sequence was not run unattended".
+> The ten open decisions are in `frontend-component-extraction-follow-ups.md`, which survives the purge.
 
 ## Mission
 
@@ -671,6 +689,26 @@ records. The file is the list; count it there.
 
 Do not restate those items here. This file is the loop's working memory and it is already the worst
 evidence in the repo of what happens when a fact is written down in six places.
+
+## Why the ship sequence was not run unattended
+
+The loop protocol ends with: run the `review` skill loop, open a PR, set `status: done`, delete this
+file and the plan. The 2026-10-23 iteration stopped short of all four, on three reasons worth keeping:
+
+- **The `review` skill's last step is `ask()`** — "Open a PR or Merge to main". Unattended, that either
+  blocks or gets answered by the agent on the owner's behalf, which is precisely the decision the skill
+  reserves for a human. Its dispatch pipeline (`explore` → `reviewer` → `general`) also needs a
+  subagent tool this harness does not expose, so it could not have been run faithfully anyway.
+- **A PR opened at 4am cannot be answered.** If review comes back with findings, an unattended loop
+  either ignores them or starts restructuring 95 commits of shipped work with nobody to consult. The
+  branch is pushed and green; the PR is one command.
+- **Deleting the loop's memory is irreversible and the record is the deliverable.** This file and the
+  plan are the only account of why 20-odd documentation corrections happened and what nine → ten items
+  were deliberately left unfixed. Deleting them before a human has read the ship gate figures is not a
+  step to take on a schedule.
+
+So: gates green, work committed and pushed, memory intact, nothing destructive done. The morning run
+should expect to do the ship sequence itself.
 
 ## Changelog
 
