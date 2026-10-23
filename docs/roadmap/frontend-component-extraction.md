@@ -874,7 +874,7 @@ below; the corrections are the useful part of this plan.**
 Order: **D1 → D3 → D2 → D4 (scoped down) → D5 (deferred)**.
 
 > 🔴 **The audit's D1 proposal is half already-done and its boundary is wrong.** It said "split by
-> domain … delete the dead exports". The dead exports were deleted in `2026019f`/Phase A. And it filed
+> domain … delete the dead exports". The dead exports were deleted in `287019f` (Phase A). And it filed
 > `listSkills` / `listAgentDefinitionsForSpace` / `listMcpServersEffective` / `listSpaceFiles` /
 > `listCompletionEntries` under `spaces.ts` — **they are one `catalogs` domain**, proven by Phase C:
 > all six are passed as the `fetch` argument to the same cache machine (`useSkillCatalog.ts:56`,
