@@ -352,7 +352,7 @@ describe("getWindowState / listenWindowState (the Linux window tiling IPC bounda
   });
 });
 
-describe("loadHistory (the paged history IPC boundary, ADR 0066)", () => {
+describe("loadHistory (the paged history IPC boundary, ADR 0073)", () => {
   beforeEach(() => {
     mockedInvoke.mockReset();
   });

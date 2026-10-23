@@ -106,7 +106,7 @@ export async function listSessions(
 }
 
 
-/** A stored session's transcript page (ADR 0066). */
+/** A stored session's transcript page (ADR 0073). */
 export async function loadHistory(
   sessionId: string,
   opts?: { limit?: number; beforeId?: number },

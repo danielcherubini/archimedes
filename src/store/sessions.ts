@@ -402,7 +402,7 @@ interface SessionsState {
    * `isStaleCompactionStart`, or the lock would come straight back.
    */
   compacting: Record<string, string | undefined>;
-  /** History pagination window state per session id (ADR 0066). */
+  /** History pagination window state per session id (ADR 0073). */
   history: Record<
     string,
     {

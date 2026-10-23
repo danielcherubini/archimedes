@@ -83,7 +83,7 @@ Three scan claims did not survive verification and are corrected below: raw `<bu
 - **Severity:** High · **Confidence:** High
 - **Problem:** `sessions.find(…) ?? historySessions.find(…) ?? archivedSessions.find(…)` is re-derived in six places, each picking a different field (cwd, title, configOptions, contextUsage, owner). `useActiveSpaceCwd.ts:14-16` already states the rule — "a second consumer re-deriving it is how the two silently disagree" — and `lib/sessionConfig.ts:17-25` already models the right shape (a plain function called *inside* the selector, because "a hook would force the pane to subscribe to `activeSessionId` + every list it does not otherwise show"). This is the prerequisite for finding 2: any `useChatComposer`/`useMentionPicker` would otherwise re-implement the walk and the extraction would just relocate the duplication.
 - **Proposal:** `src/lib/sessionLookup.ts` exporting `sessionFieldOf(state, id, key)` in the `sessionConfig.ts` shape — **not a hook**. Keep every selector's return a primitive: `SidePane.tsx:243-246` warns that zustand v5 re-runs a selector yielding a fresh object on every read, which would re-render the pane forever.
-- **Explicit non-goal:** do **not** split `src/store/sessions.ts` (935 code lines, the actual largest file). Its size is legitimate — ADR 0016's ordering ("the order is the whole design"), 0066, 0049 and 0041 all live in it, and moving actions across module boundaries is exactly how ADR 0016 would break.
+- **Explicit non-goal:** do **not** split `src/store/sessions.ts` (935 code lines, the actual largest file). Its size is legitimate — ADR 0016's ordering ("the order is the whole design"), 0073, 0049 and 0041 all live in it, and moving actions across module boundaries is exactly how ADR 0016 would break.
 
 ---
 
@@ -222,7 +222,7 @@ Sequenced so every increment is independently shippable and keeps `pnpm test` + 
 | D4 | 2 | `ChatStream.tsx` hooks: `useMentionPicker` (`:468-858`), `useAttachmentStaging`, `useComposerSend` (`:935-1362`), `usePromptQueueFlush` — hooks, **not** JSX; guarded by `ChatStream.test.tsx` |
 | D5 | 16b | The ADR-backed rename PR: `MessageBubble`, `ChatStream`/`components/chat/`/`bg-chat`, `Reasoning*`, `TodoBoardPanel`, bare `rail`, `QueuedSummaryContent`, `Sudo*Modal`. Touches 4 source-grep test files, ~50 `data-testid`s, and amends CONTEXT.md in the same commit. **`SubagentDelegatingCard`/`SubagentTranscript`/`SubagentModals` are blessed by ADR 0066 — not renamed** |
 
-**Explicit non-goals carried forward:** do not split `store/sessions.ts` (its size holds ADR 0016's ordering, 0066, 0049, 0041); do not adopt `ui/tabs.tsx`; do not extract the ~247 single-consumer JSX blocks — extract the ~15 duplicated ones.
+**Explicit non-goals carried forward:** do not split `store/sessions.ts` (its size holds ADR 0016's ordering, 0073, 0049, 0041); do not adopt `ui/tabs.tsx`; do not extract the ~247 single-consumer JSX blocks — extract the ~15 duplicated ones.
 
 ## Top Recommendation
 

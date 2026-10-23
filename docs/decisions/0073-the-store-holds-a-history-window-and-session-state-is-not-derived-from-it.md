@@ -6,6 +6,15 @@ superseded-by:
 
 # The store holds a History window, and session state is never derived from it
 
+> **Renumbered from ADR 0066 on 2026-10-23.** Two decisions were committed on 2026-10-20 under the
+> same number: this one (09:53, `a277dd5`) and *Agent overrides live in the store, not the database*
+> (20:54, `6969610`, alongside ADRs 0067 and 0068 which cross-reference it by number). **0066 stays
+> with the Agent-overrides decision**, on two grounds. Volume: 76 `ADR 0066` citations mean that one
+> (`src-tauri/` 49, `src/` 11, `docs/` 14, `CONTEXT.md` 2) against 8 for this one. And adjacency:
+> 0066/0067/0068 were committed as one trilogy in a single commit and reference each other by number,
+> so moving the Agent-overrides file would sever those cross-references while moving this one severs
+> nothing. No decision changed; only its address.
+
 A stored **Session**'s transcript is loaded as a **History window** — the latest 500 display rows, with 200 more prepended per scroll-up page (`load_history` takes `limit` / `beforeId`, cursor = the autoincrement `messages.id`) — and rendered through a virtualized list (`react-virtuoso`). `useSessions.messages[sessionId]` is therefore a *window onto* the transcript, never the transcript. Anything that must be correct regardless of how far the user has scrolled is **session state** with its own storage, and is never recovered by scanning `messages[]`. The first such case is the **Todo board**: its list is persisted in `sessions.todos_json` (written by the **Supervisor**'s event router on a main session's `todos_update` frame, and returned as `todos` on the FIRST page of `load_history`, which seeds `useInteractive.todos` on open / resume), and `useMainTodoItems`' history-scan fallback is deleted.
 
 **Why:** an unbounded `load_history` made load time and draw cost O(session length) — the IPC payload, the `rowToMessages` parse (base64 image attachments dominate) and one DOM subtree per row. Bounding only the render would leave the load cost; bounding only the load would leave a long live transcript unbounded in the DOM. But a windowed store silently breaks every reader that assumed `messages[]` is complete, and the Todo board was the one that mattered: it found the newest `manage_todo_list` write by scanning backwards, so a write older than the window made the board vanish on reload. Making the invariant explicit ("the store is a window") is what stops the next reader from re-introducing the scan.

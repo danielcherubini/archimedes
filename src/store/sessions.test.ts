@@ -3576,7 +3576,7 @@ describe("useSessions.startSessionInActiveSpace", () => {
   });
 });
 
-describe("history window and pagination (ADR 0066)", () => {
+describe("history window and pagination (ADR 0073)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useSessions.setState({
