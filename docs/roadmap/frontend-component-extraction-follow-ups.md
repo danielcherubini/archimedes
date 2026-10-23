@@ -179,3 +179,30 @@ copies had not been told.
 
 Anything a test already asserts — counts, class strings, export lists — should be cited by pointing at
 the test, not restated.
+
+## 10. `lib/update.ts` and `lib/version.ts` stay outside the barrel, on purpose
+
+**Status: decided, pinned by `src/lib/tauriBoundary.test.ts`. Do not "finish" the move without re-reading this.**
+
+Finding 12's third clause — "`lib/update.ts` and `lib/version.ts` are **undocumented parallel IPC
+modules**" — is the half D1 never took. B2 handed it on in its own scope note ("organising those is
+D1's job"); D1's plan section does not mention either file, so the hand-off landed nowhere. The clause
+asked for *documentation*, and it now has it: both files are named with their reason in
+`PARALLEL_IPC_MODULES`, which is a literal, so neither can disappear, multiply, or gain a third sibling
+without a commit that says so.
+
+**Why they were not moved into `src/lib/tauri/`.** Both already have a working mock seam of their own,
+and it is the shape that does not tolerate a second owner: `UpdateSection.test.tsx` and
+`SettingsPage.test.tsx` `vi.mock` `@/lib/update` and `@/lib/version` **wholesale, with no
+`importActual`** — the one mock shape in this repo where a forgotten name arrives as `undefined`. The
+35 barrel mockers do not mock `checkUpdate`/`installUpdate`/`relaunchApp`/`getAppInfo`, so re-pointing
+those consumers at `@/lib/tauri` would make every one of them resolve the real updater wrappers. That
+is the exact green-and-lying regression `tauriBarrel.test.ts` exists to prevent, built on purpose.
+`update.test.ts` and `version.test.ts` also mock `@tauri-apps/api/core` directly to pin their wire
+strings as literals, which the 2026-10-22 lesson records as deliberate.
+
+If a later task wants one IPC tree anyway, the prerequisite is mechanical, not stylistic: give the
+barrel mocks those four names (or convert the two wholesale factories to spread `importActual`) **in a
+commit before the move**, so the move itself stays a pure `git mv` and any lost mock shows up as a
+failure rather than as a test that quietly starts calling the real updater.
+
