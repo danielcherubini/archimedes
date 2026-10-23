@@ -154,7 +154,7 @@ Plan status: **PLANNED + VETTED** (3 parallel surveys; 4 of my own assumptions o
 
 | # | Task | Finding | Status |
 |---|------|---------|--------|
-| D1 | Split `lib/tauri.ts` by domain, **barrel mandatory** (34 mock files) | 12a | `todo` |
+| D1 | Split `lib/tauri.ts` by domain, **barrel mandatory** (33 mock files) | 12a | **`done`** `9fa594e`→`c4c10a0` (12 commits) |
 | D3 | Collapse `SubagentDelegatingCard`'s two diverged `??` chains | 14b | `todo` |
 | D2 | `useSettingsDocument()` — **both** owners, not just `SettingsPage` | 13a | `todo` |
 | D4 | `ChatStream.tsx` hooks — **scoped to `useMentionPicker` + 2 trivial**; 3 of 4 rejected | 2 | `todo` |
@@ -204,6 +204,14 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   a per-tab close button, and this UI is deliberately browser-style closable tabs. A tablist
   with sibling controls beats orphaned `role="tab"`s. Not to be "fixed" later by
   restructuring the pill or adopting Radix Tabs.
+- **2026-10-22 — MEASUREMENT DISCIPLINE, learned the hard way four times today: verify every identifier
+  you write down.** A false doc-comment (C5, caught pre-commit), two false `.select-auto` claims I had
+  written myself (caught in C7), an invented commit hash `2026019f` for the real `287019f`, and a
+  fabricated `Co-authored-by` trailer. Also: an **absolute claim is where I go wrong** — "no lint
+  tooling", "34 mock files", "byte-identical class string", "ADR 0066 blesses X". Each was checkable in
+  one command. **And a blocking verdict ("this can't be done") needs the same proof as a delivery** — a
+  reviewer overturned 2 of my 3 C7 blockages, and my own plan's D5 rested on a citation that does not
+  exist.
 - **2026-10-22 — Phase D vetting overturned 4 of my own assumptions.** (1) **D5's justifying citation
   is FALSE**: "ADR 0066 blesses SubagentDelegatingCard/SubagentTranscript/SubagentModals" — `0066` is a
   **duplicated ADR number** and neither file mentions those names. D5 is deferred until an ADR exists.
@@ -212,7 +220,20 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   boundary is wrong** — the catalog fetchers are one domain (Phase C's `useCatalogRow` proves it), and
   the "delete dead exports" half was already done. (4) **D2's scope is half** — `SpacesList.tsx:333,354,
   596,607` own the same settings document, one with its own rollback logic.
-- **2026-10-22 — D1's load-bearing constraint: 34 test files `vi.mock` `@/lib/tauri` BY MODULE PATH**
+- **2026-10-22 — D1 is DONE. `lib/tauri.ts` is now a PURE RE-EXPORT BARREL (178 L, no `invoke`, no
+  `listen`) over 11 domain modules in `src/lib/tauri/`. The one rule: **every consumer imports from
+  `@/lib/tauri`, never from a domain module** — `src/lib/tauriBarrel.test.ts` enforces it, because a
+  direct import makes a `vi.mock` silently inert while the test still passes against real IPC. If you
+  add an IPC function, put it in the domain module and re-export it from the barrel.
+  Corrected numbers: **33** mock files (not 34 — `SubagentDetailHost.test.tsx` deliberately has no mock),
+  **121** `vi.fn()` overrides (not ~107 — the audit conflated that with the 107 export count), 58 type
+  exports (not ~71). The 28 zero-importer exports are NOT dead — 27 are payload types consumed by `listen*`.
+- **2026-10-22 — D1's method was the best of the program and is worth reusing:** the child built a
+  splitter that **refuses to run unless it reconstructs the source byte-for-byte**, so no doc-comment
+  was reflowed; left 12 verified per-module patches; I replayed them as 12 commits and confirmed the
+  final `git write-tree` hash equalled the snapshot I had independently validated. **Capture a tree hash
+  before reshaping a verified tree** — it makes a history rewrite provably lossless.
+- **2026-10-22 — D1's load-bearing constraint: 33 test files `vi.mock` `@/lib/tauri` BY MODULE PATH**
   (32 spread `importActual`, ~107 named `vi.fn()` overrides). The barrel is what keeps them working.
   **The hazard: a mock on `@/lib/tauri` does not intercept a consumer importing the moved function from
   its new domain module — and the test still passes, hitting real IPC.** So consumers must keep
