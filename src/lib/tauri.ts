@@ -57,8 +57,6 @@ import type {
   SessionTitledPayload,
   SessionUpdatePayload,
   SkillInfo,
-  SpaceCheck,
-  SpaceRow,
   StalledPayload,
   SubagentClosedPayload,
   SubagentSessionStartedPayload,
@@ -157,6 +155,13 @@ export {
   testSearchProvider,
 } from "./tauri/commands/settings";
 
+export {
+  listSpaces,
+  deleteSpace,
+  setSpaceTrusted,
+  spaceForPath,
+} from "./tauri/commands/spaces";
+
 
 export async function respondPermission(
   sessionId: string,
@@ -164,34 +169,6 @@ export async function respondPermission(
   outcome: PermissionOutcome,
 ): Promise<void> {
   return invoke("respond_permission", { sessionId, requestId, outcome });
-}
-
-
-// ---------------------------------------------------------------------------
-// Spaces commands (boot, the new-session dialog, "forget this space")
-// ---------------------------------------------------------------------------
-
-/** All spaces, most recently opened first. */
-export async function listSpaces(): Promise<SpaceRow[]> {
-  return invoke<SpaceRow[]>("list_spaces");
-}
-
-
-/** "Forget this space": delete the bookkeeping row (conversations stay stored). */
-export async function deleteSpace(path: string): Promise<void> {
-  return invoke("delete_space", { path });
-}
-
-
-/** Flip a space's trusted flag (no-op for a missing row). */
-export async function setSpaceTrusted(path: string, trusted: boolean): Promise<void> {
-  return invoke("set_space_trusted", { path, trusted });
-}
-
-
-/** Canonicalize a folder and say whether a space row already exists for it. */
-export async function spaceForPath(path: string): Promise<SpaceCheck> {
-  return invoke<SpaceCheck>("space_for_path", { path });
 }
 
 
