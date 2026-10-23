@@ -226,12 +226,25 @@ impl McpManager {
     }
 
     /// Run the interactive OAuth flow for a server (the `auth` action).
-    /// Stores the resulting token (so a subsequent `connect` / `call` uses
-    /// it) and reconnects.
+    /// Stores the resulting token in `mcp-auth.json` (so a subsequent
+    /// `connect` / `call` uses it) and drops the connection so the NEXT use
+    /// reconnects with the fresh token — no reconnect happens here.
     pub async fn authenticate(
         &mut self,
         name: &str,
         cancel: &CancellationToken,
+    ) -> Result<String, String> {
+        self.authenticate_with(name, cancel, &oauth::auth_file_path())
+            .await
+    }
+
+    /// The body of `authenticate` with the credentials path injected (the test
+    /// seam — a test writes a temp `mcp-auth.json`, never the developer's).
+    async fn authenticate_with(
+        &mut self,
+        name: &str,
+        cancel: &CancellationToken,
+        auth_file: &Path,
     ) -> Result<String, String> {
         // Check it's an OAuth server + run the flow (the `def` borrow ends
         // at the block's end, so we can mutate `entry` after).
@@ -264,14 +277,20 @@ impl McpManager {
                     .map_err(|e| format!("{name}: {e}"))?;
             // Store the credentials (so a subsequent `connect` / `call` uses
             // the token).
-            let mut map = oauth::load_credentials(&oauth::auth_file_path());
+            let mut map = oauth::load_credentials(auth_file);
             map.insert(name.to_string(), stored);
-            oauth::save_credentials(&oauth::auth_file_path(), &map)?;
+            oauth::save_credentials(auth_file, &map)?;
         }
-        // Reconnect on the next `call` (drop the client — the next
-        // `ensure_connected` loads the stored token and reconnects).
+        // Authenticated: drop the connection AND the state so the next
+        // `ensure_connected` reconnects with the stored token (a `NeedsAuth`
+        // state is never auto-retried, so leaving it here would keep the
+        // server dead for the rest of the session), and drop the cached
+        // `tools/list` (the tool set can change with the identity — and
+        // `ensure_connected` does not clear it).
         if let Some(entry) = self.servers.get_mut(name) {
             entry.client = None;
+            entry.state = McpState::Disconnected;
+            entry.tools = None;
         }
         Ok(format!("{name}: authenticated"))
     }
@@ -570,6 +589,172 @@ mod tests {
             }
         });
         (format!("http://{addr}/mcp"), handle)
+    }
+
+    /// A minimal OAuth auth server for the `client_credentials` grant: the
+    /// well-known metadata (pointing at its own `/token`) + a token endpoint.
+    /// `client_credentials` is the one grant that needs NO browser and NO local
+    /// callback, so this is all `oauth::authenticate` talks to.
+    async fn start_auth_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the listener binds");
+        let addr = listener.local_addr().expect("the listener has an address");
+        let base = format!("http://{addr}");
+        let base_inner = base.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let base = base_inner.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let _ = stream.read(&mut buf).await;
+                    let request = String::from_utf8_lossy(&buf).to_string();
+                    let path = request
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or_default()
+                        .to_string();
+                    // Route by the request path (the same shape as the
+                    // `oauth.rs` mock).
+                    let body = if path.starts_with("/.well-known") {
+                        serde_json::json!({
+                            "authorization_endpoint": format!("{base}/authorize"),
+                            "token_endpoint": format!("{base}/token"),
+                        })
+                        .to_string()
+                    } else if path.starts_with("/token") {
+                        serde_json::json!({
+                            "access_token": "mock-access-token",
+                            "expires_in": 3600,
+                        })
+                        .to_string()
+                    } else {
+                        "{}".to_string()
+                    };
+                    let status = if path.starts_with("/.well-known") || path.starts_with("/token") {
+                        "200 OK"
+                    } else {
+                        "404 Not Found"
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (base, handle)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn authenticating_clears_the_needs_auth_state() {
+        // Issue #46: after the `auth` action reports `authenticated`, the
+        // server must be reconnectable — a `NeedsAuth` state is never
+        // auto-retried, so leaving it set keeps the server dead for the rest
+        // of the session.
+        //
+        // Honest caveat: this test injects the credentials FILE path (so it
+        // never writes the developer's real `mcp-auth.json`), but the READ
+        // side is still the real path — `ensure_connected` calls
+        // `stored_token_provider(name)`, which resolves `oauth::auth_file_path()`
+        // itself. So step 6 asserts on what was WRITTEN, and step 7 asserts
+        // only that the guard stopped firing: `HttpClient::send_request` maps
+        // a 401 on an OAuth server to `needs-auth` whether or not an
+        // `Authorization` header was sent, so the branch and its message are
+        // the same either way. Redirecting that read is T7's seam.
+        let (mcp_url, mcp_server) = start_401_server().await;
+        let (auth_base, auth_server) = start_auth_server().await;
+        let (mut manager, _dir) = manager_with(
+            &serde_json::json!({
+                "mcpServers": { "a": {
+                    "url": mcp_url,
+                    "auth": {
+                        "grantType": "client_credentials",
+                        "clientId": "test-cid",
+                        "authorizationServerUrl": auth_base,
+                    },
+                } }
+            })
+            .to_string(),
+            None,
+        );
+        let cancel = CancellationToken::new();
+
+        // Drive the server into the stuck state (a 401 → `NeedsAuth`).
+        let r = manager
+            .call_tool(
+                "a",
+                "echo",
+                &serde_json::json!({}),
+                &cancel,
+                Duration::from_secs(2),
+            )
+            .await;
+        assert!(r.is_err(), "a 401 → an error: {r:?}");
+        assert_eq!(manager.status_lines(), vec!["a: NeedsAuth"]);
+
+        // Authenticate (the injected credentials path — never the real one).
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let auth_file = dir.path().join("mcp-auth.json");
+        let result = manager
+            .authenticate_with("a", &cancel, &auth_file)
+            .await
+            .expect("the client_credentials flow completes");
+        assert_eq!(result, "a: authenticated");
+
+        // The stuck state is gone: the entry is reconnectable, not `NeedsAuth`.
+        assert_eq!(
+            manager.status_lines(),
+            vec!["a: Disconnected"],
+            "auth leaves the server reconnectable, not stuck in NeedsAuth"
+        );
+
+        // The fresh token landed in the injected file.
+        assert_eq!(
+            oauth::load_credentials(&auth_file)
+                .get("a")
+                .map(|s| s.token.as_str()),
+            Some("mock-access-token")
+        );
+
+        // The guard no longer fires: the 401 fake still answers `401` to
+        // everything, so this attempt fails — but with a REAL connect attempt,
+        // not the "not auto-retried" rejection.
+        let r = manager
+            .call_tool(
+                "a",
+                "echo",
+                &serde_json::json!({}),
+                &cancel,
+                Duration::from_secs(2),
+            )
+            .await;
+        let Err(e) = r else {
+            panic!("the 401 server still rejects: {r:?}");
+        };
+        assert!(
+            !e.contains("the server is in a"),
+            "the not-auto-retried guard must not fire after auth: {e}"
+        );
+        assert!(
+            e.contains("requires authentication"),
+            "a real connect attempt was made: {e}"
+        );
+        assert_eq!(
+            manager.status_lines(),
+            vec!["a: NeedsAuth"],
+            "a rejected reconnect re-marks NeedsAuth honestly"
+        );
+
+        mcp_server.abort();
+        auth_server.abort();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
