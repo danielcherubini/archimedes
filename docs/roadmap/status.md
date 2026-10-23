@@ -146,7 +146,7 @@ surfaces (`SpacesList` rows, the button sweep) last.
 | C5 | `InlineGateRow` — the card only | 5 | **`done`** `d02dd10`→`4c57551` (3 commits) |
 | C6 | `CatalogSearchDialog` shell (excludes `McpDialog`) | 4 | **`done`** `1b78344`→`0da832b` (3 commits) |
 | C4 | `SessionListRow` + `RowButton` — highest-risk surface | 3 | **`done`** `cb1aef3`→`204f2a5` (5 commits) |
-| C7 | raw `<button>` → `<Button>`, one a11y group per commit | 6d | `todo` |
+| C7 | raw `<button>` → `<Button>`, one a11y group per commit | 6d | **`done`** `ec39402`→`861bf55` (+2 doc commits) — 34/37 swept, 3 blocked |
 
 ## Phase D — mega-files
 
@@ -204,6 +204,30 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   a per-tab close button, and this UI is deliberately browser-style closable tabs. A tablist
   with sibling controls beats orphaned `role="tab"`s. Not to be "fixed" later by
   restructuring the pill or adopting Radix Tabs.
+- **2026-10-22 — C7 IS DONE with 3 sites left as raw `<button>`s ON PROOF. Do not "finish" them.**
+  `SpaceTabs.tsx`'s ✕ is blocked by `SpaceTabs.test.tsx:345` (`not.toMatch(/opacity-/)` vs the base's
+  `disabled:opacity-50` — tailwind-merge cannot strip a variant `className` doesn't name);
+  `ToolCallCardHeader.tsx`'s row and `ChangesGroupCard.tsx`'s row are blocked because
+  `buttonVariants`' **base carries `bg-clip-padding`** and `transcriptRow.test.tsx:102` requires zero
+  `bg-*` tokens — `bg-clip-*` is its own merge group, so no variant or override removes it. **All three
+  carry this rationale in a comment at the site.**
+- **2026-10-22 — C7's four traps, all now pinned. Any future `<Button>` conversion must check these:**
+  (1) `defaultVariants` → a bare `<Button>` paints `bg-primary`; name variant AND size. (2) The base's
+  `[&_svg:not([class*='size-'])]:size-4` beats a `size={N}` **prop** — add the matching `size-*` class.
+  (3) **`size="default"` contributes `text-ui-base`, and `ChatStream.test.tsx` selects
+  `.text-ui-base`** — a site spelling no font-size GAINS one and is picked up by a test that never saw
+  it; fix with `text-[length:inherit]`, never by editing the test. (4) **jsdom cannot see layout.** The
+  base's `shrink-0` broke tab-label eliding (307px vs 188px, measured in headless Chrome with
+  `min-width:0` present) and `inline-flex`+`items-center`+`justify-center` moved a glyph 8px. **A
+  class-set diff shows both as clean additions.** For any conversion that changes `display`, `flex-shrink`
+  or alignment, probe with `google-chrome --headless --dump-dom` and `getBoundingClientRect()`.
+- **2026-10-22 — the DOM-capture evidence method, and its one flaw.** `document.body.innerHTML` per
+  test, baseline in a `git worktree` at the base commit, both states run **twice**, then subtract the
+  non-determinism set (~97 tests here: random quips, braille spinner frame, async highlighting, one
+  async send race). Comparing with `class`/`data-slot`/`data-variant`/`data-size` stripped proves
+  structural neutrality; comparing class SETS proves nothing was lost. **It cannot see layout** (above),
+  and it needs ~15 min for 4 runs — budget it. Use a worktree, not `git stash`, when siblings share the
+  tree; `pnpm exec` fails on a symlinked `node_modules`, so run vitest's binary directly.
 - **2026-10-22 — C4: `RowButton` is the ONLY `role="button"` in production `src/`** (plus
   `TodoBoardPanel.tsx:279`, a deliberately different affordance: Enter OR Space + `preventDefault`,
   pinned inert-in-RowButton so it can't be folded in). **Never use `RowButton` for a hover action
@@ -437,6 +461,16 @@ Record every autonomous decision here so a later iteration does not re-litigate 
 
 ## Changelog
 
+- `2026-10-22` — **C7 done** (6 groups, `ec39402`..`861bf55`, +2 rationale commits). 142 files / 2955
+  tests green; build green. **34 of 37 sites swept; 3 blocked on proof.** Verified independently: zero
+  structural changes with 97 noise tests subtracted, zero utility classes lost anywhere, 0 assertions
+  removed except 6 C2 `toBe(EXACT_STRING)` pins replaced by a **stronger** contract (every original
+  token present + additions equal a pinned 22-token literal — mutation-proved: injecting a painting
+  utility into `Button`'s base reddens 3). `chromeButton.test.ts` and `classNameConvention.test.ts`
+  byte-identical throughout.
+  **A reviewer overturned 2 of my 3 "not sweepable" verdicts before I'd written them into the plan** —
+  I had blocked 10 sites where only 3 are genuinely blocked. Lesson: a "can't be done" verdict needs the
+  same proof as a "done", and a second opinion on a blocking claim is cheap.
 - `2026-10-22` — **C4 done** (5 commits, `cb1aef3`..`204f2a5`). 140 files / 2940 tests green; build
   green. The highest-risk surface, and the strongest evidence yet: **all 233 `expect(` lines in
   `SpacesList.test.tsx` byte-identical** (verified by extract+diff, not by eye), 10 `.closest` reads
