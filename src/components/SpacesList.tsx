@@ -78,6 +78,164 @@ function spaceNameFor(cwd: string, spaces: { path: string }[]): string {
 }
 
 /**
+ * THE SIDEBAR'S FOUR LABELLED COMMAND BUTTONS (Open Space, New Session, Skills,
+ * Agents) — one ghost `<Button>` recipe, spelled ONCE because all four drew the
+ * identical box.
+ *
+ * The FIRST argument is what `Button`'s base and the `default` size would add
+ * that these four never had, and each entry only names a group the row below
+ * does NOT spell (so the row always wins a group it owns — see C7's recipe):
+ *  - `border-0` — the base's `border` is a 1px ring; with `h-8` it would make
+ *    the row 34px and inset the label by 1px. `border-0` removes the width
+ *    outright (the base's `border-transparent` alone keeps 28px→30px).
+ *  - `justify-start` — the size centres content; these rows are labelled and
+ *    read left-to-right (the `Kbd` sits at the end via its own `flex-1` label).
+ *  - `transition-none` — the base fades hover colour over 150 ms; this band
+ *    has never had a fade, and it stays as drawn.
+ *  - `select-auto` — the base makes the label unselectable.
+ *  - `whitespace-normal` — the base's `whitespace-nowrap` is a REAL repaint
+ *    here, not a cosmetic one: the original row inherited `white-space: normal`
+ *    from its container, so a label long enough for a narrow pane wrapped. The
+ *    base would force it onto one line and overflow the 244px column.
+ *  - `shrink` — the base's `shrink-0` is `flex-shrink: 0`. The parent is a
+ *    `flex flex-col` box, so shrink applies to HEIGHT here, and a short pane
+ *    would otherwise stop these four from compressing as they always have.
+ *    `shrink` is `flex-shrink: 1`, i.e. the value they had before.
+ *  - `[user-select:auto]` — the base's `select-none` makes the label
+ *    unselectable. Written as the arbitrary property rather than `select-auto`
+ *    because this app's compiled sheet has no `.select-auto` rule (only
+ *    `.select-none`), and a class Tailwind never emits negates nothing. In the
+ *    built sheet it lands AFTER `.select-none`, so it wins the cascade.
+ *
+ * NO line-height negation is needed, and adding one would be dead code: the
+ * base's `text-ui-base/relaxed` carries BOTH the size and `line-height: 1.625`,
+ * and the row spells `text-ui-base` — measured, `cn("text-ui-base/relaxed",
+ * "text-ui-base")` keeps only `text-ui-base`, i.e. the row's utility deletes
+ * the base's whole compound, line-height included. So the row ends up with no
+ * `line-height` declared at all and inherits preflight's
+ * `html{line-height:1.5}` — exactly what it inherited before. (A
+ * `leading-[1.5]` placed before the row is itself deleted by that same
+ * `text-ui-base`, which is why it is absent rather than redundant.)
+ *
+ * NOT in the wall, because the row string spells it and comes LAST, so the row
+ * already wins it: `hover:bg-surface-hover` (the ghost arm's `hover:bg-hover`
+ * is a DIFFERENT colour in three palettes — zai-dark and Dracula read 5%
+ * against surface-hover's 10% — so this is exactly the conflict the recipe
+ * exists for, and the row resolves it).
+ *
+ * The rest of the base is inert HERE, and the reason per token:
+ *  - `bg-clip-padding` — no background is painted at rest;
+ *  - `outline-none` — `base.css:53-57` already forces
+ *    `outline: none !important` on every `:focus`/`:focus-visible`, in every
+ *    browser and again under `forced-colors`;
+ *  - `disabled:*` / `aria-invalid:*` / `aria-expanded:*` — none of these four
+ *    is ever disabled, nothing sets `aria-invalid` on them, and none carries
+ *    `aria-expanded` (the `DropdownMenuTrigger` beside them does; these do not),
+ *    so the arm's `aria-expanded:bg-hover` has no element to fire on;
+ *  - `[&_svg]:pointer-events-none` — the handler is on the button, so the click
+ *    is handled either way;
+ *  - `[&_svg]:shrink-0` — the icons are fixed `size-4`;
+ *  - `[&_svg:not([class*='size-'])]:size-3.5` — every icon here is created with
+ *    an explicit `size-4`, so the `:not([class*=size-])` guard excludes all of
+ *    them (this is the C2 chrome-bar trap, and it does not bite here);
+ *  - `has-data-[icon=inline-*]:pr/pl` — no child carries `data-icon`
+ *    (lucide-react v1.47's `createLucideIcon` sets no such attribute, and
+ *    `Kbd`'s slot attribute is `data-slot="kbd"`, which that selector does not
+ *    match).
+ */
+const SIDEBAR_COMMAND_BUTTON =
+  "border-0 justify-start transition-none whitespace-normal shrink [user-select:auto]";
+
+/**
+ * The box all four sidebar command buttons drew, VERBATIM, before C7 routed
+ * them through `<Button>`. It is the SECOND argument to `cn()` at every one of
+ * the four sites, so it wins every tailwind-merge group it spells against
+ * `Button`'s base and the `default` size — that ordering is what makes the swap
+ * paint-neutral, and it is why this string is kept whole rather than folded
+ * into the constant above. `hover:bg-surface-hover` is one of them: the ghost
+ * arm's `hover:bg-hover` is a DIFFERENT colour in three palettes (zai-dark and
+ * Dracula read 5% where `--color-surface-hover` reads 10%), so letting the arm
+ * win that group would repaint the hover fill.
+ */
+const PANE_COMMAND_ROW =
+  "flex h-8 w-full items-center gap-2 rounded-lg px-2 text-ui-base hover:bg-surface-hover";
+
+/**
+ * THE HOVER-REVEALED SESSION-ROW ACTIONS — Stop / Archive on a live or stored
+ * row, Unarchive / Delete on an archived one. Four affordances, one box, drawn
+ * by three different components (`SessionRow` and `ArchivedRow`), so the recipe
+ * lives here once.
+ *
+ * `ROW_HOVER_ACTION` is the negation wall (groups the row does NOT spell, and
+ * which `Button`'s base or the `icon-sm` size would otherwise change);
+ * `SESSION_ROW_ACTION_ROW` is the row's own class list VERBATIM and comes LAST,
+ * so it wins every group it spells. Both go to `cn()` at all four sites.
+ *
+ * What the wall undoes:
+ *  - `border-0` — the base's `border` is a 1px ring; on a `size-6` box that is
+ *    a 26px hit target where 24px was measured and pinned by the row's
+ *    alignment, and it shifts the glyph 1px.
+ *  - `transition-none` — the base fades hover colour over 150 ms. These appear
+ *    on row hover ALREADY (`group-hover:flex`); layering a second fade on the
+ *    fill would change what a hovering pointer sees.
+ *  - `shrink` — the base's `shrink-0` is `flex-shrink: 0`. These four are flex
+ *    ITEMS of the row (`RowButton` is a `flex` box), so the base would stop a
+ *    long title from squeezing them the way it always could. `shrink` is
+ *    `flex-shrink: 1` — the value they had.
+ *
+ * What the row itself wins by being LAST, and why that matters here:
+ *  - `hover:bg-surface-hover` over the ghost arm's `hover:bg-hover` (different
+ *    colours in zai-dark and Dracula — 5% vs 10%);
+ *  - `hidden` + `group-hover:flex` over the base's `inline-flex` — the
+ *    hover-reveal mechanism is the whole design of this affordance and it has
+ *    to survive;
+ *  - `items-center`, `justify-center`, `rounded-md`, `size-6`.
+ *
+ * Inert additions, with the reason:
+ *  - `text-foreground` and `hover:text-foreground` (the ghost arm) — the row
+ *    spells NO colour and inherits one anyway: `App.tsx:360`'s root is
+ *    `bg-frame text-foreground`, and nothing between it and this button sets a
+ *    colour, so the arm's ink IS the inherited ink. Same computed colour;
+ *  - `bg-clip-padding` — `padding-box` is CSS's initial `background-clip`, so
+ *    declaring it changes nothing;
+ *  - `outline-none` — `base.css:53-57` forces `outline: none !important` on
+ *    every `:focus`/`:focus-visible` anyway, in every browser and again under
+ *    `forced-colors`;
+ *  - `disabled:*` / `aria-invalid:*` / `aria-expanded:*` — none of the four is
+ *    ever disabled, and nothing sets `aria-invalid` or `aria-expanded` on it
+ *    (the `aria-pressed` pane toggles in `ChromeControls` do; these do not);
+ *  - `text-ui-base/relaxed` — 14px/1.625 declared where the button previously
+ *    inherited the UA's 16px (this app never sets a root `font-size`; it sizes
+ *    text only through `--ui-font-size` and the `text-ui-*` utilities, and
+ *    neither this button nor the `RowButton` it sits in spells one). Inert
+ *    because there is no text: the only child is an `<svg class="size-4">`, and
+ *    `size-4` is `calc(var(--spacing) * 4)` — rem, not em — inside a fixed
+ *    `size-6` box. `whitespace-nowrap` and `select-none` have no text to act
+ *    on either;
+ *  - `[&_svg]:pointer-events-none` — the click handler is on the button, so the
+ *    event is handled whether it lands on the button or is retargeted to it;
+ *  - `[&_svg]:shrink-0` — the glyph is a fixed `size-4`;
+ *  - `[&_svg:not([class*='size-'])]:size-3` — every icon here is created with
+ *    an explicit `size-4` (`SquareIcon`, `ArchiveIcon`, `ArchiveXIcon`,
+ *    `Trash2Icon`), so the `:not([class*=size-])` guard excludes all of them.
+ *    This is the C2 chrome-bar trap, and it does not bite here;
+ *  - `has-data-[icon=inline-*]:pr/pl` — no child carries `data-icon`
+ *    (lucide-react v1.47's `createLucideIcon` sets no such attribute);
+ *  - `group/button` — nothing in the tree reads that group.
+ *
+ * NOT `RowButton`, and this is the C4 rule, not an oversight: these are real
+ * `<button>`s. A second `role="button"` inside the row would resolve every
+ * `.closest('[role="button"]')` read in `SpacesList.test.tsx` to the action
+ * instead of the row, and `ToolCallCard.test.tsx`'s nesting pin keeps the
+ * `button`-in-`button` count at zero — `Button` renders a `<button>`, which is
+ * what the row's `div[role=button]` already expects as a child.
+ */
+const ROW_HOVER_ACTION = "border-0 transition-none shrink";
+const SESSION_ROW_ACTION_ROW =
+  "hidden size-6 items-center justify-center rounded-md group-hover:flex hover:bg-surface-hover";
+
+
+/**
  * ONE link of the `agentOverrides` write chain (see `patchAgentOverrides` in the
  * component): read the document, replace the map, write it back.
  *
@@ -587,43 +745,51 @@ export default function SpacesList() {
         className={cn("flex min-h-0 flex-1 flex-col", collapsed && "invisible")}
       >
       <div className="flex flex-col gap-2 p-3">
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="default"
           onClick={handleOpenSpace}
-          className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-ui-base hover:bg-surface-hover"
+          className={cn(SIDEBAR_COMMAND_BUTTON, PANE_COMMAND_ROW)}
         >
           <FolderOpenIcon className="size-4" />
           <span className="flex-1 text-left">Open Space</span>
           <Kbd className="text-foreground-subtlest">⌘O</Kbd>
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
+          variant="ghost"
+          size="default"
           onClick={handleNewSession}
-          className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-ui-base hover:bg-surface-hover"
+          className={cn(SIDEBAR_COMMAND_BUTTON, PANE_COMMAND_ROW)}
         >
           <MessageCirclePlusIcon className="size-4" />
           <span className="flex-1 text-left">New Session</span>
           <Kbd className="text-foreground-subtlest">⌘N</Kbd>
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
+          variant="ghost"
+          size="default"
           onClick={() => setSkillsOpen(true)}
-          className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-ui-base hover:bg-surface-hover"
+          className={cn(SIDEBAR_COMMAND_BUTTON, PANE_COMMAND_ROW)}
         >
           <SparklesIcon className="size-4" />
           <span className="flex-1 text-left">Skills</span>
-        </button>
+        </Button>
         {/* The Agents modal (the ONE Agent surface — Settings has no Agents
             section). No `Kbd`, matching `Skills`: neither is a chord. `BotIcon`
             moved here from the deleted Settings nav entry. */}
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="default"
           onClick={() => setAgentsOpen(true)}
-          className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-ui-base hover:bg-surface-hover"
+          className={cn(SIDEBAR_COMMAND_BUTTON, PANE_COMMAND_ROW)}
         >
           <BotIcon className="size-4" />
           <span className="flex-1 text-left">Agents</span>
-        </button>
+        </Button>
       </div>
       {/* The Sessions header: the label + the `...` menu (the old tab
           bar's `...` menu moved here — right-aligned, next to the word
@@ -845,8 +1011,10 @@ function SessionRow({
   const actions = (
     <>
       {isLive && (
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="icon-sm"
           title={inTurn ? "Stop this turn" : "Stop this session"}
           aria-label={`Stop ${title}`}
           onClick={(e) => {
@@ -855,13 +1023,15 @@ function SessionRow({
               console.error("Failed to stop session:", err);
             });
           }}
-          className="hidden size-6 items-center justify-center rounded-md group-hover:flex hover:bg-surface-hover"
+          className={cn(ROW_HOVER_ACTION, SESSION_ROW_ACTION_ROW)}
         >
           <SquareIcon className="size-4" />
-        </button>
+        </Button>
       )}
-      <button
+      <Button
         type="button"
+        variant="ghost"
+        size="icon-sm"
         title="Archive"
         aria-label={`Archive ${title}`}
         onClick={(e) => {
@@ -870,10 +1040,10 @@ function SessionRow({
             console.error("Failed to archive session:", err);
           });
         }}
-        className="hidden size-6 items-center justify-center rounded-md group-hover:flex hover:bg-surface-hover"
+        className={cn(ROW_HOVER_ACTION, SESSION_ROW_ACTION_ROW)}
       >
         <ArchiveIcon className="size-4" />
-      </button>
+      </Button>
     </>
   );
 
@@ -1029,8 +1199,10 @@ function ArchivedSessionRow({
       onOpen={() => onOpen(session.sessionId)}
       actions={
         <>
-          <button
+          <Button
             type="button"
+            variant="ghost"
+            size="icon-sm"
             title="Unarchive"
             aria-label={`Unarchive ${title}`}
             onClick={(e) => {
@@ -1039,22 +1211,24 @@ function ArchivedSessionRow({
                 console.error("Failed to unarchive session:", err);
               });
             }}
-            className="hidden size-6 items-center justify-center rounded-md group-hover:flex hover:bg-surface-hover"
+            className={cn(ROW_HOVER_ACTION, SESSION_ROW_ACTION_ROW)}
           >
             <ArchiveXIcon className="size-4" />
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="ghost"
+            size="icon-sm"
             title="Delete"
             aria-label={`Delete ${title}`}
             onClick={(e) => {
               e.stopPropagation();
               onDelete(session);
             }}
-            className="hidden size-6 items-center justify-center rounded-md group-hover:flex hover:bg-surface-hover"
+            className={cn(ROW_HOVER_ACTION, SESSION_ROW_ACTION_ROW)}
           >
             <Trash2Icon className="size-4" />
-          </button>
+          </Button>
         </>
       }
     />

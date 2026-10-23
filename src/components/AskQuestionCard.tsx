@@ -17,6 +17,75 @@ const OTHER_OPTION = "Other (type your own)";
 const RECOMMENDED_TAG = " (Recommended)";
 
 /**
+ * THE OPTION ROW and the `Other` row — the same box, drawn twice (C8 records
+ * them as two copies of one shape). `ASK_OPTION_WALL` undoes what `Button`'s
+ * base and the `default` size would change; `ASK_OPTION_ROW` is the class list
+ * both rows carried VERBATIM and it comes FIRST-BUT-LAST among the two, so the
+ * row wins every group it spells. The selected fill is appended after both, as
+ * it was before.
+ *
+ * What the wall undoes:
+ *  - `border-0` — the base's `border` is a 1px ring; the row had none, and
+ *    preflight sets `border: 0 solid`. It would grow a 21px row to 23px and
+ *    inset the ☐ by 1px. It also makes the base's `bg-clip-padding` a no-op:
+ *    with a zero-width border, `padding-box` and `border-box` are the same box,
+ *    which matters only on the SELECTED arm, where a background does paint.
+ *  - `h-auto` — the size's `h-7` is a fixed 28px. These rows are
+ *    `py-0.5`-high and GROW: an option label wraps onto two lines
+ *    (`[overflow-wrap:anywhere]` is on the label's own span precisely so a long
+ *    one can). A fixed height would clip the second line.
+ *  - `justify-start` — the size centres content on the main axis; these rows
+ *    are left-aligned lists and the row spells `text-left` but not `justify-*`.
+ *  - `whitespace-normal` — the base's `whitespace-nowrap` is a real repaint:
+ *    the row inherited `white-space: normal`, and the label's own
+ *    `[overflow-wrap:anywhere]` is only meaningful if wrapping is allowed.
+ *  - `[user-select:auto]` — the base's `select-none` would make an option's
+ *    text unselectable. Written as the arbitrary property because this app's
+ *    compiled sheet has no `.select-auto` rule (only `.select-none`); in the
+ *    built sheet it lands after `.select-none`, so it wins the cascade.
+ *  - `disabled:pointer-events-auto` — the base's `disabled:pointer-events-none`
+ *    is a REAL change here and this is the one arm `Button` adds that a test
+ *    would never catch: these rows ARE disabled while `busy`, and in the
+ *    original a disabled row still matched `:hover`, so hovering it filled
+ *    `bg-surface-hover` under the 50% dimming. With `pointer-events: none` it
+ *    would not fill, and the pointer would fall through to the card behind.
+ *
+ * What the row wins by being LAST: `flex` (over the base's `inline-flex`),
+ * `gap-2` (over the size's `gap-1`), `px-1` (over `px-2`), `rounded-md`,
+ * `items-center`, `text-ui-base`, `hover:bg-surface-hover` (the ghost arm's
+ * `hover:bg-hover` is a different colour in zai-dark and Dracula — 5% against
+ * surface-hover's 10%), and `disabled:opacity-50`, which is byte-identical to
+ * the base's own so neither side can lose it.
+ *
+ * Inert additions, with the reason:
+ *  - the ghost arm's `text-foreground` / `hover:text-foreground` — the row
+ *    spells no colour, but it paints NO TEXT of its own: both children are
+ *    spans that spell their own (`text-interaction-ask-foreground` /
+ *    `text-foreground` / `text-foreground-subtlest`), and the row itself is
+ *    inside a card whose ink is `text-foreground` anyway;
+ *  - `text-ui-base/relaxed` never survives the merge at all — the row's own
+ *    `text-ui-base` deletes the base's compound utility, line-height included
+ *    (measured: `cn("text-ui-base/relaxed", "text-ui-base")` → `text-ui-base`),
+ *    so the row keeps the font-size it inherited and declares no line-height,
+ *    exactly as before;
+ *  - `outline-none` — `base.css:53-57` forces `outline: none !important` on
+ *    every `:focus`/`:focus-visible` regardless, in every browser and again
+ *    under `forced-colors`;
+ *  - `aria-invalid:*` / `aria-expanded:*` — nothing sets either attribute here;
+ *  - `shrink-0` — the rows are children of a `space-y-1` BLOCK container, so
+ *    `flex-shrink` never applies;
+ *  - `[&_svg]:pointer-events-none`, `[&_svg]:shrink-0`,
+ *    `[&_svg:not([class*='size-'])]:size-3.5` — there is no `<svg>` in either
+ *    row; the ☐/● marks are text in spans;
+ *  - `has-data-[icon=inline-*]:pr/pl` — no child carries `data-icon`;
+ *  - `group/button` — nothing reads that group.
+ */
+const ASK_OPTION_WALL =
+  "border-0 h-auto justify-start whitespace-normal [user-select:auto] disabled:pointer-events-auto";
+const ASK_OPTION_ROW =
+  "flex w-full items-center gap-2 rounded-md px-1 py-0.5 text-left text-ui-base hover:bg-surface-hover disabled:opacity-50";
+
+/**
  * Per-question draft: which option indexes are selected, whether `Other` is
  * chosen, the `Other` free text, and a note per option index (mirrors the
  * TUI picker's `noteByOptionIndex`).
@@ -375,14 +444,15 @@ export default function AskQuestionCard({
                     // the fix still replays options as bare STRINGS, which makes
                     // `option.label` — and therefore the key — `undefined`.
                     <div key={index}>
-                      <button
+                      <Button
                         type="button"
+                        variant="ghost"
+                        size="default"
                         disabled={busy}
                         onClick={() => toggleOption(question, index)}
-                        className={cn(
-                          "flex w-full items-center gap-2 rounded-md px-1 py-0.5 text-left text-ui-base hover:bg-surface-hover disabled:opacity-50",
-                          selected && "bg-interaction-ask-fill",
-                        )}
+                        className={cn(ASK_OPTION_WALL, ASK_OPTION_ROW, {
+                          "bg-interaction-ask-fill": selected,
+                        })}
                       >
                         {question.multi ? (
                           <span
@@ -418,7 +488,7 @@ export default function AskQuestionCard({
                           {option.label}
                           {recommended && RECOMMENDED_TAG}
                         </span>
-                      </button>
+                      </Button>
                       {selected && (
                         <input
                           value={d.notes[index] ?? ""}
@@ -439,14 +509,15 @@ export default function AskQuestionCard({
                   );
                 })}
                 <div>
-                  <button
+                  <Button
                     type="button"
+                    variant="ghost"
+                    size="default"
                     disabled={busy}
                     onClick={() => toggleOther(question)}
-                    className={cn(
-                      "flex w-full items-center gap-2 rounded-md px-1 py-0.5 text-left text-ui-base hover:bg-surface-hover disabled:opacity-50",
-                      d.other && "bg-interaction-ask-fill",
-                    )}
+                    className={cn(ASK_OPTION_WALL, ASK_OPTION_ROW, {
+                      "bg-interaction-ask-fill": d.other,
+                    })}
                   >
                     {question.multi ? (
                       <span
@@ -481,7 +552,7 @@ export default function AskQuestionCard({
                     >
                       {OTHER_OPTION}
                     </span>
-                  </button>
+                  </Button>
                   {d.other && (
                     <input
                       value={d.otherText}
