@@ -155,10 +155,10 @@ Plan status: **PLANNED + VETTED** (3 parallel surveys; 4 of my own assumptions o
 | # | Task | Finding | Status |
 |---|------|---------|--------|
 | D1 | Split `lib/tauri.ts` by domain, **barrel mandatory** (33 mock files) | 12a | **`done`** `9fa594e`→`c4c10a0` (12 commits) |
-| D3 | Collapse `SubagentDelegatingCard`'s two diverged `??` chains | 14b | `todo` |
-| D2 | `useSettingsDocument()` — **both** owners, not just `SettingsPage` | 13a | `todo` |
-| D4 | `ChatStream.tsx` hooks — **scoped to `useMentionPicker` + 2 trivial**; 3 of 4 rejected | 2 | `todo` |
-| D5 | ADR-backed renames — **DEFERRED: the justifying ADR does not exist; 0066 is duplicated** | 16b | `deferred` |
+| D3 | Collapse `SubagentDelegatingCard`'s two diverged `??` chains | 14b | **`done`** `0cbe0a1` |
+| D2 | `useSettingsDocument()` + `useAgentOverridesWrites` — **both** owners done | 13a | **`done`** `8c89248` + `6351a94` |
+| D4 | `ChatStream.tsx` hooks — **scoped to `useMentionPicker` + 2 trivial**; 3 of 4 rejected | 2 | **`done`** `212932a` (1963→1550 L) |
+| D5 | ADR-backed renames — **DEFERRED.** No ADR for the renames; 0066 collision now fixed (→0073) | 16b | `deferred` |
 
 ---
 
@@ -220,6 +220,17 @@ Record every autonomous decision here so a later iteration does not re-litigate 
   boundary is wrong** — the catalog fetchers are one domain (Phase C's `useCatalogRow` proves it), and
   the "delete dead exports" half was already done. (4) **D2's scope is half** — `SpacesList.tsx:333,354,
   596,607` own the same settings document, one with its own rollback logic.
+- **2026-10-23 — D2/D3/D4 DONE; D5 deferred. Phase D is closed.** `useSettingsDocument` (one owner of
+  the settings document — `SettingsPage`'s mirror `useState` gone, `loadSettings` finally has a caller)
+  and `useAgentOverridesWrites` (`SpacesList` −242 L, rollback chain moved **byte-identically**, verified
+  by diff not assertion). `ChatStream.tsx` 1963→1550 via `useMentionPicker` + 2 zero-coupling effects;
+  `send`/`flushHead`/`resume` **stay** — `heldForSendRef` is shared by three clusters and
+  `ChatStream.test.tsx:2082/:2106` fail as object-URL *leaks* if split. `SubagentDelegatingCard`'s two
+  `??` chains collapsed after demonstrating they diverged (700 vs 900 tokens for one child).
+- **2026-10-23 — ADR 0066 was a DUPLICATED number; the history-window ADR is now 0073.** "ADR 0066"
+  now resolves uniquely, to the Agent-overrides decision (76 citations vs 8; and 0066/0067/0068 are a
+  trilogy cross-referencing by number). **`useAgentOverridesWrites` + `useSettingsDocument` are the
+  settings-document seam — go through them, don't re-add a `useState` mirror or a hand-rolled fetch.**
 - **2026-10-22 — D1 is DONE. `lib/tauri.ts` is now a PURE RE-EXPORT BARREL (178 L, no `invoke`, no
   `listen`) over 11 domain modules in `src/lib/tauri/`. The one rule: **every consumer imports from
   `@/lib/tauri`, never from a domain module** — `src/lib/tauriBarrel.test.ts` enforces it, because a
