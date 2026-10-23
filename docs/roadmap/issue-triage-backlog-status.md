@@ -49,9 +49,10 @@ Windows-arm check (only T8 needs it; see the T8 note):
 Baseline measured at `a6e3f02` (branch `main`, v0.6.0): ALL FIVE GREEN — 3049 FE tests / 149 files,
 1355 Rust tests, clippy 0 warnings, fmt clean. Nothing was red before this work started.
 
-**CURRENT figures (update on every task):** Rust 1360 / 0 failed / 4 ignored, clippy 0 warnings, fmt
+**CURRENT figures (update on every task):** Rust 1363 / 0 failed / 4 ignored, clippy 0 warnings, fmt
 clean; FE 3051 tests / 149 files; build exit 0. New tests added so far: +5 Rust (T1), +2 FE (T2),
-plus the T3 shell harnesses (71 + 131 `ok` assertions, not counted by pnpm/cargo).
++3 Rust (T4), 0 new Rust (T5 — wording only, five existing tests moved); plus the T3 shell harnesses
+(71 + 131 `ok` assertions, not counted by pnpm/cargo).
 
 ## Why the waves collapsed to serial — DO NOT "fix" this by re-parallelising
 
@@ -91,8 +92,8 @@ Consequences, all deliberate:
 | T1 | `parse_value` strips trailing `#` comments, mirroring pi | #11 | serial | `src-tauri/src/skills.rs`, `src-tauri/tests/skills.rs`, `src-tauri/src/agents.rs` (doc comment only) | `done` `142ef2f` |
 | T2 | SkillsDialog stops inserting a dead `$name` token | #10 | 1a | `src/components/SkillsDialog.tsx` + `.test.tsx` | `done` `863eec6` |
 | T3 | Inverse sig-completeness check; composer fails on an unsigned target | #41(d) | 1a | `scripts/compose-updater-manifest.sh`, `.test.sh`, `.github/workflows/release.yml`, `AGENTS.md` | `done` `2a3f8df` |
-| T4 | MCP callback HTTP response + clear `NeedsAuth` after auth | #46 | serial | `src-tauri/src/agent/mcp/callback.rs`, `agent/mcp/manager.rs` | `todo` |
-| T5 | Protected-dir refusal names a sanctioned route | #33 | serial | `agent/tools/exec/access.rs`, `agent/tools/exec/tests/policy.rs`, `agent/harness/loop/tests/policy_gate.rs` | `todo` |
+| T4 | MCP callback HTTP response + clear `NeedsAuth` after auth | #46 | serial | `src-tauri/src/agent/mcp/callback.rs`, `agent/mcp/manager.rs` | `done` `c71bb7b` |
+| T5 | Protected-dir refusal names a sanctioned route | #33 | serial | `agent/tools/exec/access.rs`, `agent/tools/exec/tests/policy.rs`, `agent/harness/loop/tests/policy_gate.rs` | `done` `e5ae57e` |
 | T6 | `find`/`grep` get the Space cwd; make the scrub observable | #81 | serial | `agent/tools/exec/search.rs`, `agent/tools/exec/tests/search.rs`, `agent/tools/exec/tests/bash_hostenv.rs`, `agent/hostenv.rs` | `todo` |
 | T7 | MCP bare-call false success + token expiry/refresh | #68 | serial | `agent/mcp/tool.rs`, `agent/mcp/oauth.rs`, `agent/mcp/manager.rs` (after T4) | `todo` |
 | T8 | Windows `cmd /C` via `raw_arg` + truthful bash tool description | #79 | serial | `agent/childproc.rs`, `agent/tools/exec/bash.rs`, `agent/tools/exec/tests/bash.rs`, `agent/harness/tool_specs.rs` | `todo` |
@@ -148,4 +149,11 @@ was deliberately NOT done, including the two items needing a human decision.
   Rust **1360** / 0 failed / 4 ignored (+5 tests), clippy 0, fmt clean, FE 3051 / 149 unchanged.
   RED evidence was the issue's own fixture resolving to the name `a # note`.
 - `159a124` — plans for T5/T6 (docs only, no gate needed).
+- `c71bb7b` — T4 (#46) callback answers as HTTP (200 + framed 400s), `authenticate` takes `close_all`'s
+  shape (`client`/`state`/`tools`). Gate after: Rust **1363** / 0 / 4 (+3 tests), clippy 0, fmt clean,
+  FE unchanged.
+- `e5ae57e` — T5 (#33) refusal names the staging route; floor untouched; no elevated route named.
+  Gate after: Rust 1363 / 0 / 4 (no new tests — five existing wording tests moved together), clippy 0,
+  fmt clean, FE unchanged.
+- `4974868` — plans for T7/T8 (docs only).
 - Current gate figures live in the Gate section above; the numbers here are what they were then.
