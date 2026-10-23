@@ -4,7 +4,73 @@ import { Input } from "@/components/ui/input";
 import { BrailleLoader } from "@/components/ui/braille-loader";
 import { brailleLoaderVariants } from "@/lib/braille-loader";
 import { cn } from "@/components/lib/utils";
+import { Button } from "@/components/ui/button";
 import { humanizeVariant } from "./primitives";
+/**
+ * C7: the two radiogroup pickers below are `<Button>`s, and both cells carried
+ * the SAME styling by hand — this constant is that shared shape plus what the
+ * base and the `default` size would otherwise change. Both name
+ * `variant="ghost"` and `size="default"` explicitly, because `ui/button.tsx:40`
+ * sets `defaultVariants {variant:"default"}` and a bare `<Button>` would paint
+ * every cell `bg-primary text-primary-foreground` at `h-7 px-2`.
+ *
+ * Measured with the real `cn()`: the rendered utility SET equals what each cell
+ * spelled before. What this wall undoes:
+ *  - `bg-clip-border` — the base's `bg-clip-padding` is REAL here (unlike the
+ *    borderless sites): these cells DO have a 1px border and the selected arm
+ *    DOES paint a background, so clipping to padding-box would stop the fill
+ *    from running under the semi-transparent `border-border` ring. This is
+ *    preflight's default for a plain `<button>`; the utility restores it.
+ *  - `h-auto` — the size's `h-7` is a fixed 28px; the cells are `py-1.5`-high
+ *    and content-sized (the spinner cell stacks a live `BrailleLoader` over a
+ *    label, so its height is the loader's).
+ *  - `whitespace-normal` — the base's `whitespace-nowrap` (the cells inherited
+ *    `normal`).
+ *  - `select-auto` — the base's `select-none` would make the variant name
+ *    unselectable text.
+ *  - `text-[length:inherit]` — the size declares `text-ui-base` and the base
+ *    declares `text-ui-base/relaxed`; `cn()` keeps the LAST utility of the
+ *    font-size group, so this restores the font-size the cell INHERITED and, by
+ *    collapsing both, declares no line-height either. It matters for the SPINNER
+ *    cell, which spells no font-size at all (its label span spells `text-[10px]`
+ *    and its loader sets an inline `fontSize`, but the cell box itself declared
+ *    none before); it is DROPPED by the merge for the FILM cell, which spells
+ *    `text-[10px]` later and wins the group outright — so that cell keeps its
+ *    10px exactly as it did. Restoring rather than arguing away: a `text-ui-*`
+ *    class the button gains is a class some other selector can read (see
+ *    `ComposerMentions.tsx` for the one that actually bit).
+ *  - `hover:bg-primary/10` on the SELECTED arm only — the selected cell spelled
+ *    NO hover background, so its fill simply persisted under the pointer.
+ *    `ghost` adds `hover:bg-hover`, and `cn()` can only drop it by replacing it
+ *    with another `hover:bg-*`; restating the resting fill is the one replacement
+ *    that paints what painted before (hover → `bg-primary/10` = the resting
+ *    value, so nothing moves). The UNSELECTED arm needs nothing: it already
+ *    spells `hover:bg-muted`, which wins the group outright.
+ *  - `text-inherit` + `hover:text-inherit` — `ghost` declares
+ *    `text-foreground`/`hover:text-foreground`. These cells paint NO ink of
+ *    their own (the spinner cell's label span spells its own colour; the film
+ *    cell's text is bare and inherits the page ink), so the pair is restored to
+ *    inherit on both the base and the hover state.
+ * The base's `justify-center` needs NO undo: the spinner cell is `flex-col` at
+ * `h-auto`, so its main axis is exactly as tall as its content and there is no
+ * free space to distribute; the film cell already spells `justify-center`.
+ * Inert here: `shrink-0` (these are GRID items — `flex-shrink` does not apply),
+ * `gap-1` (the spinner cell spells `gap-1.5`, which wins; the film cell has one
+ * child so a gap cannot show), `outline-none` (`base.css:53-57` forces
+ * `outline: none !important` on every focus, and again under `forced-colors`),
+ * `disabled:*` (never disabled), `aria-expanded:*` (Radix's `role="radio"` sets
+ * `aria-checked`, never `aria-expanded`), `aria-invalid:*`, `group/button`,
+ * `rounded-md` (the cells spell `rounded-md`), `bg-clip-*` interplay with
+ * `border` (the cell's own `border` + colour win the width and colour groups),
+ * `has-data-[icon=inline-*]:pr/pl` (lucide sets no `data-icon`),
+ * `[&_svg]:pointer-events-none` / `[&_svg]:shrink-0` /
+ * `[&_svg:not([class*='size-'])]:size-3.5` — the spinner cell's only svg-bearing
+ * descendant is a `BrailleLoader`, which renders TEXT spans and no `<svg>`; the
+ * film cell renders a text label. The icon-resize hazard does not arise.
+ */
+const PICKER_CELL_WALL =
+  "bg-clip-border h-auto whitespace-normal select-auto text-[length:inherit] text-inherit hover:text-inherit";
+
 /**
  * The ZCode `FontSizeInput` pattern: a `w-28` number `Input` (12–20,
  * `px` suffix) with a local draft — commit on blur/Enter (clamped),
@@ -89,17 +155,20 @@ export function SpinnerStylePicker({
         const selected = value === variant;
         const name = humanizeVariant(variant);
         return (
-          <button
+          <Button
             key={variant}
             type="button"
             role="radio"
+            variant="ghost"
+            size="default"
             aria-checked={selected}
             aria-label={name}
             onClick={() => onChange(variant)}
             className={cn(
+              PICKER_CELL_WALL,
               "flex flex-col items-center gap-1 rounded-md border px-2 py-1.5 transition-colors",
               selected
-                ? "border-primary bg-primary/10"
+                ? "border-primary bg-primary/10 hover:bg-primary/10"
                 : "border-border hover:bg-muted",
             )}
           >
@@ -112,7 +181,7 @@ export function SpinnerStylePicker({
             <span className="text-[10px] leading-none text-foreground-subtle">
               {name}
             </span>
-          </button>
+          </Button>
         );
       })}
     </div>
@@ -162,22 +231,25 @@ export function EmptyStateAnimationPicker({
       {EMPTY_STATE_ANIMATION_OPTIONS.map((option) => {
         const selected = value === option.value;
         return (
-          <button
+          <Button
             key={option.value}
             type="button"
             role="radio"
+            variant="ghost"
+            size="default"
             aria-checked={selected}
             aria-label={option.label}
             onClick={() => onChange(option.value)}
             className={cn(
+              PICKER_CELL_WALL,
               "flex items-center justify-center rounded-md border px-2 py-1.5 text-[10px] leading-none transition-colors",
               selected
-                ? "border-primary bg-primary/10"
+                ? "border-primary bg-primary/10 hover:bg-primary/10"
                 : "border-border hover:bg-muted",
             )}
           >
             {option.label}
-          </button>
+          </Button>
         );
       })}
     </div>

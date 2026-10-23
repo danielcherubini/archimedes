@@ -19,7 +19,67 @@ import {
 } from "../lib/subagentActivity";
 import { StatusIcon } from "./SubagentStatusIcon";
 import { cn } from "./lib/utils";
+import { Button } from "./ui/button";
 import { ToolCallCardHeader } from "./ToolCallCardHeader";
+
+/**
+ * C7: the subagent DIRECTORY row (the one clickable row inside the card's
+ * expanded list) is a `<Button variant="ghost" size="default">`, both named
+ * explicitly because `ui/button.tsx:40` sets `defaultVariants {variant:"default"}`
+ * and a bare `<Button>` would paint every row `bg-primary text-primary-foreground`
+ * at a fixed `h-7 px-2`. Measured with the real `cn()`, the rendered utility SET
+ * is exactly the string this row spelled. What `DIRECTORY_ROW_WALL` undoes:
+ *  - `border-0` — the base's `border` is a 1px ring the row never had (preflight
+ *    sets `border: 0 solid`); it would inset the status glyph by 1px inside the
+ *    card's own `px-4` and make the base's `bg-clip-padding` a no-op besides.
+ *  - `h-auto` — the size's `h-7` is a fixed 28px and this row is THREE lines
+ *    (name + metadata + activity) at `py-2`; a fixed height would clip lines two
+ *    and three. This is the single biggest hazard at this site.
+ *  - `justify-start` — the base centres on the main axis; at `h-auto` there is no
+ *    free space, so this is belt-and-braces.
+ *  - `whitespace-normal` — the base's `whitespace-nowrap` (the row inherited
+ *    `normal`; the spans that must elide spell `truncate` themselves, which is
+ *    what needs nowrap, and a row-level nowrap would defeat the label's
+ *    `[overflow-wrap]` behaviour in the activity line).
+ *  - `select-auto` — the base's `select-none` would make an agent name, a task
+ *    preview and the token/cost metadata unselectable.
+ *  - `transition-none` — the base's `transition-colors` would fade the
+ *    `hover:bg-surface-hover` band in over 150 ms; this row's band is instant.
+ *  - `text-[length:inherit]` — the size declares `text-ui-base` and the base
+ *    declares `text-ui-base/relaxed`; `cn()` keeps the LAST utility of the
+ *    font-size group, so this restores the font-size the row INHERITED (it spells
+ *    none) and, by collapsing both, declares no line-height either. Every text
+ *    child spells `text-ui-base` or `text-ui-xs` itself, so the row's own size is
+ *    invisible — but a `text-ui-base` the row GAINS is a class another selector
+ *    can read, and `ChatStream.test.tsx`'s `primaryLines()` helper (which finds
+ *    picker rows by `querySelectorAll(".text-ui-base")`) proves that is not
+ *    hypothetical: at this program's other picker it doubled a label list and
+ *    reddened six assertions. Restoring beats arguing away.
+ * Inert here: `shrink-0` (the rows are children of the card's `divide-y` BLOCK
+ * container, so `flex-shrink` never applies), `gap-1` (the row spells `gap-2.5`,
+ * which wins), `px-2`/`py-2` (the row spells `px-2 py-2`), `items-center` (the
+ * row spells `items-start`, later, same group), `rounded-md` (the row spells
+ * `rounded-lg`), `text-foreground` + `hover:text-foreground` from `ghost` (every
+ * piece of text in the row is a span/div that spells its own ink —
+ * `text-foreground`, `text-foreground-subtle`, `text-foreground-subtlest`,
+ * `text-destructive`, `text-success`, and the activity line's own `colorClass`),
+ * `text-ui-base` from the size (it collapses the base's `text-ui-base/relaxed` in
+ * the same font-size group so NO line-height is declared, and every text child
+ * spells `text-ui-base` or `text-ui-xs` itself), `bg-clip-padding` (no border →
+ * padding-box == border-box, so `hover:bg-surface-hover` fills the same box),
+ * `outline-none` (`base.css:53-57` forces `outline: none !important` on every
+ * focus, and again under `forced-colors`, which is also what makes the row's own
+ * `focus-visible:outline-none` redundant-but-harmless), `disabled:*` (a directory
+ * row is never disabled), `aria-invalid:*` / `aria-expanded:*` (Radix sets
+ * neither on a plain button), `group/button`, `has-data-[icon=inline-*]:pr/pl`
+ * (lucide sets no `data-icon`), `[&_svg]:pointer-events-none` (the click handler
+ * is on the button), `[&_svg]:shrink-0`, and
+ * `[&_svg:not([class*='size-'])]:size-3.5` — the row's only `<svg>`s are the
+ * `StatusIcon` glyphs, which carry an explicit `size-4`, so the
+ * `:not([class*='size-'])` guard excludes them (the icon-resize hazard, checked).
+ */
+const DIRECTORY_ROW_WALL =
+  "border-0 h-auto justify-start whitespace-normal select-auto transition-none text-[length:inherit]";
 
 /**
  * The `subagent` tool's card (the "Delegating" card): the standard
@@ -416,12 +476,14 @@ export default function SubagentDelegatingCard({
             }
 
             return (
-              <button
+              <Button
                 key={row.key}
                 type="button"
+                variant="ghost"
+                size="default"
                 onClick={() => row.sessionId && select(row.sessionId)}
                 aria-label={`Open ${row.agentName} transcript`}
-                className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                className={cn(DIRECTORY_ROW_WALL, "flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring")}
               >
                 <span className="mt-1">
                   <StatusIcon status={row.status} />
@@ -463,7 +525,7 @@ export default function SubagentDelegatingCard({
                     </p>
                   )}
                 </div>
-              </button>
+              </Button>
             );
           })}
         </div>
