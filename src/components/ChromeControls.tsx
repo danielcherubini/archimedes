@@ -17,6 +17,24 @@ import {
 import { useHasPendingRequest } from "../hooks/useHasPendingRequest";
 import { CHROME_BUTTON } from "./chromeButton";
 import { cn } from "./lib/utils";
+import { Button } from "./ui/button";
+
+/**
+ * C7 (finding 6d): the three app controls are `<Button>`s now, on the same arm
+ * `WindowControls` took — `variant="ghost" size="icon"` — because the two
+ * clusters are one grammar (see `./chromeButton`). `CHROME_BUTTON` remains the
+ * authority for box, ink and hover and is still passed as `className`; `relative`
+ * stays the caller's contribution (this cluster owns the `absolute` pending dot)
+ * and `border-0` undoes the one base utility that would repaint the box — the
+ * full reasoning lives in `WindowControls.tsx`, which spells the same wall.
+ *
+ * The icons keep their `size={14}` PROP and GAIN the matching `size-3.5` CLASS:
+ * `Button`'s base carries `[&_svg:not([class*='size-'])]:size-4`, which targets
+ * exactly the svgs that size themselves by prop, and a CSS rule beats a
+ * presentation attribute — without the class all three glyphs would grow from
+ * 14px to 16px in silence.
+ */
+const CHROME_BUTTON_WALL = "border-0";
 
 /**
  * The chrome bar's app-control cluster — the Settings gear and the two pane
@@ -77,21 +95,26 @@ export default function ChromeControls({
   // `./chromeButton` — see that file for why it is a CONSTANT and not a shared
   // component, and why `relative` is added HERE rather than living in it (the
   // pending dot below is `absolute`; `WindowControls` has no such child and must
-  // not gain a positioning context).
-  const BTN = cn("relative", CHROME_BUTTON);
+  // not gain a positioning context). `CHROME_BUTTON_WALL` is the C7 addition: the
+  // `Button` base's `border` is a 1px ring these three never had.
+  const BTN = cn(CHROME_BUTTON_WALL, "relative", CHROME_BUTTON);
 
   return (
     <div className="flex items-center gap-0.5 pr-1" data-testid="chrome-controls">
-      <button
+      <Button
         type="button"
+        variant="ghost"
+        size="icon"
         aria-label="Settings"
         onClick={onOpenSettings}
         className={BTN}
       >
-        <SettingsIcon size={14} aria-hidden />
-      </button>
-      <button
+        <SettingsIcon size={14} className="size-3.5" aria-hidden />
+      </Button>
+      <Button
         type="button"
+        variant="ghost"
+        size="icon"
         data-testid="left-pane-toggle"
         aria-label={
           leftCollapsed ? "Expand session list" : "Collapse session list"
@@ -100,30 +123,32 @@ export default function ChromeControls({
         onClick={() => setLeftPaneCollapsed(!leftCollapsed)}
         className={BTN}
       >
-        <PanelLeftIcon size={14} aria-hidden />
+        <PanelLeftIcon size={14} className="size-3.5" aria-hidden />
         {leftCollapsed && hasPendingRequest && (
           <span
             className="absolute top-0.5 right-0.5 size-1.5 rounded-full bg-warning"
             aria-hidden
           />
         )}
-      </button>
-      <button
+      </Button>
+      <Button
         type="button"
+        variant="ghost"
+        size="icon"
         data-testid="right-pane-toggle"
         aria-label={rightCollapsed ? "Expand side pane" : "Collapse side pane"}
         aria-pressed={!rightCollapsed}
         onClick={() => setSidePaneCollapsed(!rightCollapsed)}
         className={BTN}
       >
-        <PanelRightIcon size={14} aria-hidden />
+        <PanelRightIcon size={14} className="size-3.5" aria-hidden />
         {rightCollapsed && hasPendingRequest && (
           <span
             className="absolute top-0.5 right-0.5 size-1.5 rounded-full bg-warning"
             aria-hidden
           />
         )}
-      </button>
+      </Button>
     </div>
   );
 }
