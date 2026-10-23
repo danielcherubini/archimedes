@@ -130,12 +130,13 @@ function primaryLabel(row: MentionRow): string {
  * prefix. Plus an optional non-selectable `note` line (the `?` truncation
  * explanation).
  *
- * WHERE THE STATE LIVES: the `useMentionCatalogs` hook, the `picker` state
- * (incl. the active `prefix`), the `filtered`/`activeIndex` derivations and
- * `selectMention` all stay in `ChatStream` — the `picker` state is
- * coordinated with the textarea's `onChange` / `onKeyDown` (the token
- * re-evaluation, the arrow/Enter/Tab/Escape branches) and the send path, so
- * it cannot move here. Renders nothing while closed.
+ * WHERE THE STATE LIVES: the `useMentionCatalogs` hook and the `picker` state
+ * stay in `ChatStream`; the `filtered`/`activeIndex` derivations and
+ * `selectMention` moved to `hooks/useMentionPicker.ts`, which `ChatStream` calls
+ * and threads through as props (Phase D / Task D4) — still NOT here, because the
+ * `picker` state is coordinated with the textarea's `onChange` / `onKeyDown` (the
+ * token re-evaluation, the arrow/Enter/Tab/Escape branches) and the send path.
+ * Renders nothing while closed.
  *
  * It is therefore NOT props-only in the literal sense — it calls TWO hooks,
  * `useRef` and the ONE `useEffect` below, and that single effect is
