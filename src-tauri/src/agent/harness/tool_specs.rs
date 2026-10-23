@@ -1,6 +1,6 @@
-use serde_json::json;
+use serde_json::{json, Map, Value};
 
-use crate::agent::harness::provider::ToolSpec;
+use crate::agent::harness::provider::{ToolCall, ToolSpec};
 
 /// What the `bash` tool tells the model about the shell it is about to get.
 ///
@@ -262,13 +262,14 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "subagent".into(),
-            description: "Delegate tasks to subagents. `task` is required. Optional: `agentName` (a discovered Agent definition — its frontmatter model/thinking/tools + system-prompt body apply, layered under any explicit params), `model`, `systemPrompt`, `tools`. Omit `agentName` for a config-less dispatch (parent model, all tools, no system prompt). Model override is rarely needed.".into(),
+            description: "Delegate tasks to subagents. `task` is required. `agentName` names a discovered Agent definition (`list_agents`): its system-prompt body, model, thinking and tools apply, layered under any explicit params. Prefer `agentName` and put extra constraints in `task` — an explicit `systemPrompt` REPLACES the definition's body, it does not extend it. Omit `agentName` for a config-less dispatch (parent model, all tools, no system prompt).".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "task": { "type": "string" },
                     "agentName": { "type": "string" },
                     "model": { "type": "string" },
+                    "thinking": { "type": "string" },
                     "systemPrompt": { "type": "string" },
                     "tools": { "type": "array", "items": { "type": "string" } }
                 },
@@ -325,13 +326,28 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                         "description": "Multiple search queries executed concurrently"
                     },
                     "num_results": { "type": "number", "description": "Maximum number of results to return (1-20, default 5)" },
+                    // (issue #82, interim) The camelCase aliases the handler
+                    // actually accepts (`params.get("num_results").or_else(||
+                    // params.get("numResults"))`), plus `proxy`, which the
+                    // handler reads and the spec never mentioned. Advertised ==
+                    // accepted is what keeps the #78 unknown-param checker from
+                    // warning on a legal call; the aliases stay undocumented
+                    // behaviour otherwise.
+                    "numResults": { "type": "number", "description": "Alias for num_results" },
                     "provider": { "type": "string", "description": "Search provider to use (default: auto)" },
                     "recency_filter": { "type": "string", "description": "Time filter for results" },
+                    "recencyFilter": { "type": "string", "description": "Alias for recency_filter" },
                     "domain_filter": {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "List of domains to restrict results to"
-                    }
+                    },
+                    "domainFilter": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Alias for domain_filter"
+                    },
+                    "proxy": { "type": "string", "description": "Proxy URL override for this search (defaults to the session proxy)" }
                 }
             }),
         },
@@ -350,7 +366,10 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                     "max_chars": {
                         "type": "number",
                         "description": "Maximum characters to return in head (default 20,000, clamp 200..=200,000)"
-                    }
+                    },
+                    // (issue #82, interim) The camelCase alias the handler
+                    // accepts — see the `web_search` note.
+                    "maxChars": { "type": "number", "description": "Alias for max_chars" }
                 },
                 "required": ["url"]
             }),
@@ -362,14 +381,109 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": {
                     "response_id": { "type": "string", "description": "Response ID returned by web_search or fetch_content" },
+                    // (issue #82, interim) `fetch_content`'s own truncation
+                    // note tells the model to call this tool with `responseId`,
+                    // and the handler accepts the camelCase form — so the alias
+                    // must be advertised or the #78 checker flags the call the
+                    // tool itself provoked.
+                    "responseId": { "type": "string", "description": "Alias for response_id" },
                     "offset": { "type": "number", "description": "Character offset to start reading from (default 0)" },
                     "limit": { "type": "number", "description": "Maximum characters to read (capped at 20,000)" },
-                    "find_text": { "type": "string", "description": "Substring to search for in cached content" }
+                    "find_text": { "type": "string", "description": "Substring to search for in cached content" },
+                    "findText": { "type": "string", "description": "Alias for find_text" }
                 },
                 "required": ["response_id"]
             }),
         },
     ]
+}
+
+/// (issue #78) The warning for a tool call that passes a key the model was
+/// never told about, or `None` when there is nothing to say.
+///
+/// WHY IT LIVES HERE: this file owns the advertised shapes, so the known-key
+/// set and the shape the model was shown stay in one place. Callers MUST pass
+/// `AgentLoop::advertised_specs()` (`harness/loop.rs`) — the SAME value
+/// `model_request` sends as `tools[]` and `build_main_prompt` renders into
+/// `<tools>` (ADR 0017's byte-identity) — so a check can never disagree with
+/// the prompt and there is no second table to drift.
+///
+/// The rule, in order:
+/// 1. No spec for the (alias-normalized) name → NO check. An unknown tool is
+///    already a hard error in `dispatch_tool`'s `unknown tool:` arm
+///    (`loop/tools.rs`), and a tool the session disabled is not in
+///    `advertised_specs()` either — the model was never told it existed.
+/// 2. `parameters.properties` absent or not an object → NO check.
+///    Load-bearing: `list_agents` / `list_skills` are a bare
+///    `{"type":"object"}`, so inferring "nothing is allowed" there would flag
+///    EVERY key on EVERY call.
+/// 3. Every TOP-LEVEL argument key absent from `properties` is reported.
+///    `required` is irrelevant — only `properties` defines legality — and
+///    nested keys are never inspected (an `ask` question's `recommended` is
+///    legal, unadvertised and nested, so it stays untouched).
+/// 4. At most one suggestion, drawn from the `properties` keys ONLY, by
+///    case-insensitive containment in either direction — so `agent` →
+///    `agentName`. Never suggested from anything but the advertised shape.
+///
+/// TOP-LEVEL ONLY, and it never mutates: a pure function of `(specs, tc)`
+/// returning display text, so it is safe to call before a dispatch has
+/// decided anything. Malformed JSON needs no branch — `parse_arguments`
+/// (`provider/openai.rs`) already collapses unparseable arguments to `{}`, and
+/// a non-object payload simply has no keys.
+pub(crate) fn unknown_param_warning(specs: &[ToolSpec], tc: &ToolCall) -> Option<String> {
+    // The `dispatch_subagent` alias resolves to the `subagent` spec — the same
+    // `effective_tool_name` `is_tool_enabled` gates on, so the alias is checked
+    // against the shape the model was actually shown and the message names the
+    // canonical tool, not the alias it guessed at.
+    let spec = specs
+        .iter()
+        .find(|s| s.name == crate::agent::harness::dispatch::effective_tool_name(&tc.name))?;
+    let properties = spec.parameters.get("properties")?.as_object()?;
+    let args = tc.arguments.as_object()?;
+    let mut items: Vec<String> = args
+        .keys()
+        .filter(|key| !properties.contains_key(key.as_str()))
+        .map(|key| match suggest(key, properties) {
+            Some(hit) => format!("`{key}` (did you mean `{hit}`?)"),
+            None => format!("`{key}`"),
+        })
+        .collect();
+    if items.is_empty() {
+        return None;
+    }
+    // `serde_json`'s default `Map` is a `BTreeMap` (`Cargo.toml` never enables
+    // `preserve_order`, so `args.keys()` — and `properties.keys()` — iterate in
+    // sorted order already). The sort is therefore redundant-but-intentional:
+    // it makes the determinism local rather than a dependency on serde_json's
+    // map type, which is what lets a test pin the message byte-for-byte.
+    items.sort();
+    Some(format!(
+        "⚠ unknown param(s) for `{}`: {} — ignored.",
+        spec.name,
+        items.join(", ")
+    ))
+}
+
+/// The ONE suggested name for `key`: the first advertised property that shares
+/// a case-insensitive substring with it in either direction — so `agent` →
+/// `agentName` (the advertised name contains the typed one) and a hypothetical
+/// `name` → `agentName` too. Searching the advertised keys ONLY is the point: a
+/// suggestion the model cannot legally send is worse than none.
+///
+/// Deliberately separator-blind: `agent_name` gets NO suggestion (the `_`
+/// survives `to_lowercase`, so neither string contains the other) — it is still
+/// REPORTED, which is the half that matters; normalizing separators would
+/// suggest across unrelated names and buys nothing the report does not already
+/// say.
+fn suggest(key: &str, properties: &Map<String, Value>) -> Option<String> {
+    let lower = key.to_lowercase();
+    properties
+        .keys()
+        .find(|name| {
+            let l = name.to_lowercase();
+            l.contains(&lower) || lower.contains(&l)
+        })
+        .cloned()
 }
 
 #[cfg(test)]
@@ -378,6 +492,15 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+
+    /// A tool call with the given name + arguments (the checker input).
+    fn call(name: &str, args: Value) -> ToolCall {
+        ToolCall {
+            id: "t1".into(),
+            name: name.into(),
+            arguments: args,
+        }
+    }
 
     fn exec_param_keys() -> [(&'static str, &'static [&'static str]); 12] {
         [
@@ -396,15 +519,26 @@ mod tests {
                     "query",
                     "queries",
                     "num_results",
+                    "numResults",
                     "provider",
                     "recency_filter",
+                    "recencyFilter",
                     "domain_filter",
+                    "domainFilter",
+                    "proxy",
                 ],
             ),
-            ("fetch_content", &["url", "mode", "max_chars"]),
+            ("fetch_content", &["url", "mode", "max_chars", "maxChars"]),
             (
                 "get_search_content",
-                &["response_id", "offset", "limit", "find_text"],
+                &[
+                    "response_id",
+                    "responseId",
+                    "offset",
+                    "limit",
+                    "find_text",
+                    "findText",
+                ],
             ),
         ]
     }
@@ -452,6 +586,241 @@ mod tests {
                 "tool `{name}`: advertised {advertised:?} != executor keys {expected:?}"
             );
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // (issue #78) `unknown_param_warning` — the silently-dropped parameter
+    // announces itself in the tool result.
+    // ---------------------------------------------------------------------
+
+    /// The exact wire text the model reads on its next turn, pinned
+    /// byte-for-byte: the `⚠` (U+26A0, NO variation selector), the `(s)`, the
+    /// backticks, the em dash and the trailing `ignored` are all part of the
+    /// contract — a drift in any of them is a regression, because the model
+    /// learns the habit from this sentence.
+    #[test]
+    fn an_unknown_param_is_reported_with_a_suggestion() {
+        let warning = unknown_param_warning(
+            &tool_specs(),
+            &call("subagent", json!({ "task": "t", "agent": "reviewer" })),
+        );
+        assert_eq!(
+            warning.as_deref(),
+            Some(
+                "⚠ unknown param(s) for `subagent`: `agent` (did you mean `agentName`?) — ignored."
+            ),
+            "the whole sentence is the wire text the model reads"
+        );
+    }
+
+    /// A key with no substring relation to any advertised property is still
+    /// REPORTED, just without a suggestion — the report is the half that
+    /// matters. `agent_name` is the realistic second misspelling and pins the
+    /// separator-blind decision in `suggest`: the `_` survives `to_lowercase`,
+    /// so neither `agent_name` nor `agentName` contains the other. `zzzz` is
+    /// the control that proves the `agent_name` half is not passing by accident.
+    #[test]
+    fn an_unknown_param_without_a_close_match_is_still_reported() {
+        let warning = unknown_param_warning(
+            &tool_specs(),
+            &call("subagent", json!({ "task": "t", "agent_name": "reviewer" })),
+        )
+        .expect("`agent_name` is not an advertised property, so it is reported");
+        assert!(warning.contains("`subagent`"), "{warning}");
+        assert!(warning.contains("`agent_name`"), "{warning}");
+        assert!(
+            !warning.contains("did you mean"),
+            "`agent_name` must get NO suggestion (suggest is deliberately \
+             separator-blind): {warning}"
+        );
+
+        let warning = unknown_param_warning(
+            &tool_specs(),
+            &call("subagent", json!({ "task": "t", "zzzz": 1 })),
+        )
+        .expect("`zzzz` is not an advertised property, so it is reported");
+        assert!(warning.contains("`zzzz`"), "{warning}");
+        assert!(
+            !warning.contains("did you mean"),
+            "a key with no substring relation at all gets no suggestion: {warning}"
+        );
+    }
+
+    /// A spec whose `parameters.properties` is absent or not an object is
+    /// NEVER checked. Load-bearing: `list_agents` / `list_skills` are a bare
+    /// `{"type":"object"}`, so treating "no properties" as "nothing allowed"
+    /// would flag EVERY key on EVERY call and turn the warning into noise.
+    #[test]
+    fn a_spec_with_no_properties_is_never_checked() {
+        for bare in ["list_agents", "list_skills"] {
+            assert_eq!(
+                unknown_param_warning(&tool_specs(), &call(bare, json!({ "anything": 1 }))),
+                None,
+                "`{bare}` is a bare `{{\"type\":\"object\"}}` — no properties, no check"
+            );
+        }
+        // The "properties exists but is not an object" branch, which no real
+        // spec exercises today.
+        let odd = vec![ToolSpec {
+            name: "odd".into(),
+            description: String::new(),
+            parameters: json!({ "type": "object", "properties": "not-an-object" }),
+        }];
+        assert_eq!(
+            unknown_param_warning(&odd, &call("odd", json!({ "anything": 1 }))),
+            None,
+            "a non-object `properties` must disable the check, not enable it"
+        );
+    }
+
+    /// An unknown TOOL is not checked — `dispatch_tool`'s `unknown tool:` arm
+    /// (`loop/tools.rs`) already returns a hard `is_error: true` result, and a
+    /// second message from the checker would double-report it.
+    #[test]
+    fn an_unknown_tool_name_is_never_checked() {
+        assert_eq!(
+            unknown_param_warning(
+                &tool_specs(),
+                &call("no_such_tool", json!({ "whatever": 1 }))
+            ),
+            None
+        );
+    }
+
+    /// A call that passes only advertised keys is silent (the false-positive
+    /// guard), and the `dispatch_subagent` ALIAS is checked against the
+    /// `subagent` spec — the `effective_tool_name` lookup is what makes this
+    /// non-vacuous, and the message names the canonical tool.
+    #[test]
+    fn a_well_formed_call_produces_no_warning() {
+        assert_eq!(
+            unknown_param_warning(
+                &tool_specs(),
+                &call(
+                    "subagent",
+                    json!({
+                        "task": "t",
+                        "agentName": "scout",
+                        "thinking": "high",
+                        "model": "m",
+                        "systemPrompt": "s",
+                        "tools": ["read"]
+                    })
+                )
+            ),
+            None,
+            "every key here is advertised, so nothing may be reported"
+        );
+        let warning = unknown_param_warning(
+            &tool_specs(),
+            &call("dispatch_subagent", json!({ "task": "t", "agent": "x" })),
+        )
+        .expect("`dispatch_subagent` is an ALIAS of `subagent`, not an unknown tool");
+        assert!(warning.contains("`subagent`"), "{warning}");
+        assert!(warning.contains("`agent`"), "{warning}");
+        assert!(warning.contains("`agentName`"), "{warning}");
+    }
+
+    /// The `subagent` spec advertises exactly the set of keys the executor
+    /// reads — pinned by EXACT set equality, so both a dropped `thinking` and
+    /// an unadvertised sixth key redden this test.
+    ///
+    /// Where each key is consumed: `task` / `systemPrompt` / `model` /
+    /// `thinking` / `tools` in `interactive::dispatch_params`; `agentName` in
+    /// `dispatch::dispatch_subagent`. A future key added to either reader must
+    /// be advertised here — this is the test that goes RED when it is not.
+    #[test]
+    fn the_subagent_spec_advertises_every_param_the_executor_reads() {
+        let spec = tool_specs()
+            .into_iter()
+            .find(|s| s.name == "subagent")
+            .expect("subagent");
+        let advertised: BTreeSet<String> = spec.parameters["properties"]
+            .as_object()
+            .expect("properties")
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(
+            advertised,
+            [
+                "agentName",
+                "model",
+                "systemPrompt",
+                "task",
+                "thinking",
+                "tools"
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<BTreeSet<String>>()
+        );
+    }
+
+    /// (issue #82, interim) The three web tools' handlers accept camelCase
+    /// aliases and `proxy` that the specs must advertise — the checker added
+    /// for #78 is generic, so an unadvertised-but-legal key would be warned on
+    /// every web call. `exec_param_keys()` is the census this test shares with
+    /// `tool_specs_advertise_exactly_the_executor_param_keys`; it must list
+    /// EVERY key the handler reads (`.get("…")`, including the
+    /// `.or_else(|| params.get("…"))` alias arms) in `agent/web/tools.rs`.
+    #[test]
+    fn the_web_tool_specs_advertise_every_key_the_handlers_read() {
+        let read = |name: &str| -> BTreeSet<String> {
+            tool_specs()
+                .into_iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("no spec for `{name}`"))
+                .parameters["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("`{name}` must advertise properties"))
+                .keys()
+                .cloned()
+                .collect()
+        };
+        assert_eq!(
+            read("web_search"),
+            [
+                "query",
+                "queries",
+                "num_results",
+                "numResults",
+                "provider",
+                "recency_filter",
+                "recencyFilter",
+                "domain_filter",
+                "domainFilter",
+                "proxy"
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<BTreeSet<String>>(),
+            "exec_web_search reads all of these (web/tools.rs)"
+        );
+        assert_eq!(
+            read("fetch_content"),
+            ["url", "mode", "max_chars", "maxChars"]
+                .into_iter()
+                .map(String::from)
+                .collect::<BTreeSet<String>>(),
+            "exec_fetch_content reads all of these (web/tools.rs)"
+        );
+        assert_eq!(
+            read("get_search_content"),
+            [
+                "response_id",
+                "responseId",
+                "offset",
+                "limit",
+                "find_text",
+                "findText"
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<BTreeSet<String>>(),
+            "exec_get_search_content reads all of these (web/tools.rs) — and its \
+             own truncation note tells the model to pass `responseId`"
+        );
     }
 
     /// The advertised `bash` description names the shell THIS platform's

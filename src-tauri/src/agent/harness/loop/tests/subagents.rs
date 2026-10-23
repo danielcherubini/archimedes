@@ -11,9 +11,12 @@ use super::support::*;
 use crate::agent::events::{EventSink, RpcEvent};
 use crate::agent::harness::catalog::{CompactionConfig, Model, ModelCatalog};
 use crate::agent::harness::dispatch::{InProcessDispatcher, SubagentDispatcher};
-use crate::agent::harness::provider::{FinishReason, ProviderEvent, ToolCall};
+use crate::agent::harness::provider::{
+    ChatRole, FinishReason, MessageContent, ProviderEvent, ToolCall,
+};
 use crate::agent::harness::retry::RetryPolicy;
 use crate::agent::subagent::{LaunchConfig, SubagentOutcome, SubagentSessionManager};
+use crate::agent::tools::ContentBlock;
 use crate::agent::worker::client::{WorkerError, WorkerHandle, WorkerInboundEvent};
 use crate::agent::worker::manager::{WorkerFactory, WorkerManager};
 use crate::agent::worker::protocol::{StartEnv, StartMode};
@@ -554,7 +557,116 @@ async fn subagent_wait_a_resolving_completed_outcome_completes_the_tool() {
     .expect("the turn settled");
 }
 
-/// A test `SubagentDispatcher` that simulates a SLOW subagent (each
+/// (issue #78) The end-to-end delivery of the unknown-param warning: a
+/// `subagent` call carrying `agent` instead of `agentName` STILL dispatches and
+/// STILL succeeds, and its result carries a SECOND text block naming both keys.
+///
+/// Built on the `MockDispatcher` seam (not the `fake_worker` `WorkerManager`):
+/// the claim under test is the LOOP's delivery — the warning riding into the
+/// `tool_execution_end` payload and into the transcript `tool` message the model
+/// is re-sent — and the mock keeps the test off the process-spawn timing path.
+#[tokio::test]
+async fn a_mis_named_subagent_param_still_dispatches_and_announces_itself() {
+    let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+    let (provider, _calls) = ScriptedProvider::new(vec![
+        Some(vec![
+            ProviderEvent::ToolCall(ToolCall {
+                id: "t1".to_string(),
+                // `agent` is NOT advertised — the checker's whole trigger.
+                name: "subagent".to_string(),
+                arguments: json!({ "task": "the task", "agent": "reviewer" }),
+            }),
+            ProviderEvent::Done(FinishReason::ToolCalls),
+        ]),
+        Some(vec![
+            ProviderEvent::TextDelta("done".to_string()),
+            ProviderEvent::Done(FinishReason::Stop),
+        ]),
+    ]);
+    let dispatcher = crate::agent::harness::dispatch::MockDispatcher::new();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    dispatcher.queue(rx, crate::agent::subagent::SubagentCancel::none());
+    tx.send(SubagentOutcome::Completed {
+        output: "the answer".to_string(),
+        metrics: crate::agent::subagent::SubagentMetrics {
+            output: "the answer".to_string(),
+            input_tokens: 10,
+            output_tokens: 5,
+            cost: 0.0,
+            duration_ms: 1,
+        },
+    })
+    .unwrap();
+    let mut loop_ = build_loop_with_dispatcher(
+        Box::new(provider),
+        events_tx,
+        Arc::new(StdMutex::new(CancellationToken::new())),
+        watch::channel(0u64).0,
+        RetryPolicy::new_with(5, Duration::from_millis(1)),
+        Arc::new(TestSink {
+            updates: Arc::new(StdMutex::new(Vec::new())),
+        }),
+        Some(Arc::new(dispatcher) as Arc<dyn SubagentDispatcher>),
+        vec![fake_model("m1")],
+        None,
+    );
+    loop_.handle_prompt(&text_prompt("go")).await;
+    let end = wait_for_event(
+        &mut events_rx,
+        SETTLE_MS,
+        |e| matches!(e, RpcEvent::tool_execution_end { tool_call_id, .. } if tool_call_id == "t1"),
+    )
+    .await
+    .expect("the `subagent`'s tool_execution_end");
+    let RpcEvent::tool_execution_end {
+        result, is_error, ..
+    } = end
+    else {
+        unreachable!()
+    };
+    assert!(
+        !is_error,
+        "a mis-named param must not fail an otherwise-successful dispatch"
+    );
+    assert_eq!(
+        result["content"][0]["text"], "the answer",
+        "the child's own output stays the FIRST block (append, never prepend)"
+    );
+    let warning = result["content"][1]["text"]
+        .as_str()
+        .expect("the warning is the second text block");
+    assert!(
+        warning.starts_with("⚠ unknown param(s) for `subagent`"),
+        "{warning}"
+    );
+    assert!(warning.contains("`agent`"), "{warning}");
+    assert!(warning.contains("agentName"), "{warning}");
+    assert!(warning.contains("— ignored."), "{warning}");
+
+    // The warning travels into the TRANSCRIPT (the message list the model is
+    // re-sent next turn), not just the UI event.
+    let tool_message = loop_
+        .messages
+        .iter()
+        .find(|m| m.role == ChatRole::Tool && m.tool_call_id.as_deref() == Some("t1"))
+        .expect("the tool message for t1");
+    let MessageContent::Blocks(blocks) = &tool_message.content else {
+        panic!("the tool message carries content blocks");
+    };
+    assert_eq!(
+        blocks.len(),
+        2,
+        "the transcript keeps the child output AND the warning"
+    );
+    assert!(matches!(blocks[1], ContentBlock::Text { .. }), "{blocks:?}");
+
+    wait_for_event(&mut events_rx, SETTLE_MS, |e| {
+        matches!(e, RpcEvent::agent_settled)
+    })
+    .await
+    .expect("the turn settled");
+}
+
 /// `dispatch` resolves after `delay`) while counting how many subagents
 /// are in-flight CONCURRENTLY (the parallel-dispatch assertion — the max
 /// in-flight count is N for a concurrent batch, 1 for sequential).

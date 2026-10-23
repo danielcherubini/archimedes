@@ -14,7 +14,17 @@ const PREAMBLE: &str = "You are an expert coding assistant operating inside Arch
 
 const TODO_GUIDANCE: &str = "Use manage_todo_list to track multi-step work — write the plan before starting, mark items completed as you go";
 
-const SUBAGENT_GUIDANCE: &str = "Delegate independent subtasks with subagent — give each a systemPrompt describing its role and constraints (e.g. a read-only researcher, a focused reviewer), or a discovered agent (list_agents)";
+/// (issue #78, ADR 0020) `agentName` is the DEFAULT route and an explicit
+/// `systemPrompt` is the exception that needs justifying — the reverse of the
+/// superseded ADR 0017 "shape it with systemPrompt or use a discovered agent"
+/// wording this replaced.
+///
+/// HARD CONSTRAINT on the wording: the constant must keep opening with
+/// `Delegate independent subtasks with subagent` — `main_prompt_rules_conditional`
+/// asserts `!prompt.contains("Delegate independent subtasks")` as its "the
+/// guidance is absent without the tool" half, so rewording the opening silently
+/// weakens that test.
+const SUBAGENT_GUIDANCE: &str = "Delegate independent subtasks with subagent — pass a discovered agent's name in `agentName` (`list_agents`) and put your constraints in the task text; do NOT pass a `systemPrompt` alongside `agentName`, it replaces the agent's own prompt";
 
 const CONTEXT_CANDIDATES: &[&str] = &[
     "AGENTS.override.md",
@@ -527,8 +537,9 @@ When a skill file references a relative path, resolve it against the skill direc
         );
     }
 
-    // 2b — (ADR 0020) the guidance mentions `list_agents` (the parent
-    // discovers its Agent definitions via the `list_agents` tool).
+    // 2b — (issue #78, ADR 0020) the guidance makes `agentName` the route,
+    // names `list_agents` (the discovery tool), and forbids the habit ADR 0020
+    // superseded: hand-shaping a discovered agent with a `systemPrompt`.
     #[test]
     fn the_subagent_guidance_mentions_list_agents() {
         let root = scratch();
@@ -543,8 +554,12 @@ When a skill file references a relative path, resolve it against the skill direc
         };
         let prompt = build_main_prompt(&ctx);
         assert!(
-            prompt.contains("or a discovered agent (list_agents)"),
-            "SUBAGENT_GUIDANCE must mention list_agents: {prompt}"
+            prompt.contains("`agentName` (`list_agents`)"),
+            "SUBAGENT_GUIDANCE must make `agentName` the route and name `list_agents`: {prompt}"
+        );
+        assert!(
+            prompt.contains("do NOT pass a `systemPrompt` alongside `agentName`"),
+            "SUBAGENT_GUIDANCE must forbid the replacing-systemPrompt habit ADR 0020 superseded: {prompt}"
         );
     }
 
