@@ -100,6 +100,21 @@ pub struct SessionRecency {
     /// Unix milliseconds. Never absent: `LAST_ACTIVITY`'s `COALESCE` falls back
     /// to the row's own `created_at` when the transcript is empty.
     pub last_active_at: i64,
+    /// The row's position in the user's MANUAL ORDER (bigger number = lower
+    /// row), echoed straight from the row's own order column.
+    ///
+    /// It rides THIS payload rather than a payload of its own because ONE
+    /// sequence has to span live and stored rows, and the frontend cannot
+    /// interleave what it cannot see: a **Session** RESUMED this boot is live,
+    /// yet the slot it renders in is the one the database holds for it. A
+    /// second boot round-trip for the same rows is the alternative, and the
+    /// boot `Promise.all` already pays for this one.
+    ///
+    /// Nothing in the frontend reads the NAME — the store reduces it into an
+    /// order map (`setSessionRecency` → `sessionOrder`) and only
+    /// `mergeSessionOrder` consumes that. It is position and nothing else, so
+    /// it is never evidence (ADR 0075).
+    pub sort_order: i64,
 }
 
 /// The app's SQLite database.
@@ -593,16 +608,23 @@ impl Db {
     /// is not a contract — it is pinned only so the returned `Vec` is
     /// deterministic (a `Vec` with no `ORDER BY` is a nondeterministic fixture).
     /// `id` is the primary key, so the sort is free.
+    ///
+    /// The row's own order column travels with the stamp (see
+    /// `SessionRecency::sort_order`), so ONE frontend sequence can span live and
+    /// stored rows off this ONE read. No constant wraps that column name: it is
+    /// a plain column, not a shared expression, and inventing one would imply a
+    /// drift risk that does not exist.
     pub fn session_recency(&self) -> Result<Vec<SessionRecency>, DbError> {
         let guard = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = guard.prepare(&format!(
-            "SELECT id, {LAST_ACTIVITY} FROM sessions WHERE is_subagent = 0 ORDER BY id"
+            "SELECT id, {LAST_ACTIVITY}, sort_order FROM sessions WHERE is_subagent = 0 ORDER BY id"
         ))?;
         let rows = stmt
             .query_map([], |row| {
                 Ok(SessionRecency {
                     session_id: row.get(0)?,
                     last_active_at: row.get(1)?,
+                    sort_order: row.get(2)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -2163,6 +2185,76 @@ mod tests {
         assert_eq!(
             hidden, 1,
             "the subagent row exists in `sessions` — it was EXCLUDED, not missing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// (ADR 0075, D11 reversed) `session_recency` carries the row's OWN stored
+    /// order number, so ONE frontend sequence can interleave live and stored
+    /// rows: a resumed Session's row is in this result set (every non-subagent
+    /// row is), and its position is knowable without a second round-trip.
+    ///
+    /// TWO halves, and the second is the point:
+    ///  (a) each reported number EQUALS that row's `sort_order` column as read
+    ///      by the file's own `sort_order_of` helper — the payload ECHOES the
+    ///      column, it derives nothing;
+    ///  (b) after `reorder_sessions` the reported numbers MOVE with it, so
+    ///      `Db::session_recency` and `Db::reorder_sessions` — the write path a
+    ///      drag uses — AGREE about the column. A boot order map built from a
+    ///      reader that disagreed with the writer would reshuffle the list the
+    ///      user just arranged, which is the exact bug this branch exists to
+    ///      kill.
+    ///
+    /// Sessions go in through `record_session`, never raw `INSERT`s: a raw row
+    /// keeps `DEFAULT 0` and would tie all three, so the numbers would prove
+    /// nothing (T01/T02's fixture rule). The expectations are literal integers,
+    /// never recomputed from a constant under test.
+    #[test]
+    fn session_recency_reports_the_manual_order_number_and_reorder_moves_it() {
+        let dir =
+            std::env::temp_dir().join(format!("db-recencyorder-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).expect("db should open");
+        for id in ["a", "b", "c"] {
+            db.record_session(&title_session(id))
+                .expect("record_session should succeed");
+        }
+
+        let reported = |id: &str| -> i64 {
+            db.session_recency()
+                .expect("session_recency should succeed")
+                .into_iter()
+                .find(|r| r.session_id == id)
+                .unwrap_or_else(|| panic!("`session_recency` must return an entry for {id}"))
+                .sort_order
+        };
+
+        // (a) The payload echoes the COLUMN, row by row — not the position in
+        // the returned `Vec` (which is ordered by `id`, so on this fixture the
+        // two would coincide; `sort_order_of` is the independent witness).
+        for (id, number) in [("a", 0), ("b", 1), ("c", 2)] {
+            assert_eq!(
+                reported(id),
+                sort_order_of(&db, "sessions", "id", id),
+                "`{id}`'s reported number is the row's own `sort_order` column"
+            );
+            assert_eq!(
+                reported(id),
+                number,
+                "`{id}` was recorded {number}th, so it holds the number {number} \
+                 (the bottom-join `MAX + 1` in record order)"
+            );
+        }
+
+        // (b) The write path a drag uses moves the reported number too.
+        let ids: Vec<String> = ["c", "a", "b"].iter().map(|s| s.to_string()).collect();
+        db.reorder_sessions(&ids)
+            .expect("reorder_sessions should succeed");
+        assert_eq!(
+            vec![reported("a"), reported("b"), reported("c")],
+            vec![1, 2, 0],
+            "after `reorder_sessions([c, a, b])` the reported numbers are the \
+             new slice indices — the reader and the writer agree about the column"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

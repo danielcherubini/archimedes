@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetStores } from "../test/resetStores";
 import {
   autoSelectActive,
   detachedSessions,
@@ -4199,5 +4200,50 @@ describe("detachedSessions (sessions with no open Space — CONTEXT.md's Detache
       [],
     );
     expect(rows.map((r) => r.sessionId)).toEqual(["h2", "h1", "a2", "a1"]);
+  });
+});
+
+describe("sessionRecency (the recency + order side-channel, ADR 0075)", () => {
+  // This file resets by hand-written key lists elsewhere; this describe uses the
+  // shared `resetStores()` because the assertions below are about the store's
+  // INITIAL shape, which is exactly what that helper installs (from zustand's own
+  // `getInitialState()` capture, so a newly added field is covered for free).
+  beforeEach(() => resetStores());
+  afterEach(() => resetStores());
+
+  it("the store starts with empty sessionRecency and sessionOrder maps (the closeReasons side-channel shape)", () => {
+    // Both boot maps are `{}` before the boot fetch lands — the same shape
+    // `closeReasons` starts with, and the reason `recencyOf` must answer `null`
+    // rather than invent `0` for an id the map has never seen.
+    expect(useSessions.getState().sessionRecency).toEqual({});
+    expect(useSessions.getState().sessionOrder).toEqual({});
+  });
+
+  it("setSessionRecency reduces one row set into BOTH the per-id recency map and the per-id order map", () => {
+    // ONE payload, TWO readings. The two maps are seeded from the SAME array on
+    // purpose, so a setter that fills one and forgets the other is red here —
+    // the single most likely way to ship ADR 0075 broken (a recency map with no
+    // order map loses the one sequence; an order map with no recency map puts
+    // position back in charge of the Landing Session).
+    useSessions.getState().setSessionRecency([
+      { sessionId: "s1", lastActiveAt: 9_000_000_000_000, sortOrder: 4 },
+      { sessionId: "s2", lastActiveAt: 8_000_000_000_000, sortOrder: 1 },
+    ]);
+    expect(useSessions.getState().sessionRecency).toEqual({
+      s1: 9_000_000_000_000,
+      s2: 8_000_000_000_000,
+    });
+    expect(useSessions.getState().sessionOrder).toEqual({ s1: 4, s2: 1 });
+
+    // A later row for a known id WINS in both maps: unlike the merge-only
+    // `closeReasons` neighbour, these maps are a SNAPSHOT of the newest read
+    // (D13), so a stale entry must not outlive the row it described.
+    useSessions.getState().setSessionRecency([
+      { sessionId: "s1", lastActiveAt: 9_500_000_000_000, sortOrder: 0 },
+    ]);
+    expect(useSessions.getState().sessionRecency).toEqual({
+      s1: 9_500_000_000_000,
+    });
+    expect(useSessions.getState().sessionOrder).toEqual({ s1: 0 });
   });
 });

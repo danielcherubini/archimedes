@@ -12,6 +12,7 @@ import {
   listenSubagentSessionStarted,
   listSessions,
   listSpaces,
+  sessionRecency,
 } from "./lib/tauri";
 import { createBatchedSessionUpdate } from "./lib/batchSessionUpdates";
 import { INTERACTIVE_EVENTS } from "./lib/ipc/events";
@@ -296,6 +297,11 @@ function App() {
   // listener changes: close reasons flow through the existing
   // `handleSessionClosed`).
   //
+  // The THIRD fetch is `sessionRecency()` — the recency AND the stored order
+  // number per Session (ADR 0075: position is not evidence, so the Landing
+  // Session `setSpaces` picks has to be told what recency is). Its result is
+  // written BEFORE `setSpaces` for exactly that reason; see the effect below.
+  //
   // The content-area view: the workspace (the default) OR the settings
   // page (opened from the `SpacesList`'s gear icon). While settings is
   // open the workspace UNMOUNTS (the ZCode `opacity-0` + `inert` pattern
@@ -345,13 +351,20 @@ function App() {
   );
   const isMaximized = useWindowMaximized();
   useEffect(() => {
-    Promise.all([listSessions(true), listSpaces()])
-      .then(([rows, spaces]) => {
+    Promise.all([listSessions(true), listSpaces(), sessionRecency()])
+      .then(([rows, spaces, recency]) => {
         useSessions.getState().setHistorySessions(rows);
+        // BEFORE setSpaces: setSpaces runs autoSelectActive, which decides the
+        // Landing Session from these maps (ADR 0075). The three calls above have
+        // already settled, so this ordering costs nothing and is the whole
+        // contract — a swap lands boot on the map-less fallback. ONE call fills
+        // BOTH the recency map and the order map: the order number rides this
+        // payload precisely so boot costs no fourth IPC round-trip.
+        useSessions.getState().setSessionRecency(recency);
         useSessions.getState().setSpaces(spaces);
       })
       .catch((err) =>
-        console.error("failed to load stored sessions/spaces", err),
+        console.error("failed to load stored sessions/spaces/recency", err),
       );
   }, []);
 

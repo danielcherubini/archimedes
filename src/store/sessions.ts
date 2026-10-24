@@ -14,6 +14,7 @@ import {
   type CloseReasonStr,
   type SessionConfigOption,
   type SessionInfo,
+  type SessionRecency,
   type SpaceRow,
   type StopReason,
 } from "../lib/tauri";
@@ -375,6 +376,31 @@ interface SessionsState {
    * keys are never deleted.
    */
   closeReasons: Record<string, CloseReasonStr>;
+  /**
+   * Last activity per session id, in Unix ms, from the boot `session_recency`
+   * command (ADR 0075: position is not evidence, so anything that wants recency
+   * has to hold it as a FIELD). Same shape as `closeReasons`, and the same
+   * boot-fetched side-channel — but NOT merge-only: `setSessionRecency`
+   * replaces the whole map, because the command answers "every non-subagent
+   * session as of now" and a stale id must not outlive its row.
+   * Read ONLY through `lib/sessionRecency`'s `recencyOf` — never indexed by a
+   * call site, or the one rule has two owners.
+   */
+  sessionRecency: Record<string, number>;
+  /**
+   * Position per session id in the user's MANUAL ORDER, from the SAME boot
+   * payload as `sessionRecency` (bigger number = lower row; a row started after
+   * boot simply has no entry and sorts at the bottom).
+   *
+   * This is what makes ONE sequence span live and stored: a live row's position
+   * is knowable, so a Session RESUMED this boot keeps the slot the database
+   * holds for it instead of jumping to the front of a "live block". It is a
+   * position and nothing else — never evidence (ADR 0075) — and it is read ONLY
+   * by `mergeSessionOrder` via `sortByManualOrder`.
+   */
+  sessionOrder: Record<string, number>;
+  /** Replace BOTH maps from `sessionRecency()`'s rows (boot, alongside `setHistorySessions`). ONE call, ONE IPC round-trip's payload: the two maps must never be observable out of step. */
+  setSessionRecency: (rows: SessionRecency[]) => void;
   /** Transcript per session id. Kept after close for history. */
   messages: Record<string, Message[]>;
   /** Config options per session id. */
@@ -610,6 +636,8 @@ export const useSessions = create<SessionsState>((set, get) => ({
   activeSpacePath: null,
   spaces: [],
   closeReasons: {},
+  sessionRecency: {},
+  sessionOrder: {},
   messages: {},
   history: {},
   configOptions: {},
@@ -884,6 +912,18 @@ export const useSessions = create<SessionsState>((set, get) => ({
       );
       return { historySessions: history, archivedSessions: archived };
     }),
+
+  setSessionRecency: (rows) =>
+    set(() => ({
+      // ONE payload, TWO readings: the recency a decision needs and the position
+      // the one sequence needs. Both replaced wholesale (see the field docs).
+      sessionRecency: Object.fromEntries(
+        rows.map((r) => [r.sessionId, r.lastActiveAt]),
+      ),
+      sessionOrder: Object.fromEntries(
+        rows.map((r) => [r.sessionId, r.sortOrder]),
+      ),
+    })),
 
   archiveSession: async (sessionId) => {
     // No-op when the id is in NONE of the lists — a Session this app run has

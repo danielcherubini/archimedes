@@ -200,16 +200,23 @@ mod tests {
     }
 
     /// (ADR 0075) The WIRE KEYS of `SessionRecency` are pinned as literals:
-    /// `serde_json::to_value` on a row yields exactly `sessionId` and
-    /// `lastActiveAt`. The keys are the load-bearing half of this test — a
+    /// `serde_json::to_value` on a row yields exactly `lastActiveAt`,
+    /// `sessionId` and `sortOrder`. The keys are the load-bearing half of this test — a
     /// dropped `#[serde(rename_all = "camelCase")]` changes no field VALUE, so it
     /// passes every value assertion on both sides of the wire and is invisible to
     /// the hand-written TypeScript mirror; only a key literal sees it.
     ///
+    /// The list is ALPHABETICAL because `serde_json::to_value` emits a
+    /// `BTreeMap`-ordered object — that is why the names are sorted, not written
+    /// in declaration order.
+    ///
     /// The value half is asserted too, against the far-future stamp the fixture
     /// writes by RAW SQL rather than `record_message`: both `Db::record_*` helpers
     /// stamp `now_ms()`, so a `record_message` row could not be told apart from a
-    /// "recent" default (T01's trap, carried forward).
+    /// "recent" default (T01's trap, carried forward). And `sortOrder`'s value is
+    /// read after a `reorder_sessions`, so the row's number is NOT its record
+    /// position — a field wired to the wrong column index would answer the old
+    /// number (or the other row's) and be caught here.
     #[test]
     fn session_recency_rows_serializes_to_the_pinned_camel_case_keys() {
         let dir =
@@ -248,6 +255,14 @@ mod tests {
             .expect("fixture message row (explicit far-future created_at)");
         }
 
+        // The order number must NOT be derivable from the record order, or a
+        // field wired to the wrong column (or to the row's index in the `Vec`)
+        // would pass the value half by accident. `s_rec` was recorded FIRST, so
+        // this reorder moves it off its record position: 0 → 1.
+        let moved: Vec<String> = ["s_plain", "s_rec"].iter().map(|s| s.to_string()).collect();
+        db.reorder_sessions(&moved)
+            .expect("reorder_sessions should succeed");
+
         let rows = session_recency_rows(&db).expect("session_recency_rows should succeed");
         let value = serde_json::to_value(&rows).expect("SessionRecency serializes");
         let items = value.as_array().expect("the payload is an array");
@@ -262,8 +277,12 @@ mod tests {
                 .collect();
             assert_eq!(
                 keys,
-                vec!["lastActiveAt".to_string(), "sessionId".to_string()],
-                "the wire keys are exactly `lastActiveAt` and `sessionId` \
+                vec![
+                    "lastActiveAt".to_string(),
+                    "sessionId".to_string(),
+                    "sortOrder".to_string()
+                ],
+                "the wire keys are exactly `lastActiveAt`, `sessionId` and `sortOrder` \
                  (the pinned camelCase form — a dropped `rename_all` changes no value)"
             );
         }
@@ -286,6 +305,20 @@ mod tests {
             plain["lastActiveAt"].is_i64(),
             "a session with no messages still carries a NUMBER (the `COALESCE` \
              fallback), never null"
+        );
+
+        // The ORDER half, as a value: `s_rec` was recorded first (number 0) and
+        // the reorder above moved it to 1, so a field wired to the wrong column
+        // index — or left at a constant — answers the wrong integer here.
+        assert_eq!(
+            rec["sortOrder"],
+            serde_json::json!(1_i64),
+            "`s_rec` carries the number the reorder gave it, not its record position"
+        );
+        assert_eq!(
+            plain["sortOrder"],
+            serde_json::json!(0_i64),
+            "`s_plain` carries the number the reorder gave it"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
