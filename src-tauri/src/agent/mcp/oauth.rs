@@ -1722,12 +1722,38 @@ mod tests {
             .expect("a file name")
             .to_string_lossy()
             .starts_with("mcp-auth."));
-        // A path with no extension still gets a name.
+        // A path with no extension still gets a name, and the same three things
+        // hold for it: it is a sibling of the target, and the name keeps the
+        // target's stem and the `.tmp` tail.
+        //
+        // Asserted as PATHS plus a bare FILE NAME — the style of the assertions
+        // above — and NOT as a string prefix over the whole path. The old form
+        // was `starts_with(&format!("{}/credentials.", dir.path().display()))`,
+        // which spells the separator: `Path::display()` renders `\` on Windows,
+        // so the expected `/` never matched and this test was red on the Windows
+        // CI leg (both runs of PR #83) while the production code it guards was
+        // fine — `unique_tmp_path` only ever calls `with_file_name`, which is
+        // separator-agnostic. A file name contains no separator, so comparing
+        // parents and file names keeps every assertion here just as strong.
         let bare = dir.path().join("credentials");
-        assert!(bare
-            .with_file_name(unique_tmp_path(&bare).file_name().expect("a file name"))
+        let staged = unique_tmp_path(&bare);
+        assert_eq!(staged.parent(), bare.parent(), "staged beside the target");
+        assert_eq!(
+            bare.with_file_name(staged.file_name().expect("a file name")),
+            staged,
+            "the chosen name belongs in the target's own dir"
+        );
+        assert_eq!(staged.extension().and_then(|s| s.to_str()), Some("tmp"));
+        let staged_name = staged
+            .file_name()
+            .expect("a file name")
             .to_string_lossy()
-            .starts_with(&format!("{}/credentials.", dir.path().display())));
+            .to_string();
+        assert!(
+            staged_name.starts_with("credentials."),
+            "a target with no extension still stages under its own stem, dot included: \
+             {staged_name}"
+        );
     }
 
     #[test]
