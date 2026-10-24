@@ -34,6 +34,7 @@ import {
   cancelSession,
   resumeSession,
   startSession,
+  reorderSessions as reorderSessionsCommand,
 } from "../lib/tauri";
 import {
   getNewSpaceDialogOpen,
@@ -77,6 +78,12 @@ vi.mock("../lib/tauri", async () => {
       capabilities: {},
       archived: false,
     }),
+    // The store's `reorderSessions` / `reorderSpaces` write the manual order with
+    // these (ADR 0075). Mock them for the same reason as the commands above: the
+    // REAL wrappers would `invoke` and reject in jsdom — no global Tauri mock
+    // exists — so an un-mocked reorder failure would look nothing like its cause.
+    reorderSessions: vi.fn().mockResolvedValue(undefined),
+    reorderSpaces: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -4732,5 +4739,304 @@ describe("sessionRecency (the recency + order side-channel, ADR 0075)", () => {
       s1: 9_500_000_000_000,
     });
     expect(useSessions.getState().sessionOrder).toEqual({ s1: 0 });
+  });
+});
+
+describe("reorderSessions (the sidebar drag write path, ADR 0075)", () => {
+  // The optimistic write's whole point is that it changes the ORDER MAP, so every
+  // fixture here seeds `sessionOrder` explicitly. A fixture that left it empty
+  // would make every id unknown, every id tied, and the derivation answer input
+  // order — which at this point in the chain is byte-for-byte what the OLD
+  // live-then-stored concatenation answered, i.e. a test that cannot fail.
+  beforeEach(() => {
+    resetStores();
+    vi.mocked(reorderSessionsCommand).mockReset().mockResolvedValue(undefined);
+  });
+  afterEach(() => resetStores());
+
+  /** Drain to a macrotask boundary, so "the chain has had every chance to reach
+   *  the command" is a fact about the QUEUE and not about how many
+   *  `await Promise.resolve()`s the implementation happens to need. */
+  const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  /** The store's own view of one Space, built the way the render layer builds it.
+   *  Step (b)/(c) of the acceptance test read THIS and not `historySessions`, on
+   *  purpose: an assertion on the store's array is the shape that passes for the
+   *  stale-map implementation the test exists to catch. */
+  const viewFor = (path: string) => {
+    const s = useSessions.getState();
+    return spaceViewFor(
+      row(path, 1000),
+      s.sessions,
+      s.historySessions,
+      s.closeReasons,
+      s.archivedSessions,
+      { recency: s.sessionRecency },
+      s.sessionOrder,
+    );
+  };
+
+  /** `/w/alpha` with three STORED rows the user arranged top-to-bottom as
+   *  top(0) mid(1) bottom(2), and no live rows. */
+  const seedAlpha = () => {
+    useSessions.setState({
+      spaces: [row("/w/alpha", 1000)],
+      sessions: [],
+      historySessions: [
+        info("top", "/w/alpha"),
+        info("mid", "/w/alpha"),
+        info("bottom", "/w/alpha"),
+      ],
+      archivedSessions: [],
+      activeSessionId: null,
+      activeSpacePath: "/w/alpha",
+      closeReasons: {},
+      messages: {},
+      sessionRecency: {},
+      sessionOrder: { top: 0, mid: 1, bottom: 2 },
+    });
+  };
+
+  it("a dragged row HOLDS its slot when the list is re-derived from the stored rows (the optimistic write moves the order map, not the array it derived)", async () => {
+    // THE ACCEPTANCE TEST FOR T05 — T03's recorded constraint, made observable.
+    //
+    // TWO COMPETING ANSWERS, and this is the whole task in one assertion:
+    //  - an implementation that reorders the DERIVED array (`historySessions`)
+    //    answers the ORIGINAL order at both (b) and (c): `sessionOrder` is a BOOT
+    //    SNAPSHOT, so `mergeSessionOrder` re-sorts the union straight back and the
+    //    row SNAPS BACK — the defect T03 recorded as a constraint;
+    //  - an implementation that writes the MAP answers ["mid","bottom","top"] at
+    //    every step.
+    seedAlpha();
+    // The whole visible slice in its new order — exactly what `useDragReorder`
+    // hands `onReorder`.
+    const done = useSessions.getState().reorderSessions([
+      "mid",
+      "bottom",
+      "top",
+    ]);
+
+    // (a) THE MAP MOVED. Slice index = the new number.
+    expect(useSessions.getState().sessionOrder).toEqual({
+      top: 2,
+      mid: 0,
+      bottom: 1,
+    });
+
+    // (b) THE PAINT: the sequence the rows render, read off the derivation.
+    expect(viewFor("/w/alpha").sessionIds).toEqual(["mid", "bottom", "top"]);
+
+    // (c) THE PROMISE: re-derive from the ORIGINAL boot array — the shape any
+    // refetch or any other writer restores. (b) alone already reddens the
+    // array-only write; (c) is the constraint as T03 recorded it — a drag holds
+    // ACROSS a re-derivation — and the step that stops a future implementation
+    // satisfying the paint while leaving the durable map stale.
+    useSessions.getState().setHistorySessions([
+      info("top", "/w/alpha"),
+      info("mid", "/w/alpha"),
+      info("bottom", "/w/alpha"),
+    ]);
+    expect(viewFor("/w/alpha").sessionIds).toEqual(["mid", "bottom", "top"]);
+
+    // (d) and it is still there once the command has landed.
+    await done;
+    expect(viewFor("/w/alpha").sessionIds).toEqual(["mid", "bottom", "top"]);
+  });
+
+  it("publishes the new order BEFORE the command resolves (the optimistic publish the sidebar paints from)", () => {
+    // `useAgentOverridesWrites`' "publish first (before the awaits)", copied. The
+    // COMPETING ANSWER is a write-after-await implementation, which leaves the
+    // boot map standing at this instant. Deliberately no `await` anywhere: the
+    // command is left pending and the assertions are synchronous.
+    seedAlpha();
+    useSessions.getState().reorderSessions(["mid", "bottom", "top"]);
+    expect(useSessions.getState().sessionOrder).toEqual({
+      top: 2,
+      mid: 0,
+      bottom: 1,
+    });
+    expect(viewFor("/w/alpha").sessionIds).toEqual(["mid", "bottom", "top"]);
+  });
+
+  it("sends the WHOLE visible slice VERBATIM — unsorted, undeduped, unfiltered — and sends nothing for an empty slice", async () => {
+    seedAlpha();
+    await useSessions.getState().reorderSessions(["mid", "bottom", "top"]);
+    // TWO COMPETING ANSWERS: "send just the moved id" answers ["mid"] — and
+    // because the Rust side writes the SLICE INDEX as each row's stored number,
+    // that is the half-moved list the spec calls a bug.
+    expect(reorderSessionsCommand).toHaveBeenCalledTimes(1);
+    expect(reorderSessionsCommand).toHaveBeenCalledWith(["mid", "bottom", "top"]);
+
+    // The empty slice is the one degenerate case the store CAN see (it has no
+    // view of a visible slice — that is the render layer's answer).
+    await useSessions.getState().reorderSessions([]);
+    expect(reorderSessionsCommand).toHaveBeenCalledTimes(1);
+    expect(useSessions.getState().sessionOrder).toEqual({
+      top: 2,
+      mid: 0,
+      bottom: 1,
+    });
+  });
+
+  it("a rejected reorder logs and restores the PREVIOUS order map, and the action never rejects", async () => {
+    useSessions.setState({
+      spaces: [row("/w/a", 1000)],
+      sessions: [],
+      historySessions: [info("a", "/w/a"), info("b", "/w/a")],
+      archivedSessions: [],
+      activeSpacePath: "/w/a",
+      closeReasons: {},
+      messages: {},
+      sessionRecency: {},
+      sessionOrder: { a: 0, b: 1 },
+    });
+    const errSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    vi.mocked(reorderSessionsCommand).mockRejectedValueOnce(new Error("boom"));
+    // The `await` IS the never-rejects proof: a rejecting action fails this test
+    // on the rejection rather than on an assertion.
+    await useSessions.getState().reorderSessions(["b", "a"]);
+    // TWO COMPETING ANSWERS: no rollback leaves ["b","a"] in the UI while the DB
+    // holds ["a","b"] — the list the user sees re-arranged at the next boot,
+    // which reads as the app ignoring them.
+    expect(useSessions.getState().sessionOrder).toEqual({ a: 0, b: 1 });
+    expect(viewFor("/w/a").sessionIds).toEqual(["a", "b"]);
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("reorder"),
+      expect.anything(),
+    );
+    errSpy.mockRestore();
+  });
+
+  it("a failed OLDER drag does not roll back a NEWER drag's order (the publish epoch, checked at commit)", async () => {
+    useSessions.setState({
+      spaces: [row("/w/a", 1000)],
+      sessions: [],
+      historySessions: [
+        info("a", "/w/a"),
+        info("b", "/w/a"),
+        info("c", "/w/a"),
+      ],
+      archivedSessions: [],
+      activeSpacePath: "/w/a",
+      closeReasons: {},
+      messages: {},
+      sessionRecency: {},
+      sessionOrder: { a: 0, b: 1, c: 2 },
+    });
+    const errSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    // Two drags in one tick: the FIRST one's command fails, the second's lands.
+    vi.mocked(reorderSessionsCommand).mockRejectedValueOnce(new Error("boom"));
+    const first = useSessions.getState().reorderSessions(["b", "a"]);
+    const second = useSessions.getState().reorderSessions(["c", "b", "a"]);
+    await Promise.all([first, second]);
+    // TWO COMPETING ANSWERS: an unconditional rollback restores the pre-FIRST
+    // snapshot {a:0,b:1,c:2} and silently DELETES the user's second drag — the
+    // exact failure `useAgentOverridesWrites`' epoch exists to stop.
+    expect(useSessions.getState().sessionOrder).toEqual({ c: 0, b: 1, a: 2 });
+    expect(viewFor("/w/a").sessionIds).toEqual(["c", "b", "a"]);
+    errSpy.mockRestore();
+  });
+
+  it("reordering one Space leaves another Space's rows exactly where they were", async () => {
+    // Space B's rows sit in the ARRAY in the OPPOSITE order to their numbers, on
+    // purpose. TWO COMPETING ANSWERS: an implementation that rebuilds the map
+    // wholesale (`Object.fromEntries(ids.map(…))`) DELETES b1/b2, and
+    // `sortByManualOrder` sinks unknown ids while preserving their input order —
+    // so Space B silently answers ["b2","b1"]. Seeding B's array order to AGREE
+    // with its numbers would make the two rules answer identically, which is the
+    // trap the Conventions name.
+    useSessions.setState({
+      spaces: [row("/w/a", 1000), row("/w/b", 900)],
+      sessions: [],
+      historySessions: [
+        info("a1", "/w/a"),
+        info("a2", "/w/a"),
+        info("b2", "/w/b"),
+        info("b1", "/w/b"),
+      ],
+      archivedSessions: [],
+      activeSpacePath: "/w/a",
+      closeReasons: {},
+      messages: {},
+      sessionRecency: {},
+      sessionOrder: { a1: 0, a2: 1, b1: 0, b2: 1 },
+    });
+    // Prove the fixture is live: the map beats the array for Space B too.
+    expect(viewFor("/w/b").sessionIds).toEqual(["b1", "b2"]);
+
+    await useSessions.getState().reorderSessions(["a2", "a1"]);
+
+    expect(viewFor("/w/a").sessionIds).toEqual(["a2", "a1"]);
+    expect(viewFor("/w/b").sessionIds).toEqual(["b1", "b2"]);
+  });
+
+  it("ids outside the sent slice keep their map entries (the write touches the slice, as the command does)", async () => {
+    // The data-layer statement of the same failure as the test above: the command
+    // updates ONLY the ids it is given, so a wholesale map would sink every other
+    // Space's rows to the bottom.
+    useSessions.setState({ sessionOrder: { a: 0, b: 1, z: 7 } });
+    await useSessions.getState().reorderSessions(["b", "a"]);
+    expect(useSessions.getState().sessionOrder).toEqual({ a: 1, b: 0, z: 7 });
+  });
+
+  it("two drags in one list reach the database in DRAG ORDER (the chain — the newer drag must not land first)", async () => {
+    // The property `setSpaceTrusted`'s `inFlightToggles` queue exists for, copied
+    // (D4). TWO COMPETING ANSWERS: with the chain, the second drag's command does
+    // not START while the first is still in flight; without it, both fire as soon
+    // as they are called and the DB settles on whichever IPC finishes last — which
+    // can be the OLDER drag, leaving the database on an order the user has since
+    // overwritten. The optimistic map cannot save it: the map is the newer order
+    // while the DB is the older one, and the next boot re-derives from the DB.
+    useSessions.setState({
+      spaces: [row("/w/a", 1000)],
+      sessions: [],
+      historySessions: [
+        info("a", "/w/a"),
+        info("b", "/w/a"),
+        info("c", "/w/a"),
+      ],
+      archivedSessions: [],
+      activeSpacePath: "/w/a",
+      closeReasons: {},
+      messages: {},
+      sessionRecency: {},
+      sessionOrder: { a: 0, b: 1, c: 2 },
+    });
+    // Hold the first command open until the test says so.
+    let releaseFirst: () => void = () => {};
+    const firstCommand = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    vi.mocked(reorderSessionsCommand).mockImplementationOnce(
+      () => firstCommand,
+    );
+
+    const first = useSessions.getState().reorderSessions(["b", "a"]);
+    // Let the chain's `.then` reach the command, so the first IPC is genuinely in
+    // flight (not merely queued). A `setTimeout` flush drains the whole microtask
+    // queue, so the count below cannot be a tick-count artefact.
+    await flush();
+    expect(reorderSessionsCommand).toHaveBeenCalledTimes(1);
+
+    const second = useSessions.getState().reorderSessions(["c", "b", "a"]);
+    await flush();
+    // THE DISCRIMINATING ASSERTION: the second command has not even started.
+    expect(reorderSessionsCommand).toHaveBeenCalledTimes(1);
+
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(reorderSessionsCommand).toHaveBeenCalledTimes(2);
+    expect(reorderSessionsCommand).toHaveBeenNthCalledWith(1, ["b", "a"]);
+    expect(reorderSessionsCommand).toHaveBeenNthCalledWith(2, [
+      "c",
+      "b",
+      "a",
+    ]);
+    // And the optimistic map is the NEWER drag's, which is what the user sees.
+    expect(useSessions.getState().sessionOrder).toEqual({ c: 0, b: 1, a: 2 });
   });
 });

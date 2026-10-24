@@ -6,6 +6,7 @@ import {
   deleteSession as deleteSessionCommand,
   deleteSpace as deleteSpaceCommand,
   loadHistory,
+  reorderSessions as reorderSessionsCommand,
   resumeSession as resumeSessionCommand,
   setSessionArchived as setSessionArchivedCommand,
   setSpaceTrusted as setSpaceTrustedCommand,
@@ -107,6 +108,15 @@ export function discardSessionMessages(sessionId: string): void {
  *    ONE sequence spanning live and stored — there is no live block to keep at
  *    the front, and a Session RESUMED this boot keeps the slot its row holds.
  *    Re-introducing a live-first group here would move a row the user positioned.
+ *    The map is a BOOT SNAPSHOT only until a drag writes it: `reorderSessions`
+ *    is the mid-run writer, and it writes THE MAP — reordering the derived array
+ *    instead would be undone by the next `mergeSessionOrder`, and the dragged row
+ *    would snap back.
+ *    The numbers are comparable WITHIN one Space only, because
+ *    `mergeSessionOrder` is called with one Space's ids and nowhere else (so a
+ *    slice renumbered `0..n-1` cannot disturb another Space's rows — and the Rust
+ *    command renumbers the same way, which is why the map agrees with the
+ *    database rather than approximating it).
  *
  * Therefore `spaces[0]` is the LEFTMOST tab, not the tab that was opened last,
  * and the head of a Space's stored subsequence is the first row of a manual
@@ -646,6 +656,29 @@ interface SessionsState {
    * flag rolls back to the previous value.
    */
   setSpaceTrusted: (path: string, trusted: boolean) => void;
+  /**
+   * Rewrite the manual order of ONE Space's visible Session rows (the sidebar
+   * drag's write path, ADR 0075). Optimistic — the ORDER MAP `sessionOrder` is
+   * updated synchronously, then `reorder_sessions` fires with the WHOLE slice in
+   * its new order — and on rejection the previous map is restored and the failure
+   * logged. NEVER rejects: the call site `void`s it and a rejection would be an
+   * unhandled rejection in the webview (see `useAgentOverridesWrites` for why that
+   * matters and where the epoch rule comes from).
+   *
+   * THE MAP, NOT THE ARRAY, AND THAT IS THE WHOLE POINT: `mergeSessionOrder`
+   * re-sorts the live∪stored union from `sessionOrder` on every derivation, so a
+   * write that only reordered `historySessions` would be undone by the next
+   * `spaceViewFor` — the row would snap back. `sessionOrder` is a boot snapshot
+   * until this action writes it.
+   *
+   * `ids` is the whole visible slice (`SpaceView.sessionIds`), live rows included
+   * (a live Session HAS a `sessions` row — `record_session` writes it at start —
+   * so renumbering it is meaningful) and archived rows EXCLUDED (the Archived
+   * section is recency-ordered and must not be renumbered invisibly). The store
+   * does not re-derive that slice: what is visible is the render layer's answer,
+   * and a second owner of it is a second thing that can disagree.
+   */
+  reorderSessions: (ids: string[]) => Promise<void>;
   /** Populate the history list from `list_sessions` (boot). */
   setHistorySessions: (rows: SessionInfo[]) => void;
   /**
@@ -702,6 +735,24 @@ const inFlightToggles = new Map<string, Promise<void>>();
 // pruned in `removeSpace`), so every known path has a committed
 // baseline; the UI-value fallback below is a last resort only.
 const committedTrusted = new Map<string, boolean>();
+
+// The reorder write path (ADR 0075). ONE chain per list: two drags in the same
+// list must land in the order they happened, exactly as `inFlightToggles` does
+// for the trust flag. App-global per LIST (not per Space): the command rewrites
+// a whole slice, so two overlapping writes to the same table cannot be ordered
+// by anything but a chain. A stored promise never rejects (each link catches), so
+// a failed drag cannot poison the next one.
+const reorderChain: { sessions: Promise<void>; spaces: Promise<void> } = {
+  sessions: Promise.resolve(),
+  spaces: Promise.resolve(),
+};
+// How many optimistic reorder publishes each list has made. A failing link
+// compares its own epoch and DISCARDS its rollback if a newer drag has published
+// since — a rollback IS a publish, and a stale one deletes a newer move
+// (`useAgentOverridesWrites`' rule, copied). What is NOT copied from that hook is
+// its read-modify-write of a document: there is no file to re-read here, and the
+// epoch does not affect the success path at all.
+const reorderEpoch = { sessions: 0, spaces: 0 };
 
 // One new-session command at a time. APP-GLOBAL, not per-Space: there is one
 // selected Space and one new-session flow, and the thing it suppresses is two
@@ -1000,6 +1051,43 @@ export const useSessions = create<SessionsState>((set, get) => ({
       },
     );
     inFlightToggles.set(path, done);
+  },
+
+  reorderSessions: (ids) => {
+    // The store cannot see a visible slice (that is the render layer's answer), so
+    // it guards only the one degenerate case it CAN see. The "nothing moved" case
+    // is `useDragReorder`'s to refuse, where the list is visible.
+    if (ids.length === 0) return Promise.resolve();
+    const previous = get().sessionOrder;
+    reorderEpoch.sessions += 1;
+    const epoch = reorderEpoch.sessions;
+    // Optimistic, and the write is the MAP. Slice index = the new number, which is
+    // exactly what `Db::reorder_sessions` will store, so the two agree without a
+    // round trip. Ids outside the slice keep their entries — the command updates
+    // only the ids it is given, and a wholesale map would sink every other
+    // Space's rows to the bottom.
+    set((state) => ({
+      sessionOrder: {
+        ...state.sessionOrder,
+        ...Object.fromEntries(ids.map((id, index) => [id, index])),
+      },
+    }));
+    const link = () =>
+      reorderChain.sessions
+        .catch(() => {})
+        .then(() => reorderSessionsCommand(ids))
+        .catch((err) => {
+          console.error("Failed to reorder sessions:", err);
+          if (reorderEpoch.sessions !== epoch) return; // a newer drag owns the store
+          // Restore, do NOT refetch: `setSessionRecency` replaces the recency map
+          // too, so a refetch would be a WIDER mutation than the one being undone —
+          // and the command is one transaction, so the captured snapshot already IS
+          // the committed state.
+          set({ sessionOrder: previous });
+        });
+    const done = link();
+    reorderChain.sessions = done;
+    return done;
   },
 
   setHistorySessions: (rows) =>
