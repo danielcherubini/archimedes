@@ -282,6 +282,25 @@ deliberately left undone.
   "T04 deletes it". **HANDED TO T06:** a stale citation in
   `SessionListRow.tsx` naming the old rail-pin test.
 
+- 2026-10-24 — **T05 PLAN: a MEASURED jsdom trap that would have made the whole
+  before/after mechanism untestable.** `fireEvent.dragOver(el,
+  { clientY: 40 })` does NOT deliver `clientY` — re-verified by the orchestrator
+  independently (`expected undefined to be 40`). With `clientY` undefined, every
+  midpoint comparison collapses to ONE branch, so tests asserting the other
+  branch fail loudly but tests asserting the surviving branch pass VACUOUSLY —
+  the fourth time this branch met that failure mode. The plan ships a hand-built
+  event with `Object.assign` instead, plus the `getBoundingClientRect` override
+  (jsdom returns all zeros, so midpoint 0 makes before/after untestable at all).
+- 2026-10-24 — **T05 PLAN DEVIATES FROM THE SPEC, deliberately, and the
+  orchestrator ACCEPTS it:** the spec's §Write path says a rejected reorder
+  "logs and refetches". The plan argues a refetch is the wrong instrument —
+  `setSessionRecency` REPLACES the recency map and `setSpaces` re-seeds the
+  trusted baseline and can move the selected tab, so a refetch is a wider
+  mutation than the one being undone, and the reorder command is one transaction
+  so the committed state is already known. Rollback therefore restores the
+  captured slice. Accepted; the spec text is amended to match rather than left
+  contradicting the code.
+
 ## Changelog
 
 One line per task: hash, what shipped, gate numbers at that moment.
