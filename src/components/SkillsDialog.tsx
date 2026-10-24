@@ -79,9 +79,15 @@ function manualOnlyTooltip(name: string): string {
  * in the row's accessible name is the same sentence twice to a screen reader.
  *
  * (The `manualOnlyTooltip` header above still closes with "These TWO are the
- * only places the rule is enforced for Skills". That block is pinned, so the
- * correction lives HERE and in `skills.ts`'s "WHERE it is applied" paragraph:
- * this row affordance is the third frontend site.)
+ * only places the rule is enforced for Skills" — an under-count this branch
+ * left standing. NOT because a test pins that block: none does. No test reads
+ * this file's source text, and mutating `These TWO` to `These FOUR` reddens
+ * nothing (measured: 24/24 still green). What asked for byte-unchanged was
+ * `task02`'s acceptance line, and it asked it of `manualOnlyTooltip`'s shipped
+ * BEHAVIOUR — the two tooltip tests, which pin its rules and must pass
+ * unedited. So the count correction lives in `skills.ts`'s "WHERE it is
+ * applied" paragraph and HERE instead: this row affordance is the third
+ * frontend site.)
  */
 export const UNMENTIONABLE_ROW_REASON =
   "This name can't be typed as a mention — rename the Skill to give it one";

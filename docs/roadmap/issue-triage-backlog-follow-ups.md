@@ -63,13 +63,15 @@ is the record of what was deliberately NOT done and why — read it before re-de
   pinned, because it decides the size of the job: the two tooltip tests
   (`the_manual_only_tooltip_promises_no_$mention_a_name_cannot_carry` and
   `the_manual_only_tooltip_offers_the_$mention_and_says_the_refusal_is_live`) pin the
-  FUNCTION's two rules — both timings, and no `$` glyph for an unmentionable name — and
-  `task02`'s acceptance line asks for `manualOnlyTooltip` byte-unchanged, which is why
-  the header was left alone in that wave. But the header is a doc COMMENT, and no test
-  reads this file's source: editing `These TWO` to `These FOUR` was measured to redden
-  nothing (24/24 green). So the residue is a comment edit, not a pin change — what it
-  still owes is the judgement call about whether a pinned-function header may move, and
-  keeping the count consistent with the two places that now state it.
+  FUNCTION's two rules — both timings, and no `$` glyph for an unmentionable name.
+  `task02`'s acceptance line asks for `manualOnlyTooltip` byte-unchanged, and that is
+  an ask about the FUNCTION's shipped behaviour (those two tests passing unedited) —
+  it was never a test on the header's wording. Nothing pins the header: no test reads
+  this file's source text, so editing `These TWO` to `These FOUR` reddens 0 of 24
+  (measured, and re-measured 2026-10-24). So the residue is a comment edit, not a pin
+  change — what it still owes is only the judgement call about moving a header that
+  sits above a pinned function, and keeping the count consistent with the places that
+  now state it.
 
 ## 3. Doc corrections — APPLIED in the ship commit (do not redo)
 

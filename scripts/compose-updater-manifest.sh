@@ -273,8 +273,9 @@ fi
 #
 #   1. The file's own contract. `fail()` exists so that "a rejected manifest can
 #      never be left on disk for the next step to `gh release upload`". That is a
-#      claim about every exit-1 path, and this bare `exit 1` skipped the cleanup
-#      outright — unlike pre-write refusals like
+#      claim about every refusal that reaches this function — not about every exit 1,
+#      whose exceptions the header above names — and this bare `exit 1` skipped the
+#      cleanup outright — unlike pre-write refusals like
 #      `--sigs-dir is not a directory`, which DO delete. An operator cannot reason
 #      about which refusals leave a file behind, and the next step cannot either.
 #      (The other way was subtler and is fixed at the definition of `fail()` above:

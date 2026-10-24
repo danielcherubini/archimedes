@@ -1049,17 +1049,21 @@ mod tests {
         // `Unknown MCP server` — a sentence calling the requirement
         // "configured" contradicts the user's own settings file, which is why
         // `bd07fbf`'s other half abandoned that wording in `tool.rs`. Pinned
-        // both ways: the positive claim, and the absence of the wrong word.
+        // both ways: the positive claim, and the absence of the two WRONG
+        // PHRASES that make membership of the config the requirement. Banning
+        // the bare word "configured" would over-reach — it reddens a correct
+        // rewording ("a configured-but-disabled entry is not held"), which is
+        // the very distinction this clause exists to protect.
+        let lower = d.to_lowercase();
         assert!(
             d.contains("this session holds"),
             "the requirement is a server the session HOLDS (the wording \
              `unknown_server_scope` fails with), not a name from the config: {d}"
         );
         assert!(
-            !d.to_lowercase().contains("configured"),
-            "`configured` must not be the requirement word — a configured-but-\
-             disabled server is not held and answers Unknown, so the word \
-             contradicts the settings file: {d}"
+            !lower.contains("must name a configured") && !lower.contains("actually configured"),
+            "the requirement must not be membership of the config — a configured-but-disabled \
+             server is not held and answers Unknown: {d}"
         );
         assert!(
             d.contains("fails"),

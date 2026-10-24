@@ -134,11 +134,15 @@ None. Everything deliberately not fixed is in `docs/roadmap/issue-triage-backlog
 - 2026-10-23 — Entry was the triage itself (no `discuss` spec, no `issue:` key) → nothing to mirror the
   plan comment to. The issue tracker already carries the triage record; commits reference issue numbers.
 - 2026-10-23 — **T2 shipped with one recorded deviation**: `manualOnlyTooltip`'s header still closes
-  with "These TWO are the only places the rule is enforced for Skills" — now an under-count, but that
-  block is pinned byte-unchanged by a test, so the correction was written in `src/lib/skills.ts` and the
-  new `UNMENTIONABLE_ROW_REASON` doc instead. ADR 0036's Rust-side doc comments on
-  `skills::is_mentionable_name` / `exec_read_skill` under-count the frontend surfaces for the same
-  reason: Rust-doc-only, deliberately kept out of a frontend-only task. → follow-ups file.
+  with "These TWO are the only places the rule is enforced for Skills" — now an under-count. Nothing
+  pins that block: NO test reads `SkillsDialog.tsx`'s source text, so mutating `These TWO` to
+  `These FOUR` reddens 0 of 24 (measured, and re-measured 2026-10-24). The only `byte-unchanged` ask
+  was `task02`'s own ACCEPTANCE LINE, and it applies to `manualOnlyTooltip`'s shipped behaviour — the
+  two tooltip tests passing unedited — not to its doc comment. The correction was therefore written
+  in `src/lib/skills.ts` and the new `UNMENTIONABLE_ROW_REASON` doc. ADR 0036's Rust-side doc comments
+  on `skills::is_mentionable_name` / `exec_read_skill` under-counted the frontend surfaces for a
+  different reason: Rust-doc-only, deliberately kept out of a frontend-only task; `c4cf167` landed
+  them. → follow-ups file.
 - 2026-10-23 — **The KNOWN GAP comment in `exec/search.rs` has the wrong model, and #81 understates the
   defect.** The comment claims `fd` prints relative to its cwd so changing cwd changes the post-processing.
   Measured: `fd` echoes the search path as given (its `strip_current_dir` is only a `strip_prefix(".")`),

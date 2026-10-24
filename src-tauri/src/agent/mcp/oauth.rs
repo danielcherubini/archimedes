@@ -369,11 +369,13 @@ pub async fn client_credentials_grant(
 /// NEVER auto-refreshed (the auth server rejects the refresh grant with
 /// `invalid_client`) → `None`.
 ///
-/// Its only production caller is `manager::usable_token_provider`, and the
-/// guard fires BEFORE `discover`, so a public client never touches the network
-/// here. The degradation the `None` produces lands where the ADR wants it: the
-/// request goes out with no token → the server's 401 → `McpState::NeedsAuth` →
-/// the `mcp` tool's `auth` action (a fresh interactive flow).
+/// Its only production caller chain is `manager::usable_token_provider` →
+/// `manager::refresh_and_persist`, which is what spawns it (on the detached task
+/// below). The ADR 0015 guard fires BEFORE `discover`, so a public client never
+/// touches the network here. The degradation the `None` produces lands where the
+/// ADR wants it: the request goes out with no token → the server's 401 →
+/// `McpState::NeedsAuth` → the `mcp` tool's `auth` action (a fresh interactive
+/// flow).
 ///
 /// CANCELLATION — the invariant is **a completed rotation is never dropped on
 /// the floor**, so this grant is deliberately NOT cancellable. It takes no
