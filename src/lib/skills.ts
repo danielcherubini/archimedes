@@ -26,8 +26,10 @@ const MENTION_RE = /\$([a-z0-9]+(?:-[a-z0-9]+)*)/g;
  * WHERE it is applied for SKILLS, precisely, on the CLIENT side: this dialog's
  * tooltip (`SkillsDialog.tsx`) AND this dialog's ROW AFFORDANCE — a row whose
  * name fails this predicate renders inert (`disabled`: `aria-disabled`, out of
- * the tab order, click and Enter inert, reason in a `$`-free tooltip) instead of
- * inserting a token that expands nothing, and `insertSkill` guards the same
+ * the tab order, click and Enter inert, reason as a `$`-free VISIBLE second line
+ * in the row — visible because an inert row cannot be focused, so a `title`
+ * alone was reachable with a mouse only) instead of inserting a token that
+ * expands nothing, and `insertSkill` guards the same
  * predicate before it dispatches (issue #10, amending ADR 0036). Plus
  * `read_skill`'s model-hidden refusal (Rust). And NOT the composer's `$`
  * picker, whose rows are the FULL skill catalog with only a name

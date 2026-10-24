@@ -16,6 +16,7 @@ import {
   estimateTokensFromMessages,
   extractTargetInfo,
   getActivityDisplay,
+  unmatchedAgentTooltip,
 } from "../lib/subagentActivity";
 import { StatusIcon } from "./SubagentStatusIcon";
 import { MutedCaption } from "./MutedCaption";
@@ -477,7 +478,11 @@ export default function SubagentDelegatingCard({
                     {row.nameResolution === "unmatched" && (
                       <MutedCaption
                         className="shrink-0 text-warning"
-                        title={`No Agent definition named "${row.agentName}" — this child loaded no persona, no tool allowlist and no model override, and ran the parent's config instead.`}
+                        // The sentence has ONE owner (`unmatchedAgentTooltip`,
+                        // `lib/subagentActivity.ts`) — the transcript sheet's
+                        // header renders the same words from the same call, so
+                        // the two surfaces cannot reword independently.
+                        title={unmatchedAgentTooltip(row.agentName)}
                       >
                         no matching Agent
                       </MutedCaption>

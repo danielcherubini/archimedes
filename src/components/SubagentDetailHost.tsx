@@ -3,6 +3,7 @@ import { X } from "lucide-react";
 import { useSubagents } from "../store/subagents";
 import { useSubagentSelection } from "../store/subagentSelection";
 import { SHEET_WIDTH_CLASS } from "../lib/subagentSheetLayout";
+import { unmatchedAgentTooltip } from "../lib/subagentActivity";
 import { SubagentTranscript } from "./SubagentTranscript";
 import { MutedCaption } from "./MutedCaption";
 import { StatusIcon, STATUS_CHIP_STYLES } from "./SubagentStatusIcon";
@@ -113,7 +114,10 @@ export default function SubagentDetailHost() {
               {selected.nameResolution === "unmatched" && (
                 <MutedCaption
                   className="shrink-0 text-warning"
-                  title={`No Agent definition named "${selected.agentName}" — this child loaded no persona, no tool allowlist and no model override, and ran the parent's config instead.`}
+                  // ONE owner for the sentence — see `unmatchedAgentTooltip`
+                  // (`lib/subagentActivity.ts`); the directory row calls the
+                  // same function.
+                  title={unmatchedAgentTooltip(selected.agentName)}
                 >
                   no matching Agent
                 </MutedCaption>

@@ -1114,6 +1114,36 @@ describe("App (the `subagent-session-started` listener)", () => {
     );
     expect(useSubagents.getState().entries["sub1"].agentName).toBe("reviewr");
   });
+
+  it("OMITS the `nameResolution` key entirely for a payload from an older backend", () => {
+    // The invariant `store/subagents.ts` documents and `subagents.test.ts`
+    // pins — "an older backend OMITS it" — was only ever tested against a
+    // fixture that went straight into `addSession`. The real wire path runs
+    // through THIS handler, and an unconditional `nameResolution: p.nameResolution`
+    // turns an absent wire field into a PRESENT-BUT-`undefined` key, which is
+    // exactly the shape the store test says must not occur (an `undefined`-valued
+    // key reads differently from an absent one in an `in` / spread-based
+    // assertion — the same reason `makeSubagentEntry` deletes its own
+    // explicitly-`undefined` optionals). So this asserts KEY ABSENCE, not that
+    // the value merely reads `undefined`.
+    render(<App />);
+    const calls = vi.mocked(listenSubagentSessionStarted).mock.calls;
+    const onStarted = calls[calls.length - 1][0];
+    act(() => {
+      onStarted({
+        sessionId: "sub1",
+        parentSessionId: "main1",
+        agentName: "reviewr",
+        task: "t",
+        // An older backend: the field is not on the wire at all.
+      });
+    });
+    const entry = useSubagents.getState().entries["sub1"];
+    expect("nameResolution" in entry).toBe(false);
+    // The rest of the entry is untouched by the omission.
+    expect(entry.agentName).toBe("reviewr");
+    expect(entry.status).toBe("running");
+  });
 });
 
 describe("App (the `interactive-request-close` listener)", () => {

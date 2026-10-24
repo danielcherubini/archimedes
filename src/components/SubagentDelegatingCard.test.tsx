@@ -6,6 +6,7 @@ import { useSubagentSelection } from "../store/subagentSelection";
 import { useSessions } from "../store/sessions";
 import { useInteractive } from "../store/interactive";
 import type { SubagentEntry } from "../store/subagents";
+import { unmatchedAgentTooltip } from "../lib/subagentActivity";
 
 const entry = (over: Partial<SubagentEntry>): SubagentEntry => ({
   sessionId: "sub1",
@@ -721,6 +722,14 @@ describe("SubagentDelegatingCard (the resolve-miss marker, issue #47)", () => {
       />,
     );
     expect(screen.getByText("no matching Agent")).toBeTruthy();
+    // The tooltip is the SHARED sentence, asserted THROUGH the helper
+    // (issue #47 review): the point of `unmatchedAgentTooltip` is that the
+    // directory row and the transcript sheet cannot carry different words, so
+    // a literal here would re-create the copy it replaces. The sentence itself
+    // is pinned verbatim in `subagentActivity.test.ts`.
+    expect(screen.getByText("no matching Agent").getAttribute("title")).toBe(
+      unmatchedAgentTooltip("reviewr"),
+    );
     // ADDITIVE: the name is never replaced by the marker.
     expect(screen.getByText("reviewr")).toBeTruthy();
     // Click-to-open survives — the caption sits INSIDE the `<Button>`, and the

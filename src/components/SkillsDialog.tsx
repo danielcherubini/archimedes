@@ -48,10 +48,11 @@ function manualOnlyTooltip(name: string): string {
 }
 
 /**
- * Why a row is inert, in the row's own native tooltip (issue #10, amending ADR
- * 0036). Two wording rules, both inherited from `manualOnlyTooltip`:
+ * Why a row is inert, in the row's OWN visible line (issue #10, amending
+ * ADR 0036; rendering it visibly is the accessibility follow-up). Two wording
+ * rules, both inherited from `manualOnlyTooltip`:
  *
- * 1. NO `$` glyph anywhere. A tooltip spelling `$has space` would print the
+ * 1. NO `$` glyph anywhere. A sentence spelling `$has space` would print the
  *    exact dead token the row just stopped inserting — and the bug this fixes
  *    was a lie one node from the truth, so the new surface obeys the same rule
  *    as the old one.
@@ -63,12 +64,26 @@ function manualOnlyTooltip(name: string): string {
  *    fix — the frontmatter `name`, else the directory name it falls back to
  *    (ADR 0036).
  *
+ * WHY IT IS RENDERED AS VISIBLE TEXT AND NOT ONLY AS A `title`. An inert row is
+ * `tabIndex={-1}` on purpose (click and Enter must stay inert), so a
+ * keyboard-only user can never focus it — and a native `title` is not reliably
+ * exposed to assistive technology anyway. A `title`-only reason was therefore
+ * reachable with a MOUSE and with nothing else, which made the dialog's
+ * accessibility claim true for pointer users only. The sentence now sits in the
+ * row as a visible line the way the dialog already explains things: every
+ * reader gets it (it is part of the row's `textContent`, hence of the
+ * accessible-name computation for a `role="button"` with no explicit label)
+ * and no ARIA gymnastics are involved. The `title` survives ON THAT LINE, where
+ * `truncate` can clip the sentence and the full text is one hover away; it is
+ * GONE from the row itself, because a row-level `title` whose text is already
+ * in the row's accessible name is the same sentence twice to a screen reader.
+ *
  * (The `manualOnlyTooltip` header above still closes with "These TWO are the
  * only places the rule is enforced for Skills". That block is pinned, so the
  * correction lives HERE and in `skills.ts`'s "WHERE it is applied" paragraph:
  * this row affordance is the third frontend site.)
  */
-const UNMENTIONABLE_ROW_REASON =
+export const UNMENTIONABLE_ROW_REASON =
   "This name can't be typed as a mention — rename the Skill to give it one";
 
 /** The row shell, shared by both arms (geometry only — nothing cursor- or
@@ -116,8 +131,11 @@ function shadowHeading(winnerScope: "space" | "user", count: number): string {
  * `archimedes:insert-skill` CustomEvent (the composer listens) and closes
  * the dialog — for a name the `$` mention grammar CAN carry. A row whose name
  * it cannot carry is LISTED BUT INERT (issue #10, amending ADR 0036): the row
- * is `disabled`, so click and Enter do nothing, the dialog stays open, and a
- * `$`-free `title` says why. The row and the tooltip therefore finally agree;
+ * is `disabled`, so click and Enter do nothing and the dialog stays open, and
+ * the row gains a line of its own — the `$`-free reason in VISIBLE text,
+ * because the inert row cannot be focused and a `title` alone is reachable with
+ * a mouse only (see `UNMENTIONABLE_ROW_REASON`). The row and its reason
+ * therefore finally agree;
  * the catalog is still not filtered, because it stays total for model-facing
  * discovery (ADR 0036). The search filters
  * by case-insensitive NAME substring (v1: name only — the same policy as the
@@ -247,7 +265,10 @@ export default function SkillsDialog({
           <RowButton
             onClick={() => insertSkill(skill.name)}
             disabled={!mentionable}
-            title={mentionable ? undefined : UNMENTIONABLE_ROW_REASON}
+            // NO `title` on the row: the reason is the visible line below, so a
+            // row-level tooltip would repeat it to AT (and it was the mouse-only
+            // channel this replaces). Inertness itself is `RowButton`'s
+            // `disabled` — `aria-disabled="true"` + `tabIndex={-1}`.
             className={cn(
               SKILL_ROW_BASE,
               mentionable ? SKILL_ROW_ACTIVE : SKILL_ROW_INERT,
@@ -274,6 +295,34 @@ export default function SkillsDialog({
                 title={skill.description}
               >
                 {skill.description}
+              </span>
+            )}
+            {/* The reason this row inserts nothing, as VISIBLE text (see
+                `UNMENTIONABLE_ROW_REASON` for why a `title` alone was not
+                enough: the row is `tabIndex={-1}`, so a mouse is the only way
+                to reach a `title`). The row's OWN explanation line — the same
+                style the row already uses to explain a Skill — so every reader
+                gets it, including one that never focuses or hovers.
+                WHY THE DESCRIPTION'S TONE AND NOT A `MutedCaption`: the inert
+                arm dims the whole row with `opacity-50`, and
+                `MutedCaption`'s `text-foreground-subtlest` is the app's
+                quietest text token (foreground at 40% in `theme.css`) — the
+                two compose to text nobody can actually read, which is a poor
+                way to deliver the one sentence this row exists to say. The
+                description's tone (`text-foreground-subtle`, 60%) is the
+                row's own explanation weight and survives the dimming one step
+                better. NOT a second affordance: NO `role`, NO `tabIndex`, NO
+                click — a row carries exactly one (the `RowButton` above), and
+                the shadow report's non-row lines are pinned the same way.
+                `min-w-0 truncate` keeps the row's pinned truncation chain; the
+                `title` on THIS line carries the full sentence for the width at
+                which the line clips. */}
+            {!mentionable && (
+              <span
+                className="min-w-0 truncate text-ui-sm text-foreground-subtle"
+                title={UNMENTIONABLE_ROW_REASON}
+              >
+                {UNMENTIONABLE_ROW_REASON}
               </span>
             )}
           </RowButton>

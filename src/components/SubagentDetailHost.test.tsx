@@ -7,6 +7,7 @@ import { useInteractive } from "../store/interactive";
 import { usePermissions } from "../store/permissions";
 import { useSessions } from "../store/sessions";
 import * as statusIconModule from "./SubagentStatusIcon";
+import { unmatchedAgentTooltip } from "../lib/subagentActivity";
 
 // NO `vi.mock("../lib/tauri")` here on purpose. This file used to mock
 // `respondInteractiveRequest` / `respondPermission`, which implied the sheet
@@ -264,6 +265,13 @@ describe("SubagentDetailHost (the resolve-miss marker, issue #47)", () => {
     // INSIDE the dialog (a stray caption outside the sheet would be a second
     // host, which this file's whole partition argument forbids).
     expect(dialog.contains(marker)).toBe(true);
+    // The tooltip is the SHARED sentence from `unmatchedAgentTooltip`
+    // (`lib/subagentActivity.ts`) — asserted through the helper, because the
+    // single-ownership of this copy IS the claim (issue #47 review). The
+    // directory row (`SubagentDelegatingCard.test.tsx`) pins the same call, so
+    // the two surfaces cannot reword independently; the sentence's own wording
+    // is pinned verbatim in `subagentActivity.test.ts`.
+    expect(marker.getAttribute("title")).toBe(unmatchedAgentTooltip("reviewer"));
     // The header is otherwise UNCHANGED: the name and the status chip survive.
     expect(screen.getByText("reviewer")).toBeTruthy();
     expect(screen.getByText("running")).toBeTruthy();
