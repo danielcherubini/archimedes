@@ -91,12 +91,77 @@ workflow can do — is writing notes a person would read.
 3. Apply: `gh release edit vX.Y.Z --notes-file /tmp/notes.md`.
 4. Refresh the in-app text too — Settings → Updates renders the `notes` field of
    `latest.json`, NOT the release body, so step 3 alone leaves the app showing
-   one line. Download every `*.sig` plus `latest.json` off the release,
-   re-compose with `scripts/compose-updater-manifest.sh --notes "<new one-liner>"`,
-   and `gh release upload vX.Y.Z latest.json --clobber` — but only when the
-   downloaded `.sig` set is COMPLETE, because the composer emits one key per
-   signature it was given and **exits 0 on the shrunken result**, so a missing
-   sig publishes a manifest with a platform missing over the good one (ADR 0052).
+   one line. Download every `*.sig` plus `latest.json` off the release, re-compose
+   the manifest over the downloaded one, and re-upload it with `--clobber`. This is
+   the ONE ceremony step no workflow runs for you, so it is written out as the two
+   commands that actually decide the outcome — the completeness gate, and the
+   composer it feeds — in the shape `.github/workflows/release.yml`'s
+   "Compose latest.json" step uses them:
+
+   ```bash
+   set -euo pipefail   # a plain terminal does NOT have this on — see the trap below
+   gh release download vX.Y.Z --pattern '*.sig' --dir sigs --clobber
+   gh release download vX.Y.Z --pattern latest.json --clobber
+   bash scripts/check-release-signatures.sh \
+     --repo <owner>/<repo> --tag vX.Y.Z > expected-payloads.txt
+   require_args=()
+   while IFS= read -r payload; do
+     # `if`, not `[[ … ]] && …` — mirrored from the workflow comment: the runner's
+     # default shell is `bash -e`, and a false test at the end of a compound list
+     # aborts. Measured: with a command AFTER the loop the `&&` form survives, but as
+     # the LAST command of a step (or inside a function) it aborts the step — so the
+     # `if` form is what makes editing this block safe.
+     if [[ -n "$payload" ]]; then
+       require_args+=(--require-payload "$payload")
+     fi
+   done < expected-payloads.txt
+   bash scripts/compose-updater-manifest.sh \
+     --sigs-dir sigs \
+     --version X.Y.Z \
+     --tag vX.Y.Z \
+     --repo <owner>/<repo> \
+     --out latest.json \
+     --notes "<the new one-liner>" \
+     ${require_args[@]+"${require_args[@]}"}
+   gh release upload vX.Y.Z latest.json --clobber
+   ```
+
+   Five of those six flags are enforced by the script itself, which names the one
+   you forgot: `--sigs-dir` (where the `--dir sigs` download put the signatures —
+   signatures only, never installers), `--version` (bare `X.Y.Z`, never
+   `v`-prefixed), `--tag` (the `v` form; the URLs are pinned to it), `--repo`, and
+   `--out` (where `latest.json` was just downloaded, which is what makes the
+   refusal behaviour below matter). `--notes` is the sixth, and the script DOES
+   accept its absence — which is exactly why the workflow passes
+   `${NOTES_SUMMARY:-Archimedes $TAG}` rather than omitting it: an empty `notes` is
+   legal JSON that passes self-validation, and the in-app panel renders it as the
+   whole update description. Pass the one-line summary, never the markdown body.
+   `${require_args[@]+…}`
+   is copied from the workflow rather than tidied: a bare `"${require_args[@]}"` on
+   an EMPTY array is an unbound-variable error under `set -u` on the older bash
+   still in wide use (bash fixed it in 4.4; macOS ships 3.2), and an empty
+   `expected-payloads.txt` should say what is wrong, not die as a shell fault.
+
+   **The gate writes a FILE and the loop reads it — do not hand-run it as
+   `reqs="$(bash scripts/check-release-signatures.sh …)"`.** A terminal has no
+   `-e`, so inside `$(…)` a refusal is invisible: every diagnostic the gate prints
+   goes to stderr, `reqs` comes back EMPTY, the loop builds ZERO
+   `--require-payload` flags, and the composer runs with no expectations at all —
+   which is the opt-in, behave-as-it-always-has path that composes the shrunken
+   manifest and **exits 0**. Measured on this tree: that shape reaches the compose
+   with 0 flags and exit 0. And note where a substitution sits — `-e` judges a
+   command by its OWN status, so one buried in a word (an argument, or a here-string
+   like `done <<< "$(…)"`) never aborts the block even with `-e` on; only a bare
+   `reqs=$(…)` assignment would, and a terminal has no `-e` anyway. Both reasons
+   point the same way: the gate's stdout goes to a file, the loop reads the file, and
+   `set -euo pipefail` at the top of the block is what stops a refusal AT the gate
+   instead of turning it into an unguarded compose — the exact silent shrink this
+   whole step exists to prevent.
+
+   The whole step is worth running only when the downloaded `.sig` set is
+   COMPLETE, because the composer emits one key per signature it was given and
+   **exits 0 on the shrunken result**, so a missing sig publishes a manifest with
+   a platform missing over the good one (ADR 0052).
    **COMPLETE means one `.sig` per platform this release targets — not one per
    filename on the release.** On Windows and Linux the payload IS the installer
    (`createUpdaterArtifacts: true` signs the raw `.exe`/`.AppImage`/`.deb`/`.rpm`;
@@ -111,19 +176,38 @@ workflow can do — is writing notes a person would read.
    distinct URL names and requiring a `.sig` for each shrinks on both sides
    when a signature was never uploaded — it passes exactly when it should fail
    (issue #41(d)). The script requires a `<name>.sig` beside every installer asset
-   and prints the installer list it accepted; hand that stdout back as
-   expectations, which is what makes this step's re-compose **fail** rather than
-   shrink — one `--require-payload <name>` per line. The flag asserts that
-   `<name>.sig` is in `--sigs-dir`; it does not need the installer file itself,
-   because `--sigs-dir` holds signatures only. `.dmg` and `latest.json` are on the
-   script's allow-list because they are legitimately unsigned and are not updater
-   payloads — leave them there: a release carrying an unsigned `.dmg` is healthy,
-   and a check that demanded a signature for it would fail every release. What a
+   and prints the installer list it accepted — that stdout IS the expectation list,
+   which is what the `while read` loop above turns into one `--require-payload
+   <name>` per line, and what makes this step's re-compose **fail** rather than
+   shrink. The flag asserts that `<name>.sig` is in `--sigs-dir`; it does not need
+   the installer file itself, because `--sigs-dir` holds signatures only. `.dmg` and
+   `latest.json` are on the script's allow-list because they are legitimately
+   unsigned and are not updater payloads — leave them there: a release carrying an
+   unsigned `.dmg` is healthy, and a check that demanded a signature for it would
+   fail every release. What a
    genuinely incomplete set looks like is a *target with no signature at all* (a
    deb built but its `.deb.sig` never uploaded). Re-uploading is otherwise safe:
    the signatures and the tag-pinned URLs come out identical, and
    `tauri-plugin-updater` reads `pub_date` for display only. An incomplete set
    means stop — stale-but-correct notes beat a broken manifest.
+
+   **When the composer refuses, it deletes `latest.json`, so re-download before you
+   retry.** Every exit-1 in it removes a pre-existing `--out` — including a
+   `--require-payload` refusal — so after such a refusal the `latest.json` the second
+   download put there is GONE, and the `gh release upload` you are about to type
+   fails with "no such file or directory" instead of silently `--clobber`-ing the
+   OLD manifest over a release whose notes rewrite never landed. (A refusal by the
+   GATE is different and safer: the block stops before the compose, so the download
+   is untouched.) The composer's deletion is the point (ADR 0052's 2026-10-24
+   amendment): a stale manifest sitting at `--out` is the hazard, not the safety net.
+   It is also cheap to undo, because the file being removed is a copy of a published
+   asset — so fix the sig set, run
+   `gh release download vX.Y.Z --pattern latest.json --clobber` to put the baseline
+   back, and re-compose from there. The one composer refusal that does NOT touch
+   `--out` is
+   a missing `scripts/updater-payload-shapes.sh`: a broken checkout is not a refused
+   composition, and a tool that never started has formed no opinion about this
+   release, so it must not destroy the operator's download.
 5. Confirm, since `release.yml`'s notes step is `continue-on-error` on purpose (a
    release whose notes failed must still ship): `gh release view vX.Y.Z --json
    body -q .body` must show the curated text, not `Archimedes vX.Y.Z` — that
@@ -153,5 +237,34 @@ workflow can do — is writing notes a person would read.
 - **Squash-merge** feature branches into `main` (one commit per feature).
 - **Docs**: durable design decisions live in `docs/decisions/NNNN-slug.md`
   (ADR format); in-flight plans live in `docs/roadmap/<feature>.md` and are
-  deleted on ship.
+  deleted on ship. Anything a roadmap records that must survive that deletion
+  moves while the branch is still open — a durable fact or accepted defect goes
+  to `docs/features/` (see `docs/features/mcp-known-gaps.md`) or an ADR, not to
+  a comment in the plan.
+- **Planning**: when expanding a roadmap task into a plan (`specify`), dispatch
+  the `researcher` agent definition (`subagent` with `agentName: "researcher"`)
+  rather than a config-less dispatch.
+
+### Working in this repo
+
+These are properties of the repo, not of any branch:
+
+- **`archimedes` is ONE compilation unit**, so a syntax error anywhere breaks
+  every scoped `cargo test` run: two Rust implementation tasks can never share a
+  wave. Read-only planning dispatches fan out freely. (Established with a planted
+  error, not assumed.)
+- **`cargo test --lib` does not rebuild `fake_worker`.** A stale
+  `bin/fake_worker.rs` binary surfaces as `manager::tests` failing with
+  misleading values after a protocol change; run `cargo build --all-targets`
+  first when a fixture looks like it is lying.
+- **`cargo check --target x86_64-pc-windows-gnu --all-targets` is the only local
+  Windows proof** (the mingw target is installed). The msvc target needs `lib.exe`
+  and there is no wine here, so `#[cfg(windows)]` code type-checks locally and
+  only RUNS on CI's `windows-latest` leg — never describe Windows behaviour as
+  behaviourally verified from this machine.
+- **`grep -c '#\[cfg(unix)\]'` counts LINES, including prose that names the
+  attribute.** A census count needs the anchored `^#\[cfg(unix)\]$` or it
+  false-reports high.
+- **Plans carry stale baselines within hours** on a busy branch: re-measure test
+  counts at your own HEAD rather than trusting the plan's.
 

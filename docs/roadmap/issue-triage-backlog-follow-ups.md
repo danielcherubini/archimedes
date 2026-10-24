@@ -8,7 +8,9 @@ updated: 2026-10-24
 
 Staged here because `finish` deletes the whole `docs/roadmap/issue-triage-backlog-*` family on ship.
 Durable content was folded before deletion: the two stale-doc corrections (§3) were APPLIED directly to
-the research docs in the ship commit, and every open-work item is tracked on the issue tracker. This file
+the research docs in the ship commit, the open-work items are tracked on the issue tracker, and the two
+things the tracker does NOT hold moved to durable homes — the §2 T7 residuals to
+`docs/features/mcp-known-gaps.md` and the §4 process facts to AGENTS.md's Conventions. This file
 is the record of what was deliberately NOT done and why — read it before re-deriving any of it.
 
 ## 1. Open work — has its own issue
@@ -36,8 +38,10 @@ is the record of what was deliberately NOT done and why — read it before re-de
 - **T7 / #68 — recorded, not fixed:** `http.rs` sends the OAuth `Authorization` header with no `Bearer `
   prefix; mid-session token expiry is not handled (only the pre-connect check); stdio failures never
   reach `McpState::Error`; refresh-token ROTATION drops a rotated refresh token if the server returns
-  one. All five are at the bottom of `task07`'s plan doc (deleted on ship — this table is their
-  surviving home if not filed).
+  one; and `authenticate_server` (the Settings path) has no manager entry, so authenticating from
+  Settings while a live session holds that server in `NeedsAuth` leaves the session stuck until it
+  reconnects. **All five now live in `docs/features/mcp-known-gaps.md`** (moved 2026-10-24, because this
+  table and `task07`'s plan doc are both deleted on ship — that file is their only surviving home).
 - **T6 / #81 — the scrub verdict cannot distinguish "gate closed" from "clean mount"** (both are the
   empty verdict); named in the empty-case wording. The updater relaunch (`commands/update.rs::
   relaunch_patch`) stays deliberately silent, with the reason in `for_child()`'s doc.
@@ -66,19 +70,16 @@ is the record of what was deliberately NOT done and why — read it before re-de
   follow-ups list legitimately KEEPS: `sudo_exec` on Windows, the missing Windows process-group kill,
   and the non-Linux relaunch.
 - `docs/decisions/0036` carries two dated amendments (T2's dead-token reversal; T10's child-shape
-  correction); `0055` one (T12's OBSERVED wording); `0060` one (T8's widened remit); `0052` its second
-  (T3's inverse gate). All append-only, `superseded-by:` empty — check those before writing any new ADR
-  about the same ground.
+  correction); `0055` one (T12's OBSERVED wording); `0060` one (T8's widened remit); `0052` three (the
+  payload-shape correction predates this loop, T3's inverse gate was its second, and `774039d`'s
+  refusal-cleanup correction its third). All append-only, `superseded-by:` empty — check those before
+  writing any new ADR about the same ground.
 
 ## 4. Process facts worth keeping (the loop learned these the expensive way)
 
-- **`archimedes` is ONE compilation unit**: a syntax error anywhere breaks every scoped `cargo test`
-  run. Two Rust implementation tasks can never share a wave; planning dispatches (read-only) can fan
-  out freely. Measured with a planted error, not assumed.
-- `cargo test --lib` does not rebuild `fake_worker` → stale-binary failures in `manager::tests`.
-- `cargo check --target x86_64-pc-windows-gnu --all-targets` is the LOCAL Windows type-check (mingw
-  present; msvc needs `lib.exe`; no wine) — the only Windows proof available before CI.
-- `grep -c '#\[cfg(unix)\]'` counts LINES including prose that names the attribute — census-count
-  claims need `^#\[cfg(unix)\]$` or they false-report.
-- Plans carry stale baselines within hours on a busy branch: re-measure at your own HEAD, never trust
-  the plan's test counts.
+**Moved to AGENTS.md → Conventions → "Working in this repo" on 2026-10-24**, all of
+them. They are repo properties rather than roadmap narration, so they belong where
+every session reads them — and this file is deleted on ship, which is the other
+reason. One copy of each fact lives there now; the `fake_worker` stale-binary
+symptom additionally appears in §2's T10 bullet above, where it is a symptom of a
+fixture gap rather than a process rule.
