@@ -45,8 +45,8 @@ Loop protocol (repeat until `status: done`):
 
 Baseline measured at `e7851fe` (docs-only commit, spec + ADR 0075 + CONTEXT.md): `pnpm test` 3063
 passed / 149 files · `pnpm build` green (pre-existing chunk-size warning) · `cargo test` 1436 passed /
-0 failed · `cargo fmt --check` clean. `cargo clippy --all-targets` was NOT run at baseline — run it
-before the first Rust commit lands so a pre-existing warning is not blamed on this branch.
+0 failed · `cargo fmt --check` clean. `cargo clippy --all-targets` measured clean at 0 warnings (run
+separately, after the docs commits) — so any clippy warning from here on belongs to this branch.
 
 Current figures live HERE and nowhere else; the Changelog records what each gate said at that moment.
 
@@ -69,7 +69,7 @@ never share a wave. Wave 6 is the only parallel wave.
 
 | # | Task | Plan file | Wave | Seam (disjointness evidence) | Status |
 |---|------|-----------|------|------------------------------|--------|
-| T01 | SQLite `sort_order` on `spaces` + `sessions`: schema, pragma-gated migration seeded `0..n` in today's order, `MAX+1` on insert, `ORDER BY` swap on `list_spaces`/`list_sessions`, `reorder_spaces`/`reorder_sessions` in one transaction | `docs/roadmap/manual-list-order-task01-sort-order-columns.md` | 1 | `src-tauri/src/storage/db.rs` (owned outright) + `src-tauri/tests/storage.rs` | `todo` |
+| T01 | SQLite `sort_order` on `spaces` + `sessions`: schema, pragma-gated migration seeded `0..n` in today's order, `MAX+1` on insert, `ORDER BY` swap on `list_spaces`/`list_sessions`, `reorder_spaces`/`reorder_sessions` in one transaction | `docs/roadmap/manual-list-order-task01-sort-order-columns.md` | 1 | `src-tauri/src/storage/db.rs` (owned outright) + `src-tauri/tests/storage.rs` | `in progress` |
 | T02 | IPC surface: `last_active_at` SELECTed from the existing `COALESCE` expression (characterisation test first), the two reorder commands exposed + registered, TS mirrors in `lib/tauri/` | `docs/roadmap/manual-list-order-task02-ipc-last-active-at.md` | 2 | `src-tauri/src/types.rs`, `src-tauri/src/commands/{history,spaces}.rs`, `src-tauri/src/lib.rs`, `src/lib/tauri/types.ts`, `src/lib/tauri/commands/*` | `todo` |
 | T03 | Store derivation: `recencyOf` (new module beside `sessionTitle.ts`), `SpaceView.sessionIds` replaces the live/stored pair, the four position-reading landing rules switch to recency, Archived sorts explicitly | `docs/roadmap/manual-list-order-task03-store-derivation.md` | 3 | `src/store/sessions.ts`, `src/lib/sessionRecency.ts` (new), `src/store/sessions.test.ts` | `todo` |
 | T04 | Sidebar renders one list: delete `sortByActivity` memos + the activity subscription, `railIds = sessionIds`, DELETE `src/lib/sessionActivity.ts` and its test, delete the 3 ordering tests, reword the rail pin | `docs/roadmap/manual-list-order-task04-sidebar-one-list.md` | 4 | `src/components/SpacesList.tsx`, delete `src/lib/sessionActivity.ts` + `.test.ts` | `todo` |
