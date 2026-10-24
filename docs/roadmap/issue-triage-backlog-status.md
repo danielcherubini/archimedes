@@ -49,10 +49,12 @@ Windows-arm check (only T8 needs it; see the T8 note):
 Baseline measured at `a6e3f02` (branch `main`, v0.6.0): ALL FIVE GREEN — 3049 FE tests / 149 files,
 1355 Rust tests, clippy 0 warnings, fmt clean. Nothing was red before this work started.
 
-**CURRENT figures (update on every task):** Rust 1399 / 0 failed / 4 ignored, clippy 0 warnings, fmt
-clean, `cargo check --target x86_64-pc-windows-gnu --all-targets` green; FE 3052 tests / 149 files
-(T9 was the last FE-touching task); build exit 0. The `agent::hostenv` module's test count is
-platform-split (16 Linux / 7 elsewhere) — pinned by its own module doc, read it there.
+**CURRENT figures (update on every task):** Rust 1404 / 0 failed / 4 ignored, clippy 0 warnings, fmt
+clean, `cargo check --target x86_64-pc-windows-gnu --all-targets` green; FE 3057 tests / 149 files;
+build exit 0. The `agent::hostenv` module's test count is platform-split (16 Linux / 7 elsewhere) —
+pinned by its own module doc, read it there. **`cargo test --lib` alone does NOT rebuild
+`fake_worker`** — `manager::tests` fails with a stale binary until `cargo build --all-targets` runs
+(T10 and T11 both hit this; the full `cargo test` is unaffected).
 
 ## Why the waves collapsed to serial — DO NOT "fix" this by re-parallelising
 
@@ -99,7 +101,7 @@ Consequences, all deliberate:
 | T8 | Windows `cmd /C` via `raw_arg` + truthful bash tool description | #79 | serial | `agent/childproc.rs`, `agent/tools/exec/bash.rs`, `agent/tools/exec/tests/bash.rs`, `agent/harness/tool_specs.rs`, ADR 0060 | `done` `70bffe1` |
 | T9 | `unknown_param_warning` + `SUBAGENT_GUIDANCE` + advertise `thinking` | #78 | serial | `agent/harness/tool_specs.rs`, `agent/harness/prompt.rs`, `agent/harness/loop/turn.rs`, `agent/harness/loop/tests/subagents.rs`, `src/lib/toolOutput.test.ts` | `done` `a9b2347` |
 | T10 | A child start signal that never reaches the main-prompt arm | #9 | serial | `agent/worker/protocol.rs`, `agent/worker/core.rs`, `agent/worker/manager/subagent_flow.rs`, `agent/worker/manager/mod.rs` (doc), `agent/harness/prompt.rs` (doc), `agent/subagent.rs` (doc), `tests/worker_stdin.rs`, `tests/worker_e2e.rs`, ADR 0036 | `done` `fb33e59` |
-| T11 | A resolve miss is observable on `subagent-session-started` | #47 → #78 | serial | `agent/harness/launch.rs`, `agent/worker/protocol.rs`, `agent/worker/manager/subagent_flow.rs`, `src/store/subagents.ts`, `src/components/SubagentDelegatingCard.tsx` | `todo` |
+| T11 | A resolve miss is observable on `subagent-session-started` | #47 → #78 | serial | `agent/subagent.rs`, `agent/mod.rs`, `agent/harness/launch.rs`, `agent/harness/dispatch.rs`, `agent/worker/{dispatch,protocol,client}.rs`, `agent/worker/manager/subagent_flow.rs`, `agent/worker/manager/tests/mod.rs`, `bin/fake_worker.rs` (one line), `commands/agents.rs`, `tests/harness_dispatch_native.rs`, FE: `lib/tauri{.ts,/types.ts}`, `store/subagents.ts`, `App.tsx`, `SubagentDelegatingCard.tsx`, `SubagentDetailHost.tsx` + their tests | `done` `59b2a03` |
 | T12 | Streaming-subagent test margin + honest panic text + doc wording | #34 | serial | `agent/worker/manager/tests/mod.rs`, `src/bin/fake_worker.rs`, `agent/worker/manager/mod.rs` | `todo` |
 
 ## Blockers / open questions
@@ -203,4 +205,9 @@ was deliberately NOT done, including the two items needing a human decision.
 - `fb33e59` — T10 (#9) `StartMode::FreshChild`; `(FreshChild, None)` prepends nothing; test G's RED was
   the issue's own shape (the narrowed child's seq-0 WAS the main prompt). Gate after: Rust **1399** /
   0 / 4 (+6: A,B,C,E,F,G), clippy 0, fmt clean, gnu green, FE unchanged.
+- `59b2a03` — T11 (#47) `AgentNameResolution` tri-state resolve_launch → wire → payload
+  (`nameResolution`, exactly eight keys pinned at the emitter, no serde(default)); one quiet
+  "no matching Agent" caption for `unmatched` only; miss stays non-blocking end-to-end. Gate after:
+  Rust **1404** / 0 / 4 (+5), FE **3057** / 149 (+5), clippy 0, fmt clean, gnu green. Four mutation
+  probes run; probe-1 over-claim in the plan corrected (the emitter test builds its wire inline).
 - Current gate figures live in the Gate section above; the numbers here are what they were then.
