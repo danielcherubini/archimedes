@@ -10,8 +10,18 @@
 //! server reachable the wording is unchanged and stays a success. The partiality
 //! is judged over the set the call SCOPED to: with a `server` param naming a
 //! server that answered, a skipped OTHER server does not bear on the answer
-//! (only a skip of the named one does). The `server`-param list path and
-//! `call_tool` are untouched: they already surface the manager's real error.
+//! (only a skip of the named one does).
+//!
+//! The `server` param is a SCOPE, and it is honoured on both halves of an
+//! answer:
+//! - it filters the RESULT of `search` and `describe` alike — a `describe`
+//!   scoped to a server that does not serve the name is a miss scoped to that
+//!   server, never another server's tool;
+//! - a `server` name the config does not contain is a FAILURE naming that name
+//!   (and the servers that do exist), for every scoped path. "The scope named
+//!   nothing" must not be reported as the clean negative "the tool is not
+//!   there"; it is distinct from "the named server exists but was skipped",
+//!   which the issue #68 rule above decides.
 
 use std::time::Duration;
 
@@ -150,14 +160,62 @@ fn scoped_skipped(skipped: &[(String, String)], server: Option<&str>) -> Vec<(St
     }
 }
 
+/// Whether a `(server, tool)` pair is inside the call's `server` scope (no
+/// `server` param → every server is in scope).
+///
+/// `search` and `describe` MUST scope through here, identically: the `server`
+/// param narrows the ANSWER, not merely the wording of a failure. A lookup that
+/// filters only its FAILURE text by `server` while returning whatever server
+/// owns the name would make the `server` param a lie on its success path — it
+/// would answer with a tool the caller explicitly excluded.
+fn in_scope(server: Option<&str>, server_name: &str) -> bool {
+    server.is_none_or(|srv| srv == server_name)
+}
+
+/// Reject a `server` param naming a server the config does not contain, as
+/// opposed to one that exists and merely did not answer.
+///
+/// The `server` param can name three different things and the model must be
+/// able to tell them apart — this is the same credibility bug class as the
+/// `no such tool` of issue #68:
+/// - NEVER CONFIGURED → the scope named NOTHING, so nothing was actually
+///   searched: a `No tools matching …` / `Tool not found: …` computed over it
+///   would read as "the tool does not exist" and the model would stop, when the
+///   real problem is that the scope was empty. This FAILS, naming the unknown
+///   name and the servers that DO exist.
+/// - CONFIGURED BUT UNUSABLE (`NeedsAuth` / `Error` / a failed connect) → it is
+///   in [`Collected::skipped`] and the partial-set rule decides, exactly as
+///   before.
+/// - CONFIGURED AND ANSWERING → an ordinary scoped call.
+///
+/// [`McpManager::server_names`] is the authoritative list of configured names:
+/// it is the config's server map keys, so a server that EXISTS but is
+/// unreachable is in it — it is never reported as unknown.
+fn unknown_server_scope(manager: &McpManager, server: &str) -> Option<ToolResult> {
+    let configured = manager.server_names();
+    if configured.iter().any(|name| name == server) {
+        return None;
+    }
+    let known = if configured.is_empty() {
+        "no MCP servers are configured".to_string()
+    } else {
+        format!("configured servers: {}", configured.join(", "))
+    };
+    Some(fail(format!(
+        "Unknown MCP server: {server} ({known}) — the `server` param must name a configured server"
+    )))
+}
+
 /// The `mcp` proxy tool (the param dispatch — the `@pi-archimedes/mcp`
 /// `buildProxyToolExecute` mirrored):
 /// - `status` (no `tool`/`search`/`describe`/`connect`/`server`, or
 ///   `action: "status"`) — the `mcp({})` default: the server status lines.
 /// - `connect` — eagerly connect a server (the outcome line).
 /// - `action: "auth"` + `server` — run the interactive OAuth flow.
-/// - `search` — matching tools across servers (`[server] name — description`).
-/// - `describe` — a tool's full `inputSchema` (JSON).
+/// - `search` — matching tools, within the `server` scope when one is given
+///   (`[server] name — description`).
+/// - `describe` — a tool's full `inputSchema` (JSON), within the `server`
+///   scope when one is given.
 /// - `server` (no `tool`) — that server's tools (name + description, one per
 ///   line).
 /// - `tool` (+ `args` string-or-object) — `tools/call` (the result text = the
@@ -171,6 +229,13 @@ fn scoped_skipped(skipped: &[(String, String)], server: Option<&str>) -> Vec<(St
 /// the skipped servers; a successful call is never downgraded by an unrelated
 /// dead server, and neither is a miss scoped by the `server` param to a server
 /// that answered (issue #68).
+///
+/// A `server` param naming a server the config does not contain FAILS (naming
+/// it + the configured servers) on every scoped path — `search`, `describe`,
+/// the server-list path and a `server`-pinned `tool` call — because an answer
+/// computed over an empty scope is not an answer. `search` / `describe` filter
+/// their ANSWER by `server` too, so a scope never answers with a tool from
+/// outside itself.
 pub async fn mcp_tool(
     manager: &mut McpManager,
     args: &Value,
@@ -236,6 +301,23 @@ pub async fn mcp_tool(
         }
     }
 
+    // ── the `server` scope must name a CONFIGURED server ──
+    //
+    // Every path below takes `server` as its SCOPE, so the scope is validated
+    // ONCE here: a name the config never contained means the scope named
+    // NOTHING, and an answer computed over it is not an answer (issue #68's
+    // bug class — the model must not read an empty scope as "it doesn't
+    // exist"). A configured server that is merely unreachable passes here and
+    // is reported as a SKIP by `collect_tools`, which is the existing,
+    // different rule. (`connect` / `action: "auth"` returned above; they act ON
+    // a server rather than scoping a lookup, and the manager already fails
+    // them naming the unknown name.)
+    if let Some(name) = &server {
+        if let Some(r) = unknown_server_scope(manager, name) {
+            return r;
+        }
+    }
+
     // ── search ──
     if let Some(q) = &search {
         let all = collect_tools(manager, cancel).await;
@@ -244,10 +326,7 @@ pub async fn mcp_tool(
             .tools
             .iter()
             .filter(|(s, t)| {
-                server
-                    .as_deref()
-                    .map(|srv| srv == s.as_str())
-                    .unwrap_or(true)
+                in_scope(server.as_deref(), s)
                     && (t.name.to_lowercase().contains(&q_lower)
                         || t.description
                             .as_deref()
@@ -279,10 +358,20 @@ pub async fn mcp_tool(
     // ── describe ──
     if let Some(name) = &describe {
         let all = collect_tools(manager, cancel).await;
-        let Some((s, t)) = all.tools.iter().find(|(_, ti)| ti.name == name.as_str()) else {
-            // Nothing matched AND the scoped set was partial → a FAILED result
-            // naming the skipped servers (issue #68); a skip OUTSIDE the named
-            // `server` does not bear on this call.
+        // The `server` scope filters the LOOKUP, not just the failure wording:
+        // a describe scoped to a server that does not serve the name is a MISS
+        // scoped to that server, never another server's tool. (A describe of a
+        // name a DIFFERENT server owns is a miss here too — the caller excluded
+        // that server — and the miss keeps the plain `Tool not found:` bytes
+        // the scoped rule already promised.)
+        let Some((s, t)) = all
+            .tools
+            .iter()
+            .find(|(s, ti)| ti.name == name.as_str() && in_scope(server.as_deref(), s.as_str()))
+        else {
+            // Nothing matched in scope AND the scoped set was partial → a
+            // FAILED result naming the skipped servers (issue #68); a skip
+            // OUTSIDE the named `server` does not bear on this call.
             return miss_result(
                 format!("Tool not found: {name}"),
                 &scoped_skipped(&all.skipped, server.as_deref()),
@@ -386,13 +475,21 @@ pub async fn mcp_tool(
 mod tests {
     use super::*;
 
+    /// The `fake_mcp_stdio` test-double binary (built by `cargo test` — the
+    /// `CARGO_MANIFEST_DIR`/`target/debug` path).
+    fn fake_bin() -> String {
+        std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/target/debug/fake_mcp_stdio"
+        ))
+        .display()
+        .to_string()
+    }
+
     /// A temp `McpManager` over a temp config (the servers point at the fake
     /// stdio binary — `target/debug/fake_mcp_stdio`).
     fn manager_with(servers_json: &Value) -> (McpManager, tempfile::TempDir) {
-        let bin = std::path::Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/target/debug/fake_mcp_stdio"
-        ));
+        let bin = fake_bin();
         let dir = tempfile::tempdir().expect("a temp dir");
         let home = dir.path().to_path_buf();
         let project = dir.path().to_path_buf();
@@ -403,7 +500,7 @@ mod tests {
             // A bare string def → the fake stdio binary (a `command` server);
             // an object def → used as-is.
             let def = if def.is_string() {
-                serde_json::json!({ "command": bin.display().to_string() })
+                serde_json::json!({ "command": bin })
             } else {
                 def.clone()
             };
@@ -661,6 +758,18 @@ mod tests {
         serde_json::json!({ "url": "http://127.0.0.1:1/mcp" })
     }
 
+    /// A HEALTHY server that does NOT serve `echo`: the fake binary with its
+    /// advertised tool set narrowed to one other tool. The fixture the scoping
+    /// tests need — with two healthy servers serving the SAME set, "the scoped
+    /// server has no such tool" and "no server has it" are indistinguishable, so
+    /// a test could not tell a correctly-scoped miss from an unscoped one.
+    fn narrow_server() -> Value {
+        serde_json::json!({
+            "command": fake_bin(),
+            "args": ["--tools=only_here"],
+        })
+    }
+
     #[test]
     fn the_skip_reason_names_the_state_and_the_action() {
         assert_eq!(
@@ -890,6 +999,224 @@ mod tests {
         .await;
         assert!(!r.is_error, "a server-scoped call stays a success");
         assert_eq!(text(&r), "scoped");
+        manager.close_all();
+    }
+
+    // ── the `server` param scopes the ANSWER, not just the failure wording ──
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_describe_scoped_to_a_server_that_lacks_the_tool_is_a_scoped_miss() {
+        // `ok` serves `echo`, `narrow` (healthy) does NOT. A describe scoped to
+        // `narrow` must answer about `narrow` — the scope the caller named —
+        // and never hand back `ok`'s tool. `narrow` ANSWERED, so the scoped miss
+        // is the success-shaped "not found" the scoping rule promises.
+        let (mut manager, _dir) =
+            manager_with(&serde_json::json!({ "ok": "fake", "narrow": narrow_server() }));
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "describe": "echo", "server": "narrow" }),
+            &cancel(),
+        )
+        .await;
+        let t = text(&r);
+        assert!(
+            !r.is_error,
+            "the scoped server answered → a scoped miss, not a partial-set failure: {t}"
+        );
+        assert_eq!(t, "Tool not found: echo");
+        assert!(
+            !t.contains("Schema"),
+            "another server's tool must not be described into the scope: {t}"
+        );
+        // The unscoped call still finds it — the tool exists, the SCOPE lacked
+        // it (the two facts must stay distinguishable).
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "describe": "echo" }),
+            &cancel(),
+        )
+        .await;
+        assert!(!r.is_error);
+        assert!(text(&r).contains("echo (ok)"), "{t}");
+        manager.close_all();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_describe_scoped_to_the_server_that_serves_the_tool_is_unchanged() {
+        // The scoping fix must not cost the happy path its bytes.
+        let (mut manager, _dir) =
+            manager_with(&serde_json::json!({ "ok": "fake", "narrow": narrow_server() }));
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "describe": "echo", "server": "ok" }),
+            &cancel(),
+        )
+        .await;
+        assert!(!r.is_error);
+        let t = text(&r);
+        assert!(t.contains("echo (ok)"), "the tool + server: {t}");
+        assert!(t.contains("\"text\""), "the schema's property: {t}");
+        manager.close_all();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_search_scoped_to_a_never_configured_server_fails_naming_it() {
+        // `dead` exists and was skipped; `no-such-server` never existed at all.
+        // The second case must NOT read as the clean negative `No tools
+        // matching "…"` — the scope named nothing, so nothing was searched.
+        let (mut manager, _dir) =
+            manager_with(&serde_json::json!({ "ok": "fake", "dead": dead_server() }));
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "search": "echo", "server": "no-such-server" }),
+            &cancel(),
+        )
+        .await;
+        assert!(
+            r.is_error,
+            "a scope that named nothing is not a 'not found'"
+        );
+        let t = text(&r);
+        assert!(t.contains("no-such-server"), "the unknown name: {t}");
+        assert!(
+            !t.contains("No tools matching"),
+            "the clean-negative wording must not be reachable this way: {t}"
+        );
+        manager.close_all();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_describe_scoped_to_a_never_configured_server_fails_naming_it() {
+        let (mut manager, _dir) =
+            manager_with(&serde_json::json!({ "ok": "fake", "dead": dead_server() }));
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "describe": "echo", "server": "no-such-server" }),
+            &cancel(),
+        )
+        .await;
+        assert!(
+            r.is_error,
+            "a scope that named nothing is not a 'not found'"
+        );
+        let t = text(&r);
+        assert!(t.contains("no-such-server"), "the unknown name: {t}");
+        assert!(
+            !t.contains("Tool not found"),
+            "the tool DOES exist — the scope did not: {t}"
+        );
+        manager.close_all();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_unknown_server_scope_names_the_servers_that_do_exist() {
+        // The model's next move is to retry with a real name, so the failure
+        // carries the configured names (the authoritative list — the same one
+        // `collect_tools` walks).
+        let (mut manager, _dir) =
+            manager_with(&serde_json::json!({ "ok": "fake", "narrow": narrow_server() }));
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "search": "echo", "server": "typo" }),
+            &cancel(),
+        )
+        .await;
+        assert!(r.is_error);
+        let t = text(&r);
+        assert!(t.contains("Unknown MCP server: typo"), "{t}");
+        assert!(t.contains("ok"), "the real names are offered: {t}");
+        assert!(t.contains("narrow"), "the real names are offered: {t}");
+        manager.close_all();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_configured_but_unreachable_server_is_never_reported_as_unknown() {
+        // THE distinction the guard must not blur: `dead` is in the config (its
+        // def is what makes it a server), it simply cannot be reached. It is a
+        // SKIP — the issue #68 rule — not an unknown name, and the empty-config
+        // case says so in its own words.
+        let (mut manager, _dir) =
+            manager_with(&serde_json::json!({ "ok": "fake", "dead": dead_server() }));
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "describe": "nope", "server": "dead" }),
+            &cancel(),
+        )
+        .await;
+        assert!(r.is_error, "the scoped server itself failed");
+        let t = text(&r);
+        assert!(
+            !t.contains("Unknown MCP server"),
+            "a configured server is never 'unknown': {t}"
+        );
+        assert!(t.contains("Skipped servers: dead"), "{t}");
+        manager.close_all();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn every_scoped_path_rejects_a_never_configured_server() {
+        // The list path and a `server`-pinned call take the SAME scope rule as
+        // `search` / `describe` — one vocabulary for "that server does not
+        // exist", wherever the model meets it.
+        let (mut manager, _dir) =
+            manager_with(&serde_json::json!({ "ok": "fake", "dead": dead_server() }));
+        for args in [
+            serde_json::json!({ "server": "ghost" }),
+            serde_json::json!({ "tool": "echo", "server": "ghost", "args": { "text": "x" } }),
+        ] {
+            let r = mcp_tool(&mut manager, &args, &cancel()).await;
+            assert!(r.is_error, "{args} → a failure: {:?}", text(&r));
+            let t = text(&r);
+            assert!(t.contains("Unknown MCP server: ghost"), "{t}");
+            assert!(t.contains("ok"), "the real names are offered: {t}");
+        }
+        // A CONFIGURED scope is untouched by the guard: the list path keeps its
+        // own shape (a server that exists is listed, not rejected).
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "server": "ok" }),
+            &cancel(),
+        )
+        .await;
+        assert!(!r.is_error, "a configured scope is untouched");
+        assert!(text(&r).contains("echo:"), "{:?}", text(&r));
+        // And a configured-but-UNREACHABLE one on the list path keeps the
+        // MANAGER's own error text — it exists, so its state is the story, not
+        // its name. (The list path is un-collected, so it never reaches the
+        // `Skipped servers:` note; this pins that the guard did not swallow it.)
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "server": "dead" }),
+            &cancel(),
+        )
+        .await;
+        assert!(
+            r.is_error,
+            "an unreachable scope still fails, on its merits"
+        );
+        let t = text(&r);
+        assert!(
+            !t.contains("Unknown MCP server"),
+            "a configured server is never 'unknown': {t}"
+        );
+        manager.close_all();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_unknown_server_scope_on_an_empty_config_says_so() {
+        // No servers at all: the failure still names the scope and states the
+        // real reason rather than listing an empty candidate set.
+        let (mut manager, _dir) = manager_with(&serde_json::json!({}));
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "search": "echo", "server": "anything" }),
+            &cancel(),
+        )
+        .await;
+        assert!(r.is_error);
+        let t = text(&r);
+        assert!(t.contains("Unknown MCP server: anything"), "{t}");
+        assert!(t.contains("no MCP servers are configured"), "{t}");
         manager.close_all();
     }
 }
