@@ -637,6 +637,12 @@ pub(crate) fn dispatch_subagent(
             json!({
                 "sessionId": child_id,
                 "parentSessionId": parent_session_id,
+                // The label, TRIMMED by the time it reaches the wire —
+                // `harness::dispatch::dispatch_subagent` trims the `agentName`
+                // param BEFORE `resolve_launch`, so this field and
+                // `nameResolution` below describe the SAME string. Nothing here
+                // re-trims: the emitter normalising as well would be a second
+                // name selector for one label.
                 "agentName": wire.agent_name,
                 // (issue #47) The tri-state, verbatim off the wire — NOT
                 // re-derived here (a second `discover_agents` on

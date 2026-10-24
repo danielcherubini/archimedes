@@ -191,6 +191,14 @@ pub enum Outbound {
         /// (`WorkerHandle::spawn(std::env::current_exe())` + `--worker`), so
         /// Supervisor and Worker are always one build. Pinned by
         /// `an_old_shape_subagent_dispatch_line_without_name_resolution_is_a_decode_error`.
+        ///
+        /// What the loud direction costs, in writing: the Client's read loop
+        /// turns a decode `Err` into `eprintln!` + `continue`, so a dropped
+        /// `SubagentDispatch` line leaves the Worker's `IpcDispatcher` waiter
+        /// unresolved and the parent's `subagent` tool call hanging until the
+        /// turn is cancelled — and that `eprintln!` is visible only under
+        /// `ARCHIMEDES_DEBUG`, which is why the self-exec pin above, not the
+        /// log, is what keeps this consequence unpayable.
         name_resolution: crate::agent::subagent::AgentNameResolution,
         launch: crate::agent::subagent::LaunchConfig,
         task: String,

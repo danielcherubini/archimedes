@@ -271,10 +271,21 @@ pub(crate) async fn dispatch_subagent(
             };
         }
     };
+    // The label is TRIMMED here, at the one binding that feeds BOTH consumers:
+    // `resolve_launch` selects on `agent_name.trim()`, so a padded `"  scout  "`
+    // is a genuine `Matched`. Handing the RAW string downstream would put a
+    // label on the wire that the resolver never selected by, and the
+    // `subagent-session-started` payload would print the padding while its
+    // `nameResolution` described the trimmed name — a marker and a label about
+    // two different strings (the UI's row shows the padding verbatim). Trimming
+    // at the EMITTER instead would leave the wire raw and the payload trimmed,
+    // i.e. the same disagreement one hop earlier; and `resolve_launch` keeps its
+    // own `trim()` because its other callers (the Agents modal) pass raw names.
     let agent_name = params
         .get("agentName")
         .and_then(Value::as_str)
         .unwrap_or_default()
+        .trim()
         .to_string();
     // ADR 0020: resolve `agentName` against the discovered Agent definitions
     // (layered — explicit params win; no match / empty = config-less, never an

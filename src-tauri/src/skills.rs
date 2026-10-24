@@ -615,17 +615,22 @@ pub(crate) fn is_tag_safe_name(name: &str) -> bool {
 ///   `commands::agents::list_agent_definitions_for_space`): "can this name
 ///   ever be MENTIONED?" → this predicate (hide, do not skip — the resource
 ///   stays live for the session and for dispatch);
-/// - route-naming-time, for SKILLS only: `exec_read_skill`'s model-hidden
-///   refusal and the Skills-dialog tooltip decide whether to PROMISE a `$name`.
-///   The `$` skill picker is deliberately NOT filtered by it — the Client's
-///   skill catalog stays total (ADR 0036), so the picker can legitimately offer
-///   a name the refusal will not promise. Do not describe this as "what the
-///   picker filters on" for Skills: no skill code path filters on it.
+/// - route-naming-time, for SKILLS only: FOUR places decide whether to PROMISE
+///   a `$name` — `exec_read_skill`'s model-hidden refusal, the Skills-dialog
+///   tooltip, that dialog's inert ROW AFFORDANCE for an unmentionable row, and
+///   `insertSkill`'s guard before it dispatches the token (the last two are
+///   issue #10). The `$` skill picker is deliberately NOT filtered by it — the
+///   Client's skill catalog stays total (ADR 0036), so the picker can
+///   legitimately offer a name the refusal will not promise. Do not describe
+///   this as "what the picker filters on" for Skills: no skill code path filters
+///   on it.
 ///
 /// MATCHED PAIR: `isMentionableSkillName` in `src/lib/skills.ts` is the
-/// TypeScript side of THIS predicate (the Skills-dialog tooltip uses it to
-/// decide whether to promise a `$name` route, and `read_skill` here uses it
-/// for the same reason). The two must agree on the grammar — change one, the
+/// TypeScript side of THIS predicate (the Skills-dialog tooltip, its inert row
+/// affordance and `insertSkill`'s guard all use it to decide whether to promise
+/// a `$name` route, and `read_skill` here uses it for the same reason — the
+/// frontend's "where it is applied" paragraph in `skills.ts` is the authoritative
+/// count). The two must agree on the grammar — change one, the
 /// other moves with it, and both sides carry tests for the same name set
 /// (`scout` / `fast-recon` / mixed case in; `has space`, `a_b`, `a.b`,
 /// `café`, `a--b`, `-lead`, `trail-` out).

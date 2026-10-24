@@ -389,8 +389,19 @@ fn start_env_with_file_policy(
 /// transcript asserted (system + user + assistant + tool-role rows — a
 /// resume of the session would work) + the `SinkFrame` UI contract +
 /// the clean-exit bookkeeping.
+// The `ENV_LOCK` is taken because this test's Worker reads `HOME` (via
+// `home_dir()`) while `a_child_with_a_tools_list_and_an_empty_body_gets_no_main_prompt`
+// holds the process-global lock with a MUTATED `HOME` across up to 90 s of
+// awaits: benign today (that scratch home holds nothing this turn looks for),
+// but the coupling is real and this test was racing it by accident, not by
+// decision. The lock is held across `await` points INTENTIONALLY — the
+// `test_support` `ENV_LOCK` pattern.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn full_turn_real_worker_canned_provider() {
+    let _lock = archimedes_lib::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let mut h = E2e::new().await;
     let server = MockServer::start().await;
     // The canned `chat.completions` stream: a few `text_delta`s + a
@@ -1350,7 +1361,10 @@ async fn subagent_dispatch_end_to_end_real_workers() {
 /// proves "no seq-0 row" breaks nothing downstream.
 // The `ENV_LOCK` (`std::sync::Mutex`) is held across the test's `await`
 // points INTENTIONALLY — a sibling test's `HOME` read mid-mutation would
-// see the wrong value (the `test_support` `ENV_LOCK` pattern).
+// see the wrong value (the `test_support` `ENV_LOCK` pattern). The sibling
+// this raced is `full_turn_real_worker_canned_provider`, whose Worker reads
+// `HOME` via `home_dir()`; it now takes the same lock, so the exclusion is
+// mutual rather than accidental.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn a_child_with_a_tools_list_and_an_empty_body_gets_no_main_prompt() {

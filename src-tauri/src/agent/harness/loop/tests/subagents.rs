@@ -588,6 +588,105 @@ async fn a_subagent_named_after_no_definition_still_runs_and_says_so() {
     );
 }
 
+/// (issue #47 follow-up) A PADDED `agentName` puts the TRIMMED name on the
+/// payload. `resolve_launch` trims before it selects, so `"  scout  "` is a
+/// genuine `Matched` — but the label travelled down a separate path, so the
+/// wire (and therefore the payload) carried the RAW string while the marker
+/// described the trimmed one: the UI printed `"  scout  "` and its row and its
+/// badge were about two different names.
+///
+/// A PAYLOAD-level pin, deliberately not a resolver-level one:
+/// `resolve_launch_a_blank_name_is_no_name_and_a_padded_name_is_a_match`
+/// already proves the padded name MATCHES, and that test stays green with the
+/// label bug in place — nothing below `dispatch_subagent` sees the difference
+/// except this emit. Runs the same real path as the two neighbours above
+/// (`resolve_launch` → `dispatch_native` → `subagent_flow`).
+///
+/// No `env_lock()` (both neighbours' note applies verbatim): the space-level
+/// roots are scanned first, so a user-level `scout` can never shadow the
+/// space-level one written below, and nothing here asserts on a USER-level
+/// definition.
+#[tokio::test]
+async fn a_padded_agent_name_reaches_the_payload_trimmed() {
+    let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+    let (provider, _calls) = ScriptedProvider::new(vec![
+        Some(vec![
+            ProviderEvent::ToolCall(ToolCall {
+                id: "t1".to_string(),
+                name: "subagent".to_string(),
+                // The padding is the whole test: a model that emitted the name
+                // with surrounding space (a copy out of a prose list) is the
+                // realistic producer of this input.
+                arguments: json!({ "task": "recon the auth code", "agentName": "  scout  " }),
+            }),
+            ProviderEvent::Done(FinishReason::ToolCalls),
+        ]),
+        Some(vec![
+            ProviderEvent::TextDelta("done".to_string()),
+            ProviderEvent::Done(FinishReason::Stop),
+        ]),
+    ]);
+    let models = vec![fake_model("m1"), fake_model("m2")];
+    let sink_events = Arc::new(StdMutex::new(Vec::<(String, Value)>::new()));
+    let sink: Arc<dyn EventSink> = Arc::new(RecordingSink {
+        events: sink_events.clone(),
+    });
+    let manager =
+        make_subagent_manager(Duration::from_secs(30), models.clone(), None, sink.clone()).await;
+    let mut loop_ = build_loop_with_dispatcher(
+        Box::new(provider),
+        events_tx,
+        Arc::new(StdMutex::new(CancellationToken::new())),
+        watch::channel(0u64).0,
+        RetryPolicy::new_with(5, Duration::from_millis(1)),
+        sink,
+        Some(Arc::new(InProcessDispatcher::new(manager)) as Arc<dyn SubagentDispatcher>),
+        models,
+        None,
+    );
+    let agent_file = loop_.space_cwd.join(".agents/agents/scout.md");
+    if let Some(parent) = agent_file.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(
+        &agent_file,
+        "---\nname: scout\ndescription: Fast recon.\nmodel: fake/m2\nthinking: low\ntools: [read]\n---\nYou are a scout.\n",
+    )
+    .unwrap();
+    loop_.handle_prompt(&text_prompt("go")).await;
+    wait_for_event(&mut events_rx, SPAWN_MS, |e| {
+        matches!(e, RpcEvent::agent_settled)
+    })
+    .await
+    .expect("the parent turn settled");
+    let events = sink_events
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    let started = events
+        .iter()
+        .find(|(name, _)| name == "subagent-session-started")
+        .expect("the `subagent-session-started` frame was emitted");
+    // THE fix: the label the resolver actually selected by.
+    assert_eq!(
+        started.1["agentName"], "scout",
+        "the payload carries the TRIMMED name — the marker and the label must \
+         describe one string, got {:?}",
+        started.1["agentName"]
+    );
+    // And the trim did not COST the dispatch anything: it still matched, and it
+    // still ran the frontmatter (so this is not the `Unmatched` path in a
+    // different costume).
+    assert_eq!(
+        started.1["nameResolution"], "matched",
+        "a padded real name is still MATCHED"
+    );
+    assert_eq!(
+        started.1["model"], "fake/m2",
+        "the padded name still resolved the frontmatter's model"
+    );
+}
+
 /// `SubagentWait` mechanics (the `MockDispatcher` seam — a QUEUED
 /// oneshot): a resolving `Completed` outcome completes the `subagent`
 /// tool with the captured output (the `select!`'s outcome arm fires
