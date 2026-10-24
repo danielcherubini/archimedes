@@ -190,6 +190,47 @@ deliberately left undone.
   inodes stayed 35→38%. The earlier 113k-directory cleanup remains a one-off
   breach by the T01 child, not a pattern.
 
+- 2026-10-24 — **T03 PLAN REVERSED by the orchestrator before implementation —
+  D11 contradicted an APPROVED user decision.** The plan's largest "known limit"
+  accepted that the live-before-stored split survives inside `sessionIds` (a
+  RESUMED Session sits in the live block, not the slot the DB holds, and settles
+  only at the next restart). The spec's approved decision says the opposite:
+  "ONE order per Space, spanning live and stored", precisely because a split
+  means "'stop them moving around' is only half fixed". The plan's stated reason
+  — "a live row's `sort_order` never crosses the wire" — was ALSO false: the
+  separate `SessionRecency` struct exists precisely so this field is cheap
+  (2 construction sites, both in `db.rs`, vs `SessionInfo`'s 40), and its SQL
+  already reads every non-subagent row, so a live Session's own row is covered.
+  Fix: `sort_order` joins that payload (1 Rust struct field, 1 SELECT column,
+  1 TS interface field), the store keeps a boot ORDER map from the SAME single
+  IPC call, and `mergeSessionOrder` builds one sequence with unknown ids at the
+  BOTTOM (= the approved new-row rule, no new decision needed).
+- 2026-10-24 — **PROOF RETIRED BY DESIGN, do not "restore" it:** T02's Done-when
+  asserted `grep -rn "sort_order\|sortOrder" src/` == 0 hits. After T03 the
+  column reaches the frontend through the `SessionRecency` payload by design, so
+  that proof is T02-scoped ("no frontend CONSUMER yet"), NOT a durable
+  invariant. Successor assertion: `sortOrder` appears ONLY in the wire type +
+  the store's ordering derivation + tests; **`src/components/**` must stay at 0
+  hits**; `sort_order` (snake_case) stays at 0 anywhere in `src/`.
+- 2026-10-24 — **CONSTRAINT HANDED TO T05 (do not lose this):** `sessionOrder`
+  is a BOOT SNAPSHOT and nothing writes it mid-boot, so a DRAG will not hold
+  across a re-derivation unless T05's optimistic reorder WRITES THE ORDER MAP
+  ITSELF, not merely the array it just derived. If T05 updates only the array,
+  the next `spaceViewFor` recomputes from the stale map and the row snaps back.
+  T03 exports `mergeSessionOrder` so T05 reuses the one ordering expression.
+  Until T05 lands, "resumed rows keep their slot" is true and "dragged rows
+  hold" is not — they land in different tasks; do not describe the feature as
+  complete between them.
+- 2026-10-24 — **SEAM GRANTS for T03** (arbitrated, recorded so the seam table is
+  not left looking falsified): `src/components/SpacesList.tsx` GRANTED for the
+  mechanical `spaceViewFor` call-site updates only (no behaviour/JSX — T04's);
+  `src/App.test.tsx` GRANTED (boot wiring is T03's contract; its `vi.mock`
+  factory spreads `importActual`, so an un-mocked boot call rejects the
+  `Promise.all`, the `.catch` swallows it, and ~40 tests go red for an unrelated
+  cause); `src-tauri/src/storage/db.rs`, `src/lib/tauri/types.ts` and
+  `commands/history.rs` (a pinned wire-key literal test) join T03's seam for the
+  payload field — temporal overlap with the already-merged T02, not concurrent.
+
 ## Changelog
 
 One line per task: hash, what shipped, gate numbers at that moment.
