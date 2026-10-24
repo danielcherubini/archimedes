@@ -702,9 +702,7 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
       path: "/workspaces/alpha",
       title: "alpha",
       sessionIds: ["stored-alpha", "live-alpha"],
-      liveSessionIds: ["live-alpha"],
       liveSessionId: "live-alpha",
-      storedSessionIds: ["stored-alpha"],
       archivedSessionIds: [],
       trusted: false,
       // The Landing Session's reason: the live one's (`live-alpha` →
@@ -731,9 +729,7 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
       path: "/workspaces/bravo",
       title: "bravo",
       sessionIds: ["idX", "idY"],
-      liveSessionIds: [],
       liveSessionId: null,
-      storedSessionIds: ["idX", "idY"],
       archivedSessionIds: [],
       trusted: false,
       // No live session: the most RECENT stored session's reason, and with an
@@ -757,9 +753,7 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
       path: "/workspaces/charlie",
       title: "charlie",
       sessionIds: [],
-      liveSessionIds: [],
       liveSessionId: null,
-      storedSessionIds: [],
       archivedSessionIds: [],
       trusted: false,
       lastReason: undefined,
@@ -845,11 +839,24 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
   // live session. `sessions` is in insertion order (newest appended by
   // `addSession` / `resumeSession`), so the space row points at the
   // MOST-RECENTLY-STARTED one.
+  //
+  // T05 repurposed this test: the newest-first ORDER half used to be read off
+  // the view's `liveSessionIds`, a field that has since been deleted (ADR 0075 —
+  // the view carries ONE sequence, `sessionIds`). The order contract now lives
+  // on `liveSessionsInSpace`, whose own test
+  // `"returns session IDs for matching cwd in reverse insertion order (newest first)"`
+  // pins it; what the VIEW still owns is the LIVE DOT, which is the fact the tab
+  // renders. Both halves stay asserted here, on the fields that carry them.
   it("a space with TWO coexisting live sessions points at the most-recently-started one (the one-live cap lift)", () => {
     const twoLive = [
       info("first", "/workspaces/alpha"),
       info("second", "/workspaces/alpha"),
     ];
+    // The order half, on the helper that owns it: newest STARTED first.
+    expect(liveSessionsInSpace(twoLive, "/workspaces/alpha")).toEqual([
+      "second",
+      "first",
+    ]);
     const view = spaceViewFor(
       spaces[0],
       twoLive,
@@ -859,10 +866,12 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
       recencyEvidence(),
       noOrder(),
     );
-    expect(view.liveSessionIds).toEqual(["second", "first"]);
+    // The live-dot half, on the view: the tab's dot points at the newest one,
+    // i.e. the head of the helper's answer.
     expect(view.liveSessionId).toBe("second");
-    expect(view.liveSessionId).toBe(view.liveSessionIds[0] ?? null);
-    expect(view.storedSessionIds).toEqual(["stored-alpha"]);
+    expect(view.liveSessionId).toBe(
+      liveSessionsInSpace(twoLive, "/workspaces/alpha")[0] ?? null,
+    );
   });
 
   it("autoSelectActive prefers the most-recently-started live session in the space (the one-live cap lift)", () => {
@@ -875,12 +884,21 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
     ).toBe("second");
   });
 
+  // Same repurposing as the two-live test above: the newest-first ORDER half
+  // read the view's deleted `liveSessionIds` field (ADR 0075); it now belongs to
+  // `liveSessionsInSpace`, and the VIEW keeps the live-dot half.
   it("a space with three or more live sessions orders them newest-first", () => {
     const threeLive = [
       info("s1", "/workspaces/alpha"),
       info("s2", "/workspaces/alpha"),
       info("s3", "/workspaces/alpha"),
     ];
+    // The order half, on the helper that owns it.
+    expect(liveSessionsInSpace(threeLive, "/workspaces/alpha")).toEqual([
+      "s3",
+      "s2",
+      "s1",
+    ]);
     const view = spaceViewFor(
       spaces[0],
       threeLive,
@@ -890,10 +908,20 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
       recencyEvidence(),
       noOrder(),
     );
-    expect(view.liveSessionIds).toEqual(["s3", "s2", "s1"]);
+    // The live-dot half, on the view.
     expect(view.liveSessionId).toBe("s3");
   });
 
+  // Its subject is per-Space MEMBERSHIP ACROSS Spaces, not the deleted pair, so
+  // it survives on the view — and gets STRONGER: it now pins the rendered
+  // sequence too, not just an input list.
+  //
+  // TWO COMPETING ANSWERS for Space A: with NO order map every id is unknown,
+  // every id ties, and the sequence is `liveSessionsInSpace`'s reverse insertion
+  // order — ["alpha-3","alpha-2","alpha-1"]. The seeded map below is what makes
+  // the fixture's own order the answer: ["alpha-3","alpha-1","alpha-2"], which
+  // reverse insertion order cannot produce. (A fixture expecting
+  // ["alpha-1","alpha-2","alpha-3"] here has mis-read the helper.)
   it("handles live sessions from multiple different spaces interleaved", () => {
     const interleavedLive = [
       info("alpha-1", "/workspaces/alpha"),
@@ -909,9 +937,16 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
       closeReasons,
       [],
       recencyEvidence(),
-      noOrder(),
+      { "alpha-3": 0, "alpha-1": 1, "alpha-2": 2 },
     );
-    expect(alphaView.liveSessionIds).toEqual(["alpha-3", "alpha-2", "alpha-1"]);
+    expect(alphaView.sessionIds).toEqual([
+      "alpha-3",
+      "alpha-1",
+      "alpha-2",
+      // The describe's stored row for this Space: the map does not know it, so
+      // it sinks to the BOTTOM (the "unknown id joins at the bottom" rule).
+      "stored-alpha",
+    ]);
     expect(alphaView.liveSessionId).toBe("alpha-3");
 
     const bravoView = spaceViewFor(
@@ -923,7 +958,15 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
       recencyEvidence(),
       noOrder(),
     );
-    expect(bravoView.liveSessionIds).toEqual(["bravo-2", "bravo-1"]);
+    // Space B has no map, so its live rows keep reverse insertion order and its
+    // stored rows follow — the point being that Space A's map moved nothing in
+    // Space B.
+    expect(bravoView.sessionIds).toEqual([
+      "bravo-2",
+      "bravo-1",
+      "idX",
+      "idY",
+    ]);
     expect(bravoView.liveSessionId).toBe("bravo-2");
   });
 });
@@ -3124,7 +3167,6 @@ describe("spaceViewFor — archivedSessionIds (view membership only)", () => {
     // `sessionIds` is UNCHANGED in membership: stored + live only (the archived
     // id must NOT appear — the Space group renders stored sessions only).
     expect(view.sessionIds).toEqual(["live-a", "stored-a"]);
-    expect(view.storedSessionIds).toEqual(["stored-a"]);
     // The LIVE session is the Landing Session (live is preferred over any
     // stored one, whatever the recency maps say): its reason wins.
     expect(view.lastReason).toBe("user");
@@ -3143,7 +3185,6 @@ describe("spaceViewFor — archivedSessionIds (view membership only)", () => {
     );
     expect(archivedOnly.archivedSessionIds).toEqual(["arch-a"]);
     expect(archivedOnly.sessionIds).toEqual([]);
-    expect(archivedOnly.storedSessionIds).toEqual([]);
     expect(archivedOnly.lastReason).toBe("agent-exited");
   });
 });
@@ -3897,7 +3938,12 @@ describe("views (store integration for space views)", () => {
     trusted: false,
   });
 
-  it("adding multiple sessions sequentially via addSession in the same space produces newest-first liveSessionIds in views()", () => {
+  it("adding sessions sequentially in one space yields a newest-first LIVE DOT and a newest-first sequence in views()", () => {
+    // T05 renamed this test: its old name named `liveSessionIds`, a `SpaceView`
+    // field ADR 0075 deleted. The fixture is unchanged and so is the expected
+    // sequence — it is simply pinned on fields that survive. The order map is
+    // EMPTY, so every id is unknown, every id ties, and the sequence is input
+    // order, which for all-live rows is reverse insertion order.
     useSessions.setState({
       spaces: [space("/workspaces/alpha")],
     });
@@ -3916,7 +3962,7 @@ describe("views (store integration for space views)", () => {
       { recency: s.sessionRecency },
       s.sessionOrder,
     );
-    expect(view.liveSessionIds).toEqual(["s3", "s2", "s1"]);
+    expect(view.sessionIds).toEqual(["s3", "s2", "s1"]);
     expect(view.liveSessionId).toBe("s3");
   });
 });

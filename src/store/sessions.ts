@@ -178,9 +178,8 @@ export function autoSelectActive(
  * One per-space group for the UI (used by both this store and the Task 6
  * components). Built with the same input-order rule as `autoSelectActive`.
  *
- * Supports multiple coexisting live sessions per space: `liveSessionIds`
- * contains all active live sessions most-recently-STARTED first, while
- * `liveSessionId` points to the most recently started live session (or `null`).
+ * A Space may hold more than one live session; `liveSessionId` points to the
+ * most recently STARTED one (or `null`) — the tab's live dot.
  * `sessionIds` is what the rows RENDER — one sequence, not a live block.
  *
  * Note: a session without a space is NOT a case here by design — a space is
@@ -195,26 +194,15 @@ export interface SpaceView {
   /**
    * THE one order this Space's sidebar rows render (ADR 0075): ONE sequence
    * spanning live and stored, no group headers, no re-sorting by anything the
-   * user did not do. Built from the two lists below plus the boot order map by
-   * ONE function (`mergeSessionOrder`) so the rows and the collapsed rail cannot
-   * disagree, and so a row keeps its slot whether its Worker is live, stored,
-   * or has just been resumed.
+   * user did not do. Built from this Space's live and stored rows plus the boot
+   * order map by ONE function (`mergeSessionOrder`) so the rows and the
+   * collapsed rail cannot disagree, and so a row keeps its slot whether its
+   * Worker is live, stored, or has just been resumed.
    * Position here means position, nothing more — recency is `lib/sessionRecency`.
    */
   sessionIds: string[];
-  /** DEPRECATED — one INPUT to `sessionIds`; T04 deletes it and renders `sessionIds`.
-   * (All live sessions of this Space, most recently STARTED first — reverse
-   * insertion order, NOT recency.) */
-  liveSessionIds: string[];
   /** The most recent live session in this space, or `null` (the tab's live dot). */
   liveSessionId: string | null;
-  /** DEPRECATED — the other INPUT to `sessionIds`, in the server's manual order;
-   * T05 deletes it. Do NOT re-sort: the input order IS the user's Manual order,
-   * and since ADR 0075 it is evidence of nothing but position. The display sort
-   * that used to re-rank this list for the sidebar is GONE — no surface re-sorts
-   * it any more — and since T04 nothing outside this file reads this field or
-   * its sibling at all: they are INPUTS to `mergeSessionOrder` and nothing else. */
-  storedSessionIds: string[];
   /**
    * Archived sessions of this space (NOT rendered in the Space group —
    * used only for `view` membership, so a space whose only sessions are
@@ -239,8 +227,8 @@ export interface SpaceView {
  * goes at the BOTTOM, which is the spec's "new rows join at the bottom" rule
  * restated for a client that has not written the row's number yet.
  *
- * With an EMPTY map every id is unknown, every id ties, and the answer is
- * `[...liveSessionIds, ...storedSessionIds]`: the pre-T03 sequence. That is not
+ * With an EMPTY map every id is unknown, every id ties, and the answer is live
+ * rows then stored rows in input order: the pre-T03 sequence. That is not
  * a fallback path, it is stability under no information, and it is what keeps
  * every pre-existing fixture's expected order honest.
  */
@@ -293,9 +281,7 @@ export function spaceViewFor(
     path: space.path,
     title: basenameOfPath(space.path),
     sessionIds: mergeSessionOrder(liveSessionIds, storedSessionIds, orderMap),
-    liveSessionIds,
     liveSessionId,
-    storedSessionIds,
     archivedSessionIds,
     trusted: space.trusted,
     lastReason: landingId === undefined ? undefined : closeReasons[landingId],
@@ -357,7 +343,7 @@ export function archivedInSpace(
  *
  * The match is the same raw byte-for-byte string equality every other
  * Space↔session join in this file uses (`liveSessionsInSpace`,
- * `spaceViewFor`'s `storedSessionIds`/`archivedSessionIds` filters). Do NOT
+ * `spaceViewFor`'s `stored` / `archivedSessionIds` filters). Do NOT
  * normalise or canonicalise the path here — a normalised key would silently
  * disagree with those sites. It is also pure string equality with no
  * filesystem access: a row whose folder was deleted from disk is simply
