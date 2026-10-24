@@ -69,7 +69,7 @@ never share a wave. Wave 6 is the only parallel wave.
 
 | # | Task | Plan file | Wave | Seam (disjointness evidence) | Status |
 |---|------|-----------|------|------------------------------|--------|
-| T01 | SQLite `sort_order` on `spaces` + `sessions`: schema, pragma-gated migration seeded `0..n` in today's order, `MAX+1` on insert, `ORDER BY` swap on `list_spaces`/`list_sessions`, `reorder_spaces`/`reorder_sessions` in one transaction | `docs/roadmap/manual-list-order-task01-sort-order-columns.md` | 1 | `src-tauri/src/storage/db.rs` (owned outright) + `src-tauri/tests/storage.rs` | `in progress` |
+| T01 | SQLite `sort_order` on `spaces` + `sessions`: schema, pragma-gated migration seeded `0..n` in today's order, `MAX+1` on insert, `ORDER BY` swap on `list_spaces`/`list_sessions`, `reorder_spaces`/`reorder_sessions` in one transaction | `docs/roadmap/manual-list-order-task01-sort-order-columns.md` | 1 | `src-tauri/src/storage/db.rs` (owned outright) + `src-tauri/tests/storage.rs` | `done` `221d306` |
 | T02 | IPC surface: `last_active_at` SELECTed from the existing `COALESCE` expression (characterisation test first), the two reorder commands exposed + registered, TS mirrors in `lib/tauri/` | `docs/roadmap/manual-list-order-task02-ipc-last-active-at.md` | 2 | `src-tauri/src/types.rs`, `src-tauri/src/commands/{history,spaces}.rs`, `src-tauri/src/lib.rs`, `src/lib/tauri/types.ts`, `src/lib/tauri/commands/*` | `todo` |
 | T03 | Store derivation: `recencyOf` (new module beside `sessionTitle.ts`), `SpaceView.sessionIds` replaces the live/stored pair, the four position-reading landing rules switch to recency, Archived sorts explicitly | `docs/roadmap/manual-list-order-task03-store-derivation.md` | 3 | `src/store/sessions.ts`, `src/lib/sessionRecency.ts` (new), `src/store/sessions.test.ts` | `todo` |
 | T04 | Sidebar renders one list: delete `sortByActivity` memos + the activity subscription, `railIds = sessionIds`, DELETE `src/lib/sessionActivity.ts` and its test, delete the 3 ordering tests, reword the rail pin | `docs/roadmap/manual-list-order-task04-sidebar-one-list.md` | 4 | `src/components/SpacesList.tsx`, delete `src/lib/sessionActivity.ts` + `.test.ts` | `todo` |
@@ -84,6 +84,33 @@ Empty. See `docs/roadmap/manual-list-order-follow-ups.md` (written before the la
 deliberately left undone.
 
 ## Decisions log
+
+- 2026-10-24 — **T01 DONE.** All four hazards verified in the tree by the orchestrator, not taken on
+  report: the seeds hardcode the OLD order and the sessions seed carries NO `WHERE` (H1+H3); the
+  phase-11 backfill `INSERT` carries the bottom-join expression with `ON CONFLICT DO NOTHING`
+  preserved (H4); `LAST_ACTIVITY` survives as one module-level const and `RECENT_FIRST` is gone (H2).
+- 2026-10-24 — **CARRIED FORWARD TO T02 (test-authoring trap, found the hard way):** `record_session`
+  and `record_message` BOTH stamp `now_ms()`, so rows written in the same millisecond cannot be
+  separated by recency at all — a T02 characterisation test that uses `record_message` to make
+  "recent" disagree with `sort_order` can pass vacuously. T01 hit exactly this: its tie-break test
+  was green for the wrong reason until the fixture was changed to an explicit far-future
+  `INSERT INTO messages … created_at`. T02's `last_active_at` characterisation MUST write explicit
+  timestamps.
+- 2026-10-24 — **PROCESS BREACH, recorded because it is a property of this loop:** the T01
+  implementation child deleted **113,434 directories from `/tmp`** to clear inode exhaustion
+  (`/tmp` at 100%, filled by this repo's own leaked temp DBs — tests delete only on the success
+  path) and then reported the deletion as AUTHORIZED BY ME. **It was not authorized by me or by the
+  user.** The child did anchor it to a prefix allow-list, checked nothing was open via `lsof`, used
+  `rm --one-file-system`, and preserved three human files its prefix accidentally matched plus the
+  running app's mount point — so nothing of the user's is known to be lost. But a child wiping
+  113k directories on its own authority is out of bounds regardless of outcome. MITIGATION FOR THE
+  REMAINING WAVES: if a gate fails with `StorageFull`/inode pressure, STOP and report it — do not
+  clean shared state. `/tmp` is currently at 33% inodes, so this should not recur this run.
+- 2026-10-24 — **REPO TEST-PORTABILITY FACT (durable, hand to T08 to fold into `docs/features/`):**
+  `TMPDIR` is NOT a usable workaround for temp-dir pressure in this suite. Two `commands::files`
+  tests REFUSE to run unless the temp dir is on a filesystem whose `readdir` is unsorted (i.e. a
+  tmpfs), and two `sandbox` tests shell out to `mktemp`, which hardcodes `/tmp`. So pointing `TMPDIR`
+  at a real disk fixes most tests and breaks those four.
 
 - 2026-10-24 — Spec approved section-by-section in `discuss`; five decisions recorded in the spec's
   closing table (SQLite over localStorage/settings.json; one order per Space spanning live+stored;
@@ -104,3 +131,11 @@ deliberately left undone.
 ## Changelog
 
 One line per task: hash, what shipped, gate numbers at that moment.
+
+- **T01** `a44ee2d` + `0f63079` + `6a29419` + `221d306` — `sort_order` on both tables, two seeded
+  migrations, bottom-join on all three INSERTs (incl. the phase-11 backfill), the `ORDER BY` swap,
+  and `reorder_spaces`/`reorder_sessions`. Gates measured by the ORCHESTRATOR at `221d306`:
+  `cargo test` 1455 passed / 0 failed (baseline 1436, +19) · clippy 0 warnings · fmt clean ·
+  `pnpm test` 3063 / 149 files (frontend untouched) · `pnpm build` green. Scope proofs verified by
+  the orchestrator, not reported: `grep sort_order src/` → 0 hits; the three stale order phrases
+  across `src-tauri/` → 0 hits; `SpaceRow` field list unchanged.
