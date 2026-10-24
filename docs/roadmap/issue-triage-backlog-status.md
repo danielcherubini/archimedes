@@ -1,7 +1,7 @@
 ---
 status: running
 mode: autonomous
-updated: 2026-10-23
+updated: 2026-10-24
 ---
 
 # issue-triage-backlog — STATUS
@@ -11,10 +11,10 @@ updated: 2026-10-23
 ## Mission
 
 Land the fixes for the GitHub issues triaged on 2026-10-23 (the triage record lives in the issue
-comments themselves — #74/#75/#27/#47/#42 were closed with evidence; #81 was filed). "Finished" means
-the 12 tasks below are `done`, each as its own commit on `feature/issue-triage-backlog`, with the
+comments themselves — #74/#75/#27/#47/#42 were closed with evidence; #81 and #82 were filed). "Finished"
+means the 12 tasks below are `done`, each as its own commit on `feature/issue-triage-backlog`, with the
 AGENTS.md gate green at every step. There is no separate spec doc: the issues are the source documents,
-and each task names its issue number so the commit references it.
+and each task's commit references its issue number.
 
 ## Operating mode
 
@@ -23,7 +23,7 @@ Loop protocol (repeat until `status: done`):
 2. Verify the task against the tree before doing it. Trust the tree over the task text — several of
    these issues were written against older heads, and the triage already found one (#27) fully fixed.
 3. Expand it with `specify` in CONSUMED MODE (marker `SPECIFY CONSUMED MODE`, plus the task text and
-   `target: docs/roadmap/issue-triage-backlog-taskNN-<slug>.md`).
+   `target: docs/roadmap/<feature>-taskNN-<slug>.md`).
 4. Dispatch per the wave rules below. **The Rust tasks are SERIAL** — see the compile-unit note.
 5. Run the gate. Green -> commit by pathspec -> mark `done` here -> one Changelog line.
    Red -> re-dispatch; never fix by hand in the orchestrator.
@@ -33,16 +33,16 @@ Loop protocol (repeat until `status: done`):
 
 From the repo root:
 
-    pnpm test      # 149 files / 3049 tests
+    pnpm test      # baseline 149 files / 3049 tests
     pnpm build     # exit 0
 
 From `src-tauri/`:
 
-    cargo test                     # 1355 passed, 0 failed, 4 ignored
+    cargo test                     # baseline 1355 passed, 0 failed, 4 ignored
     cargo clippy --all-targets     # 0 warnings (AGENTS.md bar)
     cargo fmt --check              # exit 0
 
-Windows-arm check (only T8 needs it; see the T8 note):
+Windows-arm check (T8 needs it; any later Rust task should keep it green):
 
     cargo check --target x86_64-pc-windows-gnu --all-targets
 
@@ -87,6 +87,8 @@ Consequences, all deliberate:
     Serial:  T11             (needs T10's start-signal shape; shares protocol.rs)
     Serial:  T12             (shares manager/tests/mod.rs with T10/T11)
 
+ALL TWELVE LANDED — see the Task table; nothing is `todo`.
+
 ## Tasks
 
 | # | Task | Issue | Wave | Seam (disjointness evidence) | Status |
@@ -102,12 +104,11 @@ Consequences, all deliberate:
 | T9 | `unknown_param_warning` + `SUBAGENT_GUIDANCE` + advertise `thinking` | #78 | serial | `agent/harness/tool_specs.rs`, `agent/harness/prompt.rs`, `agent/harness/loop/turn.rs`, `agent/harness/loop/tests/subagents.rs`, `src/lib/toolOutput.test.ts` | `done` `a9b2347` |
 | T10 | A child start signal that never reaches the main-prompt arm | #9 | serial | `agent/worker/protocol.rs`, `agent/worker/core.rs`, `agent/worker/manager/subagent_flow.rs`, `agent/worker/manager/mod.rs` (doc), `agent/harness/prompt.rs` (doc), `agent/subagent.rs` (doc), `tests/worker_stdin.rs`, `tests/worker_e2e.rs`, ADR 0036 | `done` `fb33e59` |
 | T11 | A resolve miss is observable on `subagent-session-started` | #47 → #78 | serial | `agent/subagent.rs`, `agent/mod.rs`, `agent/harness/launch.rs`, `agent/harness/dispatch.rs`, `agent/worker/{dispatch,protocol,client}.rs`, `agent/worker/manager/subagent_flow.rs`, `agent/worker/manager/tests/mod.rs`, `bin/fake_worker.rs` (one line), `commands/agents.rs`, `tests/harness_dispatch_native.rs`, FE: `lib/tauri{.ts,/types.ts}`, `store/subagents.ts`, `App.tsx`, `SubagentDelegatingCard.tsx`, `SubagentDetailHost.tsx` + their tests | `done` `59b2a03` |
-| T12 | Streaming-subagent test margin + honest panic text + doc wording | #34 | serial | `agent/worker/manager/tests/mod.rs`, `src/bin/fake_worker.rs`, `agent/worker/manager/mod.rs` | `todo` |
+| T12 | Streaming-subagent test margin + honest panic text + doc wording | #34 | serial | `agent/worker/manager/tests/mod.rs`, `bin/fake_worker.rs`, `agent/worker/manager/mod.rs` | `done` `45cbb9a` |
 
 ## Blockers / open questions
 
-None. See `docs/roadmap/issue-triage-backlog-follow-ups.md` (written before the last commit) for what
-was deliberately NOT done, including the two items needing a human decision.
+None. Everything deliberately not fixed is in `docs/roadmap/issue-triage-backlog-follow-ups.md`.
 
 ## Decisions log
 
@@ -137,20 +138,8 @@ was deliberately NOT done, including the two items needing a human decision.
   box, `rg -g 'sub/*' -- needle <abs space>` returns 0 matches with **exit 0** when cwd is not the Space.
   So under `AppRun.c`'s `chdir("$APPDIR/usr")` every directory-scoped `grep` silently reports "nothing
   found" — a false negative, not cosmetic. T6's plan is written against the measurement, not the comment.
-
 - 2026-10-23 — **Wave 1a held.** T2 and T3 committed as two disjoint pathspec commits (`863eec6`,
   `2a3f8df`); full suite run once after the wave, green. Every task from T1 onward is SERIAL.
-
-- 2026-10-23 — **T6 confirmed by fresh measurement that `fd` has NO cwd bug at all** — its `-g` globs are
-  cwd-independent too (measured from 5 cwds on fd 10.4.2). Only `rg`'s `-g` is cwd-relative. The T6
-  commit body says "fd and rg both echo the absolute search path" (true for output) — the glob half
-  applies to rg alone. Precision note only; no code impact.
-- 2026-10-23 — **Doc correction owed, not folded into T6's commit:**
-  `docs/research/appimage-child-process-env-leak.md` §"Gaps" item (b) claims `--max-results` is not a
-  real `fd` flag — it is (`fd --max-results 10 -g a.txt -- <dir>` exits 0 with results), so the fd fast
-  path does run. Strike item (b). T8's planner also handed back a stale paragraph in
-  `docs/research/windows-child-console-window.md`. → follow-ups file.
-
 - 2026-10-23 — **Doc corrections handed back, not folded into task commits** (T6/T8 precedent):
   (a) `docs/research/appimage-child-process-env-leak.md` §Gaps item (b) — `--max-results` IS a real fd
   flag; strike it. (b) `docs/research/windows-child-console-window.md` line ~133 and the first
@@ -159,16 +148,20 @@ was deliberately NOT done, including the two items needing a human decision.
   Windows, the Windows process-group kill, and the non-Linux relaunch. → follow-ups file.
 - 2026-10-23 — **T9's planner found a same-class credibility bug outside this roadmap's scope**:
   `fetch_content`/`get_search_content` advertise params their schemas don't carry (six functional keys,
-  e.g. `findText`), and fetch_content's own truncation note tells the model to use `responseId`. When
-  T9's checker ships it will start warning on those tools' legal-looking calls. Needs its own issue:
-  fix the schemas, or the warning fires on the web tools constantly. → follow-ups file + file it.
-
+  e.g. `findText`), and fetch_content's own truncation note tells the model to use `responseId` — the
+  identical credibility bug on other tools; handed to the orchestrator as its own task. → follow-ups file.
 - 2026-10-23 — **#82 interim folded into T9 by orchestrator decision** (recorded on #82 too): the web
   specs advertise the camelCase keys their handlers read, so the generic checker ships with zero known
   false positives. Option (b) — narrow handlers to one dialect, fix the truncation notice — stays open
   on #82. T9's census found no handler reading an unadvertised TOP-LEVEL key anywhere else; `ask`'s
   nested `recommended` is nested-only, invisible to the top-level rule.
 - 2026-10-23 — filed **#82** (web tools' camelCase dialect).
+- 2026-10-24 — **T12's mutation probe contradicted its plan, and the plan's STOP rule did not apply.**
+  The in-tool test is NOT green under mutation A (a frozen deadline expires during the hold; the
+  `!in_flight` guard DELAYS the reaping until `tool_execution_end` lifts it) — measured 7/11 RED. The
+  STOP rule fires when a test PASSES under its own mutation; the opposite happened. The doc paragraph
+  now states the measured behaviour, and mutation B (deterministic RED) is named as what actually pins
+  that test.
 
 ## Changelog
 
@@ -210,4 +203,8 @@ was deliberately NOT done, including the two items needing a human decision.
   "no matching Agent" caption for `unmatched` only; miss stays non-blocking end-to-end. Gate after:
   Rust **1404** / 0 / 4 (+5), FE **3057** / 149 (+5), clippy 0, fmt clean, gnu green. Four mutation
   probes run; probe-1 over-claim in the plan corrected (the emitter test builds its wire inline).
+- `45cbb9a` — T12 (#34) `LIVENESS_DEAD_BOUND` 1500 ms both tests, 30 chunks / 3 s holds, honest panic
+  text + OBSERVED wording, ADR 0055 amended append-only. Gate after: Rust **1404** / 0 / 4 (+0 — no new
+  tests by design), FE 3057 / 149 unchanged, clippy 0, fmt clean, gnu green. 10/10 green bare and under
+  load; both mutation mutations run, one plan prediction corrected by measurement.
 - Current gate figures live in the Gate section above; the numbers here are what they were then.

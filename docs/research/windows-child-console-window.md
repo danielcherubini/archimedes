@@ -1,6 +1,6 @@
 ---
 status: current
-last-verified: 2026-10-17
+last-verified: 2026-10-24
 verified-by: web research — 4 researcher angles (local spawn audit, Win32 console semantics, ecosystem precedent, report triage) + inline verification against this tree; the fix itself was implemented and validated on Linux on branch `bugfix/35-windows-child-console-window` (`d344a34`..`0c471d8`: `childproc` + the census + the `execute_tool` stdin test; cargo 1216 passed / 0 failed / 4 ignored, clippy 0 warnings, fmt clean, `pnpm test` 2054 passed, `pnpm build` ok); NO Windows runtime reproduction was possible — there is no Windows machine here, so the window-suppression half is still doc-derived, not observed
 ---
 
@@ -130,13 +130,13 @@ reason this doc is worth keeping next to the ADR.
 
 ## Related, deliberately filed separately
 
-`exec.rs:381` passes the model's entire command string as a single `.arg()` to `cmd /C`. `Command::arg`'s contract — "passed as-is, not evaluated by a shell" — is **false for `cmd.exe`**, which is why std's batch escaping was exploitable twice ([CVE-2024-24576](https://github.com/rust-lang/rust/security/advisories/GHSA-q455-m56c-85mh), CVE-2024-43402) and why `raw_arg`'s own docs suggest a temp `.bat` over a complex `cmd /c` tail. Our tests already concede the consequence: `exec.rs` (the `cmd /C` arm of the process-group test) says the command line *"does not even parse as written"* under `cmd /C`, and four test groups are `#[cfg(unix)]`-gated because of it. Industry uses `/D /S /C` (+ `raw_arg`, + `is_cmd_exe()` ordering care) — pnpm, Zed, VS Code's `copilot_shim`. That is a correctness/injection issue, not a window issue; the fixes are adjacent but must not be conflated.
+~~`exec.rs:381` passes the model's entire command string as a single `.arg()` to `cmd /C`.~~ **CLOSED 2026-10-24 by `70bffe1` (issue #79)** — the `not(unix)` arm now hands the command to `childproc::append_cmd_c`, a `raw_arg` of `/d /s /c "<exact string>"` (the documented `cmd` rule; the pnpm/Zed/VS Code `copilot_shim` shape), with census invariant E keeping `.raw_arg(` inside `childproc`, and the bash tool's description now names `cmd /d /s /c` on Windows instead of lying about `sh -c`. The analysis below stayed true until then: `Command::arg`'s contract — "passed as-is, not evaluated by a shell" — is **false for `cmd.exe`**, which is why std's batch escaping was exploitable twice ([CVE-2024-24576](https://github.com/rust-lang/rust/security/advisories/GHSA-q455-m56c-85mh), CVE-2024-43402) and why `raw_arg`'s own docs suggest a temp `.bat` over a complex `cmd /c` tail. Our tests conceded the consequence: the `cmd /C` arm of the process-group test said the command line *"does not even parse as written"*, and four decision-test groups were `#[cfg(unix)]`-gated because of it (un-gated by the same commit). That was a correctness/injection issue, not a window issue; the fixes were adjacent and were kept separate, as written.
 
 ## Follow-ups deliberately left out of PR #36
 
 Recorded here because the plan doc that scoped them is deleted on ship, and none of them is fixed by #36:
 
-- **`cmd /C` quoting/escaping** — the same line (`exec.rs`, the `not(unix)` arm of `exec_bash`) hands the model's whole command string to `cmd /C` as one `.arg()`. Highest-value of the set: it is a correctness and injection surface, not cosmetics.
+- ~~**`cmd /C` quoting/escaping**~~ — **CLOSED 2026-10-24 by `70bffe1` (issue #79):** `raw_arg` + `/d /s /c` threaded through `childproc`, census invariant E, per-platform tool description. Its two sibling symptoms stayed open on purpose, exactly as the issue says they must: `timeout /t` needs console input the Tool-child stdin policy refuses, and `start /B`'s file-lock is unexplained.
 - **`sudo_exec` is not gated off Windows** — it spawns a literal `sudo` (`sudo_argv.rs`) that cannot exist there, and is still offered to the Agent in the Windows tool registry.
 - **No process-group kill on Windows** (`exec.rs`, the `#[cfg(not(unix))]` arm is an explicit no-op) and **no `kill_on_drop` on the Worker spawn** (`worker/client.rs`) — together they mean a grandchild, or a dropped `WorkerHandle`, leaves an unreapable process. This is the first place to look if a user reports windows that *linger* rather than flash.
 - **Non-Linux relaunch is outside the seam** — `relaunch_through_the_mount` is `#[cfg(target_os = "linux")]`, so Windows/macOS take `app.restart()` → Tauri's own unflagged spawn. See Gaps above.

@@ -1,0 +1,84 @@
+---
+status: shipped-with
+feature: issue-triage-backlog
+updated: 2026-10-24
+---
+
+# issue-triage-backlog — follow-ups
+
+Staged here because `finish` deletes the whole `docs/roadmap/issue-triage-backlog-*` family on ship.
+Durable content was folded before deletion: the two stale-doc corrections (§3) were APPLIED directly to
+the research docs in the ship commit, and every open-work item is tracked on the issue tracker. This file
+is the record of what was deliberately NOT done and why — read it before re-deriving any of it.
+
+## 1. Open work — has its own issue
+
+| Item | Where | Status |
+|---|---|---|
+| Choose the project licence (SPDX) → `LICENSE`, `Cargo.toml`, `package.json`, `tauri.conf.json` `bundle.license`, and `bundle.rpm.files` to ship `/usr/share/licenses/archimedes/LICENSE` | #28 | `open work` — blocked on a HUMAN legal decision, not on code. The rpm ships an empty `License` tag until then; `rpmlint` reports error-severity `no-license`. |
+| Narrow the web handlers to ONE param dialect (option b): drop the camelCase acceptance, fix the truncation notice + `details` key to say `response_id` | #82 | `open work` — the interim shipped with T9 (`a9b2347`): specs now advertise exactly what handlers read, so #78's checker has zero known false positives. The real fix wants a line in the ADR that owns the web tools. |
+| Migrate the 21 `agent:` → `agentName:` call sites across 9 skills in `~/.agents` | `~/.agents` repo (separate) | `open work` — out of this repo's reach. #78's warning (`a9b2347`) makes each stale call visible on its first dispatch, which is the designed teaching mechanism, not a regression. |
+| `agents.rs` ignores pi's richer agent frontmatter: `skills:`, `systemPromptMode:`, `inheritSkills`, `model_kwargs` — so even a correctly-dispatched `reviewer` never receives its skill | #78's own "Out of scope" section | `open work` — ADR 0020 lists tolerating unknown frontmatter as a deliberate consequence; honouring it is a decision that wants its own ADR. |
+| `ask`'s nested `recommended` per-question key is read by the handler but unadvertised in `ask`'s nested `items.properties` | (small; fold into #82's area) | `recorded, not open work` — #78's checker is top-level-only, so it can never fire on a nested key. Cheap to advertise if the nested rule ever lands. |
+| `sudo_exec` never consults `protected_dirs` (the asymmetry #33 documents) | #33 (stays open for its proposal 2) | `accepted` — ADR 0030's documented intent: the floor is a guard-rail, not a security boundary; `Shell = Sandboxed` closes it from the other side via `rule_root_around_protected`. T5 changed only the refusal TEXT and deliberately did not name `sudo_exec` in it. |
+
+## 2. Accepted residuals inside shipped tasks
+
+- **T8 / #79 — `timeout /t 20 /nobreak >nul` still fails** ("Input redirection is not supported"). Not
+  quoting: it needs console input and Tool children get stdin forced to NULL + `CREATE_NO_WINDOW` — the
+  deliberate policy. Mitigated in the description only. The issue says explicitly the quoting fix must
+  not close it. `start /B prog.bat`'s "being used by another process" is likewise unexplained and
+  explicitly NOT closed. `raw_arg`'s trailing-backslash edge is accepted (matching pnpm/Zed/VS Code).
+- **T8 — Windows behaviour is CI-only.** The two `cmd.exe` tests compile locally under the gnu target
+  (proved by planted type errors reddening `cargo check --target x86_64-pc-windows-gnu --all-targets`
+  inside the `#[cfg(windows)]` regions) but cannot RUN here: no wine, and the msvc target needs
+  `lib.exe`. Do not describe T8 as behaviourally verified locally.
+- **T7 / #68 — recorded, not fixed:** `http.rs` sends the OAuth `Authorization` header with no `Bearer `
+  prefix; mid-session token expiry is not handled (only the pre-connect check); stdio failures never
+  reach `McpState::Error`; refresh-token ROTATION drops a rotated refresh token if the server returns
+  one. All five are at the bottom of `task07`'s plan doc (deleted on ship — this table is their
+  surviving home if not filed).
+- **T6 / #81 — the scrub verdict cannot distinguish "gate closed" from "clean mount"** (both are the
+  empty verdict); named in the empty-case wording. The updater relaunch (`commands/update.rs::
+  relaunch_patch`) stays deliberately silent, with the reason in `for_child()`'s doc.
+- **T12 / #34 — second-confirmation reaping was rejected** (invasive at a 30-min default). Recorded in
+  ADR 0055's 2026-10-24 amendment. The `!in_flight` guard only DELAYS a frozen-clock reaping until
+  `tool_execution_end` lifts it — measured, stated in the in-tool test's doc.
+- **T10 — the fixture-side decode gap:** `bin/fake_worker.rs`'s `let Ok(msg) = decode_inbound(&l) else
+  { continue }` silently DROPS an unreadable `start` line (production's pump at least `eprintln!`s it).
+  A comment now names it; changing fixture decode behaviour was out of scope. Symptom if it bites:
+  `manager::tests` failing with misleading values after a protocol change — and remember
+  `cargo test --lib` does NOT rebuild `fake_worker`; run `cargo build --all-targets` first.
+- **T2 / #10 — `manualOnlyTooltip`'s header still says "These TWO are the only places the rule is
+  enforced for Skills"** — an under-count since T2. Left because a test pins that block byte-unchanged;
+  the correction lives in `src/lib/skills.ts` and `UNMENTIONABLE_ROW_REASON`. Rust-side docs on
+  `skills::is_mentionable_name` / `exec_read_skill` under-count the frontend surfaces for the same
+  reason; a Rust-doc-only change is owed.
+
+## 3. Doc corrections — APPLIED in the ship commit (do not redo)
+
+- `docs/research/appimage-child-process-env-leak.md` §"Gaps" item (b): `--max-results` IS a real `fd`
+  flag (measured: `fd --max-results 10 -g a.txt -- <dir>` exits 0 with results), so the fd fast path
+  does run. Struck.
+- `docs/research/windows-child-console-window.md`: the "Related, deliberately filed separately"
+  paragraph and the first "Follow-ups" bullet described the `cmd /C` quoting bug as open. Now read
+  CLOSED by `70bffe1` (`raw_arg` + `/d /s /c` threaded through `childproc`, census invariant E). The
+  follow-ups list legitimately KEEPS: `sudo_exec` on Windows, the missing Windows process-group kill,
+  and the non-Linux relaunch.
+- `docs/decisions/0036` carries two dated amendments (T2's dead-token reversal; T10's child-shape
+  correction); `0055` one (T12's OBSERVED wording); `0060` one (T8's widened remit); `0052` its second
+  (T3's inverse gate). All append-only, `superseded-by:` empty — check those before writing any new ADR
+  about the same ground.
+
+## 4. Process facts worth keeping (the loop learned these the expensive way)
+
+- **`archimedes` is ONE compilation unit**: a syntax error anywhere breaks every scoped `cargo test`
+  run. Two Rust implementation tasks can never share a wave; planning dispatches (read-only) can fan
+  out freely. Measured with a planted error, not assumed.
+- `cargo test --lib` does not rebuild `fake_worker` → stale-binary failures in `manager::tests`.
+- `cargo check --target x86_64-pc-windows-gnu --all-targets` is the LOCAL Windows type-check (mingw
+  present; msvc needs `lib.exe`; no wine) — the only Windows proof available before CI.
+- `grep -c '#\[cfg(unix)\]'` counts LINES including prose that names the attribute — census-count
+  claims need `^#\[cfg(unix)\]$` or they false-report.
+- Plans carry stale baselines within hours on a busy branch: re-measure at your own HEAD, never trust
+  the plan's test counts.
