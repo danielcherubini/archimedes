@@ -247,6 +247,12 @@ export default function SpacesList() {
   const historySessions = useSessions((s) => s.historySessions);
   const archivedSessions = useSessions((s) => s.archivedSessions);
   const closeReasons = useSessions((s) => s.closeReasons);
+  const sessionRecency = useSessions((s) => s.sessionRecency);
+  // The boot order map (ADR 0075): the ONLY thing that lets a LIVE row keep its
+  // slot. Read here because `spaceViewFor` needs it as an argument — the pane
+  // does not otherwise care about position, and T04 renders `sessionIds`
+  // straight through.
+  const sessionOrder = useSessions((s) => s.sessionOrder);
   const activeSessionId = useSessions((s) => s.activeSessionId);
   const activeSpacePath = useSessions((s) => s.activeSpacePath);
   const openSession = useSessions((s) => s.openSession);
@@ -277,9 +283,16 @@ export default function SpacesList() {
   const views = useMemo(
     () =>
       spaces.map((s) =>
-        spaceViewFor(s, sessions, historySessions, closeReasons, archivedSessions),
+        // `{ recency }` only, on purpose: subscribing this pane to `messages`
+        // would re-render the whole list on every streamed token — the exact
+        // hazard `activityKeyOf` exists to dodge. The boot recency map is the
+        // same SQL expression, so the close-reason banner's Landing Session is
+        // decided on the same number, just read at boot.
+        spaceViewFor(s, sessions, historySessions, closeReasons, archivedSessions, {
+          recency: sessionRecency,
+        }, sessionOrder),
       ),
-    [spaces, sessions, historySessions, closeReasons, archivedSessions],
+    [spaces, sessions, historySessions, closeReasons, archivedSessions, sessionRecency, sessionOrder],
   );
   // The ACTIVE SPACE's view — the ROW LIST's source (`viewIds`, `liveIds` /
   // `storedIds`, the rows themselves and every row's Space name), NOT a

@@ -19,6 +19,12 @@ import {
   type StopReason,
 } from "../lib/tauri";
 import { basenameOfPath } from "../lib/paths";
+import {
+  mostRecentByRecency,
+  sortByManualOrder,
+  sortByRecency,
+  type RecencyEvidence,
+} from "../lib/sessionRecency";
 import { describeIpcError } from "../lib/ipcError";
 import { openNewSpaceDialog } from "../lib/newSpaceDialogState";
 import type { SessionUpdateBatchItem } from "../lib/batchSessionUpdates";
@@ -179,27 +185,64 @@ export interface SpaceView {
   path: string;
   /** Display label (base name; `""` if the base name is empty — the UI falls back to `path`). */
   title: string;
-  /** All live sessions in this space, most recently STARTED at index 0
-   * (reverse insertion order). The SIDEBAR re-sorts this by last ACTIVITY for
-   * display — `lib/sessionActivity` — because "started last" and "used last"
-   * are different facts once a space holds more than one Worker. */
+  /**
+   * THE one order this Space's sidebar rows render (ADR 0075): ONE sequence
+   * spanning live and stored, no group headers, no re-sorting by anything the
+   * user did not do. Built from the two lists below plus the boot order map by
+   * ONE function (`mergeSessionOrder`) so the rows and the collapsed rail cannot
+   * disagree, and so a row keeps its slot whether its Worker is live, stored,
+   * or has just been resumed.
+   * Position here means position, nothing more — recency is `lib/sessionRecency`.
+   */
+  sessionIds: string[];
+  /** DEPRECATED — one INPUT to `sessionIds`; T04 deletes it and renders `sessionIds`.
+   * (All live sessions of this Space, most recently STARTED first — reverse
+   * insertion order, NOT recency.) */
   liveSessionIds: string[];
-  /** The most recent live session in this space, or `null`. */
+  /** The most recent live session in this space, or `null` (the tab's live dot). */
   liveSessionId: string | null;
-  /** Stored sessions of this space, in `list_sessions` order (most recently
-   * ACTIVE first — see the ordering note above). Do NOT re-sort here; the
-   * sidebar re-sorts what it can prove (`lib/sessionActivity`). */
+  /** DEPRECATED — the other INPUT to `sessionIds`, in the server's manual order;
+   * T04 deletes it. Do NOT re-sort: the input order IS the user's Manual order,
+   * and since ADR 0075 it is evidence of nothing but position. */
   storedSessionIds: string[];
   /**
    * Archived sessions of this space (NOT rendered in the Space group —
    * used only for `view` membership, so a space whose only sessions are
-   * archived still resolves its `view`).
+   * archived still resolves its `view`). Its own order comes from
+   * `archivedInSpace`, not from this field or from `sessionIds`.
    */
   archivedSessionIds: string[];
   /** Whether the space is trusted (permission prompts for gated tools are auto-approved). */
   trusted: boolean;
-  /** Close reason of the space's newest session (live one preferred, else the head of the stored subsequence, else the head of the archived subsequence), if any. */
+  /** Close reason of the space's Landing Session (a live one preferred, else the most RECENT stored Session by `recencyOf`, else the most recent archived one as a last resort), if any. */
   lastReason: CloseReasonStr | undefined;
+}
+
+/**
+ * THE one sequence a **Space**'s sidebar rows render: live and stored rows
+ * interleaved by their stored order numbers, ONE sequence with no group
+ * boundary (ADR 0075; the spec's Section 2 — the live-before-stored split has
+ * no headers, so keeping it was an invisible rule that made a dragged row jump
+ * when its Session closed or resumed, i.e. "stop them moving around" half-fixed).
+ *
+ * A row the order map does not know — a Session started after the boot fetch —
+ * goes at the BOTTOM, which is the spec's "new rows join at the bottom" rule
+ * restated for a client that has not written the row's number yet.
+ *
+ * With an EMPTY map every id is unknown, every id ties, and the answer is
+ * `[...liveSessionIds, ...storedSessionIds]`: the pre-T03 sequence. That is not
+ * a fallback path, it is stability under no information, and it is what keeps
+ * every pre-existing fixture's expected order honest.
+ */
+export function mergeSessionOrder(
+  liveSessionIds: readonly string[],
+  storedSessionIds: readonly string[],
+  orderMap: Record<string, number>,
+): string[] {
+  // ONE union, ONE sort. A live id is never in `storedSessionIds` (both
+  // `addSession` and `resumeSession` filter it out of the stored arm when they
+  // add it to the live one), so the concatenation cannot double-count a row.
+  return sortByManualOrder([...liveSessionIds, ...storedSessionIds], orderMap);
 }
 
 export function spaceViewFor(
@@ -208,10 +251,14 @@ export function spaceViewFor(
   historySessions: SessionInfo[],
   closeReasons: Record<string, CloseReasonStr>,
   archivedSessions: SessionInfo[],
+  evidence: RecencyEvidence,
+  orderMap: Record<string, number>,
 ): SpaceView {
   const liveSessionIds = liveSessionsInSpace(sessions, space.path);
   const liveSessionId = liveSessionIds[0] ?? null;
-  // Input order = newest-first from `list_sessions`; NOT re-sorted.
+  // Store input order = the server's MANUAL ORDER. NOT re-sorted, and NOT
+  // evidence of anything (ADR 0075; the ordering note above says why). The
+  // order MAP is what lets a live row rejoin this sequence by position.
   const storedSessionIds = historySessions
     .filter((s) => s.cwd === space.path)
     .map((s) => s.sessionId);
@@ -220,26 +267,69 @@ export function spaceViewFor(
   const archivedSessionIds = archivedSessions
     .filter((s) => s.cwd === space.path)
     .map((s) => s.sessionId);
-  // The close reason of the session the user would LAND on: the live one, else
-  // the head of the stored subsequence (which `list_sessions` puts there by last
-  // ACTIVITY, so this is the session the boot would open, not the one created
-  // last), else the head of the archived subsequence (an archived session is
-  // still the space's most recent stored session — the close-reason banner must
-  // not silently vanish for an archived-only space); nothing when the space has
-  // no sessions.
-  const newestId =
-    liveSessionId ?? storedSessionIds[0] ?? archivedSessionIds[0];
+  // The session the user would LAND on for this Space: a live one first (a
+  // Space holding a Worker mid-turn shows that turn), else the most RECENT
+  // stored Session by `recencyOf` — NOT the head of the stored subsequence,
+  // which since ADR 0075 is merely the first row of a manual arrangement —
+  // else the most recent archived one as a last resort (the close-reason banner
+  // must not silently vanish for an archived-only Space). Note this ordering
+  // PREFERENCE is orthogonal to `sessionIds`: which row a tab opens and where
+  // the row RENDERs are different questions with different rules.
+  const landingId =
+    liveSessionId ??
+    mostRecentByRecency(storedSessionIds, evidence) ??
+    mostRecentByRecency(archivedSessionIds, evidence);
   return {
     path: space.path,
     title: basenameOfPath(space.path),
+    sessionIds: mergeSessionOrder(liveSessionIds, storedSessionIds, orderMap),
     liveSessionIds,
     liveSessionId,
     storedSessionIds,
     archivedSessionIds,
     trusted: space.trusted,
-    lastReason:
-      newestId === undefined ? undefined : closeReasons[newestId],
+    lastReason: landingId === undefined ? undefined : closeReasons[landingId],
   };
+}
+
+/**
+ * The **Archived** section's rows for one **Space**, in EXPLICIT recency order.
+ *
+ * This is the list ADR 0075 calls the trap: it used to render `archived.filter(…)`
+ * in input order and INHERIT recency for free from `list_sessions`. That query
+ * now returns the manual order, so the same filter would present a manual
+ * arrangement under a recency heading — and pass every pre-existing test while
+ * doing it. So the sort is said out loud, here, by the one function the section
+ * calls.
+ *
+ * The two filters are the section's existing ones and are load-bearing: the
+ * sticky live ids are excluded (a resumed archived Session renders in its Space
+ * group — CONTEXT.md "Archived session"), and rows of another Space are
+ * excluded (a row whose Space has no tab is **Detached** and belongs to
+ * Settings, not here). `spacePath === null` matches nothing, so the section's
+ * "No archived sessions." empty state with no Space selected is preserved.
+ *
+ * Returns ROWS, not ids, mirroring `detachedSessions`: the section renders
+ * `title`/`cwd` straight off them.
+ */
+export function archivedInSpace(
+  spacePath: string | null,
+  archivedSessions: SessionInfo[],
+  liveSessions: SessionInfo[],
+  evidence: RecencyEvidence,
+): SessionInfo[] {
+  const liveIds = new Set(liveSessions.map((s) => s.sessionId));
+  const visible = archivedSessions.filter(
+    (s) => s.cwd === spacePath && !liveIds.has(s.sessionId),
+  );
+  const byId = new Map(visible.map((s) => [s.sessionId, s]));
+  // The `!` is safe by construction — every id came out of `visible` — and the
+  // store already uses this idiom (`bySession.get(sessionId)!` in
+  // `applySessionUpdates`). `Map.get` cannot be narrowed any cheaper here.
+  return sortByRecency(
+    visible.map((s) => s.sessionId),
+    evidence,
+  ).map((id) => byId.get(id)!);
 }
 
 /**

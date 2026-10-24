@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetStores } from "../test/resetStores";
 import {
+  archivedInSpace,
   autoSelectActive,
   detachedSessions,
   discardSessionMessages,
@@ -31,6 +32,7 @@ import {
   deleteSpace,
   closeSession,
   cancelSession,
+  resumeSession,
   startSession,
 } from "../lib/tauri";
 import {
@@ -43,6 +45,7 @@ import type {
   SessionInfo,
   SpaceRow,
 } from "../lib/tauri";
+import type { RecencyEvidence } from "../lib/sessionRecency";
 
 vi.mock("../lib/tauri", async () => {
   const actual = await vi.importActual<Record<string, unknown>>("../lib/tauri");
@@ -102,6 +105,23 @@ const row = (path: string, lastOpenedAt: number): SpaceRow => ({
   lastOpenedAt,
   trusted: false,
 });
+
+/**
+ * The recency evidence bag (ADR 0075). Empty by default: these fixtures are about
+ * membership and live order, and an empty map makes every id equally unevidenced,
+ * which is what the pre-T03 assertions were written against.
+ */
+const recencyEvidence = (
+  recency: Record<string, number> = {},
+  messages?: Record<string, Message[] | undefined>,
+): RecencyEvidence => ({ recency, ...(messages ? { messages } : {}) });
+
+/** The boot order map. EMPTY by default, and that default is load-bearing, not lazy:
+ *  with no entries every id is unknown, every id ties, and `sortByManualOrder` falls
+ *  through to input order — i.e. `[...live, ...stored]`, byte-for-byte the pre-T03
+ *  sequence. A pre-existing fixture that did not care about order keeps its expected
+ *  answer for the right reason. */
+const noOrder = (): Record<string, number> => ({});
 
 /**
  * `MessageRow` helper: override for `MessageRow` fixtures, to distinguish
@@ -662,43 +682,81 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
     idX: "agent-exited",
   };
 
+  // The ORDER map puts the LIVE row AFTER the stored one here
+  // (`live-alpha` 5 > `stored-alpha` 2), so `sessionIds` is
+  // ["stored-alpha", "live-alpha"] — NOT the live-block-first concatenation the
+  // two arms used to produce. `lastReason` stays "user" regardless: which row a
+  // tab OPENS (live preferred) and where that row RENDERs are different
+  // questions with different rules.
   it("groups a space with a live session and a stored session", () => {
-    const view = spaceViewFor(spaces[0], sessions, historySessions, closeReasons, []);
+    const view = spaceViewFor(
+      spaces[0],
+      sessions,
+      historySessions,
+      closeReasons,
+      [],
+      recencyEvidence(),
+      { "live-alpha": 5, "stored-alpha": 2 },
+    );
     expect(view).toEqual({
       path: "/workspaces/alpha",
       title: "alpha",
+      sessionIds: ["stored-alpha", "live-alpha"],
       liveSessionIds: ["live-alpha"],
       liveSessionId: "live-alpha",
       storedSessionIds: ["stored-alpha"],
       archivedSessionIds: [],
       trusted: false,
-      // The newest session's reason: the live one's (`live-alpha` →
+      // The Landing Session's reason: the live one's (`live-alpha` →
       // `user`), NOT the stored session's (`stored-alpha` → `error`) —
       // proves the lookup does not fall through to the stored one.
       lastReason: "user",
     });
   });
 
-  it("returns storedSessionIds in the given input order (no re-sort)", () => {
-    const view = spaceViewFor(spaces[1], sessions, historySessions, closeReasons, []);
+  it("returns sessionIds in the stored order the boot map carries (no re-sort)", () => {
+    // The map AGREES with the fixture's input order on purpose: this test is
+    // about "the store invents no sequence of its own", not about the merge —
+    // `"a Session RESUMED this boot keeps the MIDDLE slot …"` owns the merge.
+    const view = spaceViewFor(
+      spaces[1],
+      sessions,
+      historySessions,
+      closeReasons,
+      [],
+      recencyEvidence(),
+      { idX: 0, idY: 1 },
+    );
     expect(view).toEqual({
       path: "/workspaces/bravo",
       title: "bravo",
+      sessionIds: ["idX", "idY"],
       liveSessionIds: [],
       liveSessionId: null,
       storedSessionIds: ["idX", "idY"],
       archivedSessionIds: [],
       trusted: false,
-      // No live session: the head of the stored subsequence's reason.
+      // No live session: the most RECENT stored session's reason, and with an
+      // empty recency map every id is equally unevidenced, so the tie falls
+      // through to input order — `idX`, whose reason the fixture records.
       lastReason: "agent-exited",
     });
   });
 
   it("returns an empty shape for a space with no sessions", () => {
-    const view = spaceViewFor(spaces[2], sessions, historySessions, closeReasons, []);
+    const view = spaceViewFor(
+      spaces[2],
+      sessions,
+      historySessions,
+      closeReasons,
+      [],
+      recencyEvidence(),
+      noOrder(),
+    );
     expect(view).toEqual({
       path: "/workspaces/charlie",
       title: "charlie",
+      sessionIds: [],
       liveSessionIds: [],
       liveSessionId: null,
       storedSessionIds: [],
@@ -706,6 +764,81 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
       trusted: false,
       lastReason: undefined,
     });
+  });
+
+  // THE test the D11 reversal exists for. `/w/alpha` holds three rows the user
+  // arranged (numbers 0/1/2) and the MIDDLE one has just been resumed, so it is
+  // LIVE. TWO COMPETING ANSWERS for this fixture: "live block first" — the old
+  // two-arm concatenation — answers
+  // ["resumed", "stored_top", "stored_bottom"], while ONE order by the stored
+  // number answers ["stored_top", "resumed", "stored_bottom"]. The row the user
+  // positioned does not move. The fixture drives the REAL `resumeSession`
+  // action (not a hand-built post-resume state), so the live/stored list
+  // bookkeeping this test depends on is the store's own.
+  it("a Session RESUMED this boot keeps the MIDDLE slot the database holds for it (one sequence spans live and stored)", async () => {
+    useSessions.setState({
+      spaces: [row("/w/alpha", 1000)],
+      sessions: [],
+      historySessions: [
+        info("stored_top", "/w/alpha"),
+        info("resumed", "/w/alpha"),
+        info("stored_bottom", "/w/alpha"),
+      ],
+      archivedSessions: [],
+      activeSessionId: null,
+      activeSpacePath: null,
+      closeReasons: {},
+      messages: {},
+      sessionRecency: {},
+      sessionOrder: { stored_top: 0, resumed: 1, stored_bottom: 2 },
+    });
+    vi.mocked(resumeSession).mockResolvedValueOnce({
+      sessionId: "resumed",
+      cwd: "/w/alpha",
+      capabilities: {},
+      archived: false,
+    });
+    await useSessions.getState().resumeSession("resumed");
+
+    const s = useSessions.getState();
+    // The store's own bookkeeping first: the resumed id left the stored arm and
+    // is now live (so the two INPUTS to the merge really do span both arms).
+    expect(s.sessions.map((x) => x.sessionId)).toEqual(["resumed"]);
+    expect(s.historySessions.map((x) => x.sessionId)).toEqual([
+      "stored_top",
+      "stored_bottom",
+    ]);
+
+    const view = spaceViewFor(
+      s.spaces[0],
+      s.sessions,
+      s.historySessions,
+      s.closeReasons,
+      s.archivedSessions,
+      recencyEvidence(),
+      s.sessionOrder,
+    );
+    expect(view.sessionIds).toEqual(["stored_top", "resumed", "stored_bottom"]);
+    // This describe is otherwise PURE (no store writes), so this test cleans up
+    // after itself rather than leaking a live row into the next describe.
+    resetStores();
+  });
+
+  it("a live row whose id the order map does not know joins at the BOTTOM of the sequence", () => {
+    // A Session started AFTER the boot fetch has no number anywhere. The
+    // approved rule is "new rows join at the bottom", so an implementation that
+    // defaulted the unknown to `0` — which would promote the fresh row to the
+    // TOP of a list the user arranged — is red here.
+    const view = spaceViewFor(
+      row("/w/alpha", 1000),
+      [info("fresh", "/w/alpha")],
+      [info("stored_row", "/w/alpha")],
+      {},
+      [],
+      recencyEvidence(),
+      { stored_row: 0 },
+    );
+    expect(view.sessionIds).toEqual(["stored_row", "fresh"]);
   });
 
   // The one-live cap is LIFTED: a space may hold MORE than one
@@ -717,7 +850,15 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
       info("first", "/workspaces/alpha"),
       info("second", "/workspaces/alpha"),
     ];
-    const view = spaceViewFor(spaces[0], twoLive, historySessions, closeReasons, []);
+    const view = spaceViewFor(
+      spaces[0],
+      twoLive,
+      historySessions,
+      closeReasons,
+      [],
+      recencyEvidence(),
+      noOrder(),
+    );
     expect(view.liveSessionIds).toEqual(["second", "first"]);
     expect(view.liveSessionId).toBe("second");
     expect(view.liveSessionId).toBe(view.liveSessionIds[0] ?? null);
@@ -738,7 +879,15 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
       info("s2", "/workspaces/alpha"),
       info("s3", "/workspaces/alpha"),
     ];
-    const view = spaceViewFor(spaces[0], threeLive, historySessions, closeReasons, []);
+    const view = spaceViewFor(
+      spaces[0],
+      threeLive,
+      historySessions,
+      closeReasons,
+      [],
+      recencyEvidence(),
+      noOrder(),
+    );
     expect(view.liveSessionIds).toEqual(["s3", "s2", "s1"]);
     expect(view.liveSessionId).toBe("s3");
   });
@@ -751,11 +900,27 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
       info("bravo-2", "/workspaces/bravo"),
       info("alpha-3", "/workspaces/alpha"),
     ];
-    const alphaView = spaceViewFor(spaces[0], interleavedLive, historySessions, closeReasons, []);
+    const alphaView = spaceViewFor(
+      spaces[0],
+      interleavedLive,
+      historySessions,
+      closeReasons,
+      [],
+      recencyEvidence(),
+      noOrder(),
+    );
     expect(alphaView.liveSessionIds).toEqual(["alpha-3", "alpha-2", "alpha-1"]);
     expect(alphaView.liveSessionId).toBe("alpha-3");
 
-    const bravoView = spaceViewFor(spaces[1], interleavedLive, historySessions, closeReasons, []);
+    const bravoView = spaceViewFor(
+      spaces[1],
+      interleavedLive,
+      historySessions,
+      closeReasons,
+      [],
+      recencyEvidence(),
+      noOrder(),
+    );
     expect(bravoView.liveSessionIds).toEqual(["bravo-2", "bravo-1"]);
     expect(bravoView.liveSessionId).toBe("bravo-2");
   });
@@ -2818,7 +2983,7 @@ describe("archivedSessions (sticky, ADR 0016)", () => {
 });
 
 describe("spaceViewFor — archivedSessionIds (view membership only)", () => {
-  it("reports archivedSessionIds without polluting storedSessionIds, and lastReason falls back to the archived head", () => {
+  it("reports archivedSessionIds without polluting sessionIds, and lastReason falls back to the most recent archived Session", () => {
     const space = row("/w/alpha", 1000);
     const live = info("live-a", "/w/alpha");
     const stored = info("stored-a", "/w/alpha");
@@ -2828,21 +2993,162 @@ describe("spaceViewFor — archivedSessionIds (view membership only)", () => {
       "stored-a": "error",
       "arch-a": "agent-exited",
     };
-    const view = spaceViewFor(space, [live], [stored], reasons, [archived]);
+    // An EMPTY order map: every id is unknown, every id ties, and the sequence
+    // keeps this fixture's live-before-stored answer (the safety property — see
+    // `mergeSessionOrder`). Membership and the banner are what this test owns.
+    const view = spaceViewFor(
+      space,
+      [live],
+      [stored],
+      reasons,
+      [archived],
+      recencyEvidence(),
+      noOrder(),
+    );
     expect(view.archivedSessionIds).toEqual(["arch-a"]);
-    // `storedSessionIds` is UNCHANGED: stored sessions only (the archived
+    // `sessionIds` is UNCHANGED in membership: stored + live only (the archived
     // id must NOT appear — the Space group renders stored sessions only).
+    expect(view.sessionIds).toEqual(["live-a", "stored-a"]);
     expect(view.storedSessionIds).toEqual(["stored-a"]);
-    // The live session is the newest: its reason wins.
+    // The LIVE session is the Landing Session (live is preferred over any
+    // stored one, whatever the recency maps say): its reason wins.
     expect(view.lastReason).toBe("user");
 
-    // No live session, no stored sessions: the ARCHIVED head is still the
-    // space's newest stored session — the close-reason banner must not
-    // silently vanish for an archived-only space.
-    const archivedOnly = spaceViewFor(space, [], [], reasons, [archived]);
+    // No live session, no stored sessions: an archived row is still the last
+    // resort — the close-reason banner must not silently vanish for an
+    // archived-only Space.
+    const archivedOnly = spaceViewFor(
+      space,
+      [],
+      [],
+      reasons,
+      [archived],
+      recencyEvidence(),
+      noOrder(),
+    );
     expect(archivedOnly.archivedSessionIds).toEqual(["arch-a"]);
+    expect(archivedOnly.sessionIds).toEqual([]);
     expect(archivedOnly.storedSessionIds).toEqual([]);
     expect(archivedOnly.lastReason).toBe("agent-exited");
+  });
+});
+
+describe("lastReason (ADR 0075: the banner follows the Landing Session, not the list head)", () => {
+  it("spaceViewFor reads lastReason off the max-recency stored Session, not the head", () => {
+    // TWO COMPETING ANSWERS: the head of the stored subsequence is
+    // `stored_first` → "error"; max recency is `stored_last` → "user". Since
+    // ADR 0075 the head is merely the first row of a manual arrangement, so the
+    // banner has to follow the recency answer.
+    const space = row("/w/alpha", 1000);
+    const reasons: Record<string, CloseReasonStr> = {
+      stored_first: "error",
+      stored_last: "user",
+    };
+    const view = spaceViewFor(
+      space,
+      [],
+      [info("stored_first", "/w/alpha"), info("stored_last", "/w/alpha")],
+      reasons,
+      [],
+      recencyEvidence({
+        stored_first: 1_000,
+        stored_last: 9_000_000_000_000,
+      }),
+      noOrder(),
+    );
+    expect(view.lastReason).toBe("user");
+  });
+
+  it("spaceViewFor falls back to the most recent ARCHIVED Session only when the Space has no stored one", () => {
+    // D5: the archived arm is a LAST RESORT, not a max over stored ∪ archived.
+    // THREE candidate answers for this fixture, and only one is right:
+    //   - the head of the stored subsequence (the pre-ADR-0075 rule) → "error";
+    //   - a max over stored ∪ archived (which the archived row's far-future
+    //     stamp would win) → "agent-exited";
+    //   - max recency WITHIN the stored arm, archived only if stored is empty →
+    //     "user". The fixture puts the most recent stored row SECOND, so the
+    //     head-of-list rule cannot answer it by accident.
+    const space = row("/w/alpha", 1000);
+    const reasons: Record<string, CloseReasonStr> = {
+      stored_head: "error",
+      stored_recent: "user",
+      "arch-a": "agent-exited",
+    };
+    const evidence = recencyEvidence({
+      stored_head: 1_000,
+      stored_recent: 5_000_000_000_000,
+      "arch-a": 9_000_000_000_000,
+    });
+    const withStored = spaceViewFor(
+      space,
+      [],
+      [info("stored_head", "/w/alpha"), info("stored_recent", "/w/alpha")],
+      reasons,
+      [{ ...info("arch-a", "/w/alpha"), archived: true }],
+      evidence,
+      noOrder(),
+    );
+    expect(withStored.lastReason).toBe("user");
+
+    // Drop BOTH stored rows and the archived arm answers — the banner survives
+    // an archived-only Space.
+    const archivedOnly = spaceViewFor(
+      space,
+      [],
+      [],
+      reasons,
+      [{ ...info("arch-a", "/w/alpha"), archived: true }],
+      evidence,
+      noOrder(),
+    );
+    expect(archivedOnly.lastReason).toBe("agent-exited");
+  });
+});
+
+describe("archivedInSpace (the Archived section sorts by recency, explicitly)", () => {
+  const archivedRow = (sessionId: string, cwd: string): SessionInfo => ({
+    sessionId,
+    cwd,
+    capabilities: {},
+    archived: true,
+  });
+
+  it("archivedInSpace sorts by recency and NOT by input order", () => {
+    // ADR 0075's named trap: this section used to inherit recency for free from
+    // `list_sessions`. TWO COMPETING ANSWERS: input order (the manual order the
+    // query now returns) is ["a_old", "a_new"]; recency order is
+    // ["a_new", "a_old"]. Swapping the two recency values reddens it.
+    const a_old = archivedRow("a_old", "/w/alpha");
+    const a_new = archivedRow("a_new", "/w/alpha");
+    const rows = archivedInSpace(
+      "/w/alpha",
+      [a_old, a_new],
+      [],
+      recencyEvidence({ a_old: 1_000, a_new: 9_000_000_000_000 }),
+    );
+    expect(rows.map((r) => r.sessionId)).toEqual(["a_new", "a_old"]);
+    // ROWS come back, not ids (the section renders title/cwd off them).
+    expect(rows[0]).toEqual(a_new);
+  });
+
+  it("archivedInSpace drops the sticky live ids and another Space's rows", () => {
+    const resumed = archivedRow("resumed", "/w/alpha");
+    const other = archivedRow("beta-1", "/w/beta");
+    const own = archivedRow("alpha-1", "/w/alpha");
+    const rows = archivedInSpace(
+      "/w/alpha",
+      [resumed, other, own],
+      [info("resumed", "/w/alpha")],
+      recencyEvidence(),
+    );
+    // A resumed archived Session renders in its Space group, not here; a row of
+    // another Space is Detached and belongs to Settings.
+    expect(rows.map((r) => r.sessionId)).toEqual(["alpha-1"]);
+    // The documented empty state: no Space selected matches NOTHING (the
+    // section's "No archived sessions." must not silently become "everything").
+    expect(
+      archivedInSpace(null, [own], [], recencyEvidence()).map((r) => r.sessionId),
+    ).toEqual([]);
   });
 });
 
@@ -3475,6 +3781,8 @@ describe("views (store integration for space views)", () => {
       s.historySessions,
       s.closeReasons,
       s.archivedSessions,
+      { recency: s.sessionRecency },
+      s.sessionOrder,
     );
     expect(view.liveSessionIds).toEqual(["s3", "s2", "s1"]);
     expect(view.liveSessionId).toBe("s3");
