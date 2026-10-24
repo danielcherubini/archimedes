@@ -7,6 +7,7 @@ import {
   deleteSpace as deleteSpaceCommand,
   loadHistory,
   reorderSessions as reorderSessionsCommand,
+  reorderSpaces as reorderSpacesCommand,
   resumeSession as resumeSessionCommand,
   setSessionArchived as setSessionArchivedCommand,
   setSpaceTrusted as setSpaceTrustedCommand,
@@ -679,6 +680,20 @@ interface SessionsState {
    * and a second owner of it is a second thing that can disagree.
    */
   reorderSessions: (ids: string[]) => Promise<void>;
+  /**
+   * Rewrite the manual order of the Space tab strip (the tab drag's write path,
+   * ADR 0075). Same shape as `reorderSessions` — optimistic, ONE
+   * `reorder_spaces` call with the WHOLE strip, rollback on rejection, never
+   * rejects — with one deliberate asymmetry: **Spaces carry position in the
+   * ARRAY**, because `spaces.map(…)` IS the tab strip and `SpaceRow` carries no
+   * order field (the column never crosses the wire), while Sessions carry it in
+   * `sessionOrder`. So there is no map to write here and no snap-back hazard;
+   * what this action owns instead is the array's integrity — a row the slice does
+   * not name is KEPT, at the bottom (the approved new-row rule, so a tab opened
+   * mid-drag survives the write instead of vanishing with it), and a path the
+   * store has no row for is skipped, because it cannot be rendered.
+   */
+  reorderSpaces: (paths: string[]) => Promise<void>;
   /** Populate the history list from `list_sessions` (boot). */
   setHistorySessions: (rows: SessionInfo[]) => void;
   /**
@@ -1087,6 +1102,48 @@ export const useSessions = create<SessionsState>((set, get) => ({
         });
     const done = link();
     reorderChain.sessions = done;
+    return done;
+  },
+
+  reorderSpaces: (paths) => {
+    if (paths.length === 0) return Promise.resolve();
+    const previous = get().spaces;
+    reorderEpoch.spaces += 1;
+    const epoch = reorderEpoch.spaces;
+    // Optimistic, and the write is the ARRAY — for Spaces that IS the order (ADR
+    // 0075; `views = spaces.map(spaceViewFor)` inherits it, so the tab strip and
+    // the sidebar's group order cannot disagree). A path the store has no row for
+    // is skipped (it cannot be rendered, so inserting it would put `undefined` in
+    // the strip); a row the slice does not name goes to the BOTTOM (the approved
+    // new-row rule, and the reason a tab opened mid-drag survives the write rather
+    // than vanishing with it).
+    set((state) => {
+      const byPath = new Map(state.spaces.map((s) => [s.path, s]));
+      const moved = paths.flatMap((p) => {
+        const found = byPath.get(p);
+        return found ? [found] : [];
+      });
+      const named = new Set(paths);
+      return {
+        spaces: [...moved, ...state.spaces.filter((s) => !named.has(s.path))],
+      };
+    });
+    const link = () =>
+      reorderChain.spaces
+        .catch(() => {})
+        .then(() => reorderSpacesCommand(paths))
+        .catch((err) => {
+          console.error("Failed to reorder spaces:", err);
+          if (reorderEpoch.spaces !== epoch) return; // a newer drag owns the store
+          // Restore, do NOT refetch: `setSpaces` is a BOOT action — it re-seeds
+          // `committedTrusted` and, with nothing selected, runs `autoSelectActive`
+          // and `openSession`, so a mid-error refetch could move the selected tab
+          // and fire a transcript load. And the command is one transaction, so the
+          // captured array already IS the committed state.
+          set({ spaces: previous });
+        });
+    const done = link();
+    reorderChain.spaces = done;
     return done;
   },
 

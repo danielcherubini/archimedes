@@ -35,6 +35,7 @@ import {
   resumeSession,
   startSession,
   reorderSessions as reorderSessionsCommand,
+  reorderSpaces as reorderSpacesCommand,
 } from "../lib/tauri";
 import {
   getNewSpaceDialogOpen,
@@ -5038,5 +5039,170 @@ describe("reorderSessions (the sidebar drag write path, ADR 0075)", () => {
     ]);
     // And the optimistic map is the NEWER drag's, which is what the user sees.
     expect(useSessions.getState().sessionOrder).toEqual({ c: 0, b: 1, a: 2 });
+  });
+});
+
+describe("reorderSpaces (the tab-strip drag write path, ADR 0075)", () => {
+  // The asymmetry with the describe above, stated once: a Space carries its
+  // position in the ARRAY — `SpaceRow` has no order field and the column never
+  // crosses the wire — so `spaces.map(…)` IS the tab strip and
+  // `views = spaces.map(spaceViewFor)` inherits it. There is therefore no map to
+  // write and no snap-back hazard; what this action owns instead is the array's
+  // integrity (nothing dropped, nothing invented).
+  beforeEach(() => {
+    resetStores();
+    vi.mocked(reorderSpacesCommand).mockReset().mockResolvedValue(undefined);
+  });
+  afterEach(() => resetStores());
+
+  const stripPaths = () => useSessions.getState().spaces.map((s) => s.path);
+
+  it("reorders the tab strip optimistically and sends the whole strip's PATHS", async () => {
+    useSessions.setState({
+      spaces: [row("/a", 3000), row("/b", 2000), row("/c", 1000)],
+    });
+    const done = useSessions.getState().reorderSpaces(["/c", "/a", "/b"]);
+    // SYNCHRONOUS — the optimistic publish the tab strip paints from. The
+    // COMPETING ANSWER is a write-after-await implementation, which still answers
+    // ["/a","/b","/c"] at this instant.
+    expect(stripPaths()).toEqual(["/c", "/a", "/b"]);
+    await done;
+    // PATHS, verbatim. Sending ids or whole rows instead is a `{ ids }` wire key
+    // against Rust's `paths` parameter — a runtime-only failure no Rust test and
+    // no component test can see, which is why it is pinned at this boundary too.
+    // Asserted AFTER the await on purpose: the write is CHAINED (D4), so the IPC
+    // legitimately starts a microtask after the publish — the optimistic half
+    // above is what has to be synchronous, not the call.
+    expect(reorderSpacesCommand).toHaveBeenCalledWith(["/c", "/a", "/b"]);
+    expect(stripPaths()).toEqual(["/c", "/a", "/b"]);
+  });
+
+  it("a rejected tab drag restores the PREVIOUS strip array (no refetch — see the doc)", async () => {
+    useSessions.setState({
+      spaces: [row("/a", 3000), row("/b", 2000), row("/c", 1000)],
+    });
+    const before = useSessions.getState().spaces;
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(reorderSpacesCommand).mockRejectedValueOnce(new Error("boom"));
+    // The `await` is the never-rejects proof (a rejecting action fails here on the
+    // rejection, not on an assertion).
+    await useSessions.getState().reorderSpaces(["/c", "/a", "/b"]);
+    // TWO COMPETING ANSWERS: leaving the dragged order means the strip and the DB
+    // disagree until a restart — and `removeSpace`'s leftmost-tab fallback then
+    // lands on a tab the DB does not think is leftmost.
+    expect(useSessions.getState().spaces).toBe(before);
+    expect(stripPaths()).toEqual(["/a", "/b", "/c"]);
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("reorder"),
+      expect.anything(),
+    );
+    errSpy.mockRestore();
+  });
+
+  it("a Space the slice does not name is kept, at the BOTTOM (a tab added mid-drag is not dropped)", async () => {
+    useSessions.setState({
+      spaces: [row("/a", 3000), row("/b", 2000), row("/c", 1000)],
+    });
+    // As if `/b` had been opened mid-gesture, so the drag's slice predates it.
+    // `/b` sits in the MIDDLE of the strip on purpose: seed it last and "keep its
+    // index" and "go to the bottom" answer identically and the test certifies
+    // nothing. THREE COMPETING ANSWERS:
+    //  - a naive `paths.map(lookup)` answers ["/c","/a"] — a tab that VANISHES
+    //    from the strip while its Space still exists is data loss in a UI costume;
+    //  - splicing the named rows and leaving the unnamed one at its ORIGINAL index
+    //    answers ["/c","/b","/a"];
+    //  - the approved new-row rule answers ["/c","/a","/b"].
+    await useSessions.getState().reorderSpaces(["/c", "/a"]);
+    expect(stripPaths()).toEqual(["/c", "/a", "/b"]);
+  });
+
+  it("an unknown path in the slice is ignored, and an empty slice sends nothing", async () => {
+    useSessions.setState({
+      spaces: [row("/a", 3000), row("/b", 2000), row("/c", 1000)],
+    });
+    // The ghost cannot be rendered, so it is not inserted as `undefined`; the
+    // slice still goes to the command verbatim (the store does not second-guess
+    // what the call site can see).
+    await useSessions.getState().reorderSpaces(["/ghost", "/a"]);
+    expect(stripPaths()).toEqual(["/a", "/b", "/c"]);
+    expect(reorderSpacesCommand).toHaveBeenCalledWith(["/ghost", "/a"]);
+
+    await useSessions.getState().reorderSpaces([]);
+    expect(reorderSpacesCommand).toHaveBeenCalledTimes(1);
+    expect(stripPaths()).toEqual(["/a", "/b", "/c"]);
+  });
+
+  it("after a tab drag, closing the selected tab lands on the NEW leftmost tab (a neighbour means the user's neighbour)", async () => {
+    // The ADR 0075 consequence, and the one place another action reads the array's
+    // order. `/c` is the SELECTED tab because `removeSpace` answers its fallback
+    // ONLY for the Space that was selected (`null` otherwise) — selecting anything
+    // else here would make the test fail for the wrong reason.
+    useSessions.setState({
+      spaces: [row("/a", 3000), row("/b", 2000), row("/c", 1000)],
+      activeSpacePath: "/c",
+    });
+    await useSessions.getState().reorderSpaces(["/c", "/b", "/a"]);
+    expect(stripPaths()).toEqual(["/c", "/b", "/a"]);
+    // `removeSpace`, not `closeSpace`: it RETURNS the fallback, which isolates the
+    // ordering claim, while `closeSpace` additionally runs `selectSpace` →
+    // `openSession` → a `loadHistory` IPC whose result could muddy an assertion
+    // about position.
+    const fallback = await useSessions.getState().removeSpace("/c");
+    // TWO COMPETING ANSWERS: had the reorder been a no-op the strip would still be
+    // ["/a","/b","/c"], and removing "/c" would leave ["/a","/b"] → leftmost
+    // "/a". After a REAL drag it leaves ["/b","/a"] → leftmost "/b".
+    // `removeSpace`'s rule is deliberately UNCHANGED by ADR 0075 ("the LEFTMOST
+    // remaining tab"), so this is the pin that the rule now reads the user's
+    // arrangement rather than a server-inferred recency.
+    expect(fallback).toBe("/b");
+  });
+
+  it("a failed OLDER tab drag does not roll back a NEWER tab drag's strip (the publish epoch)", async () => {
+    // The same rule as `reorderSessions`'s epoch test, on the other list: a
+    // rollback IS a publish, so a stale one silently deletes the user's newer
+    // move. TWO COMPETING ANSWERS: an unconditional rollback restores the
+    // pre-FIRST array and erases the second drag; the epoch-checked one discards
+    // the stale rollback and keeps ["/c","/b","/a"].
+    useSessions.setState({
+      spaces: [row("/a", 3000), row("/b", 2000), row("/c", 1000)],
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // Two drags in one tick; the FIRST command fails, the second's lands.
+    vi.mocked(reorderSpacesCommand).mockRejectedValueOnce(new Error("boom"));
+    const first = useSessions.getState().reorderSpaces(["/b", "/a", "/c"]);
+    const second = useSessions.getState().reorderSpaces(["/c", "/b", "/a"]);
+    await Promise.all([first, second]);
+    expect(stripPaths()).toEqual(["/c", "/b", "/a"]);
+    errSpy.mockRestore();
+  });
+
+  it("two tab drags in one list reach the database in DRAG ORDER (the chain)", async () => {
+    // The spaces half of the sessions chain pin, for the same reason: D4 says the
+    // command rewrites a WHOLE slice, so two overlapping writes to the `spaces`
+    // table have no order without a chain, and the DB could settle on the OLDER
+    // drag. Without the chain both commands start as soon as they are called.
+    useSessions.setState({
+      spaces: [row("/a", 3000), row("/b", 2000), row("/c", 1000)],
+    });
+    let releaseFirst: () => void = () => {};
+    const firstCommand = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    vi.mocked(reorderSpacesCommand).mockImplementationOnce(() => firstCommand);
+
+    const first = useSessions.getState().reorderSpaces(["/b", "/a", "/c"]);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(reorderSpacesCommand).toHaveBeenCalledTimes(1);
+
+    const second = useSessions.getState().reorderSpaces(["/c", "/b", "/a"]);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    // THE DISCRIMINATING ASSERTION: the second command has not even started.
+    expect(reorderSpacesCommand).toHaveBeenCalledTimes(1);
+
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(reorderSpacesCommand).toHaveBeenNthCalledWith(1, ["/b", "/a", "/c"]);
+    expect(reorderSpacesCommand).toHaveBeenNthCalledWith(2, ["/c", "/b", "/a"]);
+    expect(stripPaths()).toEqual(["/c", "/b", "/a"]);
   });
 });
