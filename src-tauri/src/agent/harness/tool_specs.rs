@@ -376,7 +376,16 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_search_content".into(),
-            description: "Get cached search content or full document from a previous fetch/search by responseId.".into(),
+            // (issue #82, round 2) The handle is named in its SNAKE_CASE form —
+            // the spelling `required` names, and the spelling every
+            // model-visible web sentence now uses
+            // (`web::tools::RESPONSE_ID_PARAM`). The camelCase alias stays
+            // ADVERTISED below (the handler accepts it, so the #78 checker must
+            // not flag it) but is no longer the form the tool tells the model to
+            // type: `required: ["response_id"]` is not satisfied by `responseId`,
+            // so a description that named the alias documented a call its own
+            // schema rejects.
+            description: "Get cached search content or full document from a previous fetch/search by response_id.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -818,8 +827,10 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect::<BTreeSet<String>>(),
-            "exec_get_search_content reads all of these (web/tools.rs) — and its \
-             own truncation note tells the model to pass `responseId`"
+            "exec_get_search_content reads all of these (web/tools.rs) — the \
+             camelCase alias stays ADVERTISED because the handler honours it, even \
+             though nothing model-facing tells the model to SEND it any more \
+             (see `the_model_facing_web_prose_names_the_key_the_advertised_schema_requires`)"
         );
     }
 
@@ -898,6 +909,102 @@ mod tests {
             "same guard as above for `subagent`: the e2e asserts the <tools> section \
              with only `bash` enabled contains neither tool name, and a description \
              that trips it reddens the Worker e2e. got {d:?}"
+        );
+    }
+
+    /// The parameter name the web tools' MODEL-VISIBLE prose uses for the cache
+    /// handle must be a key the advertised schema REQUIRES — not merely one it
+    /// tolerates.
+    ///
+    /// This is issue #82's residual lie-as-regression, the sibling of
+    /// [`the_bash_description_names_the_shell_this_platform_actually_runs`]. The
+    /// interim fix for #82 made the specs advertise what the handlers accept,
+    /// which is right for the CHECKER but wrong for the SENTENCE: while
+    /// `required` named `response_id`, `fetch_content`'s truncation note told the
+    /// model to call `get_search_content with responseId …` and the
+    /// `get_search_content` description said "by responseId". That call is
+    /// schema-INVALID (`required` is not satisfied by an alias), and the #78
+    /// checker is structurally blind to it — its rule 3 says `required` is
+    /// irrelevant, because only `properties` defines legality, and BOTH
+    /// spellings sit there. So the only feedback a strict model got was the
+    /// provider's own rejection, for a call the tool itself provoked.
+    ///
+    /// The test is the anti-drift pin between the two files: the prose is built
+    /// from `web::tools::RESPONSE_ID_PARAM`, the schema is a literal here, and
+    /// the assertions use literals of their own so the test cannot be satisfied
+    /// by editing the const alone. Narrowing the handler to the snake_case
+    /// dialect is still open on issue #82 — the LAST assertion pins that the
+    /// alias is still ADVERTISED, so if that option is ever taken the census
+    /// tests (this file's two web tests plus `exec_param_keys()`) are the place
+    /// that changes, not this sentence.
+    #[test]
+    fn the_model_facing_web_prose_names_the_key_the_advertised_schema_requires() {
+        use crate::agent::web::tools::{
+            search_summary_empty, search_summary_head, truncation_note, RESPONSE_ID_PARAM,
+        };
+
+        let spec = tool_specs()
+            .into_iter()
+            .find(|s| s.name == "get_search_content")
+            .expect("`get_search_content` is advertised");
+
+        // 1. The schema, read as the model's provider reads it.
+        let required: Vec<&str> = spec.parameters["required"]
+            .as_array()
+            .expect("`get_search_content` declares `required`")
+            .iter()
+            .map(|v| v.as_str().expect("a string key"))
+            .collect();
+        assert_eq!(
+            required,
+            vec!["response_id"],
+            "the required key is the snake_case one — the sentence below has to \
+             agree with THIS literal, not with a const"
+        );
+
+        // 2. The prose is built from a name that IS that required key.
+        assert_eq!(
+            RESPONSE_ID_PARAM, required[0],
+            "the web tools' model-visible sentences interpolate a parameter name \
+             that `get_search_content`'s `required` does not name"
+        );
+
+        // 3. Every model-visible sentence the web tools emit names the handle in
+        //    the required spelling and NEVER in the alias spelling. Literals,
+        //    deliberately — see the doc above.
+        let id = "resp-1";
+        let prose = [
+            spec.description.clone(),
+            search_summary_head(id),
+            search_summary_empty(id),
+            truncation_note(1234, id),
+        ];
+        for text in &prose {
+            assert!(
+                text.contains("response_id"),
+                "model-visible web prose must name `response_id` (the key the \
+                 schema requires), got {text:?}"
+            );
+            assert!(
+                !text.contains("responseId"),
+                "model-visible web prose must not name the `responseId` alias: a \
+                 call written from this sentence fails `required: \
+                 [\"response_id\"]` at the provider, and the #78 checker cannot \
+                 flag it because both spellings are in `properties`. got {text:?}"
+            );
+        }
+
+        // 4. The alias is still ACCEPTED and still ADVERTISED (issue #82's
+        //    option (b) is still open; the #78 checker must keep staying quiet
+        //    about a call the handler would honour).
+        assert!(
+            spec.parameters["properties"]
+                .as_object()
+                .expect("`get_search_content` advertises properties")
+                .contains_key("responseId"),
+            "`exec_get_search_content` still reads `responseId`, so the alias must \
+             stay advertised — removing it from the handler is issue #82's open \
+             option (b), and it moves the census tests with it"
         );
     }
 
