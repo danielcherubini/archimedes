@@ -73,6 +73,24 @@ impl StoredAuth {
 /// the skew between this clock and the auth server's, plus the request in
 /// flight. `tool.rs`'s per-request bound is 60 s, so a token that dies inside
 /// that window is expired for our purposes.
+///
+/// Everything inside the margin goes through `oauth::refresh`, and that grant
+/// is NOT cancellable (see `refresh`) — which is why a Stop can cost up to one
+/// refresh round trip rather than being instant. The trade-off was taken on
+/// purpose:
+///
+/// - `refresh` is a two-phase thing. Before the `POST` nothing is spent, so a
+///   cancel there is free; AFTER the auth server has answered, the stored
+///   refresh token is CONSUMED and the response holds the rotated one. Dropping
+///   the future at that point loses the rotation permanently and leaves a dead
+///   token on disk, so the next attempt re-sends a token the server already
+///   revoked and the server lands in `NeedsAuth` — a full browser flow for
+///   something that had a perfectly good credential. Correctness over
+///   stop-latency (and the grant is bounded by the caller's own HTTP timeout).
+/// - REJECTED: "on cancel, just keep using the stored token". It cannot work —
+///   the stored refresh token is precisely the thing the server just consumed,
+///   and the stored ACCESS token is the one that is expired (that is why we are
+///   here). There is nothing salvageable to return.
 pub const TOKEN_EXPIRY_MARGIN_SECS: i64 = 60;
 
 /// The current wall-clock time in Unix epoch seconds (the same reading
@@ -349,6 +367,27 @@ pub async fn client_credentials_grant(
 /// here. The degradation the `None` produces lands where the ADR wants it: the
 /// request goes out with no token → the server's 401 → `McpState::NeedsAuth` →
 /// the `mcp` tool's `auth` action (a fresh interactive flow).
+///
+/// CANCELLATION — the invariant is **a completed rotation is never dropped on
+/// the floor**, so this future is deliberately NOT cancellable. It takes no
+/// cancel token and its caller runs it to completion even when the turn has
+/// been cancelled (see `manager::usable_token_provider`); the bound on that
+/// wait is this client's own HTTP timeout. The alternatives were weighed and
+/// rejected:
+///
+/// - racing the `POST` against a cancel token: the window in which a cancel is
+///   harmless is BEFORE the request is sent, and there is no await point in
+///   `refresh` before the `POST` other than `discover` — so a race can only
+///   ever lose by firing exactly where it must not (the response arrives, the
+///   caller is gone, the rotated refresh token is gone with it). A "cancel only
+///   before the send" variant needs the caller to poll a flag at a point that
+///   does not exist, and buys a few milliseconds of stop-latency.
+/// - returning the stored token on cancel: the stored refresh token is the one
+///   the server just consumed and the stored access token is the one that is
+///   expired — there is nothing salvageable to hand back.
+///
+/// The cost is one Stop that waits at most the refresh round trip; the gain is
+/// that a Stop never costs a person their stored credentials.
 pub async fn refresh(stored: &StoredAuth, client: &reqwest::Client) -> Option<StoredAuth> {
     let Some(refresh_token) = &stored.refresh_token else {
         return None;
@@ -601,6 +640,11 @@ fn url_encode(s: &str) -> String {
 /// Load the stored credentials (the `mcp-auth.json` — a `server → StoredAuth`
 /// map). A missing / unparseable file → an empty map (best-effort, never an
 /// error).
+///
+/// Returning an empty map is only survivable because `save_credentials` publishes
+/// by rename: a reader can never observe a half-written document, so a parse
+/// failure means the file really is absent or really is corrupt, not that this
+/// reader lost a race with a writer.
 pub fn load_credentials(path: &Path) -> BTreeMap<String, StoredAuth> {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return BTreeMap::new();
@@ -613,6 +657,27 @@ pub fn load_credentials(path: &Path) -> BTreeMap<String, StoredAuth> {
 
 /// Save the stored credentials (the `mcp-auth.json` — `0600` on unix; a
 /// missing parent dir is created; a write failure is `Err`).
+///
+/// ATOMIC, because this file is now written on the ROUTINE connect path (any
+/// Worker that finds its token expired — not only on an explicit `auth`), and
+/// the topology is one parent Worker + N child Workers, each with its own
+/// `McpManager` writing the same file:
+///
+/// - a plain `std::fs::write` TRUNCATES the target and then fills it, so a
+///   concurrent reader can catch a half-written document — and because
+///   `load_credentials` answers any parse failure with an empty map, that
+///   reader's next save would persist an empty file and lose every token. A
+///   rename is atomic w.r.t. readers: they see the old document or the new one,
+///   never a prefix of either.
+/// - the temp name is UNIQUE PER WRITE (a pid + a process-global counter), not
+///   the fixed name the review suggested — two writers choosing
+///   `mcp-auth.json.tmp` would write each other's bytes into the same file and
+///   each rename a document containing the other's half.
+///
+/// `0600` is applied to the temp file BEFORE the rename, so there is no window
+/// in which the published document is world-readable (and, on a fresh install,
+/// the file never exists with the process umask's mode at all). A rename failure
+/// is an `Err` (and the temp file is removed, so a failed save leaves no litter).
 pub fn save_credentials(path: &Path, map: &BTreeMap<String, StoredAuth>) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -620,15 +685,66 @@ pub fn save_credentials(path: &Path, map: &BTreeMap<String, StoredAuth>) -> Resu
     }
     let contents =
         serde_json::to_string_pretty(map).map_err(|e| format!("serializing failed: {e}"))?;
-    std::fs::write(path, contents).map_err(|e| format!("writing failed: {e}"))?;
-    // `0600` on unix (the file holds a token — not world-readable).
+    let tmp = unique_tmp_path(path);
+    std::fs::write(&tmp, contents).map_err(|e| format!("writing failed: {e}"))?;
+    // `0600` on unix (the file holds a token — not world-readable), BEFORE the
+    // rename makes the document visible.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| format!("chmod 0600 failed: {e}"))?;
     }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("renaming into place failed: {e}"));
+    }
     Ok(())
+}
+
+/// A unique temp path next to `path` for one `save_credentials` write (the
+/// same stem + extension, so a `.json` target still gets a `.json` temp file).
+/// Unique across processes (pid) AND across concurrent threads of this process
+/// (a counter) — see `save_credentials`.
+fn unique_tmp_path(path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("credentials");
+    let extension = path.extension().and_then(|s| s.to_str());
+    let name = match extension {
+        Some(ext) => format!("{stem}.{pid}.{seq}.{ext}.tmp"),
+        None => format!("{stem}.{pid}.{seq}.tmp"),
+    };
+    path.with_file_name(name)
+}
+
+/// Read the credentials file, insert ONE server's entry, and save it — the
+/// read-modify-write every persist site does, in the one order that is safe:
+/// the file is re-read IMMEDIATELY before the write, so the merge is against
+/// what is on disk NOW rather than a snapshot taken before a network round trip.
+///
+/// That closes the lost-update window that matters: between reading a stored
+/// token and persisting its refresh, an interactive `auth` (this process or the
+/// Settings page) may have replaced that entry with a FRESH browser-granted
+/// token, and other servers' entries may have appeared. Merging into the live
+/// document keeps all of them; merging into the stale snapshot would clobber
+/// them with a token the auth server has since rotated away.
+///
+/// The residual race (two writers both read, then rename — the later rename
+/// drops the earlier one's entry) is the read-modify-write's own, and it is
+/// bounded to ONE server's entry lost on ONE machine: the worst case is a token
+/// that has to be refreshed (or re-authorized) again. Closing it needs a lock
+/// file, and the atomicity that actually prevents total loss — a reader never
+/// seeing a torn document — is in `save_credentials`.
+pub fn store_credentials(path: &Path, server_name: &str, stored: StoredAuth) -> Result<(), String> {
+    let mut fresh = load_credentials(path);
+    fresh.insert(server_name.to_string(), stored);
+    save_credentials(path, &fresh)
 }
 
 #[cfg(test)]
@@ -825,6 +941,203 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let path = dir.path().join("does-not-exist.json");
         assert!(load_credentials(&path).is_empty());
+    }
+
+    /// A stored entry for the storage tests (an `id`-suffixed token).
+    fn entry(id: &str) -> StoredAuth {
+        StoredAuth {
+            client_id: format!("cid-{id}"),
+            client_secret: Some("sec".into()),
+            token: format!("tok-{id}"),
+            refresh_token: Some(format!("rt-{id}")),
+            expires_at: Some(123),
+            auth_server_url: "https://auth.example".into(),
+            scope: None,
+        }
+    }
+
+    #[test]
+    fn a_save_publishes_atomically_and_leaves_no_temp_file() {
+        // The failure this guards: `std::fs::write` truncates the target before
+        // filling it, so a second Worker (one parent + N children, each with its
+        // own `McpManager`) that reads during the write gets a torn document —
+        // and `load_credentials` answers a parse failure with an EMPTY map, so
+        // that reader's next save would persist an empty file: every token lost.
+        // Provable without a crash harness: (1) the published file is always a
+        // COMPLETE document — a reader thread that reads raw bytes while a
+        // writer re-saves a large map never sees a prefix of one, and (2) the
+        // staging file is gone once the save returns.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join("mcp-auth.json");
+        let mut base = BTreeMap::new();
+        // Big enough that a truncate-in-place write would span several `write`s
+        // (a torn read is then a matter of timing, not of luck).
+        for i in 0..400 {
+            base.insert(format!("server-{i:03}"), entry("x"));
+        }
+        save_credentials(&path, &base).expect("the first save works");
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_stop = stop.clone();
+        let reader_path = path.clone();
+        let reader = std::thread::spawn(move || {
+            let mut torn = 0usize;
+            while !reader_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(contents) = std::fs::read_to_string(&reader_path) {
+                    if contents.is_empty() {
+                        // A zero-length read of a file mid-rename: not a torn
+                        // document, but not a usable one either — count it.
+                        torn += 1;
+                        continue;
+                    }
+                    if serde_json::from_str::<BTreeMap<String, StoredAuth>>(&contents).is_err() {
+                        torn += 1;
+                    }
+                }
+            }
+            torn
+        });
+
+        let mut next = base.clone();
+        next.insert("late-arrival".to_string(), entry("y"));
+        for _ in 0..50 {
+            save_credentials(&path, &next).expect("a save works");
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let torn = reader.join().expect("the reader thread ends");
+        assert_eq!(torn, 0, "a reader never sees a half-written document");
+
+        // The full document is what landed.
+        assert_eq!(load_credentials(&path), next);
+        // No staging litter beside the file.
+        let litter: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("the dir is readable")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(litter.is_empty(), "no temp file left behind: {litter:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_publish_leaves_the_previous_document_intact() {
+        // The other half of atomicity: when the save cannot finish, what was on
+        // disk before is STILL on disk (a truncate-in-place write would already
+        // have destroyed it by the time the error surfaced). Forced here by
+        // taking the parent dir out of the writer's hands after the first save.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let parent = dir.path().join("data");
+        let path = parent.join("mcp-auth.json");
+        let mut map = BTreeMap::new();
+        map.insert("a".to_string(), entry("a"));
+        save_credentials(&path, &map).expect("the first save creates the dir + file");
+
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500))
+            .expect("the dir goes read-only");
+        let mut rewritten = map.clone();
+        rewritten.insert("b".to_string(), entry("b"));
+        let r = save_credentials(&path, &rewritten);
+        // Restore the mode BEFORE asserting (a failing test must not leave a
+        // dir the temp-dir cleanup cannot remove).
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))
+            .expect("the dir comes back");
+        match r {
+            // A root run (or any filesystem that lets the write through) has
+            // nothing to prove here — the assertion is about the FAILED save.
+            Ok(()) => eprintln!("skipping: this filesystem accepted a read-only-dir write"),
+            Err(e) => {
+                assert!(
+                    e.contains("writing failed"),
+                    "the staging write is what failed: {e}"
+                );
+                assert_eq!(
+                    load_credentials(&path),
+                    map,
+                    "a failed save leaves the previous document intact"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn two_writers_never_choose_the_same_staging_file() {
+        // The review's `path.with_extension("json.tmp")` is a FIXED name: two
+        // Workers staging into it concurrently each write the other's bytes and
+        // each renames a document that is half someone else's. The names differ
+        // per call (a process-global counter) and stay in the target's dir with
+        // the target's extension.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join("mcp-auth.json");
+        let a = unique_tmp_path(&path);
+        let b = unique_tmp_path(&path);
+        assert_ne!(a, b, "each write stages to its own file");
+        assert_eq!(a.parent(), path.parent(), "staged beside the target");
+        assert_eq!(a.extension().and_then(|s| s.to_str()), Some("tmp"));
+        // The stem keeps the target's, so a `.json` target never stages a
+        // `.tmp`-named document under a name a `.json` reader would pick up.
+        assert!(a
+            .file_name()
+            .expect("a file name")
+            .to_string_lossy()
+            .starts_with("mcp-auth."));
+        // A path with no extension still gets a name.
+        let bare = dir.path().join("credentials");
+        assert!(bare
+            .with_file_name(unique_tmp_path(&bare).file_name().expect("a file name"))
+            .to_string_lossy()
+            .starts_with(&format!("{}/credentials.", dir.path().display())));
+    }
+
+    #[test]
+    fn storing_one_server_keeps_everyone_elses_entry() {
+        // The lost-update half: `map` was a snapshot taken BEFORE a network round
+        // trip, so anything another writer saved in between (the Settings page's
+        // `auth`, another Worker's refresh) was clobbered by the rename. The
+        // merge is against the live file.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join("mcp-auth.json");
+        let mut mine = BTreeMap::new();
+        mine.insert("mine".to_string(), entry("old"));
+        save_credentials(&path, &mine).expect("the first save works");
+
+        // Another writer adds an entry AFTER our snapshot was taken (here: after
+        // the caller read the file — `store_credentials` re-reads it itself).
+        let snapshot = load_credentials(&path);
+        let mut other = snapshot.clone();
+        other.insert("settings-page".to_string(), entry("fresh"));
+        save_credentials(&path, &other).expect("the other writer saves");
+
+        store_credentials(&path, "mine", entry("refreshed")).expect("storing works");
+
+        let stored = load_credentials(&path);
+        assert_eq!(
+            stored.get("settings-page").map(|s| s.token.as_str()),
+            Some("tok-fresh"),
+            "the concurrent writer's entry survives"
+        );
+        assert_eq!(
+            stored.get("mine").map(|s| s.token.as_str()),
+            Some("tok-refreshed"),
+            "our entry is the refreshed one"
+        );
+        // And the stale snapshot really WOULD have lost it (the shape the fix
+        // replaced).
+        let mut clobbered = snapshot;
+        clobbered.insert("mine".to_string(), entry("refreshed"));
+        assert!(!clobbered.contains_key("settings-page"));
+    }
+
+    #[test]
+    fn storing_creates_the_file_when_there_is_none() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join("nested/deeper/mcp-auth.json");
+        store_credentials(&path, "a", entry("a")).expect("storing creates the parents");
+        assert_eq!(
+            load_credentials(&path).get("a").map(|s| s.token.as_str()),
+            Some("tok-a")
+        );
     }
 
     // ── the network functions (a mock OAuth server) ──────────────────

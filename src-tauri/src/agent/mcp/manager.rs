@@ -299,10 +299,11 @@ impl McpManager {
                     .await
                     .map_err(|e| format!("{name}: {e}"))?;
             // Store the credentials (so a subsequent `connect` / `call` uses
-            // the token).
-            let mut map = oauth::load_credentials(auth_file);
-            map.insert(name.to_string(), stored);
-            oauth::save_credentials(auth_file, &map)?;
+            // the token). Merged into the file as it is on disk NOW — the flow
+            // above took a browser round trip, and anything another writer
+            // saved meanwhile (another Worker's refresh, the Settings page)
+            // must survive.
+            oauth::store_credentials(auth_file, name, stored)?;
         }
         // Authenticated: drop the connection AND the state so the next
         // `ensure_connected` reconnects with the stored token (a `NeedsAuth`
@@ -344,31 +345,86 @@ impl McpManager {
 /// A FREE function (not a method): `ensure_connected` calls it while `entry`
 /// (a `self.servers` borrow) and `def` (an `entry.def` borrow) are live, so a
 /// `&self` receiver would be a double borrow.
+///
+/// CANCELLATION: this future sits inside the `mcp` tool arm's `select!` against
+/// the TURN token (`harness/loop/tools.rs`), so a Stop drops it wherever it
+/// happens to be — including between "the auth server consumed our refresh
+/// token" and "we persisted the rotated one". The refresh is therefore run on a
+/// DETACHED task that owns its persist (see [`refresh_and_persist`]): dropping
+/// this future cannot drop that task, so a completed rotation is always written.
 async fn usable_token_provider(server_name: &str, auth_file: &Path) -> Option<TokenProvider> {
     let mut map = oauth::load_credentials(auth_file);
-    let stored = map.get(server_name).cloned()?;
+    let stored = map.remove(server_name)?;
     let token = if stored.is_expired(oauth::now_epoch_secs()) {
         eprintln!("mcp: {server_name}'s stored token is expired — trying the refresh_token grant");
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .ok()?;
         // The ADR 0015 guard lives INSIDE `oauth::refresh` (a client with no
         // secret returns `None` before it touches the network) — this call site
         // must not grow its own copy of that decision.
-        let refreshed = oauth::refresh(&stored, &client).await?;
-        let token = refreshed.token.clone();
-        map.insert(server_name.to_string(), refreshed);
-        // A failed WRITE must not throw away a token we just earned: use it for
-        // this connection and let the next attempt retry the write.
-        if let Err(e) = oauth::save_credentials(auth_file, &map) {
-            eprintln!("mcp: persisting the refreshed token for {server_name} failed: {e}");
-        }
-        token
+        refresh_and_persist(stored, server_name.to_string(), auth_file.to_path_buf()).await?
     } else {
         stored.token
     };
     Some(Box::new(move || Some(token.clone())))
+}
+
+/// Run the `refresh_token` grant for `stored` and PERSIST the result, on a task
+/// the caller cannot cancel — the invariant is that **a completed rotation is
+/// never dropped on the floor**.
+///
+/// Why it has to be a task and not just an `.await`: the caller is cancellable
+/// by construction (the `mcp` tool arm races the whole flow against the turn
+/// token), so any `await` inside this function is a place a Stop can strand it.
+/// A `tokio::spawn`ed task is detached — dropping our `JoinHandle` does not
+/// abort it — so the refresh runs to completion and writes its own result even
+/// when the tool call that asked for it was cancelled. The caller still awaits
+/// the join, because on the normal path it needs the new token for this
+/// connection; the detached task is what makes that await safe to abandon.
+///
+/// The alternative the review offered — "await the refresh uncancellably" — is
+/// not available from here: the `select!` is the caller's, and it drops this
+/// future on a Stop no matter what this function does. Detaching achieves the
+/// same guarantee (the rotation survives) with BETTER stop-latency (a Stop
+/// returns immediately; the write lands a moment later). The margin that decides
+/// how often this code runs at all is documented on
+/// [`oauth::TOKEN_EXPIRY_MARGIN_SECS`], including why the grant is not raced
+/// against a cancel token and why "return the stored token on cancel" is not an
+/// option.
+///
+/// Honest limits of the detach:
+/// - it needs a runtime that outlives the call (true in production: the Worker's
+///   `new_multi_thread` runtime, `run_worker`; the tests use the `multi_thread`
+///   flavour), and
+/// - the caller no longer sees the token if it was dropped — which is fine, the
+///   tool call it served is gone; the NEXT connect reads the persisted token.
+///
+/// And one the detach makes slightly more likely: the write can land AFTER a
+/// newer write for the SAME server (an `auth` that finished while this grant was
+/// still in flight). The merge keeps every OTHER server's entry; this server's
+/// entry is last-writer-wins, so the worst case is one server holding the older
+/// of two valid tokens — which costs a refresh (or, if the auth server revoked
+/// it, one `auth`), never a torn file and never another server's credentials.
+async fn refresh_and_persist(
+    stored: oauth::StoredAuth,
+    server_name: String,
+    auth_file: PathBuf,
+) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .ok()?;
+    let task = tokio::spawn(async move {
+        let refreshed = oauth::refresh(&stored, &client).await?;
+        let token = refreshed.token.clone();
+        // Merge into the LIVE file, not a snapshot taken before this round trip
+        // (a concurrent `auth` may have replaced this very entry in the
+        // meantime). A failed WRITE must not throw away a token we just earned:
+        // use it for this connection and let the next attempt retry the write.
+        if let Err(e) = oauth::store_credentials(&auth_file, &server_name, refreshed) {
+            eprintln!("mcp: persisting the refreshed token failed: {e}");
+        }
+        Some(token)
+    });
+    task.await.ok().flatten()
 }
 
 /// A one-shot test of a server definition (the Settings page's Test
@@ -432,9 +488,10 @@ pub async fn authenticate_server(server_name: &str, def: &ServerDef) -> Result<S
     let stored = oauth::authenticate(http_def, auth_server_url.as_deref(), &cancel, &open_browser)
         .await
         .map_err(|e| format!("{server_name}: {e}"))?;
-    let mut map = oauth::load_credentials(&oauth::auth_file_path());
-    map.insert(server_name.to_string(), stored);
-    oauth::save_credentials(&oauth::auth_file_path(), &map)?;
+    // Merged into the live file (see `oauth::store_credentials`) — the flow
+    // above just spent a browser round trip, and a Worker's token refresh may
+    // have written other entries in that window.
+    oauth::store_credentials(&oauth::auth_file_path(), server_name, stored)?;
     Ok(format!("{server_name}: authenticated"))
 }
 
@@ -719,15 +776,21 @@ mod tests {
         // auto-retried, so leaving it set keeps the server dead for the rest
         // of the session.
         //
-        // Honest caveat: this test injects the credentials FILE path (so it
-        // never writes the developer's real `mcp-auth.json`), but the READ
-        // side is still the real path — `ensure_connected` calls
-        // `stored_token_provider(name)`, which resolves `oauth::auth_file_path()`
-        // itself. So step 6 asserts on what was WRITTEN, and step 7 asserts
-        // only that the guard stopped firing: `HttpClient::send_request` maps
-        // a 401 on an OAuth server to `needs-auth` whether or not an
-        // `Authorization` header was sent, so the branch and its message are
-        // the same either way. Redirecting that read is T7's seam.
+        // Honest caveat: this test injects the credentials FILE path (via
+        // `authenticate_with`, so it never writes the developer's real
+        // `mcp-auth.json`). The READ side is injected too, since T7:
+        // `ensure_connected` goes through `usable_token_provider(name,
+        // &self.auth_file)`, so a manager built with `with_auth_file` would
+        // read the same temp file. This test does NOT do that — it leaves the
+        // manager on the real `oauth::auth_file_path()` and only asserts on what
+        // `authenticate_with` WROTE, so step 6 is exact and step 7 asserts only
+        // that the guard stopped firing. What this shape still cannot see: the
+        // token the reconnect actually SENDS. `HttpClient::send_request` maps a
+        // 401 on an OAuth server to `needs-auth` whether or not an
+        // `Authorization` header went out, so the branch and its message are the
+        // same either way — proving "the token from the injected file reached the
+        // wire" needs the `with_auth_file` seam on this manager plus a
+        // header-recording server (as `an_expired_token_is_refreshed…` does).
         let (mcp_url, mcp_server) = start_401_server().await;
         let (auth_base, auth_server) = start_auth_server().await;
         let (mut manager, _dir) = manager_with(
@@ -834,6 +897,21 @@ mod tests {
         std::sync::Arc<std::sync::atomic::AtomicU32>,
         tokio::task::JoinHandle<()>,
     ) {
+        start_refresh_server_with(succeeds, Duration::ZERO).await
+    }
+
+    /// `start_refresh_server` with a `delay` on the `/token` answer (the
+    /// cancelled-refresh test needs the grant to still be in flight when the
+    /// caller is dropped).
+    async fn start_refresh_server_with(
+        succeeds: bool,
+        delay: Duration,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        std::sync::Arc<std::sync::atomic::AtomicU32>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("the listener binds");
@@ -927,6 +1005,12 @@ mod tests {
                                 .push(format!("{}={}", k, url_decode(v)));
                         }
                         if succeeds {
+                            if !delay.is_zero() {
+                                // Hold the grant open (the auth server HAS
+                                // consumed the refresh token by now — the
+                                // rotated one is in this pending response).
+                                tokio::time::sleep(delay).await;
+                            }
                             (
                                 "200 OK",
                                 serde_json::json!({
@@ -1133,6 +1217,197 @@ mod tests {
         );
 
         mcp_server.abort();
+        auth_server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_refresh_cancelled_mid_flight_still_persists_the_rotation() {
+        // Finding 2: `usable_token_provider` runs inside the `mcp` tool arm's
+        // `select!` against the TURN token, so a Stop drops this future
+        // wherever it happens to be — including after the auth server has
+        // consumed our refresh token and answered with a ROTATED one. Losing
+        // that response leaves a dead token on disk and the server in
+        // `NeedsAuth` (a full browser flow). The refresh therefore runs on a
+        // detached task that writes its own result: dropping the caller cannot
+        // drop the task.
+        //
+        // The auth server holds its `/token` answer open, so the caller is
+        // guaranteed to be dropped while the grant is in flight.
+        let (auth_base, auth_fields, _counter, auth_server) =
+            start_refresh_server_with(true, Duration::from_millis(400)).await;
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let auth_file = dir.path().join("mcp-auth.json");
+        write_credentials(
+            &auth_file,
+            oauth::StoredAuth {
+                client_id: "cid".into(),
+                client_secret: Some("sec".into()),
+                token: "stale-access-token".into(),
+                refresh_token: Some("stale-refresh".into()),
+                expires_at: Some(oauth::now_epoch_secs() - 10),
+                auth_server_url: auth_base.clone(),
+                scope: None,
+            },
+        );
+
+        // Cancel the turn the flow is racing against, exactly the way the tool
+        // arm does: `select!` on the turn token drops the provider future while
+        // the grant is in flight, and the discarded branch's value is gone. The
+        // stop is triggered by the auth server RECORDING the `/token` POST (not
+        // by a sleep), so the grant is provably in flight when the caller dies.
+        let turn = CancellationToken::new();
+        let auth_file_for_call = auth_file.clone();
+        let stopper = {
+            let turn = turn.clone();
+            let fields = auth_fields.clone();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            tokio::spawn(async move {
+                loop {
+                    let sent = fields
+                        .lock()
+                        .unwrap()
+                        .contains(&"grant_type=refresh_token".to_string());
+                    if sent {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the refresh grant was never attempted"
+                    );
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                turn.cancel();
+            })
+        };
+        let call = async move {
+            tokio::select! {
+                provider = usable_token_provider("a", &auth_file_for_call) => {
+                    let _ = provider;
+                    panic!("the refresh finished before the Stop — the drop was not mid-flight")
+                }
+                _ = turn.cancelled() => {}
+            }
+        };
+        // The caller is dropped at the end of this statement, mid-refresh.
+        call.await;
+        stopper.await.expect("the stopper ran");
+        // The Stop returned immediately (the caller did NOT wait for the grant,
+        // which is still being held open), and nothing has been written yet.
+        let fields_dropped = auth_fields.lock().unwrap().clone();
+        assert!(
+            fields_dropped.contains(&"grant_type=refresh_token".to_string()),
+            "the refresh grant was in flight when the caller was dropped: {fields_dropped:?}"
+        );
+        assert_eq!(
+            oauth::load_credentials(&auth_file)
+                .get("a")
+                .map(|s| s.token.as_str()),
+            Some("stale-access-token"),
+            "nothing is written before the response arrives"
+        );
+
+        // The detached task finishes the job the dropped caller could not: the
+        // rotation lands, and the file stays a complete document.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let stored = oauth::load_credentials(&auth_file);
+            if stored.get("a").map(|s| s.token.as_str()) == Some("refreshed-access-token") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the cancelled-in-flight refresh never persisted its rotation"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let persisted = oauth::load_credentials(&auth_file);
+        let stored = persisted.get("a").expect("the entry is still there");
+        assert_eq!(stored.refresh_token.as_deref(), Some("rotated-refresh"));
+        assert!(
+            stored
+                .expires_at
+                .is_some_and(|at| at > oauth::now_epoch_secs()),
+            "the new expiry is in the future: {:?}",
+            stored.expires_at
+        );
+
+        auth_server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_refresh_persist_does_not_clobber_an_entry_another_writer_saved() {
+        // Finding 1's lost update, end to end: `map` used to be a snapshot taken
+        // BEFORE the refresh round trip, so anything another writer saved during
+        // that round trip — the Settings page's `auth`, another Worker's
+        // refresh — was renamed away by our save. The persist now merges into
+        // the file as it is on disk when the write happens.
+        let (auth_base, auth_fields, _counter, auth_server) =
+            start_refresh_server_with(true, Duration::from_millis(400)).await;
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let auth_file = dir.path().join("mcp-auth.json");
+        write_credentials(
+            &auth_file,
+            oauth::StoredAuth {
+                client_id: "cid".into(),
+                client_secret: Some("sec".into()),
+                token: "stale-access-token".into(),
+                refresh_token: Some("stale-refresh".into()),
+                expires_at: Some(oauth::now_epoch_secs() - 10),
+                auth_server_url: auth_base.clone(),
+                scope: None,
+            },
+        );
+        let file_for_call = auth_file.clone();
+        let call =
+            tokio::spawn(async move { usable_token_provider("a", &file_for_call).await.is_some() });
+
+        // The other writer lands INSIDE the refresh's round trip (the same
+        // window the snapshot used to straddle): a fresh token for a DIFFERENT
+        // server, written through the same persist path the Settings page uses.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let sent = auth_fields
+                .lock()
+                .unwrap()
+                .contains(&"grant_type=refresh_token".to_string());
+            if sent {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the refresh grant was never attempted"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        oauth::store_credentials(
+            &auth_file,
+            "settings-page",
+            oauth::StoredAuth {
+                client_id: "cid-b".into(),
+                client_secret: Some("sec-b".into()),
+                token: "settings-token".into(),
+                refresh_token: None,
+                expires_at: Some(oauth::now_epoch_secs() + 3600),
+                auth_server_url: auth_base.clone(),
+                scope: None,
+            },
+        )
+        .expect("the other writer saves");
+
+        assert!(call.await.expect("the provider task runs"));
+
+        let stored = oauth::load_credentials(&auth_file);
+        assert_eq!(
+            stored.get("a").map(|s| s.token.as_str()),
+            Some("refreshed-access-token"),
+            "our refresh landed"
+        );
+        assert_eq!(
+            stored.get("settings-page").map(|s| s.token.as_str()),
+            Some("settings-token"),
+            "the entry another writer saved during the round trip survives"
+        );
+
         auth_server.abort();
     }
 
