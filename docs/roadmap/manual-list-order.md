@@ -258,7 +258,16 @@ preview.
 Optimistic, matching `useAgentOverridesWrites`: the store rewrites the affected
 slice in memory at once, then fires `invoke("reorder_spaces", { ids })` /
 `invoke("reorder_sessions", { ids })`. A rejection logs through the repo's
-existing `void`-command convention and refetches.
+existing `void`-command convention and **restores the captured slice**.
+
+> **Amended 2026-10-24, during T05's planning.** This said "and refetches". A
+> refetch is the wrong instrument for undoing a reorder: `setSessionRecency`
+> REPLACES the recency map and `setSpaces` re-seeds the trusted baseline and can
+> move the selected tab, so refetching is a WIDER mutation than the one being
+> undone — it could move the user's selection while undoing their drag. And the
+> command is one transaction, so after a rejection the committed state is already
+> known: it is the slice captured before the optimistic write. Restoring that
+> snapshot is strictly narrower and needs no round-trip.
 
 The command takes the **whole visible slice's ids** and writes their `sort_order`
 in **one transaction** (`unchecked_transaction`, the pattern `db.rs:239` uses for
@@ -376,7 +385,8 @@ survives, only its cause changes.
 17. A `drop` released outside any row still reaches the window backstop (no
     navigation).
 18. Hover actions and the tab ✕ carry `draggable={false}`.
-19. A rejected reorder refetches and the list snaps back.
+19. A rejected reorder restores the slice captured before the optimistic write,
+    and the list snaps back to its pre-drag order.
 
 ## Section 6 — Docs
 
