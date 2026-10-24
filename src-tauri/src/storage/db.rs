@@ -87,6 +87,21 @@ pub struct SpaceRow {
     pub trusted: bool,
 }
 
+/// One session's recency, as a FIELD rather than a position (ADR 0075).
+///
+/// `list_sessions` stopped sorting by recency, so recency has to be asked for
+/// by name. This is the ONLY thing that crosses the wire for that question —
+/// deliberately NOT a `SessionInfo` field: `SessionInfo` is built by dozens of
+/// struct literals and is the struct ADR 0064 protects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRecency {
+    pub session_id: String,
+    /// Unix milliseconds. Never absent: `LAST_ACTIVITY`'s `COALESCE` falls back
+    /// to the row's own `created_at` when the transcript is empty.
+    pub last_active_at: i64,
+}
+
 /// The app's SQLite database.
 ///
 /// The connection is wrapped in a `std::sync::Mutex` (a raw
@@ -553,6 +568,41 @@ impl Db {
                     archived: row.get::<_, i64>(5)? != 0,
                     context_usage_json: row.get(6)?,
                     is_subagent: row.get::<_, i64>(7)? != 0,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Every non-subagent session's recency, as an explicit FIELD (ADR 0075 —
+    /// position is not evidence, so anything that wants recency has to ask for it).
+    ///
+    /// The SQL is the SAME `LAST_ACTIVITY` const the upgrade seed
+    /// (`seed_session_sort_order`) reads with, interpolated here with `format!`
+    /// the way that seed builds its statement — so the number a row prints and
+    /// the number a recency decision reads cannot drift: one copy of the
+    /// expression exists, and it is that const.
+    ///
+    /// The filter is `is_subagent = 0` with NO `archived` filter, matching
+    /// `list_sessions(true)` exactly. That equality is the contract: the recency
+    /// map's key set equals the boot session list's key set, so a consumer can
+    /// never meet a session with no recency entry, nor a recency entry with no
+    /// session.
+    ///
+    /// `ORDER BY id` is arbitrary but STABLE: consumers key by id, so the order
+    /// is not a contract — it is pinned only so the returned `Vec` is
+    /// deterministic (a `Vec` with no `ORDER BY` is a nondeterministic fixture).
+    /// `id` is the primary key, so the sort is free.
+    pub fn session_recency(&self) -> Result<Vec<SessionRecency>, DbError> {
+        let guard = self.conn.lock().expect("db mutex poisoned");
+        let mut stmt = guard.prepare(&format!(
+            "SELECT id, {LAST_ACTIVITY} FROM sessions WHERE is_subagent = 0 ORDER BY id"
+        ))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(SessionRecency {
+                    session_id: row.get(0)?,
+                    last_active_at: row.get(1)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1879,6 +1929,240 @@ mod tests {
             ids,
             vec!["s_c", "s_b", "s_a"],
             "the session with the newest message keeps its middle position"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// CHARACTERISATION (ADR 0075, the pin Task 1 exists for): `session_recency`'s
+    /// `last_active_at` equals what the OLD recency expression — the one
+    /// `list_sessions` used to `ORDER BY` — yields for the same row. The
+    /// expectation is read by raw SQL that SPELLS the `COALESCE(MAX …)`
+    /// expression out in full and deliberately does NOT interpolate
+    /// `LAST_ACTIVITY`: recomputing the expectation from the const under test
+    /// would make this pin green on any edit to that const (the same reasoning
+    /// `tauriBarrel.test.ts` gives for its literal list, and the reasoning
+    /// `list_sessions_ties_break_on_id_desc` gives for its explicit timestamp).
+    ///
+    /// The fixture covers the three shapes that can break the equivalence:
+    /// - `s_msg_new`: one message, so "newest" is unambiguous;
+    /// - `s_msg_old`: TWO messages inserted **smaller-last**, so an implementation
+    ///   that read "the last message by id" instead of `MAX()` answers
+    ///   `1_600_000_000_000` here while the real expression answers
+    ///   `9_000_000_000_000` — the test cannot pass by accident;
+    /// - `s_no_messages`: `MAX()` over no rows is `NULL`, which SQLite sorts LAST
+    ///   in a `DESC` list (the reason `RECENT_FIRST`'s `COALESCE` exists) — so the
+    ///   entry must be PRESENT and equal the row's own `created_at`, never
+    ///   NULL/absent;
+    /// - `s_archived`: the Archived section sorts by recency, so an archived
+    ///   session with no recency entry is the bug this task must not ship.
+    ///
+    /// Every message row is written by RAW SQL with an EXPLICIT far-future
+    /// `created_at`, never by `record_message`: `record_session` and
+    /// `record_message` both stamp `now_ms()`, so rows written inside one test
+    /// land in the same millisecond and recency cannot separate them at all — a
+    /// `record_message` fixture would tie every row and let the assertion pass for
+    /// the wrong reason (the trap T01 records and carries forward here).
+    #[test]
+    fn session_recency_matches_the_old_coalesce_expression() {
+        let dir = std::env::temp_dir().join(format!("db-recency-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).expect("db should open");
+        for id in ["s_msg_new", "s_msg_old", "s_no_messages", "s_archived"] {
+            db.record_session(&title_session(id))
+                .expect("record_session should succeed");
+        }
+
+        // `s_msg_new`: the single newest transcript stamp, far in the future.
+        db.conn
+            .lock()
+            .expect("db mutex poisoned")
+            .execute(
+                "INSERT INTO messages (session_id, kind, message_key, payload_json, created_at) \
+                 VALUES ('s_msg_new', 'user', NULL, '{}', 9_999_999_999_999)",
+                [],
+            )
+            .expect("fixture message row");
+        // `s_msg_old`: TWO rows inserted SMALLER-LAST — the newest is the FIRST
+        // insert, so `MAX()` and "last row by id" disagree (see the doc comment).
+        db.conn
+            .lock()
+            .expect("db mutex poisoned")
+            .execute(
+                "INSERT INTO messages (session_id, kind, message_key, payload_json, created_at) \
+                 VALUES ('s_msg_old', 'user', NULL, '{}', 9_000_000_000_000)",
+                [],
+            )
+            .expect("fixture message row (newer, inserted first)");
+        db.conn
+            .lock()
+            .expect("db mutex poisoned")
+            .execute(
+                "INSERT INTO messages (session_id, kind, message_key, payload_json, created_at) \
+                 VALUES ('s_msg_old', 'agent-text', 'k0', '{}', 1_600_000_000_000)",
+                [],
+            )
+            .expect("fixture message row (older, inserted LAST)");
+        // `s_no_messages`: nothing written — the `COALESCE` fallback case.
+        // `s_archived`: archived, no messages.
+        assert!(db
+            .set_session_archived("s_archived", true)
+            .expect("set_session_archived should succeed"));
+
+        let rows = db
+            .session_recency()
+            .expect("session_recency should succeed");
+
+        // The OLD expression, spelled out rather than interpolated — the whole
+        // point of a characterisation test.
+        let old_key = |id: &str| -> i64 {
+            db.conn
+                .lock()
+                .expect("db mutex poisoned")
+                .query_row(
+                    "SELECT COALESCE((SELECT MAX(m.created_at) FROM messages m \
+                      WHERE m.session_id = sessions.id), sessions.created_at) \
+                     FROM sessions WHERE id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .expect("the old recency expression must resolve for a stored id")
+        };
+
+        for id in ["s_msg_new", "s_msg_old", "s_no_messages", "s_archived"] {
+            let entry = rows
+                .iter()
+                .find(|r| r.session_id == id)
+                .unwrap_or_else(|| panic!("`session_recency` must return an entry for {id}"));
+            assert_eq!(
+                entry.last_active_at,
+                old_key(id),
+                "`{id}`'s recency equals what the OLD expression yields for the same row"
+            );
+        }
+
+        // The `MAX()`-not-last-inserted half, pinned as a NUMBER as well as
+        // against the expression: `s_msg_old`'s newest stamp is its FIRST insert.
+        assert_eq!(
+            rows.iter()
+                .find(|r| r.session_id == "s_msg_old")
+                .expect("`s_msg_old` is listed")
+                .last_active_at,
+            9_000_000_000_000,
+            "recency is `MAX(created_at)`, not the last-inserted row's stamp"
+        );
+
+        // The no-messages case, spelled out separately: the entry EXISTS (an
+        // absent key would strand the row in T03's recency map) and equals the
+        // row's own `created_at` — never NULL, never absent.
+        let created_at: i64 = db
+            .conn
+            .lock()
+            .expect("db mutex poisoned")
+            .query_row(
+                "SELECT created_at FROM sessions WHERE id = 's_no_messages'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("the row's own created_at");
+        let fallback = rows
+            .iter()
+            .find(|r| r.session_id == "s_no_messages")
+            .expect("a session with no messages still gets a recency entry");
+        assert_eq!(
+            fallback.last_active_at, created_at,
+            "the `COALESCE` falls back to the row's own `created_at` \
+             (`MAX()` over no rows is NULL, which SQLite sorts LAST in a DESC list)"
+        );
+
+        // The archived half: the Archived section sorts by recency, so the row
+        // must be in the result at all.
+        assert!(
+            rows.iter().any(|r| r.session_id == "s_archived"),
+            "an archived session gets a recency entry — the Archived section sorts by it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The DRIFT GUARD beside the characterisation test: `LAST_ACTIVITY` equals
+    /// the old expression, spelled as a LITERAL here. The moment anyone edits the
+    /// const this reddens, so the characterisation above has to be re-decided
+    /// rather than silently drifting with it.
+    ///
+    /// The right-hand side is the ONE-LINE spelling on purpose (the const itself
+    /// carries `\\`-continuations): the assertion says out loud that the const's
+    /// multi-line form and this single-line form are the same expression, which a
+    /// whitespace-normalising comparison would not.
+    #[test]
+    fn the_last_activity_const_matches_the_expression_the_row_prints() {
+        assert_eq!(
+            LAST_ACTIVITY,
+            "COALESCE((SELECT MAX(m.created_at) FROM messages m WHERE m.session_id = sessions.id), sessions.created_at)"
+        );
+    }
+
+    /// (ADR 0075) `session_recency` covers EVERY non-subagent session — archived
+    /// included, matching `list_sessions(true)`'s key set exactly — and excludes
+    /// `is_subagent = 1` rows.
+    ///
+    /// The subagent row's PRESENCE in the table is witnessed by raw SQL against
+    /// `db.conn`: that is the only witness that exists, because `list_sessions`
+    /// filters hidden rows out of every read path (the shape
+    /// `list_sessions_hides_subagent_rows_but_their_transcripts_load` establishes).
+    /// Without it, "no third entry" would be indistinguishable from "the fixture
+    /// never wrote the row".
+    #[test]
+    fn session_recency_covers_archived_and_excludes_subagent_rows() {
+        let dir =
+            std::env::temp_dir().join(format!("db-recencycover-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).expect("db should open");
+
+        db.record_session(&title_session("main-1"))
+            .expect("record main-1");
+        db.record_session(&title_session("arch-1"))
+            .expect("record arch-1");
+        assert!(db
+            .set_session_archived("arch-1", true)
+            .expect("set_session_archived should succeed"));
+        let sub = SessionInfo {
+            session_id: "sub-1".to_string(),
+            cwd: std::path::PathBuf::from("/tmp/proj"),
+            capabilities: serde_json::json!({}),
+            config_options: None,
+            archived: false,
+            title: None,
+            context_usage: None,
+            is_subagent: true,
+        };
+        db.record_session(&sub).expect("record subagent");
+
+        let ids: Vec<String> = db
+            .session_recency()
+            .expect("session_recency should succeed")
+            .into_iter()
+            .map(|r| r.session_id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["arch-1", "main-1"],
+            "every non-subagent session is returned (archived included) and \
+             the subagent row is not — exactly `list_sessions(true)`'s key set"
+        );
+
+        // The hidden row is really in the table (raw SQL — the only witness).
+        let hidden: i64 = db
+            .conn
+            .lock()
+            .expect("db mutex poisoned")
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE id = 'sub-1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count the subagent row");
+        assert_eq!(
+            hidden, 1,
+            "the subagent row exists in `sessions` — it was EXCLUDED, not missing"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

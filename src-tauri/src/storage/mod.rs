@@ -3,4 +3,4 @@
 
 mod db;
 
-pub use db::{Db, DbError, MessageRow, SessionRow, SpaceRow};
+pub use db::{Db, DbError, MessageRow, SessionRecency, SessionRow, SpaceRow};
