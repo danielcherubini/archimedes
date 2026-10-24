@@ -209,11 +209,11 @@ export interface SpaceView {
   /** The most recent live session in this space, or `null` (the tab's live dot). */
   liveSessionId: string | null;
   /** DEPRECATED — the other INPUT to `sessionIds`, in the server's manual order;
-   * T04 deletes it. Do NOT re-sort: the input order IS the user's Manual order,
-   * and since ADR 0075 it is evidence of nothing but position. (This used to be
-   * re-sorted for display by `lib/sessionActivity`; that module still runs in
-   * the sidebar until T04 deletes it, and this field is where its last caller
-   * reads its input from.) */
+   * T05 deletes it. Do NOT re-sort: the input order IS the user's Manual order,
+   * and since ADR 0075 it is evidence of nothing but position. The display sort
+   * that used to re-rank this list for the sidebar is GONE — no surface re-sorts
+   * it any more — and since T04 nothing outside this file reads this field or
+   * its sibling at all: they are INPUTS to `mergeSessionOrder` and nothing else. */
   storedSessionIds: string[];
   /**
    * Archived sessions of this space (NOT rendered in the Space group —

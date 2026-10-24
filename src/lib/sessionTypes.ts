@@ -4,7 +4,7 @@
  *
  * These live here and NOT in `store/sessions.ts` (they used to be defined
  * there) because the store is not their owner: `lib/transcript/reducer.ts`
- * builds `Message`s, and `lib/sessionTitle.ts`, `lib/sessionActivity.ts`,
+ * builds `Message`s, and `lib/sessionTitle.ts`, `lib/sessionRecency.ts`,
  * `lib/sessionTime.ts`, `lib/toolGroups.ts`, `lib/toolOutput.ts`,
  * `lib/transcript/identity.ts` and `lib/transcript/unitKeys.ts` all read them.
  * Having a `lib/` module import a transcript type from the store that imports

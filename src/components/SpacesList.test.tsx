@@ -672,7 +672,7 @@ describe("SpacesList", () => {
     // The user-visible promise this whole branch exists for: a row's LABEL stays
     // live (its own per-row `messages` subscription) while its SLOT never moves.
     // Red at HEAD for exactly the reason it exists to forbid: after the append,
-    // `sortByActivity(…, "last")` floated the newly-active row to the top of the
+    // the deleted display sort floated the newly-active row to the top of the
     // stored group, so the SECOND position comparison failed.
     const now = Date.now();
     useSessions.setState({
