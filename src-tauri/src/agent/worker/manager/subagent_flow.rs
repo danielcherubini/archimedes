@@ -628,7 +628,9 @@ pub(crate) fn dispatch_subagent(
     // current driver's step 9 — the PARENT session's sink: the
     // `model` in the COMPOSED `provider/id` form, the
     // `thinkingLevel` the step-2 RESOLVED value, the
-    // `enabledTools` the child's resolved set).
+    // `enabledTools` the child's resolved set, and the
+    // `nameResolution` the resolver's tri-state (issue #47) — the
+    // eight-key payload the subagent directory row and the sheet read.
     if let Some(sink) = state.hooks.sink_for(&parent_session_id) {
         sink.emit(
             "subagent-session-started",
@@ -636,6 +638,11 @@ pub(crate) fn dispatch_subagent(
                 "sessionId": child_id,
                 "parentSessionId": parent_session_id,
                 "agentName": wire.agent_name,
+                // (issue #47) The tri-state, verbatim off the wire — NOT
+                // re-derived here (a second `discover_agents` on
+                // `wire.parent_cwd` would be a second name selector, and two
+                // selectors is how the dispatch and the report drift).
+                "nameResolution": wire.name_resolution,
                 "task": wire.task,
                 "model": ModelKey::from(&model).to_string(),
                 "thinkingLevel": thinking.as_deref(),

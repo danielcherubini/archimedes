@@ -244,3 +244,35 @@ describe("SubagentDetailHost (the subagent transcript sheet)", () => {
   // otherwise (pinned there by `an `ask` card's OWN Escape still dismisses the
   // card (the wrapper's stop does not swallow it)`).
 });
+
+/**
+ * (issue #47) The transcript sheet is the second surface that prints a child's
+ * name as a claim about its identity, so it carries the same one quiet caption
+ * as the directory row — and, like the row, ONLY for `unmatched`.
+ *
+ * The dialog is looked up as `{ name: /transcript/ }` on purpose: the sheet's
+ * `aria-label` (`"<agentName> — transcript"`) is byte-identical before and after
+ * the marker, because the marker is additive and the label is explicit.
+ */
+describe("SubagentDetailHost (the resolve-miss marker, issue #47)", () => {
+  it("shows the resolve-miss marker in the sheet header for an unmatched name, and nothing for a matched one", () => {
+    useSubagents.getState().addSession({ ...entry, nameResolution: "unmatched" });
+    render(<SubagentDetailHost />);
+    select("sub1");
+    const dialog = screen.getByRole("dialog", { name: /transcript/ });
+    const marker = screen.getByText("no matching Agent");
+    // INSIDE the dialog (a stray caption outside the sheet would be a second
+    // host, which this file's whole partition argument forbids).
+    expect(dialog.contains(marker)).toBe(true);
+    // The header is otherwise UNCHANGED: the name and the status chip survive.
+    expect(screen.getByText("reviewer")).toBeTruthy();
+    expect(screen.getByText("running")).toBeTruthy();
+
+    // A matched name renders nothing extra — the child loaded a real persona.
+    act(() => {
+      useSubagents.getState().addSession({ ...entry, nameResolution: "matched" });
+    });
+    expect(screen.queryByText("no matching Agent")).toBeNull();
+    expect(screen.getByText("reviewer")).toBeTruthy();
+  });
+});

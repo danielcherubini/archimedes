@@ -211,6 +211,9 @@ function App() {
           sessionId: p.sessionId,
           parentSessionId: p.parentSessionId,
           agentName: p.agentName,
+          // (issue #47) Copied verbatim — the store never derives it, and an
+          // older payload leaves it absent (which renders nothing).
+          nameResolution: p.nameResolution,
           task: p.task,
           status: "running",
           model: p.model,

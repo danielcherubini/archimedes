@@ -369,6 +369,21 @@ export interface SubagentMetrics {
 
 
 /**
+ * The Rust `AgentNameResolution` (`src-tauri/src/agent/subagent.rs`) over the
+ * wire — whether a `subagent` call's `agentName` matched a discovered Agent
+ * definition. `resolve_launch` returns the SAME verbatim launch for `no_name`
+ * and `unmatched` (ADR 0020: an unknown or omitted name is a config-less
+ * dispatch, never an error), so this is the ONLY thing that separates the
+ * deliberate case from the typo, and the surfaces that print a child's name
+ * render the marker in exactly one of the three states.
+ *
+ * Serialised by serde `#[serde(rename_all = "snake_case")]`, so `no_name` is
+ * the one two-word value (unlike `SubagentFailureReason`, whose four values are
+ * single words and so coincide in every case).
+ */
+export type AgentNameResolution = "no_name" | "matched" | "unmatched";
+
+/**
  * A `subagent-session-started` event payload (camelCase over the wire).
  *
  * Emitted by `dispatch_subagent` (`src-tauri/src/agent/worker/manager.rs`) on
@@ -389,6 +404,17 @@ export interface SubagentSessionStartedPayload {
   sessionId: string;
   parentSessionId: string;
   agentName: string;
+  /**
+   * (issue #47) Whether `agentName` resolved. OPTIONAL for the same reason
+   * `SubagentClosedPayload.reason` is: a payload from a backend that predates
+   * the field omits it, and the UI then renders exactly what it rendered
+   * before. `undefined` and `"matched"` and `"no_name"` all render NOTHING
+   * extra — only `"unmatched"` says anything, because only it means "this
+   * child loaded no persona, no tool allowlist and no model from the name it
+   * was given". NON-BLOCKING by design: the child still runs and its output is
+   * real (the same reasoning ADR 0055 applies to a failed child's metrics).
+   */
+  nameResolution?: AgentNameResolution;
   task: string;
   model?: string;
   thinkingLevel?: string;

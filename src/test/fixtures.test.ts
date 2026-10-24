@@ -306,6 +306,8 @@ describe("subagent fixtures", () => {
     expect("endedAt" in entry).toBe(false);
     expect("metrics" in entry).toBe(false);
     expect("reason" in entry).toBe(false);
+    // (issue #47) Likewise the resolve tri-state: absent unless named.
+    expect("nameResolution" in entry).toBe(false);
   });
 
   it("makeSubagentEntry keeps the parent/child identity coherent under overrides", () => {

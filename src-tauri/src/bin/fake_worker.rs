@@ -81,7 +81,7 @@ use std::io::{BufRead, Write};
 use archimedes_lib::agent::events::RpcEvent;
 use archimedes_lib::agent::harness::store::DisplayRow;
 use archimedes_lib::agent::harness::ModelKey;
-use archimedes_lib::agent::subagent::LaunchConfig;
+use archimedes_lib::agent::subagent::{AgentNameResolution, LaunchConfig};
 use archimedes_lib::agent::worker::protocol::{decode_inbound, encode_outbound, Inbound, Outbound};
 
 /// The fixture version (the `ready` frame's `version` field).
@@ -484,6 +484,10 @@ fn emit_subagent_dispatch<W: Write>(
             parent_cwd: "/tmp/space".to_string(),
             parent_enabled_tools,
             agent_name: "tester".to_string(),
+            // (issue #47) The fixture NAMES an agent, so `Matched` is the
+            // truthful canned value; a manager-level test that wants another
+            // leg of the tri-state builds its own wire.
+            name_resolution: AgentNameResolution::Matched,
             launch: LaunchConfig {
                 system_prompt: Some("be brief".to_string()),
                 model: None,

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type {
+  AgentNameResolution,
   SubagentFailureReason,
   SubagentMetrics,
 } from "../lib/tauri";
@@ -44,6 +45,15 @@ export interface SubagentEntry {
   sessionId: string;
   parentSessionId: string;
   agentName: string;
+  /**
+   * (issue #47) The `subagent-session-started` payload's `nameResolution`.
+   * OPTIONAL and copied verbatim: an older backend omits it, and `"no_name"` /
+   * `"matched"` are the states the directory row and the sheet must NOT mark.
+   * Never derived here, and never from the tool-result envelope (a `progress`
+   * / `result` frame's `agent` field is the model's own claim about a name, not
+   * the resolver's answer about one).
+   */
+  nameResolution?: AgentNameResolution;
   task: string;
   status: "running" | "completed" | "failed";
   /**

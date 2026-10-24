@@ -79,6 +79,22 @@ describe("addSession", () => {
     add({ ...A1, task: "review v2" });
     expect(useSubagents.getState().entries["sub1"].startedAt).toBe(original);
   });
+
+  it("carries `nameResolution` through `addSession`, and leaves it absent when the payload omits it", () => {
+    // (issue #47) The store COPIES the tri-state and never derives it. The
+    // second half matters as much as the first: the card and the sheet branch
+    // on `=== "unmatched"`, and an `undefined`-valued key reads differently to
+    // an absent one in an `in` / `toEqual` assertion downstream — so a payload
+    // from a backend that predates the field must not gain one here.
+    useSubagents.getState().addSession({ ...A1, nameResolution: "unmatched" });
+    expect(useSubagents.getState().entries["sub1"].nameResolution).toBe(
+      "unmatched",
+    );
+    useSubagents.getState().addSession(A2);
+    expect("nameResolution" in useSubagents.getState().entries["sub2"]).toBe(
+      false,
+    );
+  });
 });
 
 describe("markClosed", () => {

@@ -15,7 +15,9 @@ use crate::agent::harness::provider::{
     ChatRole, FinishReason, MessageContent, ProviderEvent, ToolCall,
 };
 use crate::agent::harness::retry::RetryPolicy;
-use crate::agent::subagent::{LaunchConfig, SubagentOutcome, SubagentSessionManager};
+use crate::agent::subagent::{
+    AgentNameResolution, LaunchConfig, SubagentOutcome, SubagentSessionManager,
+};
 use crate::agent::tools::ContentBlock;
 use crate::agent::worker::client::{WorkerError, WorkerHandle, WorkerInboundEvent};
 use crate::agent::worker::manager::{WorkerFactory, WorkerManager};
@@ -451,6 +453,10 @@ async fn a_native_subagent_with_a_matching_agent_name_runs_the_frontmatter_confi
         started.1["thinkingLevel"], "low",
         "the child's thinking level is the frontmatter's"
     );
+    assert_eq!(
+        started.1["nameResolution"], "matched",
+        "a discovered definition reports MATCHED end to end"
+    );
     // The child's `Start` envelope (the `fake_worker`'s `session_info`
     // echo — re-emitted on the parent's scope by the `on_event`
     // router): the frontmatter body is the `systemPrompt` (the
@@ -476,6 +482,109 @@ async fn a_native_subagent_with_a_matching_agent_name_runs_the_frontmatter_confi
         child_info.1["update"]["enabledTools"],
         json!(["read"]),
         "the child gets exactly the frontmatter's tool"
+    );
+}
+
+/// (issue #47) The exact scenario: `subagent({ agentName: "reviewr" })` — a
+/// typo in a CORRECTLY-spelled key, so T9's unknown-KEY checker cannot see it.
+///
+/// Two halves, and the first is the one that matters: the miss NEVER blocks.
+/// The `subagent` tool result is still the child's real captured output with
+/// `is_error == false`, and the parent turn settles — ADR 0020's deliberate
+/// config-less dispatch, unchanged, and the same non-blocking doctrine as T9's
+/// warning and ADR 0055's metrics. The second half is what this task adds: the
+/// `subagent-session-started` payload says `unmatched` while still carrying the
+/// name the model asked for, so the UI can stop presenting a confident label
+/// for a child that loaded no persona, no tool allowlist and no model.
+///
+/// Runs the REAL `resolve_launch` → `dispatch_native` → `subagent_flow` path.
+/// NO agent file is written at all, so the name can only miss.
+///
+/// No `env_lock()` (the neighbour's note applies verbatim): the space-level
+/// roots are scanned first and this Space holds no agent file, and the
+/// mutators' scratch homes hold none either — and nothing here asserts on a
+/// USER-level definition.
+#[tokio::test]
+async fn a_subagent_named_after_no_definition_still_runs_and_says_so() {
+    let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+    let (provider, _calls) = ScriptedProvider::new(vec![
+        Some(vec![
+            ProviderEvent::ToolCall(ToolCall {
+                id: "t1".to_string(),
+                name: "subagent".to_string(),
+                arguments: json!({ "task": "recon the auth code", "agentName": "reviewr" }),
+            }),
+            ProviderEvent::Done(FinishReason::ToolCalls),
+        ]),
+        Some(vec![
+            ProviderEvent::TextDelta("done".to_string()),
+            ProviderEvent::Done(FinishReason::Stop),
+        ]),
+    ]);
+    let models = vec![fake_model("m1")];
+    let sink_events = Arc::new(StdMutex::new(Vec::<(String, Value)>::new()));
+    let sink: Arc<dyn EventSink> = Arc::new(RecordingSink {
+        events: sink_events.clone(),
+    });
+    let manager =
+        make_subagent_manager(Duration::from_secs(30), models.clone(), None, sink.clone()).await;
+    let mut loop_ = build_loop_with_dispatcher(
+        Box::new(provider),
+        events_tx,
+        Arc::new(StdMutex::new(CancellationToken::new())),
+        watch::channel(0u64).0,
+        RetryPolicy::new_with(5, Duration::from_millis(1)),
+        sink,
+        Some(Arc::new(InProcessDispatcher::new(manager)) as Arc<dyn SubagentDispatcher>),
+        models,
+        None,
+    );
+    // NO agent file: `"reviewr"` can only miss.
+    loop_.handle_prompt(&text_prompt("go")).await;
+    // 1. NON-BLOCKING: the tool result is the child's real output, not an error.
+    let end = wait_for_event(
+        &mut events_rx,
+        SPAWN_MS,
+        |e| matches!(e, RpcEvent::tool_execution_end { tool_call_id, .. } if tool_call_id == "t1"),
+    )
+    .await
+    .expect("the `subagent`'s tool_execution_end");
+    let RpcEvent::tool_execution_end {
+        result, is_error, ..
+    } = end
+    else {
+        unreachable!()
+    };
+    assert!(
+        !is_error,
+        "a resolve miss never fails the dispatch — got {result}"
+    );
+    assert_eq!(
+        result["content"][0]["text"], "canned answer",
+        "the tool result is the child's captured final text (the child RAN)"
+    );
+    // 2. The parent turn settled.
+    wait_for_event(&mut events_rx, SPAWN_MS, |e| {
+        matches!(e, RpcEvent::agent_settled)
+    })
+    .await
+    .expect("the parent turn settled");
+    // 3. The report: `unmatched`, and the name is still there (additive).
+    let events = sink_events
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    let started = events
+        .iter()
+        .find(|(name, _)| name == "subagent-session-started")
+        .expect("the `subagent-session-started` frame was emitted");
+    assert_eq!(
+        started.1["nameResolution"], "unmatched",
+        "a name that matched no definition is visible on the payload"
+    );
+    assert_eq!(
+        started.1["agentName"], "reviewr",
+        "the marker never replaces the label — the row keeps the name"
     );
 }
 
@@ -699,6 +808,7 @@ impl SubagentDispatcher for ConcurrentCountingDispatcher {
         _parent_model: &Model,
         _parent_enabled_tools: Vec<String>,
         _agent_name: String,
+        _name_resolution: AgentNameResolution,
         _launch: LaunchConfig,
         _task: String,
         _sink: &Arc<dyn EventSink>,
@@ -832,6 +942,7 @@ impl SubagentDispatcher for CancellingDispatcher {
         _parent_model: &Model,
         _parent_enabled_tools: Vec<String>,
         _agent_name: String,
+        _name_resolution: AgentNameResolution,
         _launch: LaunchConfig,
         _task: String,
         _sink: &Arc<dyn EventSink>,
@@ -882,6 +993,7 @@ impl SubagentDispatcher for OutOfOrderDispatcher {
         _parent_model: &Model,
         _parent_enabled_tools: Vec<String>,
         _agent_name: String,
+        _name_resolution: AgentNameResolution,
         _launch: LaunchConfig,
         task: String,
         _sink: &Arc<dyn EventSink>,
@@ -1137,6 +1249,7 @@ impl SubagentDispatcher for PartialResolveDispatcher {
         _parent_model: &Model,
         _parent_enabled_tools: Vec<String>,
         _agent_name: String,
+        _name_resolution: AgentNameResolution,
         _launch: LaunchConfig,
         task: String,
         _sink: &Arc<dyn EventSink>,

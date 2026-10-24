@@ -42,6 +42,8 @@ pub use session::{
     user_message_payload, ClosedReason, EffectiveCatalog, ImagePayload, ProviderFactory,
     SessionManager, SessionManagerBuilder, StalledInfo, StopReason, MAX_IMAGE_BYTES,
 };
-pub use subagent::{LaunchConfig, SubagentMetrics, SubagentOutcome, SubagentSessionManager};
+pub use subagent::{
+    AgentNameResolution, LaunchConfig, SubagentMetrics, SubagentOutcome, SubagentSessionManager,
+};
 pub use todo::{TodoItem, TodoStatus, TodoStore};
 pub use tools::{ContentBlock, ImageRef, ToolCtx, ToolResult};

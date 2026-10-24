@@ -929,12 +929,22 @@ mod tests {
 
             // SIDE 1 — the dispatch. `resolve_launch` is what a real `subagent`
             // call runs (it reads `settings.json` and discovers for itself).
-            let dispatch = crate::agent::harness::launch::resolve_launch(
+            let (dispatch, name_resolution) = crate::agent::harness::launch::resolve_launch(
                 &LaunchConfig::default(),
                 "scout",
                 &cat,
                 Some(&config_dir),
                 &space,
+            );
+            // (issue #47) The parity cases are all MATCHED cases — the fixture
+            // writes `scout.md` into the scratch Space for every one of them,
+            // so if any of them ever resolves to `Unmatched` the three
+            // comparisons below are comparing a config-less launch against the
+            // modal's row and proving nothing.
+            assert_eq!(
+                name_resolution,
+                crate::agent::subagent::AgentNameResolution::Matched,
+                "both sides were handed a Space that defines `scout`: {settings_body}"
             );
 
             // SIDE 2 — the modal's command, fed the definitions the DISPATCH's

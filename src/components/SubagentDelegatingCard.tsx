@@ -18,6 +18,7 @@ import {
   getActivityDisplay,
 } from "../lib/subagentActivity";
 import { StatusIcon } from "./SubagentStatusIcon";
+import { MutedCaption } from "./MutedCaption";
 import { cn } from "./lib/utils";
 import { Button } from "./ui/button";
 import { ToolCallCardHeader } from "./ToolCallCardHeader";
@@ -62,7 +63,9 @@ import { ToolCallCardHeader } from "./ToolCallCardHeader";
  * `rounded-lg`), `text-foreground` + `hover:text-foreground` from `ghost` (every
  * piece of text in the row is a span/div that spells its own ink —
  * `text-foreground`, `text-foreground-subtle`, `text-foreground-subtlest`,
- * `text-destructive`, `text-success`, and the activity line's own `colorClass`),
+ * `text-destructive`, `text-success`, `text-warning` (the issue #47 resolve-miss
+ * caption, a `MutedCaption` span that spells its own ink through `cn()`), and
+ * the activity line's own `colorClass`),
  * `text-ui-base` from the size (it collapses the base's `text-ui-base/relaxed` in
  * the same font-size group so NO line-height is declared, and every text child
  * spells `text-ui-base` or `text-ui-xs` itself), `bg-clip-padding` (no border →
@@ -325,6 +328,12 @@ export default function SubagentDelegatingCard({
     // payload): the `progress` / `result` shapes are the older tool-result
     // detail stream and never carried a code.
     const reason = storeEntry?.reason;
+    // (issue #47) Likewise `nameResolution` exists ONLY on the store entry (the
+    // `subagent-session-started` payload — the resolver's own answer). It is
+    // deliberately NOT part of the `agentCandidate` chain above: that chain
+    // reads the model's CLAIM about a name, this is the resolver's ANSWER about
+    // one, and the two are different facts.
+    const nameResolution = storeEntry?.nameResolution;
 
     return {
       // `entry-${idx}` keeps the deleted block's fallback key for a task-less
@@ -343,6 +352,7 @@ export default function SubagentDelegatingCard({
       durationMs,
       error,
       reason,
+      nameResolution,
       progress,
       result,
       sessionMessages,
@@ -456,6 +466,21 @@ export default function SubagentDelegatingCard({
                           {row.task}
                         </span>
                       </>
+                    )}
+                    {/* (issue #47) The resolve miss — ONE quiet caption, and
+                        ONLY for `unmatched`. A name that matched no definition
+                        still dispatches (ADR 0020), so this must not read as a
+                        failure: the row keeps its name, its status icon, its
+                        metadata line and its click handler, and the child's
+                        real output still renders. `no_name` / `matched` /
+                        absent render nothing here at all. */}
+                    {row.nameResolution === "unmatched" && (
+                      <MutedCaption
+                        className="shrink-0 text-warning"
+                        title={`No Agent definition named "${row.agentName}" — this child loaded no persona, no tool allowlist and no model override, and ran the parent's config instead.`}
+                      >
+                        no matching Agent
+                      </MutedCaption>
                     )}
                   </div>
 

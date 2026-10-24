@@ -7,7 +7,9 @@ use tokio::sync::watch;
 
 use crate::agent::events::EventSink;
 use crate::agent::harness::catalog::{Model, ModelCatalog};
-use crate::agent::subagent::{LaunchConfig, SubagentFailureReason, SubagentOutcome};
+use crate::agent::subagent::{
+    AgentNameResolution, LaunchConfig, SubagentFailureReason, SubagentOutcome,
+};
 use crate::agent::worker::client::{WorkerError, WorkerHandle, WorkerInboundEvent};
 use crate::agent::worker::manager::{
     feed_capture, finish_subagent, note_liveness_event, note_liveness_frame, note_liveness_gate,
@@ -352,6 +354,7 @@ fn dispatch_child_task_with_id(
             parent_cwd: "/tmp/space".to_string(),
             parent_enabled_tools: vec!["bash".to_string(), "read".to_string()],
             agent_name: "tester".to_string(),
+            name_resolution: AgentNameResolution::Matched,
             launch: LaunchConfig::default(),
             task: task.to_string(),
             // The RESOLVED `provider/id` key (what `subagent.rs` composes —
@@ -1801,6 +1804,7 @@ async fn a_gate_whose_tool_closed_without_an_answer_is_still_closed() {
         parent_cwd: "/tmp/space".to_string(),
         parent_enabled_tools: vec!["bash".to_string()],
         agent_name: "tester".to_string(),
+        name_resolution: AgentNameResolution::Matched,
         launch: crate::agent::subagent::LaunchConfig::default(),
         task: "the parked task".to_string(),
         model_key: "fake/m1".to_string(),
@@ -1932,6 +1936,10 @@ async fn the_subagent_ui_lifecycle_events_fire_on_the_parent_sink() {
     assert_eq!(started["parentSessionId"], "u1");
     assert!(started["sessionId"].is_string(), "the child session id");
     assert_eq!(started["agentName"], "tester");
+    assert_eq!(
+        started["nameResolution"], "matched",
+        "the tri-state rides the payload"
+    );
     assert_eq!(started["task"], "the task");
     assert_eq!(
         started["model"], "fake/m1",
@@ -1960,6 +1968,130 @@ async fn the_subagent_ui_lifecycle_events_fire_on_the_parent_sink() {
     assert!(metrics["inputTokens"].is_u64());
     assert!(metrics["outputTokens"].is_u64());
     assert!(metrics["cost"].is_number());
+}
+
+/// (issue #47) The `subagent-session-started` payload names a resolve MISS, and
+/// its key set is pinned EXACTLY.
+///
+/// Three things this pins in one place, none of which a frontend test can see:
+///
+/// 1. the `nameResolution` key carries the WIRE spelling (`unmatched` /
+///    `no_name`) taken verbatim off the wire — from the REAL emit, not from a
+///    serde unit test;
+/// 2. the payload's key set is EXACTLY the eight keys — the byte-for-byte
+///    payload pin. It lives HERE (at the emitter) rather than in
+///    `src/lib/ipc/events.test.ts`, which pins event NAMES and nothing else;
+/// 3. the miss is NON-BLOCKING: the drive still reaches `subagent-closed` with
+///    `status: "completed"`, which is the acceptance criterion and the only way
+///    to prove it without a model.
+///
+/// Each case runs on its OWN parent session (its own `register_sink` +
+/// `attach`) so the two drives' events cannot be confused, and with a DISTINCT
+/// DISPATCH id (`subagent-result` / `subagent-cancel` route by DISPATCH id, so
+/// a shared id would attribute one drive's outcome to the other). The wire is
+/// built inline — a copy of `dispatch_child_task_with_id`'s nine field
+/// assignments with `name_resolution` differing per case — because that
+/// helper's signature is shared by ten call sites and stays untouched.
+#[tokio::test]
+async fn the_started_payload_names_a_resolve_miss_and_pins_its_full_key_set() {
+    for (parent, dispatch_id, resolution, want) in [
+        ("n1", "miss-1", AgentNameResolution::Unmatched, "unmatched"),
+        ("n2", "miss-2", AgentNameResolution::NoName, "no_name"),
+    ] {
+        let (manager, _crashes, _events, sinks) = make_manager(Some(Duration::from_secs(30)));
+        let sink_events = register_sink(&sinks, parent);
+        manager
+            .attach(parent, &test_env(parent, Some(vec!["bash".to_string()])))
+            .await
+            .expect("the parent attach completes");
+        manager.dispatch_subagent(
+            parent,
+            SubagentDispatchWire {
+                id: dispatch_id.to_string(),
+                parent_session_id: parent.to_string(),
+                parent_cwd: "/tmp/space".to_string(),
+                parent_enabled_tools: vec!["bash".to_string(), "read".to_string()],
+                agent_name: "tester".to_string(),
+                name_resolution: resolution,
+                launch: LaunchConfig::default(),
+                task: "the task".to_string(),
+                model_key: "fake/m1".to_string(),
+            },
+        );
+
+        // Bounded poll for `subagent-closed` (every exit path emits it) — the
+        // same shape as the neighbouring lifecycle test, so a missing frame is
+        // a failure and not a hang.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let got: Vec<(String, Value)> = sink_events
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
+            if got.iter().any(|(e, _)| e == "subagent-closed")
+                || tokio::time::Instant::now() >= deadline
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let got: Vec<(String, Value)> = sink_events
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let started = got
+            .iter()
+            .find(|(e, _)| e == "subagent-session-started")
+            .map(|(_, p)| p.clone())
+            .expect("the `subagent-session-started` fired on the parent's sink");
+
+        assert_eq!(
+            started["nameResolution"], want,
+            "the wire spelling rides the payload ({resolution:?})"
+        );
+        assert_eq!(
+            started["agentName"], "tester",
+            "the marker is ADDITIVE — the label never disappears"
+        );
+
+        // The byte-for-byte payload pin: EXACTLY these eight keys.
+        let keys: std::collections::BTreeSet<String> = started
+            .as_object()
+            .expect("the payload is an object")
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "sessionId",
+                "parentSessionId",
+                "agentName",
+                "nameResolution",
+                "task",
+                "model",
+                "thinkingLevel",
+                "enabledTools",
+            ]
+            .iter()
+            .map(|k| (*k).to_string())
+            .collect::<std::collections::BTreeSet<String>>(),
+            "the `subagent-session-started` key set is exactly eight keys ({want})"
+        );
+
+        // NON-BLOCKING: the miss never stops the child.
+        let closed = got
+            .iter()
+            .find(|(e, _)| e == "subagent-closed")
+            .map(|(_, p)| p.clone())
+            .expect("the `subagent-closed` fired on the parent's sink");
+        assert_eq!(
+            closed["status"], "completed",
+            "a resolve miss never fails the dispatch ({want})"
+        );
+        assert_eq!(closed["sessionId"], started["sessionId"], "the same child");
+        manager.detach(parent);
+    }
 }
 
 /// The `enabled_tools` wire convention (reviewer-corrected — the

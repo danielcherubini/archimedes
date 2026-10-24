@@ -7,6 +7,7 @@ import {
   listenInteractiveRequestClose,
   listenSessionTitled,
   listenSubagentClosed,
+  listenSubagentSessionStarted,
   startSession,
 } from "./lib/tauri";
 import { useSessions } from "./store/sessions";
@@ -1072,6 +1073,46 @@ describe("App (the `subagent-closed` listener)", () => {
     // 0040's amendment records (paraphrased here, not quoted): a closed child
     // keeps its gate card on screen until its entry is evicted.
     expect(useInteractive.getState().requests["sub1"]).toHaveLength(1);
+  });
+});
+
+/**
+ * (issue #47) The `subagent-session-started` listener's wiring.
+ *
+ * This is the one thing no component test can see: `SubagentDelegatingCard` and
+ * `SubagentDetailHost` are both tested against a store they seed themselves, so
+ * a handler that dropped `nameResolution` on the way in would leave every one of
+ * them green while the marker never appeared in the app.
+ */
+describe("App (the `subagent-session-started` listener)", () => {
+  const clearStore = () => {
+    for (const id of Object.keys(useSubagents.getState().entries)) {
+      useSubagents.getState().dismiss(id);
+    }
+    useSubagentSelection.getState().select(null);
+  };
+  beforeEach(clearStore);
+  afterEach(clearStore);
+
+  it("carries the payload's `nameResolution` into the store entry", () => {
+    render(<App />);
+    // The LAST registration is this render's (the file never clears mocks).
+    const calls = vi.mocked(listenSubagentSessionStarted).mock.calls;
+    const onStarted = calls[calls.length - 1][0];
+    act(() => {
+      onStarted({
+        sessionId: "sub1",
+        parentSessionId: "main1",
+        agentName: "reviewr",
+        task: "t",
+        // The issue's exact case: a typo in a correctly-spelled key.
+        nameResolution: "unmatched",
+      });
+    });
+    expect(useSubagents.getState().entries["sub1"].nameResolution).toBe(
+      "unmatched",
+    );
+    expect(useSubagents.getState().entries["sub1"].agentName).toBe("reviewr");
   });
 });
 
