@@ -241,6 +241,52 @@ impl Db {
             backfill_session_todos(&tx)?;
             tx.commit()?;
         }
+        // One-time migration for pre-existing databases: add `sort_order` to
+        // `spaces` (fresh databases already have it from SCHEMA) and seed it
+        // with the order the user was already looking at. The ALTER and the
+        // seed run in ONE transaction, so a crash rolls both back and retries
+        // on the next open — which is what makes the seed one-time rather than
+        // merely idempotent.
+        //
+        // TWO independent gates, one per table, because each gate probes and
+        // repairs its own table through `pragma_table_info`: a crash between
+        // the two commits leaves one table seeded and the other un-migrated,
+        // and that mixed state is SELF-HEALING — the next open re-probes both
+        // tables and runs whichever gate is still missing, independently. It
+        // also matches this file's one-column-per-gate style.
+        let has_space_sort_order: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('spaces') WHERE name = 'sort_order'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_space_sort_order == 0 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "ALTER TABLE spaces ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+            seed_space_sort_order(&tx)?;
+            tx.commit()?;
+        }
+        // The matching gate for `sessions` (see the `spaces` gate above for
+        // why the two are separate transactions). This gate — like the space
+        // one — runs BEFORE the phase-11 space backfill below, so a database
+        // that already has `sessions` rows but no `spaces` rows reaches the
+        // backfill with the session numbering already settled.
+        let has_session_sort_order: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'sort_order'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_session_sort_order == 0 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "ALTER TABLE sessions ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+            seed_session_sort_order(&tx)?;
+            tx.commit()?;
+        }
         // One-time migration for pre-existing databases: give
         // `native_messages` its `ON DELETE CASCADE` foreign key (a
         // pre-existing table cannot GAIN an FK in place — recreate it,
@@ -943,6 +989,72 @@ fn backfill_session_todos(conn: &Connection) -> Result<(), DbError> {
     Ok(())
 }
 
+/// One-time seed of `spaces.sort_order` on a pre-existing database (ADR 0075).
+///
+/// The read order is the OLD display order (`last_opened_at DESC, path ASC`)
+/// and is HARDCODED on purpose: at seed time every row still carries
+/// `DEFAULT 0`, so ordering by `sort_order` would be a pure tie and would pick
+/// an order nobody ever saw — the upgrade must reproduce the list the user was
+/// already looking at (ADR 0075's Consequences own the full reason).
+fn seed_space_sort_order(conn: &Connection) -> Result<(), DbError> {
+    let mut stmt =
+        conn.prepare("SELECT path FROM spaces ORDER BY last_opened_at DESC, path ASC")?;
+    let paths = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    // Close the read cursor before the writes start (the `backfill_session_todos`
+    // hygiene — a live Statement is not a compile or SQLite requirement).
+    drop(stmt);
+
+    for (index, path) in paths.iter().enumerate() {
+        conn.execute(
+            "UPDATE spaces SET sort_order = ?2 WHERE path = ?1",
+            params![path, index as i64],
+        )?;
+    }
+    Ok(())
+}
+
+/// One-time seed of `sessions.sort_order` on a pre-existing database (ADR 0075).
+///
+/// The read order is the OLD display order (last activity, then `id DESC`) and
+/// is HARDCODED on purpose for the same reason as `seed_space_sort_order`: at
+/// seed time the column is all `DEFAULT 0`, so it cannot be its own seed order.
+///
+/// NO `WHERE` — every row is numbered, hidden `is_subagent = 1` rows included
+/// (hazard H1): the bottom-join `MAX + 1` is global, so a hidden row already
+/// consumes a number, and seeding only the visible rows would duplicate values
+/// and tie them with the visible row at 0.
+fn seed_session_sort_order(conn: &Connection) -> Result<(), DbError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id FROM sessions ORDER BY {LAST_ACTIVITY} DESC, id DESC"
+    ))?;
+    let ids = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt); // close the read cursor before the writes (hygiene, as above)
+
+    for (index, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE sessions SET sort_order = ?2 WHERE id = ?1",
+            params![id, index as i64],
+        )?;
+    }
+    Ok(())
+}
+
+/// A session's last activity in unix milliseconds: the newest timestamp in its
+/// transcript, falling back to the row's own `created_at` when the transcript
+/// is empty (`COALESCE` on the SUBQUERY — `MAX()` over no rows is `NULL`, which
+/// SQLite sorts LAST in a `DESC` list, burying the newest thing on the list).
+///
+/// This is the single copy of the expression. It is the order the pre-manual
+/// `list_sessions` used, it is the order `seed_session_sort_order` reads with,
+/// and it is what the frontend prints as a session's `last_active_at` — so the
+/// number a row shows and the number a recency decision reads cannot drift.
+const LAST_ACTIVITY: &str = "COALESCE((SELECT MAX(m.created_at) FROM messages m \
+                             WHERE m.session_id = sessions.id), sessions.created_at)";
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
@@ -953,7 +1065,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     archived INTEGER NOT NULL DEFAULT 0,
     context_usage_json TEXT,
     is_subagent INTEGER NOT NULL DEFAULT 0,
-    todos_json TEXT
+    todos_json TEXT,
+    sort_order INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY,
@@ -977,7 +1090,8 @@ CREATE TABLE IF NOT EXISTS spaces (
     path TEXT PRIMARY KEY,
     created_at INTEGER NOT NULL,
     last_opened_at INTEGER NOT NULL,
-    trusted INTEGER NOT NULL DEFAULT 0
+    trusted INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0
 );
 "#;
 
@@ -2232,6 +2346,303 @@ mod tests {
             Some("sentinel".to_string())
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The pre-`sort_order` schema: the current `SCHEMA` with the
+    /// `sort_order` column absent from BOTH `sessions` and `spaces` — i.e.
+    /// exactly what a database written before the manual-order columns looks
+    /// like. `native_messages` keeps its FK so the phase-10 FK migration
+    /// stays quiet and the fixture exercises only the seed under test.
+    fn create_pre_sort_order_db(path: &Path) {
+        let conn = Connection::open(path).expect("raw open of the fixture db");
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                cwd TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                title TEXT,
+                capabilities_json TEXT NOT NULL,
+                archived INTEGER NOT NULL DEFAULT 0,
+                context_usage_json TEXT,
+                is_subagent INTEGER NOT NULL DEFAULT 0,
+                todos_json TEXT
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                message_key TEXT,
+                payload_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE(session_id, kind, message_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
+            CREATE TABLE native_messages (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                seq INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE(session_id, seq)
+            );
+            CREATE TABLE spaces (
+                path TEXT PRIMARY KEY,
+                created_at INTEGER NOT NULL,
+                last_opened_at INTEGER NOT NULL,
+                trusted INTEGER NOT NULL DEFAULT 0
+            );",
+        )
+        .expect("fixture schema should build");
+        drop(conn);
+    }
+
+    /// Reads a single TEXT column through the raw connection (the row structs
+    /// never select `sort_order`, so the seed assertions go straight to SQL).
+    fn raw_column(db: &Db, sql: &str) -> Vec<String> {
+        let guard = db.conn.lock().expect("db mutex poisoned");
+        let rows = guard
+            .prepare(sql)
+            .expect("prepare should succeed")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query should succeed")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows should read");
+        rows
+    }
+
+    /// (sort_order) A FRESH database gains the column from `SCHEMA` alone —
+    /// no migration runs (the pragma gate in `Db::open` skips it).
+    #[test]
+    fn sort_order_columns_exist_on_a_fresh_database() {
+        let dir = std::env::temp_dir().join(format!("db-sortfresh-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).expect("db should open");
+        let conn = db.conn.lock().expect("db mutex poisoned");
+        for table in ["spaces", "sessions"] {
+            let has: i64 = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = 'sort_order'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("pragma query should succeed");
+            assert_eq!(
+                has, 1,
+                "a fresh database has sort_order on {table} straight from SCHEMA"
+            );
+        }
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// (sort_order) A pre-existing database is seeded in the order the user
+    /// was ALREADY looking at for spaces: `last_opened_at DESC, path ASC`.
+    /// The assertion pins BOTH halves of that read order — `/x/b` leads on
+    /// recency, and `/x/a` beats `/x/c` on the `path ASC` tie-break at a tied
+    /// timestamp. No `sessions` rows are inserted, so the phase-11 space
+    /// backfill cannot add rows and pollute the assertion.
+    #[test]
+    fn sort_order_seeded_in_the_old_space_order_on_a_preexisting_db() {
+        let dir = std::env::temp_dir().join(format!("db-sortspace-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        create_pre_sort_order_db(&path);
+        let conn = Connection::open(&path).expect("raw open of the fixture db");
+        for (path_value, created, opened) in [
+            ("/x/b", 1_i64, 3_000_i64),
+            ("/x/a", 1, 2_000),
+            ("/x/c", 1, 2_000),
+        ] {
+            conn.execute(
+                "INSERT INTO spaces (path, created_at, last_opened_at) VALUES (?1, ?2, ?3)",
+                params![path_value, created, opened],
+            )
+            .expect("fixture space row");
+        }
+        drop(conn);
+
+        let db = Db::open(&path).expect("the sort_order seed must not brick startup");
+        let paths: Vec<String> = raw_column(
+            &db,
+            "SELECT path FROM spaces ORDER BY sort_order ASC, path ASC",
+        );
+        assert_eq!(
+            paths,
+            vec!["/x/b", "/x/a", "/x/c"],
+            "the seed numbers the spaces in the OLD display order \
+             (last_opened_at DESC, then path ASC on a tied timestamp)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// (sort_order) A pre-existing database is seeded in the order the user
+    /// was ALREADY looking at for sessions: last activity (the `COALESCE`
+    /// expression) then `id DESC`. That order is neither `id DESC` alone nor
+    /// `created_at DESC` alone, so the assertion pins the whole expression.
+    #[test]
+    fn sort_order_seeded_in_the_old_session_order_on_a_preexisting_db() {
+        let dir = std::env::temp_dir().join(format!("db-sortsess-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        create_pre_sort_order_db(&path);
+        let conn = Connection::open(&path).expect("raw open of the fixture db");
+        // A cwd that does not exist on disk: the phase-11 space backfill skips
+        // it, so the fixture stays about sessions only.
+        for (id, created) in [
+            ("s_old_used", 1_000_i64),
+            ("s_stale", 2_000),
+            ("s_fresh", 3_000),
+        ] {
+            conn.execute(
+                "INSERT INTO sessions (id, cwd, created_at, capabilities_json, is_subagent) \
+                 VALUES (?1, '/x/nope-not-a-folder', ?2, '{}', 0)",
+                params![id, created],
+            )
+            .expect("fixture session row");
+        }
+        // The OLDEST-created session is the most recently USED one.
+        conn.execute(
+            "INSERT INTO messages (session_id, kind, message_key, payload_json, created_at) \
+             VALUES ('s_old_used','user',NULL,'{}',9999)",
+            [],
+        )
+        .expect("fixture message row");
+        drop(conn);
+
+        let db = Db::open(&path).expect("the sort_order seed must not brick startup");
+        let ids: Vec<String> = raw_column(
+            &db,
+            "SELECT id FROM sessions ORDER BY sort_order ASC, id DESC",
+        );
+        assert_eq!(
+            ids,
+            vec!["s_old_used", "s_fresh", "s_stale"],
+            "the seed numbers the sessions in the OLD display order \
+             (last activity DESC, then id DESC)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// (sort_order) The seed is GATED, not merely idempotent: after the first
+    /// open the pragma gate is closed, so a re-open never rewrites the
+    /// numbers. The sentinel idiom from
+    /// `legacy_db_migration_backfills_newest_non_read_todos_once`.
+    #[test]
+    fn sort_order_seed_does_not_rerun_on_reopen() {
+        let dir = std::env::temp_dir().join(format!("db-sortonce-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        create_pre_sort_order_db(&path);
+        let conn = Connection::open(&path).expect("raw open of the fixture db");
+        conn.execute(
+            "INSERT INTO spaces (path, created_at, last_opened_at) VALUES ('/x/a', 1, 1000)",
+            [],
+        )
+        .expect("fixture space row");
+        conn.execute(
+            "INSERT INTO sessions (id, cwd, created_at, capabilities_json, is_subagent) \
+             VALUES ('s_a', '/x/nope-not-a-folder', 1, '{}', 0)",
+            [],
+        )
+        .expect("fixture session row");
+        drop(conn);
+
+        let db = Db::open(&path).expect("first open should seed the column");
+        {
+            let conn = db.conn.lock().expect("db mutex poisoned");
+            conn.execute(
+                "UPDATE spaces SET sort_order = 4242 WHERE path = ?1",
+                params!["/x/a"],
+            )
+            .expect("sentinel space write");
+            conn.execute(
+                "UPDATE sessions SET sort_order = 77 WHERE id = ?1",
+                params!["s_a"],
+            )
+            .expect("sentinel session write");
+        }
+        drop(db);
+
+        let db = Db::open(&path).expect("re-open of the migrated db must succeed");
+        let conn = db.conn.lock().expect("db mutex poisoned");
+        let space_value: i64 = conn
+            .query_row(
+                "SELECT sort_order FROM spaces WHERE path = ?1",
+                params!["/x/a"],
+                |row| row.get(0),
+            )
+            .expect("read the space sentinel");
+        let session_value: i64 = conn
+            .query_row(
+                "SELECT sort_order FROM sessions WHERE id = ?1",
+                params!["s_a"],
+                |row| row.get(0),
+            )
+            .expect("read the session sentinel");
+        assert_eq!(
+            space_value, 4242,
+            "the seed gate is closed on the second open, so the space sentinel survives"
+        );
+        assert_eq!(
+            session_value, 77,
+            "the seed gate is closed on the second open, so the session sentinel survives"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// (hazard H1) The seed renumbers EVERY session row, hidden subagent rows
+    /// included — no `WHERE`. `MAX + 1` is global and `ensure_session_row`
+    /// routes subagent rows through `record_session`, so a hidden row already
+    /// consumes a number: seeding only the visible rows would duplicate
+    /// values and tie them with the visible row at 0.
+    #[test]
+    fn sort_order_seed_numbers_subagent_rows_too() {
+        let dir = std::env::temp_dir().join(format!("db-sortsub-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        create_pre_sort_order_db(&path);
+        let conn = Connection::open(&path).expect("raw open of the fixture db");
+        for (id, is_subagent) in [("s_main_1", 0_i64), ("s_main_2", 0), ("s_sub", 1)] {
+            conn.execute(
+                "INSERT INTO sessions (id, cwd, created_at, capabilities_json, is_subagent) \
+                 VALUES (?1, '/x/nope-not-a-folder', 1, '{}', ?2)",
+                params![id, is_subagent],
+            )
+            .expect("fixture session row");
+        }
+        drop(conn);
+
+        let db = Db::open(&path).expect("the seed must number hidden rows too");
+        let conn = db.conn.lock().expect("db mutex poisoned");
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .expect("count sessions");
+        let distinct: i64 = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT sort_order) FROM sessions",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count distinct sort_order");
+        let at_zero: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE sort_order = 0",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count rows at sort_order 0");
+        assert_eq!(total, 3, "three fixture rows are stored");
+        assert_eq!(
+            distinct, 3,
+            "every row (the hidden subagent row included) got its own number"
+        );
+        assert_eq!(
+            at_zero, 1,
+            "exactly one row sits at 0 — no tie with the hidden row"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
