@@ -70,7 +70,7 @@ never share a wave. Wave 6 is the only parallel wave.
 | # | Task | Plan file | Wave | Seam (disjointness evidence) | Status |
 |---|------|-----------|------|------------------------------|--------|
 | T01 | SQLite `sort_order` on `spaces` + `sessions`: schema, pragma-gated migration seeded `0..n` in today's order, `MAX+1` on insert, `ORDER BY` swap on `list_spaces`/`list_sessions`, `reorder_spaces`/`reorder_sessions` in one transaction | `docs/roadmap/manual-list-order-task01-sort-order-columns.md` | 1 | `src-tauri/src/storage/db.rs` (owned outright) + `src-tauri/tests/storage.rs` | `done` `221d306` |
-| T02 | IPC surface: `last_active_at` SELECTed from the existing `COALESCE` expression (characterisation test first), the two reorder commands exposed + registered, TS mirrors in `lib/tauri/` | `docs/roadmap/manual-list-order-task02-ipc-last-active-at.md` | 2 | `src-tauri/src/storage/db.rs` (SessionRecency + Db::session_recency — DEVIATION: not types.rs, see Decisions), `src-tauri/src/commands/{history,spaces}.rs`, `src-tauri/src/lib.rs`, `src/lib/tauri/types.ts`, `src/lib/tauri/commands/*`, `src-tauri/tests/ipc.rs` | `todo` |
+| T02 | IPC surface: `last_active_at` SELECTed from the existing `COALESCE` expression (characterisation test first), the two reorder commands exposed + registered, TS mirrors in `lib/tauri/` | `docs/roadmap/manual-list-order-task02-ipc-last-active-at.md` | 2 | `src-tauri/src/storage/db.rs` (SessionRecency + Db::session_recency — DEVIATION: not types.rs, see Decisions), `src-tauri/src/commands/{history,spaces}.rs`, `src-tauri/src/lib.rs`, `src/lib/tauri/types.ts`, `src/lib/tauri/commands/*`, `src-tauri/tests/ipc.rs` | `done` `3386975` |
 | T03 | Store derivation: `recencyOf` (new module beside `sessionTitle.ts`), `SpaceView.sessionIds` replaces the live/stored pair, the four position-reading landing rules switch to recency, Archived sorts explicitly | `docs/roadmap/manual-list-order-task03-store-derivation.md` | 3 | `src/store/sessions.ts`, `src/lib/sessionRecency.ts` (new), `src/store/sessions.test.ts` | `todo` |
 | T04 | Sidebar renders one list: delete `sortByActivity` memos + the activity subscription, `railIds = sessionIds`, DELETE `src/lib/sessionActivity.ts` and its test, delete the 3 ordering tests, reword the rail pin | `docs/roadmap/manual-list-order-task04-sidebar-one-list.md` | 4 | `src/components/SpacesList.tsx`, delete `src/lib/sessionActivity.ts` + `.test.ts` | `todo` |
 | T05 | The drag gesture: `useDragReorder` hook (dragProps, before/after by pointer half, indicator state) + the store's optimistic reorder actions over one IPC call | `docs/roadmap/manual-list-order-task05-drag-reorder-hook.md` | 5 | `src/hooks/useDragReorder.ts` (new) + test; `src/store/sessions.ts` (reorder actions only) | `todo` |
@@ -166,6 +166,29 @@ deliberately left undone.
   harness driving a command NAME through the real dispatcher; its
   `#![cfg(target_os = "linux")]` gate is recorded as a limit, not hidden).
   Scope discipline confirmed: no task touches src/store/ or any component.
+
+- 2026-10-24 — **T02 DONE** (`3c8238c` + `d509958` + `cc7ae06`, flake fix `3386975`).
+  Gates measured by the orchestrator: `cargo test` **1462 / 0 failed** · clippy
+  **0 warnings** · fmt clean · `pnpm test` **3066 / 149 files** · `pnpm build`
+  green. Scope proofs verified in the tree, not reported: `SessionInfo` gained
+  NO field; **0** files under `src/store/`, `src/components/`, `src/hooks/` or
+  `src/App.tsx` touched since T01; `grep sort_order src/` still **0** hits (the
+  column never reaches the frontend); 3 commands registered in `lib.rs`;
+  `SessionRecency` in `types.ts`; 3 wrappers under `src/lib/tauri/commands/`.
+- 2026-10-24 — **T01 DEFECT FOUND AND FIXED (was mine, was in T01's seam):**
+  `tests/storage.rs::spaces_upsert_find_delete` failed **~50% of runs** (measured
+  3 fails in 6 before, 14 passes in 14 after). Root cause: on `main` that test
+  had THREE `sleep(5ms)` calls; two guarded the recency-order assertions T01
+  deliberately deleted, but the THIRD sat before the re-upsert of `/tmp/pb` and
+  was the only thing making the SURVIVING `pb.created_at > pa_before.created_at`
+  assertion deterministic — `Db::upsert_space` stamps `now_ms()`, so two calls
+  in one millisecond tie. T01's plan said "drop the sleeps" and all three went.
+  LESSON, generalised: **when deleting assertions, check whether a sleep is
+  load-bearing for a DIFFERENT surviving assertion.** Fixed by restoring exactly
+  one sleep with a comment naming why it is load-bearing.
+- 2026-10-24 — **`/tmp` hygiene:** the flake-fix child deleted NO shared state;
+  inodes stayed 35→38%. The earlier 113k-directory cleanup remains a one-off
+  breach by the T01 child, not a pattern.
 
 ## Changelog
 
