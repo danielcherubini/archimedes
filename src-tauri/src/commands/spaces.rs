@@ -7,7 +7,7 @@ use tauri::State;
 
 use crate::agent::worker::manager::WorkerManager;
 use crate::agent::SpacesError;
-use crate::storage::Db;
+use crate::storage::{Db, DbError};
 
 /// The folder check + canonicalizer for the new-space dialog.
 ///
@@ -65,6 +65,26 @@ pub async fn delete_space(state: State<'_, Arc<Db>>, path: String) -> Result<(),
     state
         .delete_space(&path)
         .map_err(|e| SpacesError::Database(e.to_string()))
+}
+
+/// Rewrite the manual order of the spaces in ONE transaction (only a drag
+/// calls this — ADR 0075).
+///
+/// Keyed by `paths`, not ids: the `spaces` table's key IS the canonical path
+/// (`space_key`), and the values arriving from `list_spaces` are already that
+/// stored key. The command layer deliberately does NOT re-canonicalize — a
+/// folder that vanished mid-drag would then be silently skipped and leave a
+/// PARTIAL renumber behind, the worst outcome (see `Db::reorder_spaces`).
+#[tauri::command]
+pub async fn reorder_spaces(
+    state: State<'_, Arc<Db>>,
+    paths: Vec<String>,
+) -> Result<(), SpacesError> {
+    reorder_space_rows(&state, &paths).map_err(|e| SpacesError::Database(e.to_string()))
+}
+
+pub(crate) fn reorder_space_rows(db: &Db, paths: &[String]) -> Result<(), DbError> {
+    db.reorder_spaces(paths)
 }
 
 /// Set (or clear) a space's trust flag (Trusted Space, ADR 0010).
@@ -153,5 +173,47 @@ mod tests {
         db.upsert_space(&check.canonical_path, false).unwrap();
         let check_after = resolve_space_for_path(&db, path_str).unwrap();
         assert!(check_after.is_space);
+    }
+
+    /// (ADR 0075) `reorder_space_rows` writes the slice in the GIVEN order: the
+    /// paths arrive as `[c, a, b]` and `list_spaces` reads that back verbatim, so
+    /// the command layer cannot sort or reorder a tab-strip drag. The paths are
+    /// the STORED keys (the canonical paths `list_spaces` returns) — the command
+    /// layer deliberately does NOT re-canonicalize, so the test feeds exactly
+    /// what the frontend would send. Also proves the
+    /// `Vec<String> → &[String]` deref the `#[tauri::command]` wrapper needs.
+    #[test]
+    fn reorder_space_rows_writes_the_slice_in_given_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("test.db")).unwrap();
+        // `space_key` canonicalizes, so the folders must EXIST.
+        let mut keys: Vec<String> = Vec::new();
+        for name in ["a", "b", "c"] {
+            let folder = dir.path().join(name);
+            std::fs::create_dir_all(&folder).unwrap();
+            db.upsert_space(folder.to_str().unwrap(), false).unwrap();
+            keys.push(
+                std::fs::canonicalize(&folder)
+                    .unwrap()
+                    .display()
+                    .to_string(),
+            );
+        }
+        let [a, b, c] = <[String; 3]>::try_from(keys).expect("three space keys");
+
+        reorder_space_rows(&db, &[c.clone(), a.clone(), b.clone()])
+            .expect("reorder_space_rows should succeed");
+
+        let listed: Vec<String> = db
+            .list_spaces()
+            .expect("list_spaces should succeed")
+            .into_iter()
+            .map(|s| s.path)
+            .collect();
+        assert_eq!(
+            listed,
+            vec![c, a, b],
+            "the given slice order IS the stored order"
+        );
     }
 }
