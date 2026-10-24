@@ -2019,6 +2019,60 @@ describe("SpacesList (archive, ADR 0016)", () => {
     expect(screen.queryByText("Beta archived work two")).toBeNull();
   });
 
+  it("lists the Archived rows in RECENCY order when the store's input order (the Manual order) disagrees", () => {
+    // THE LIVE DEFECT ADR 0075 predicted. The section rendered
+    // `archived.filter(…)` in INPUT order and inherited recency for free, because
+    // `list_sessions` used to sort by the last-activity expression. T01 swapped
+    // that `ORDER BY` to the Manual order, so the same filter has been presenting
+    // a manual arrangement under a heading that means recency — and passing every
+    // archived test in this file, because not one of them asserted the ORDER.
+    //
+    // TWO COMPETING ANSWERS: input order (what the component does today, and what
+    // the Manual order now means) answers "first" then "last"; the store's
+    // `archivedInSpace` explicit recency sort answers "last" then "first".
+    // Flipping the two `sessionRecency` values flips the expectation, so this
+    // cannot pass by accident.
+    //
+    // `sessions`/`historySessions` are emptied so nothing else competes for the
+    // DOM positions; both rows carry a generated `title`, so no transcript is
+    // needed for the labels to be queryable.
+    useSessions.setState({
+      sessions: [],
+      historySessions: [],
+      archivedSessions: [
+        makeSessionRow({
+          sessionId: "a_first",
+          cwd: "/tmp/alpha",
+          archived: true,
+          title: "Archived first in the manual order",
+        }),
+        makeSessionRow({
+          sessionId: "a_second",
+          cwd: "/tmp/alpha",
+          archived: true,
+          title: "Archived last in the manual order",
+        }),
+      ],
+      // `a_second` is the RECENT one (a far-future stamp, never arithmetic that
+      // can tie) while the input order puts it SECOND.
+      sessionRecency: { a_first: 1_000, a_second: 9_000_000_000_000 },
+    });
+    render(<SpacesList />);
+    fireEvent.click(screen.getByText("Archived"));
+    const firstInManual = screen.getByText("Archived first in the manual order");
+    const lastInManual = screen.getByText("Archived last in the manual order");
+    expect(
+      lastInManual.compareDocumentPosition(firstInManual) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // …and the BADGE still counts the array the rows came from (the joint
+    // property "the header count counts the active Space's rows only" pins for
+    // the cross-Space case; this closes the SORT half of it). Scoped to the
+    // header row — a bare `getByText("2")` would match a count anywhere in the
+    // pane.
+    expect(rowOf("Archived").getByText("2")).toBeTruthy();
+  });
+
   it("renders the empty state with NO Space selected, even though archived rows exist", () => {
     // `cwd === activeSpacePath` matches nothing when no Space is selected, which
     // is honest: those rows are Detached (CONTEXT.md) and live in Settings →

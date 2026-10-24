@@ -35,7 +35,7 @@ import {
   subscribeLeftPane,
 } from "../lib/leftPaneState";
 import { openNewSpaceDialog } from "../lib/newSpaceDialogState";
-import { useSessions, spaceViewFor } from "../store/sessions";
+import { archivedInSpace, useSessions, spaceViewFor } from "../store/sessions";
 import { useSessionStatus } from "../hooks/useSessionStatus";
 import { useSessionStatuses } from "../hooks/useSessionStatus";
 import { useSkillCatalog } from "../hooks/useSkillCatalog";
@@ -821,10 +821,19 @@ function SessionRow({
  * The **active Space's** Archived section: the archived rows whose `cwd` is the
  * selected Space, rendered AFTER that Space's groups and scrolling with the
  * list. COLLAPSED by default; the header (icon + "Archived" + count + chevron)
- * toggles it. The count is the SAME predicate the rows are filtered by, so it is
- * the Space's count and never the app-wide total.
+ * toggles it. The count is the SAME array the rows render, so it is the Space's
+ * count and never the app-wide total.
  *
- * Two filters, both load-bearing:
+ * The ORDER is explicit recency, and the two filters below are `archivedInSpace`'s
+ * rather than this component's — one call, so the badge, the rows and the sort
+ * cannot disagree. This section is the list ADR 0075 calls the trap: it used to
+ * inherit its order from the query's input order and get recency for free, and
+ * once that query returned the Manual order it presented a manual arrangement
+ * under a heading that means recency while passing every test that did not assert
+ * the order.
+ *
+ * Two filters, both load-bearing (applied by the store function, whose own doc
+ * says why):
  * - the sticky live ids are view-filtered out — a resumed archived session
  *   renders in its Space group (live), not here (CONTEXT.md "Archived session");
  * - rows of another Space are excluded — the section is the SELECTED Space's, so
@@ -849,11 +858,21 @@ function ArchivedSection({
   const archived = useSessions((s) => s.archivedSessions);
   const sessions = useSessions((s) => s.sessions);
   const activeSpacePath = useSessions((s) => s.activeSpacePath);
-  const visible = archived.filter(
-    (s) =>
-      s.cwd === activeSpacePath &&
-      !sessions.some((l) => l.sessionId === s.sessionId),
-  );
+  // The recency the section sorts by (ADR 0075). `{ recency }` only, never
+  // `{ recency, messages }`: subscribing this section to the transcripts would
+  // re-render it on every streamed token, and the boot map is the same SQL
+  // expression the row's label reads (T03's D3, inherited here).
+  const sessionRecency = useSessions((s) => s.sessionRecency);
+  // ONE call, so the badge and the rows cannot disagree, and so the sort is the
+  // STORE's — said out loud — rather than an order inherited from a query that
+  // since ADR 0075 returns the Manual order. The defect this line closes: the
+  // section used to `archived.filter(…)` in input order and inherit recency for
+  // free, and after T01's ORDER BY swap that input order became the Manual
+  // order — a manual arrangement under a heading that means recency, passing
+  // every test that did not assert the order (this is the one that does).
+  const visible = archivedInSpace(activeSpacePath, archived, sessions, {
+    recency: sessionRecency,
+  });
   return (
     <div className="px-2.5 py-1">
       <RowButton
