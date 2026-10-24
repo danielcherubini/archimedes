@@ -185,6 +185,15 @@ None. Everything deliberately not fixed is in `docs/roadmap/issue-triage-backlog
   what `git branch --show-current` says" worked twice. Gate after R3: Rust 1436/0/4, clippy 0, fmt
   clean, gnu check, FE 3063/149, build 0, harnesses 155+156+others.
   Round 4 dispatched to confirm zero actionable.
+- 2026-10-24 — **Rounds 4–5** (skill max is 5 iterations, hit). R4: 0 blocking, 2 minor + 3 nits →
+  `a4c541b`. R5 (confirmation): 2 major + 3 minor, all prose/test-shape, all measured → `f647151`.
+  R5's two majors: a test that banned the WORD "configured" and reddened a correct rewording (now bans
+  the two wrong PHRASES, three legs proved); and the "pinned byte-unchanged by a test" belief — measured
+  FALSE (TWO→FOUR reddens 0 of 24) yet surviving in two files besides the one that was fixed. After
+  `f647151` the orchestrator ran the FULL gate itself: Rust 1436/0/4, clippy 0, fmt clean, gnu check 0,
+  FE 3063/149 (fixer ran full vitest; orchestrator re-ran the touched suite 24/24), build 0, all 5 shell
+  harnesses 0, tree clean. Remaining findings at exit: ZERO actionable — the loop ends by evidence, not
+  by the iteration cap.
 - 2026-10-24 — **`/tmp` hygiene**: tmpfs hit 80% (77k entries: 1,570 abandoned vitest `client`/`ssr`
   caches + ~2,400 stale test data dirs `UUID/archimedes.db`) and vitest began ENOENT-ing its mock cache
   — environment, not the diff (proved by stashing). Cleaned ~6 GB (mine, >1-day, provably single-child;
