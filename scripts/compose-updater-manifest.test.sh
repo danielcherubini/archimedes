@@ -542,6 +542,27 @@ assert_eq "the seeded manifest does NOT survive a typo typed before --out" \
 assert_eq "and it is GONE rather than intact-previous (the stale file the upload step would clobber onto the release)" \
   "absent" "$(previous_manifest_state "$out_file")"
 
+#     The `--out=FILE` arm of that scan, pinned. This composer has NO `--out=`
+#     parse arm, so the glued spelling is itself refused as an unknown argument —
+#     that refusal is the FIRST assertion, not something the case papers over: the
+#     tool does not accept this spelling and does not pretend to. What the arm is
+#     for is the cleanup, and it is the only thing that can serve it here, because
+#     the refusal fires before the loop assigns anything, so `$out_file` is empty
+#     and the designated path exists ONLY inside the typed argv. Deleting the arm
+#     leaves the seeded manifest on disk and reddens the state assertion below
+#     (measured: `intact-previous`) — which is what makes a defensive branch
+#     tested rather than dead. No separate exit-code assertion: were the parser
+#     ever to grow an `--out=` arm, the run would SUCCEED and rewrite the path,
+#     and the state assertion would read `rewritten` and go red on that too.
+seed_previous_manifest "$out_file"
+status=0
+output="$("$compose_script" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" \
+  --repo "$repo" --out="$out_file" 2>&1)" || status=$?
+assert_contains "the glued --out=FILE spelling is refused as an unknown argument" \
+  "unknown argument: --out=" "$output"
+assert_eq "and the seeded manifest at that glued path is still removed by the scan" \
+  "absent" "$(previous_manifest_state "$out_file")"
+
 # The same order trap on the SECOND gate's flag, so the fix is not pinned only to
 # the `unknown argument` arm: `--require-payload` refuses deep in the run, and with
 # `--out` typed last the parser had reached `--out` by then. Green before the fix

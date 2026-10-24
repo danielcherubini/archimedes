@@ -54,9 +54,18 @@ usage: compose-updater-manifest.sh --sigs-dir DIR --version X.Y.Z --tag TAG \
 USAGE
 }
 
-# Every exit-1 path funnels through here so a rejected manifest can never be
+# Every refusal funnels through here so a rejected manifest can never be
 # left on disk for the next step to `gh release upload` — a partial `latest.json`
 # published over a good one is worse than no manifest at all.
+#
+# "Every refusal", NOT "every exit 1": a few paths leave 1 behind without ever
+# reaching this function — the missing shape library at the top of the file, a
+# value-less flag at the END of the line (a bash shift fault, so no message at
+# all), and an `--out` path the OS refuses. None of those reports a refusal, and
+# none of them touches the manifest, so the promise above is exactly as wide as
+# this function is. (AGENTS.md step 4 and ADR 0052's amendment state this RULE by
+# name — "everything that reports no refusal" — rather than by counting paths, so
+# the set here can grow without the prose going stale.)
 #
 # THE TARGET IS THE INVOCATION'S `--out`, NOT THE `$out_file` VARIABLE. The parse
 # loop fills `$out_file` only when it REACHES `--out`, and a refusal can fire before
@@ -86,6 +95,13 @@ fail() {
         target="$argument"
         break
       fi
+      # DEFENSIVE by design: the parse loop has no `--out=FILE` arm, so this
+      # spelling is refused as `unknown argument: --out=FILE` and `$out_file` is
+      # left empty — which is exactly when the scan runs, and exactly the case
+      # where it is the ONLY way to find the designated path. It is here so the
+      # cleanup promise does not depend on a future `--out=FILE` arm being added
+      # or on the operator's spelling; the harness pins it by typing `--out=`
+      # once and asserting both the refusal and the seeded manifest being gone.
       if [[ "$argument" == --out=* ]]; then
         target="${argument#--out=}"
         break

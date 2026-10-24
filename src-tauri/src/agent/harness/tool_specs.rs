@@ -308,7 +308,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                     "search": { "type": "string", "description": "Search tools by name/description keyword" },
                     "describe": { "type": "string", "description": "Tool name to show full parameter schema for" },
                     "connect": { "type": "string", "description": "Server name to eagerly connect" },
-                    "server": { "type": "string", "description": "Scopes the call to one server (search, describe, that server's tool list, or a tool call), and it must name a server that is actually configured — a name the config does not contain fails rather than answering 'not found'" },
+                    "server": { "type": "string", "description": "Scopes the call to one server (search, describe, that server's tool list, or a tool call), and it must name a server this session holds — an entry the config marks disabled (or a legacy sse / malformed one) is not held, so a name outside that set fails rather than answering 'not found'" },
                     "action": { "type": "string", "description": "Action string ('status' or 'auth')" }
                 }
             }),
@@ -1041,10 +1041,29 @@ mod tests {
              to it: {d}"
         );
         assert!(d.contains("search"), "and `search`: {d}");
+        // The requirement clause names the set the manager HOLDS, exactly the
+        // way `mcp::tool`'s failure message does (`unknown_server_scope`). It
+        // must NOT say "configured": `types::classify_server` drops a
+        // `disabled: true` (or legacy `sse` / malformed) entry before the
+        // manager ever sees it, so a server the user DID configure answers
+        // `Unknown MCP server` — a sentence calling the requirement
+        // "configured" contradicts the user's own settings file, which is why
+        // `bd07fbf`'s other half abandoned that wording in `tool.rs`. Pinned
+        // both ways: the positive claim, and the absence of the wrong word.
         assert!(
-            d.to_lowercase().contains("must name") || d.to_lowercase().contains("configured"),
-            "and that the name has to be a real one — a guessed name is a FAILURE, not a \
-             'not found': {d}"
+            d.contains("this session holds"),
+            "the requirement is a server the session HOLDS (the wording \
+             `unknown_server_scope` fails with), not a name from the config: {d}"
+        );
+        assert!(
+            !d.to_lowercase().contains("configured"),
+            "`configured` must not be the requirement word — a configured-but-\
+             disabled server is not held and answers Unknown, so the word \
+             contradicts the settings file: {d}"
+        );
+        assert!(
+            d.contains("fails"),
+            "and that a name outside that set is a FAILURE, not a 'not found': {d}"
         );
         // One sentence: this is the model's only briefing on the param, and the
         // surrounding workflow lines carry the rest. (No sentence-terminating

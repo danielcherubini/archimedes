@@ -75,8 +75,10 @@ impl StoredAuth {
 /// that window is expired for our purposes.
 ///
 /// Everything inside the margin goes through `oauth::refresh`, and that grant
-/// is NOT cancellable (see `refresh`) — which is why a Stop can cost up to one
-/// refresh round trip rather than being instant. The trade-off was taken on
+/// is NOT cancellable (see `refresh`) — but it does not cost stop-latency:
+/// `manager::refresh_and_persist` runs the grant on a DETACHED task, so a Stop
+/// drops only the caller's await and returns immediately while the task keeps
+/// the rotation and writes it a moment later. The trade-off was taken on
 /// purpose:
 ///
 /// - `refresh` is a two-phase thing. Before the `POST` nothing is spent, so a
@@ -85,8 +87,9 @@ impl StoredAuth {
 ///   the future at that point loses the rotation permanently and leaves a dead
 ///   token on disk, so the next attempt re-sends a token the server already
 ///   revoked and the server lands in `NeedsAuth` — a full browser flow for
-///   something that had a perfectly good credential. Correctness over
-///   stop-latency (and the grant is bounded by the caller's own HTTP timeout).
+///   something that had a perfectly good credential. Correctness over a
+///   cancellable grant (and the grant is bounded by the HTTP timeout on the
+///   client `manager::refresh_and_persist` builds for it).
 /// - REJECTED: "on cancel, just keep using the stored token". It cannot work —
 ///   the stored refresh token is precisely the thing the server just consumed,
 ///   and the stored ACCESS token is the one that is expired (that is why we are
@@ -373,11 +376,12 @@ pub async fn client_credentials_grant(
 /// the `mcp` tool's `auth` action (a fresh interactive flow).
 ///
 /// CANCELLATION — the invariant is **a completed rotation is never dropped on
-/// the floor**, so this future is deliberately NOT cancellable. It takes no
-/// cancel token and its caller runs it to completion even when the turn has
-/// been cancelled (see `manager::usable_token_provider`); the bound on that
-/// wait is this client's own HTTP timeout. The alternatives were weighed and
-/// rejected:
+/// the floor**, so this grant is deliberately NOT cancellable. It takes no
+/// cancel token, and the thing that runs it is not the cancellable caller at
+/// all: `manager::refresh_and_persist` spawns it on a detached task, so the run
+/// finishes and persists even after the turn has been cancelled; the bound on
+/// the run is the HTTP timeout on the client that function builds. The
+/// alternatives were weighed and rejected:
 ///
 /// - racing the `POST` against a cancel token: the window in which a cancel is
 ///   harmless is BEFORE the request is sent, and there is no await point in
@@ -385,13 +389,22 @@ pub async fn client_credentials_grant(
 ///   ever lose by firing exactly where it must not (the response arrives, the
 ///   caller is gone, the rotated refresh token is gone with it). A "cancel only
 ///   before the send" variant needs the caller to poll a flag at a point that
-///   does not exist, and buys a few milliseconds of stop-latency.
+///   does not exist, and buys stop-latency the detached task already gives for
+///   free.
 /// - returning the stored token on cancel: the stored refresh token is the one
 ///   the server just consumed and the stored access token is the one that is
 ///   expired — there is nothing salvageable to hand back.
 ///
-/// The cost is one Stop that waits at most the refresh round trip; the gain is
-/// that a Stop never costs a person their stored credentials.
+/// The cost is therefore nothing the person waiting for a Stop pays: the grant
+/// is uncancellable because its persist lives on the detached task that
+/// `manager::refresh_and_persist` spawns — a task the caller's drop cannot
+/// reach — so a Stop returns immediately and the rotation lands a moment later.
+/// The gain is that a Stop never costs a person their stored credentials.
+///
+/// Note the scope of "not cancellable": it is about the GRANT surviving, not
+/// about anyone waiting for it. `refresh` itself is a plain future, and the
+/// caller that awaits it on the normal path is free to be dropped — only the
+/// detached task's copy of the run is beyond reach.
 pub async fn refresh(stored: &StoredAuth, client: &reqwest::Client) -> Option<StoredAuth> {
     let Some(refresh_token) = &stored.refresh_token else {
         return None;

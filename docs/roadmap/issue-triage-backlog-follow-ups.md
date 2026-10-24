@@ -53,11 +53,23 @@ is the record of what was deliberately NOT done and why — read it before re-de
   A comment now names it; changing fixture decode behaviour was out of scope. Symptom if it bites:
   `manager::tests` failing with misleading values after a protocol change — and remember
   `cargo test --lib` does NOT rebuild `fake_worker`; run `cargo build --all-targets` first.
-- **T2 / #10 — `manualOnlyTooltip`'s header still says "These TWO are the only places the rule is
-  enforced for Skills"** — an under-count since T2. Left because a test pins that block byte-unchanged;
-  the correction lives in `src/lib/skills.ts` and `UNMENTIONABLE_ROW_REASON`. Rust-side docs on
-  `skills::is_mentionable_name` / `exec_read_skill` under-count the frontend surfaces for the same
-  reason; a Rust-doc-only change is owed.
+- **T2 / #10 — the frontend half of the under-count is still open; the Rust half is
+  DONE.** `skills::is_mentionable_name` and `exec_read_skill` said "a Rust-doc-only
+  change is owed" here, and that change landed in `c4cf167`: both Rust sites now say
+  FOUR, matching the frontend's corrected paragraph. What remains is `manualOnlyTooltip`'s
+  header, still reading "These TWO are the only places the rule is enforced for Skills";
+  the correction therefore lives in `src/lib/skills.ts` and in `UNMENTIONABLE_ROW_REASON`
+  (whose comment says so), and that relocation is the residue. Note what is and is not
+  pinned, because it decides the size of the job: the two tooltip tests
+  (`the_manual_only_tooltip_promises_no_$mention_a_name_cannot_carry` and
+  `the_manual_only_tooltip_offers_the_$mention_and_says_the_refusal_is_live`) pin the
+  FUNCTION's two rules — both timings, and no `$` glyph for an unmentionable name — and
+  `task02`'s acceptance line asks for `manualOnlyTooltip` byte-unchanged, which is why
+  the header was left alone in that wave. But the header is a doc COMMENT, and no test
+  reads this file's source: editing `These TWO` to `These FOUR` was measured to redden
+  nothing (24/24 green). So the residue is a comment edit, not a pin change — what it
+  still owes is the judgement call about whether a pinned-function header may move, and
+  keeping the count consistent with the two places that now state it.
 
 ## 3. Doc corrections — APPLIED in the ship commit (do not redo)
 
