@@ -334,10 +334,17 @@ impl Db {
         // One-time backfill for pre-existing databases: give a space row to every
         // distinct stored session cwd (canonicalized). A vanished folder is skipped
         // silently — its sessions stay stored, just without a space.
-        // DO NOTHING on conflict: the backfill must NOT refresh last_opened_at on
-        // every open (that would collapse the sidebar's recent-first ordering to a
-        // tie on every restart — recency is refreshed by `upsert_space`, which runs
-        // on real starts/resumes, i.e. Task 3's `record_session` hook).
+        // DO NOTHING on conflict: the backfill must NOT refresh `last_opened_at`
+        // or `created_at` on every open — an open is not an "open" the user did,
+        // and those timestamps stay the bookkeeping values the row was born with.
+        // (Recency is no longer the sort key at all — `list_spaces` reads
+        // `sort_order` — so this rule protects the stored timestamps, not a list
+        // order.)
+        //
+        // The INSERT joins at the BOTTOM (`MAX + 1`): on this upgrade path the
+        // seed may have numbered nothing, and a row left on `DEFAULT 0` would tie
+        // with every other backfilled row and hand the user an alphabetical list.
+        // ADR 0075's Consequences own the full reason.
         //
         // Key regime: rows are keyed by CANONICAL path — every upsert source
         // canonicalizes (`upsert_space` is fed `info.cwd`, canonicalized at
@@ -499,55 +506,42 @@ impl Db {
         Ok(row)
     }
 
-    /// All stored sessions, MOST RECENTLY ACTIVE FIRST.
+    /// All stored sessions, in the user's manual order (`sort_order`), `id`
+    /// descending breaking ties.
     ///
-    /// The key is the session's LAST PERSISTED MESSAGE, falling back to
-    /// `created_at` when it has none: the sidebar orders its rows by last
-    /// activity and prints each row's relative time from the same last
-    /// message, so the two must be the same fact or a list can be sorted by
-    /// one thing and labelled by another. Ordering by `created_at` alone made a
-    /// session started weeks ago but used a minute ago sit below one created
-    /// yesterday and never used, which is what read as "no order at all".
+    /// Position is NOT evidence of recency: nothing but a drag (or the one-time
+    /// upgrade seed) moves a row, so a session that was used a second ago sits
+    /// exactly where its number says (ADR 0075,
+    /// `docs/decisions/0075-list-position-is-not-evidence.md`). Recency is a
+    /// FIELD, not a position — `LAST_ACTIVITY` is the single copy of that
+    /// expression: the seed reads with it, and the row struct will `SELECT` it as
+    /// `last_active_at`, so the number a row prints and the number any recency
+    /// decision reads cannot drift.
     ///
-    /// The fallback is why `COALESCE` is on the subquery and not on a
-    /// `left_join … max()`: a session with an empty transcript is a session
-    /// nobody has used yet, and `MAX()` over no rows is `NULL`, which SQLite
-    /// would sort LAST in a `DESC` list — burying the newest thing on the list.
-    ///
-    /// The subquery rides `idx_messages_session` (the `(session_id, id)` index
-    /// covers the lookup), and `list_sessions` runs once per boot and once per
-    /// archive/delete, not per token — a desktop-sized history is not a
-    /// performance question here.
+    /// The subquery behind that expression rides `idx_messages_session` (the
+    /// `(session_id, id)` index covers the lookup), and `list_sessions` runs once
+    /// per boot and once per archive/delete, not per token — a desktop-sized
+    /// history is not a performance question here.
     ///
     /// `include_archived = false` (the default) excludes archived rows — the
     /// sidebar's Space groups render stored sessions only; the boot fetches
     /// with `true` and splits client-side by the flag (ADR 0016). BOTH arms
-    /// order identically: the Archived section reads the same recency.
+    /// order identically, for the same reason they filter identically: one
+    /// shared `ORDER BY`, so the Archived section cannot drift.
     pub fn list_sessions(&self, include_archived: bool) -> Result<Vec<SessionRow>, DbError> {
         let guard = self.conn.lock().expect("db mutex poisoned");
-        // ONE ordering expression, shared by both arms — two copies of a
-        // three-line `COALESCE` is two things that can drift, and a drifted
-        // Archived section reads as a random order.
-        const RECENT_FIRST: &str = "ORDER BY \
-             COALESCE((SELECT MAX(m.created_at) FROM messages m \
-                       WHERE m.session_id = sessions.id), sessions.created_at) DESC, \
-             id DESC";
         let sql = if include_archived {
-            format!(
-                "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent
-                 FROM sessions
-                 WHERE is_subagent = 0
-                 {RECENT_FIRST}"
-            )
+            "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent
+             FROM sessions
+             WHERE is_subagent = 0
+             ORDER BY sort_order ASC, id DESC"
         } else {
-            format!(
-                "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent
-                 FROM sessions
-                 WHERE archived = 0 AND is_subagent = 0
-                 {RECENT_FIRST}"
-            )
+            "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent
+             FROM sessions
+             WHERE archived = 0 AND is_subagent = 0
+             ORDER BY sort_order ASC, id DESC"
         };
-        let mut stmt = guard.prepare(&sql)?;
+        let mut stmt = guard.prepare(sql)?;
         let rows = stmt
             .query_map([], |row| {
                 Ok(SessionRow {
@@ -824,13 +818,14 @@ impl Db {
         Ok(n > 0)
     }
 
-    /// All spaces, most recently opened first.
+    /// All spaces, in the user's manual order (`sort_order`), `path` breaking
+    /// ties. Nothing else moves a row.
     pub fn list_spaces(&self) -> Result<Vec<SpaceRow>, DbError> {
         let guard = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = guard.prepare(
             "SELECT path, created_at, last_opened_at, trusted
              FROM spaces
-             ORDER BY last_opened_at DESC, path ASC",
+             ORDER BY sort_order ASC, path ASC",
         )?;
         let rows = stmt
             .query_map([], |row| {
@@ -1658,44 +1653,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The list is ordered by LAST ACTIVITY, not by creation: the session with
-    /// the newest persisted message comes first, and a session with NO messages
-    /// falls back to `created_at` rather than to nothing.
+    /// The list is ordered by `sort_order`, then `id DESC`: the position the
+    /// user (or a drag) gave a row decides where it sits, and nothing else
+    /// moves it (ADR 0075 — `docs/decisions/0075-list-position-is-not-evidence.md`).
     ///
-    /// The two halves both matter. Ordering by `created_at` alone (the old rule)
-    /// put a session started weeks ago but used a minute ago BELOW one created
-    /// yesterday and never used — which is what read as "no order at all". And
-    /// ordering by `MAX(messages.created_at)` alone with a left join would sort
-    /// a never-used session's `NULL` LAST in a `DESC` list, burying the newest
-    /// thing on the list; the `COALESCE` is what stops that.
+    /// The fixture makes `sort_order` and recency DISAGREE: the last-listed
+    /// session gets the newest transcript, so the old recency `ORDER BY` would
+    /// have floated it to the top. A fixture where both orders agreed would pass
+    /// under either statement and prove nothing.
     #[test]
-    fn list_sessions_orders_by_last_message_then_created_at() {
-        let dir = std::env::temp_dir().join(format!("db-recency-test-{}", uuid::Uuid::new_v4()));
+    fn list_sessions_orders_by_sort_order_then_id_desc() {
+        let dir = std::env::temp_dir().join(format!("db-sortlist-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = Db::open(&dir.join("t.db")).expect("db should open");
-        // `created_at` written EXPLICITLY (hours apart): `record_session` stamps
-        // `now_ms()`, and three inserts inside one millisecond would make the
-        // fallback order a coin flip between `created_at` and the `id DESC`
-        // tiebreak — a test that passes on a fast machine is not a test.
+        // Recorded through `record_session` so `sort_order` is actually written
+        // (raw INSERTs would leave every row on `DEFAULT 0` and tie the list).
+        for id in ["s_x", "s_y", "s_z"] {
+            db.record_session(&title_session(id))
+                .expect("record_session should succeed");
+        }
+        // Re-number them into a NON-recency sequence: `s_y` leads, the row
+        // recorded first (`s_x`) lands last.
         {
             let conn = db.conn.lock().expect("db mutex poisoned");
-            for (id, created) in [
-                ("old-but-used", 1_000_i64),
-                ("fresh-unused", 3_000_i64),
-                ("stale-unused", 2_000_i64),
-            ] {
+            for (id, value) in [("s_x", 2_i64), ("s_y", 0), ("s_z", 1)] {
                 conn.execute(
-                    "INSERT INTO sessions (id, cwd, created_at, capabilities_json, is_subagent) \
-                     VALUES (?1, '/tmp/proj', ?2, '{}', 0)",
-                    params![id, created],
+                    "UPDATE sessions SET sort_order = ?2 WHERE id = ?1",
+                    params![id, value],
                 )
-                .expect("insert should succeed");
+                .expect("sort_order write should succeed");
             }
         }
-        // The OLDEST-created session gets a message. `record_message` stamps
-        // `now_ms()`, which is strictly after every `created_at` above.
-        db.record_message("old-but-used", "user", None, "{\"text\":\"hi\"}")
+        // The LAST-listed row gets the newest transcript: recency says it leads,
+        // its number says it trails, and the number is what wins.
+        db.record_message("s_x", "user", None, "{\"text\":\"hi\"}")
             .expect("record_message should succeed");
+
         let ids: Vec<String> = db
             .list_sessions(false)
             .expect("list_sessions should succeed")
@@ -1704,13 +1697,68 @@ mod tests {
             .collect();
         assert_eq!(
             ids,
-            vec!["old-but-used", "fresh-unused", "stale-unused"],
-            "the used session leads on its message; the never-used ones keep \
-             `created_at` desc (the COALESCE fallback), not a NULL last"
+            vec!["s_y", "s_z", "s_x"],
+            "rows come back in `sort_order` order even though the last one has \
+             the newest message — position is not evidence of recency"
         );
-        // The archived arm orders identically — the Archived section reads the
-        // same recency (one shared `ORDER BY`, so it cannot drift).
-        db.set_session_archived("fresh-unused", true).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two rows sharing a `sort_order` break the tie on `id DESC`, and BOTH arms
+    /// of the statement order identically: the archived-inclusive read is the
+    /// OTHER arm, so it is a real second assertion (it can fail on its own) and
+    /// not a copy of the first — one shared `ORDER BY` is what keeps them from
+    /// drifting.
+    ///
+    /// Recency is made to disagree (the first-id row carries the newest
+    /// transcript), so the assertion cannot be satisfied by the old ordering.
+    #[test]
+    fn list_sessions_ties_break_on_id_desc() {
+        let dir = std::env::temp_dir().join(format!("db-sorttie-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).expect("db should open");
+        db.record_session(&title_session("s_a"))
+            .expect("record s_a");
+        db.record_session(&title_session("s_b"))
+            .expect("record s_b");
+        {
+            let conn = db.conn.lock().expect("db mutex poisoned");
+            conn.execute("UPDATE sessions SET sort_order = 5", [])
+                .expect("tie the two rows on one number");
+        }
+        // `s_a`'s transcript is the newer one, so the old recency key would put
+        // `s_a` FIRST; the tie-break is what puts `s_b` first here. The
+        // `created_at` is written EXPLICITLY and far in the future: both rows
+        // were recorded inside the same millisecond, so a `record_message`
+        // timestamp could TIE their last activity and let the old statement
+        // reach the same `id DESC` answer for the wrong reason.
+        db.conn
+            .lock()
+            .expect("db mutex poisoned")
+            .execute(
+                "INSERT INTO messages (session_id, kind, message_key, payload_json, created_at) \
+                 VALUES ('s_a', 'user', NULL, '{}', 9_999_999_999_999)",
+                [],
+            )
+            .expect("fixture message row");
+
+        let ids: Vec<String> = db
+            .list_sessions(false)
+            .expect("list_sessions should succeed")
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["s_b", "s_a"],
+            "an equal `sort_order` breaks on `id DESC`, never on recency"
+        );
+
+        // Archive one of the two tied rows: the second read now runs the
+        // archived-inclusive arm over the same pair.
+        assert!(db
+            .set_session_archived("s_a", true)
+            .expect("set_session_archived should succeed"));
         let ids: Vec<String> = db
             .list_sessions(true)
             .expect("list_sessions(true) should succeed")
@@ -1719,8 +1767,137 @@ mod tests {
             .collect();
         assert_eq!(
             ids,
-            vec!["old-but-used", "fresh-unused", "stale-unused"],
-            "the archived-inclusive list orders the same way"
+            vec!["s_b", "s_a"],
+            "the archived-inclusive arm orders the tied pair identically"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// (ADR 0075 behaviour pin) Transcript activity never moves a row: the
+    /// session with the NEWEST message sits in the MIDDLE of the `sort_order`
+    /// sequence and stays there. The old statement floated it to the top on
+    /// every persisted message, which is the bug ADR 0075 exists to kill.
+    #[test]
+    fn list_sessions_ignores_transcript_activity() {
+        let dir = std::env::temp_dir().join(format!("db-sortidle-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).expect("db should open");
+        for id in ["s_a", "s_b", "s_c"] {
+            db.record_session(&title_session(id))
+                .expect("record_session should succeed");
+        }
+        // Reverse the numbers: the sequence becomes [s_c, s_b, s_a], so `s_b`
+        // is the MIDDLE row.
+        {
+            let conn = db.conn.lock().expect("db mutex poisoned");
+            for (id, value) in [("s_a", 2_i64), ("s_b", 1), ("s_c", 0)] {
+                conn.execute(
+                    "UPDATE sessions SET sort_order = ?2 WHERE id = ?1",
+                    params![id, value],
+                )
+                .expect("sort_order write should succeed");
+            }
+        }
+        // The middle row gets the only (and therefore newest) transcript. The
+        // `created_at` is written EXPLICITLY and far in the future so the old
+        // recency key deterministically floats this row to the TOP: with three
+        // rows recorded inside one millisecond a `record_message` timestamp
+        // could tie every row's last activity, and the old statement's own
+        // `id DESC` tie-break would then answer `["s_c", "s_b", "s_a"]` — the
+        // expected order, for the wrong reason, i.e. a vacuous green.
+        db.conn
+            .lock()
+            .expect("db mutex poisoned")
+            .execute(
+                "INSERT INTO messages (session_id, kind, message_key, payload_json, created_at) \
+                 VALUES ('s_b', 'user', NULL, '{}', 9_999_999_999_999)",
+                [],
+            )
+            .expect("fixture message row");
+
+        let ids: Vec<String> = db
+            .list_sessions(false)
+            .expect("list_sessions should succeed")
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["s_c", "s_b", "s_a"],
+            "the session with the newest message keeps its middle position"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Spaces order by `sort_order` with `path ASC` breaking ties. The fixture
+    /// gives the FIRST-listed row the LOWEST `last_opened_at`, so the old
+    /// recency statement would have returned the reverse-ish order; and the
+    /// second half ties two rows so the tie-break itself is pinned (and pinned
+    /// as stable across reads, not re-derived from recency).
+    #[test]
+    fn list_spaces_orders_by_sort_order_then_path() {
+        let dir = std::env::temp_dir().join(format!("db-spacelist-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).expect("db should open");
+        // Upserted z, m, a: `sort_order` 0,1,2 while `path ASC` is a,m,z — the
+        // two orders disagree, so the tie-break half below is not vacuous.
+        let dirs = [dir.join("zzz"), dir.join("mmm"), dir.join("aaa")];
+        for d in &dirs {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let keys: Vec<String> = dirs
+            .iter()
+            .map(|d| {
+                db.upsert_space(d.to_str().unwrap(), false)
+                    .expect("upsert_space should succeed");
+                std::fs::canonicalize(d).unwrap().display().to_string()
+            })
+            .collect();
+        // Recency says the opposite: the first-listed row is the STALEST.
+        {
+            let conn = db.conn.lock().expect("db mutex poisoned");
+            for (key, opened) in [(&keys[0], 1_000_i64), (&keys[1], 3_000), (&keys[2], 2_000)] {
+                conn.execute(
+                    "UPDATE spaces SET last_opened_at = ?2 WHERE path = ?1",
+                    params![key, opened],
+                )
+                .expect("last_opened_at write should succeed");
+            }
+        }
+
+        let paths: Vec<String> = db
+            .list_spaces()
+            .expect("list_spaces should succeed")
+            .into_iter()
+            .map(|s| s.path)
+            .collect();
+        assert_eq!(
+            paths, keys,
+            "rows come back in `sort_order` order although the first is the least recently opened"
+        );
+
+        // Tie two rows on one number: they must come back `path ASC` (`a`
+        // before `m`), NOT in the order their `last_opened_at` values imply.
+        {
+            let conn = db.conn.lock().expect("db mutex poisoned");
+            for key in [&keys[1], &keys[2]] {
+                conn.execute(
+                    "UPDATE spaces SET sort_order = 7 WHERE path = ?1",
+                    params![key],
+                )
+                .expect("tie the two rows on one number");
+            }
+        }
+        let paths: Vec<String> = db
+            .list_spaces()
+            .expect("list_spaces should succeed")
+            .into_iter()
+            .map(|s| s.path)
+            .collect();
+        assert_eq!(
+            paths,
+            vec![keys[0].clone(), keys[2].clone(), keys[1].clone()],
+            "a tied `sort_order` breaks on `path ASC` and never on recency"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

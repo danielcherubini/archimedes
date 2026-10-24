@@ -48,7 +48,7 @@ pub async fn space_for_path(
     resolve_space_for_path(&state, &path)
 }
 
-/// All spaces, most recently opened first.
+/// All spaces, in the user's manual order (`sort_order`; see `Db::list_spaces`).
 #[tauri::command]
 pub async fn list_spaces(
     state: State<'_, Arc<Db>>,

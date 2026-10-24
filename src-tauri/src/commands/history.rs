@@ -24,8 +24,9 @@ pub struct HistoryPage {
     pub todos: Option<serde_json::Value>,
 }
 
-/// All stored sessions, MOST RECENTLY ACTIVE FIRST (see `Db::list_sessions`),
-/// as `SessionInfo` (camelCase over IPC).
+/// All stored sessions, in the user's MANUAL ORDER (see `Db::list_sessions`),
+/// as `SessionInfo` (camelCase over IPC). Position says nothing about recency
+/// (ADR 0075, `docs/decisions/0075-list-position-is-not-evidence.md`).
 ///
 /// `include_archived` (ADR 0016, `Option` → the frontend may omit the
 /// argument): `false` (the default) hides archived sessions; `true`

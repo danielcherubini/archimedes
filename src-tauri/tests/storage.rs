@@ -294,7 +294,7 @@ fn reopens_an_existing_database() {
 }
 
 #[test]
-fn spaces_upsert_find_delete_and_order() {
+fn spaces_upsert_find_delete() {
     let path = temp_db_path();
     let db = Db::open(&path).expect("db should open");
 
@@ -305,28 +305,16 @@ fn spaces_upsert_find_delete_and_order() {
 
     db.upsert_space("/tmp/pa", false)
         .expect("upsert_space /tmp/pa");
-    std::thread::sleep(std::time::Duration::from_millis(5));
     db.upsert_space("/tmp/pb", false)
         .expect("upsert_space /tmp/pb");
 
     let spaces = db.list_spaces().expect("list_spaces");
     assert_eq!(spaces.len(), 2, "exactly two spaces should be stored");
-    assert_eq!(spaces[0].path, "/tmp/pb", "most recently opened first");
     let pa = spaces
         .iter()
         .find(|s| s.path == "/tmp/pa")
         .expect("a /tmp/pa row should exist");
     assert!(pa.created_at <= pa.last_opened_at);
-
-    // A re-touch wins the ordering.
-    std::thread::sleep(std::time::Duration::from_millis(5));
-    db.upsert_space("/tmp/pa", false)
-        .expect("upsert_space /tmp/pa again");
-    let spaces = db.list_spaces().expect("list_spaces");
-    assert_eq!(
-        spaces[0].path, "/tmp/pa",
-        "a re-touch wins the recent-first ordering"
-    );
 
     assert_eq!(
         db.find_space("/tmp/pa").expect("find_space /tmp/pa"),
@@ -339,7 +327,6 @@ fn spaces_upsert_find_delete_and_order() {
     assert_eq!(spaces.len(), 1, "deleting a space leaves the other");
     assert_eq!(spaces[0].path, "/tmp/pa");
     let pa_before = spaces[0].clone();
-    std::thread::sleep(std::time::Duration::from_millis(5));
     db.upsert_space("/tmp/pb", false)
         .expect("upsert_space /tmp/pb again");
     let spaces = db.list_spaces().expect("list_spaces");
@@ -348,6 +335,8 @@ fn spaces_upsert_find_delete_and_order() {
         2,
         "a re-upsert of a deleted space brings it back"
     );
+    // Reached by lookup, NOT by index: a recreated row joins at the bottom, so
+    // its position in the list is not stable (ADR 0075).
     let pb = spaces
         .iter()
         .find(|s| s.path == "/tmp/pb")
@@ -355,6 +344,52 @@ fn spaces_upsert_find_delete_and_order() {
     assert!(
         pb.created_at > pa_before.created_at,
         "a recreated space gets a fresh created_at"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The ordering half of the old `spaces_upsert_find_delete_and_order`, asserted
+/// through the PUBLIC surface only (`tests/storage.rs` cannot reach `db.conn`,
+/// which is why the raw-SQL halves live in `db.rs`'s own tests): a re-touch
+/// keeps a row exactly where it is and a new row joins at the END of the list
+/// (ADR 0075 — `docs/decisions/0075-list-position-is-not-evidence.md`).
+#[test]
+fn space_retouch_keeps_its_position_and_new_rows_join_last() {
+    let path = temp_db_path();
+    let db = Db::open(&path).expect("db should open");
+
+    // The paths are upserted in a NON-alphabetical order, so a list that fell
+    // back to `path ASC` on tied numbers could not satisfy these assertions.
+    for p in ["/tmp/pz", "/tmp/pm", "/tmp/pa"] {
+        db.upsert_space(p, false).expect("upsert_space");
+    }
+    let paths = |db: &Db| -> Vec<String> {
+        db.list_spaces()
+            .expect("list_spaces")
+            .into_iter()
+            .map(|s| s.path)
+            .collect()
+    };
+    assert_eq!(
+        paths(&db),
+        vec!["/tmp/pz", "/tmp/pm", "/tmp/pa"],
+        "rows come back in the order they joined, not by recency or name"
+    );
+
+    db.upsert_space("/tmp/pz", false)
+        .expect("re-touch the first row");
+    assert_eq!(
+        paths(&db),
+        vec!["/tmp/pz", "/tmp/pm", "/tmp/pa"],
+        "a re-touch (a click, a resume) never moves a row"
+    );
+
+    db.upsert_space("/tmp/pd", false).expect("upsert a new row");
+    assert_eq!(
+        paths(&db),
+        vec!["/tmp/pz", "/tmp/pm", "/tmp/pa", "/tmp/pd"],
+        "a NEW row joins at the bottom, whatever its timestamp or name"
     );
 
     let _ = std::fs::remove_file(&path);
