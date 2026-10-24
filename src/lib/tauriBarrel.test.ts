@@ -374,12 +374,14 @@ describe("the scanner actually reads the tree", () => {
           stripJsComments(readFileSync(f, "utf8")),
         ),
     );
-    // SET SIZE, pinned: 35 files mock the barrel by path. The number may only
+    // SET SIZE, pinned: 36 files mock the barrel by path. The number may only
     // move when a test file is added or removed, in a commit that says so — this
     // one moved 34 -> 35 when D2 wired `useAgentOverridesWrites` into `SpacesList`
-    // and landed its test file, which mocks the barrel the documented way.
-    expect(mockers).toHaveLength(35);
-    // 34 of the 35 SPREAD `vi.importActual`, which is the shape that makes the
+    // and landed its test file, which mocks the barrel the documented way, and
+    // 35 -> 36 when #85 added `store/modelCatalog.test.ts` (the catalog store the
+    // subagent card's context % reads).
+    expect(mockers).toHaveLength(36);
+    // 35 of the 36 SPREAD `vi.importActual`, which is the shape that makes the
     // seam forgiving: an unlisted export still resolves. The remaining one replaces
     // the module wholesale, so a name it forgets is `undefined` — the case the
     // pinned-surface assertion below covers.
@@ -387,7 +389,7 @@ describe("the scanner actually reads the tree", () => {
       mockers.filter((f) =>
         /vi\.importActual/.test(readFileSync(f, "utf8")),
       ).length,
-    ).toBe(34);
+    ).toBe(35);
   });
 });
 

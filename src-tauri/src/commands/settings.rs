@@ -41,13 +41,23 @@ pub async fn list_models(
     state: State<'_, Arc<SessionManager>>,
     force_refresh: Option<String>,
 ) -> Result<Vec<ModelDto>, SettingsError> {
-    Ok(state
-        .effective_catalog(force_refresh.as_deref())
-        .await
-        .models
-        .iter()
-        .map(ModelDto::from)
-        .collect())
+    let catalog = state.effective_catalog(force_refresh.as_deref()).await;
+    // (#85) A refresh must reach LIVE sessions, not just new ones: the context
+    // window is copied into each session's `AgentLoop` at spawn, so without this
+    // a corrected window is invisible to every running session (and, since that
+    // same window is the compaction threshold's input, the session silently
+    // over-compacts). Scoped to the refreshed provider — a plain cached read
+    // (`force_refresh: None`, the settings page's initial load) pushes nothing.
+    if let Some(provider_id) = force_refresh.as_deref() {
+        let refreshed: Vec<crate::agent::harness::catalog::Model> = catalog
+            .models
+            .iter()
+            .filter(|m| m.provider == provider_id)
+            .cloned()
+            .collect();
+        state.refresh_live_models(&refreshed).await;
+    }
+    Ok(catalog.models.iter().map(ModelDto::from).collect())
 }
 
 /// The camelCase wire shape (the `Model` struct itself is NOT renamed —

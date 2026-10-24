@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useSubagents, type SubagentEntry } from "../store/subagents";
+import { useModelCatalog } from "../store/modelCatalog";
 import { useSubagentSelection } from "../store/subagentSelection";
 import { useInteractive } from "../store/interactive";
 import { useSessions, type ToolCallUiStatus } from "../store/sessions";
@@ -108,6 +109,11 @@ export default function SubagentDelegatingCard({
   sessionId: string;
 }) {
   const entries = useSubagents((s) => s.entries);
+  // (#85) The real context windows, so a child's percentage is computed against
+  // the window its provider actually declares instead of a hardcoded name
+  // table (`getModelContextWindow`'s last resort, which answers 64k for every
+  // deepseek model — 6% of a 1M-window model's real size).
+  const catalog = useModelCatalog((s) => s.models);
   const select = useSubagentSelection((s) => s.select);
   const allMessages = useSessions((s) => s.messages);
   const allInteractiveCost = useInteractive((s) => s.cost);
@@ -290,7 +296,7 @@ export default function SubagentDelegatingCard({
       (explicitTokens && explicitTokens > 0 ? explicitTokens : undefined) ??
       estimatedTokens;
 
-    const modelContextWindow = getModelContextWindow(model);
+    const modelContextWindow = getModelContextWindow(model, catalog);
     const calculatedPct =
       tokens && modelContextWindow > 0 ? (tokens / modelContextWindow) * 100 : undefined;
 
