@@ -7,9 +7,11 @@
 //! least one server was UNAVAILABLE (a `NeedsAuth` / `Error` state, a failed
 //! connect) is a FAILURE naming each skipped server and its state — not a
 //! successful "no such tool" the model reads as "it doesn't exist". With every
-//! server reachable the wording is unchanged and stays a success. The `server`
-//! -param path and `call_tool` are untouched: they already surface the manager's
-//! real error.
+//! server reachable the wording is unchanged and stays a success. The partiality
+//! is judged over the set the call SCOPED to: with a `server` param naming a
+//! server that answered, a skipped OTHER server does not bear on the answer
+//! (only a skip of the named one does). The `server`-param list path and
+//! `call_tool` are untouched: they already surface the manager's real error.
 
 use std::time::Duration;
 
@@ -133,6 +135,21 @@ async fn collect_tools(manager: &mut McpManager, cancel: &CancellationToken) -> 
     out
 }
 
+/// The servers the call actually scoped to: the `server` param names ONE, so a
+/// skip of any OTHER server is not this call's business; unscoped, every server
+/// is in scope and the whole skipped list stands (issue #68 — the partiality is
+/// judged over the set the call scoped to, not over every declared server).
+fn scoped_skipped(skipped: &[(String, String)], server: Option<&str>) -> Vec<(String, String)> {
+    match server {
+        None => skipped.to_vec(),
+        Some(srv) => skipped
+            .iter()
+            .filter(|(name, _)| name == srv)
+            .cloned()
+            .collect(),
+    }
+}
+
 /// The `mcp` proxy tool (the param dispatch — the `@pi-archimedes/mcp`
 /// `buildProxyToolExecute` mirrored):
 /// - `status` (no `tool`/`search`/`describe`/`connect`/`server`, or
@@ -149,10 +166,11 @@ async fn collect_tools(manager: &mut McpManager, cancel: &CancellationToken) -> 
 ///   the `server` param is required (an error naming the candidates).
 /// - an unknown `action` — an error listing the valid ones.
 ///
-/// A `search` / `describe` / bare-`tool` miss while a server was skipped
-/// (`NeedsAuth` / `Error` / a failed connect) is a FAILED result naming the
-/// skipped servers; a successful call is never downgraded by an unrelated dead
-/// server (issue #68).
+/// A `search` / `describe` / bare-`tool` miss while a server IN SCOPE was
+/// skipped (`NeedsAuth` / `Error` / a failed connect) is a FAILED result naming
+/// the skipped servers; a successful call is never downgraded by an unrelated
+/// dead server, and neither is a miss scoped by the `server` param to a server
+/// that answered (issue #68).
 pub async fn mcp_tool(
     manager: &mut McpManager,
     args: &Value,
@@ -247,8 +265,13 @@ pub async fn mcp_tool(
             .collect();
         if results.is_empty() {
             // A search computed over a PARTIAL server set is not an answer:
-            // it fails and names what was skipped (issue #68).
-            return miss_result(format!("No tools matching \"{q}\""), &all.skipped);
+            // it fails and names what was skipped (issue #68) — but only the
+            // skips INSIDE the set the call scoped to (a `server` param narrows
+            // both the tools and the partiality check).
+            return miss_result(
+                format!("No tools matching \"{q}\""),
+                &scoped_skipped(&all.skipped, server.as_deref()),
+            );
         }
         return ok(results.join("\n"));
     }
@@ -257,9 +280,13 @@ pub async fn mcp_tool(
     if let Some(name) = &describe {
         let all = collect_tools(manager, cancel).await;
         let Some((s, t)) = all.tools.iter().find(|(_, ti)| ti.name == name.as_str()) else {
-            // Nothing matched AND something was skipped → a FAILED result
-            // naming the skipped servers (issue #68).
-            return miss_result(format!("Tool not found: {name}"), &all.skipped);
+            // Nothing matched AND the scoped set was partial → a FAILED result
+            // naming the skipped servers (issue #68); a skip OUTSIDE the named
+            // `server` does not bear on this call.
+            return miss_result(
+                format!("Tool not found: {name}"),
+                &scoped_skipped(&all.skipped, server.as_deref()),
+            );
         };
         let schema =
             serde_json::to_string_pretty(&t.input_schema).unwrap_or_else(|_| "{}".to_string());
@@ -315,8 +342,14 @@ pub async fn mcp_tool(
                     // Nothing matched AND something was skipped → a FAILED
                     // result naming the skipped servers (issue #68); with every
                     // server reachable the wording is unchanged and stays a
-                    // success.
-                    return miss_result(format!("Tool not found: {t}"), &all.skipped);
+                    // success. This branch only runs UNscoped (a named `server`
+                    // resolves above without collecting), so the filter is a
+                    // no-op here — applied to keep the rule stated in one
+                    // shape: partiality is judged over the scoped set.
+                    return miss_result(
+                        format!("Tool not found: {t}"),
+                        &scoped_skipped(&all.skipped, server.as_deref()),
+                    );
                 }
                 if matches.len() == 1 {
                     (matches[0].clone(), t.clone())
@@ -743,6 +776,97 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_search_scoped_to_an_answering_server_is_not_poisoned_by_a_dead_sibling() {
+        // The finding: `server` scopes the CALL, so it scopes the partiality
+        // check. The named server answered → the search is complete over the
+        // set the user asked about, so the plain `No tools matching` wording is
+        // a SUCCESS (the same bytes as the all-healthy case).
+        let (mut manager, _dir) =
+            manager_with(&serde_json::json!({ "ok": "fake", "dead": dead_server() }));
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "search": "zzz", "server": "ok" }),
+            &cancel(),
+        )
+        .await;
+        assert!(
+            !r.is_error,
+            "a scoped search over the one server it scoped to is an answer: {:?}",
+            text(&r)
+        );
+        assert_eq!(text(&r), "No tools matching \"zzz\"");
+        manager.close_all();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_describe_scoped_to_an_answering_server_is_not_poisoned_by_a_dead_sibling() {
+        let (mut manager, _dir) =
+            manager_with(&serde_json::json!({ "ok": "fake", "dead": dead_server() }));
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "describe": "nope", "server": "ok" }),
+            &cancel(),
+        )
+        .await;
+        assert!(
+            !r.is_error,
+            "a scoped describe over the one server it scoped to is an answer: {:?}",
+            text(&r)
+        );
+        assert_eq!(text(&r), "Tool not found: nope");
+        manager.close_all();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_search_scoped_to_the_skipped_server_still_fails_and_names_it() {
+        // The other half of the rule: when the NAMED server is the one that
+        // failed, the scoped set is partial and the call still fails naming it.
+        let (mut manager, _dir) =
+            manager_with(&serde_json::json!({ "ok": "fake", "dead": dead_server() }));
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "search": "zzz", "server": "dead" }),
+            &cancel(),
+        )
+        .await;
+        assert!(r.is_error, "the scoped server itself failed");
+        let t = text(&r);
+        assert!(t.contains("No tools matching \"zzz\""), "{t}");
+        assert!(t.contains("Skipped servers: dead"), "{t}");
+        // The healthy sibling answered — it is not a skip, named or not.
+        assert!(!t.contains("ok ("), "only the scoped skip is named: {t}");
+        manager.close_all();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_unscoped_search_still_reports_every_skipped_server() {
+        // The unscoped call's whole value is naming EVERY dead sibling — the
+        // fix must leave those bytes alone.
+        let (mut manager, _dir) = manager_with(
+            &serde_json::json!({ "ok": "fake", "dead": dead_server(), "dead2": dead_server() }),
+        );
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "search": "zzz" }),
+            &cancel(),
+        )
+        .await;
+        assert!(
+            r.is_error,
+            "an unscoped search over a partial server set fails"
+        );
+        let t = text(&r);
+        assert!(t.contains("No tools matching \"zzz\""), "{t}");
+        assert!(t.contains("dead"), "the first skip is named: {t}");
+        assert!(t.contains("dead2"), "the second skip is named: {t}");
+        assert!(
+            !t.contains("ok ("),
+            "the answering server is not a skip: {t}"
+        );
+        manager.close_all();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_call_on_a_healthy_server_is_not_broken_by_a_skipped_one() {
         // The rule must not over-apply: a successful call is never downgraded
         // because an unrelated server is dead.
@@ -756,6 +880,16 @@ mod tests {
         .await;
         assert!(!r.is_error, "a working call stays a success");
         assert_eq!(text(&r), "hi");
+        // The same with the server named explicitly: the resolution never
+        // consults the dead sibling, so the call is untouched by it.
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "tool": "echo", "server": "ok", "args": { "text": "scoped" } }),
+            &cancel(),
+        )
+        .await;
+        assert!(!r.is_error, "a server-scoped call stays a success");
+        assert_eq!(text(&r), "scoped");
         manager.close_all();
     }
 }
