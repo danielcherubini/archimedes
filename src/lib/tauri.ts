@@ -105,6 +105,7 @@ export type {
   CompletionEntryDto,
   CompletionDirDto,
   HistoryPage,
+  SessionRecency,
   SessionTitledPayload,
   InteractiveRequestClosePayload,
   WindowFrameState,
@@ -122,6 +123,8 @@ export {
   loadHistory,
   deleteSession,
   setSessionArchived,
+  sessionRecency,
+  reorderSessions,
 } from "./tauri/commands/sessions";
 
 export {
@@ -146,6 +149,7 @@ export {
   deleteSpace,
   setSpaceTrusted,
   spaceForPath,
+  reorderSpaces,
 } from "./tauri/commands/spaces";
 
 export {
