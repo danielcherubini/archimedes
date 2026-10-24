@@ -72,7 +72,7 @@ never share a wave. Wave 6 is the only parallel wave.
 | T01 | SQLite `sort_order` on `spaces` + `sessions`: schema, pragma-gated migration seeded `0..n` in today's order, `MAX+1` on insert, `ORDER BY` swap on `list_spaces`/`list_sessions`, `reorder_spaces`/`reorder_sessions` in one transaction | `docs/roadmap/manual-list-order-task01-sort-order-columns.md` | 1 | `src-tauri/src/storage/db.rs` (owned outright) + `src-tauri/tests/storage.rs` | `done` `221d306` |
 | T02 | IPC surface: `last_active_at` SELECTed from the existing `COALESCE` expression (characterisation test first), the two reorder commands exposed + registered, TS mirrors in `lib/tauri/` | `docs/roadmap/manual-list-order-task02-ipc-last-active-at.md` | 2 | `src-tauri/src/storage/db.rs` (SessionRecency + Db::session_recency — DEVIATION: not types.rs, see Decisions), `src-tauri/src/commands/{history,spaces}.rs`, `src-tauri/src/lib.rs`, `src/lib/tauri/types.ts`, `src/lib/tauri/commands/*`, `src-tauri/tests/ipc.rs` | `done` `3386975` |
 | T03 | Store derivation: `recencyOf` (new module beside `sessionTitle.ts`), `SpaceView.sessionIds` replaces the live/stored pair, the four position-reading landing rules switch to recency, Archived sorts explicitly | `docs/roadmap/manual-list-order-task03-store-derivation.md` | 3 | `src/store/sessions.ts`, `src/lib/sessionRecency.ts` (new), `src/store/sessions.test.ts` + GRANTED: `src/components/SpacesList.tsx` (call-sites only), `src/App.tsx` + `src/App.test.tsx` (boot wiring), `src-tauri/src/storage/db.rs`, `src/lib/tauri/types.ts`, `commands/history.rs` (wire-key literal test) | `done` `cc6ecd2` |
-| T04 | Sidebar renders one list: delete `sortByActivity` memos + the activity subscription, `railIds = sessionIds`, DELETE `src/lib/sessionActivity.ts` and its test, delete the 3 ordering tests, reword the rail pin | `docs/roadmap/manual-list-order-task04-sidebar-one-list.md` | 4 | `src/components/SpacesList.tsx`, delete `src/lib/sessionActivity.ts` + `.test.ts` | `todo` |
+| T04 | Sidebar renders one list: delete `sortByActivity` memos + the activity subscription, `railIds = sessionIds`, DELETE `src/lib/sessionActivity.ts` and its test, delete the 3 ordering tests, reword the rail pin | `docs/roadmap/manual-list-order-task04-sidebar-one-list.md` | 4 | `src/components/SpacesList.tsx`, delete `src/lib/sessionActivity.ts` + `.test.ts` | `done` `df73fc7` |
 | T05 | The drag gesture: `useDragReorder` hook (dragProps, before/after by pointer half, indicator state) + the store's optimistic reorder actions over one IPC call | `docs/roadmap/manual-list-order-task05-drag-reorder-hook.md` | 5 | `src/hooks/useDragReorder.ts` (new) + test; `src/store/sessions.ts` (reorder actions only) | `todo` |
 | T06 | Wire the sidebar rows: `draggable` on `SessionListRow`, a drop-edge indicator prop, hover actions `draggable={false}` | `docs/roadmap/manual-list-order-task06-wire-sidebar-rows.md` | 6 | `src/components/SpacesList.tsx`, `src/components/SessionListRow.tsx` + `SessionListRow.test.tsx` | `todo` |
 | T07 | Wire the tabs: `draggable` on the pill, indicator class, ✕ `draggable={false}`, pin `data-tauri-drag-region="false"` and the middle-click/drag non-interference | `docs/roadmap/manual-list-order-task07-wire-tabs.md` | 6 | `src/components/SpaceTabs.tsx` + `SpaceTabs*.test.tsx` — disjoint from T06 | `todo` |
@@ -254,6 +254,33 @@ deliberately left undone.
   red-count predictions were therefore wrong twice (10 not 9; 4 not 5–6) —
   **the plan's predicted red counts are not trustworthy on this feature; measure
   them.**
+
+- 2026-10-24 — **T04 DONE** (`0a23a77` `9b1c417` `df73fc7`). Gates measured by
+  the orchestrator: `pnpm test` **3070 / 149 files** (3086/150 − the deleted
+  file's 16 tests, exactly) · `pnpm build` green · `cargo test` **1463 / 0** ·
+  clippy **0** · fmt clean · **0** Rust files changed (proven by diff).
+  `sessionActivity.ts` deleted; `sortByActivity(`/`activityKeyOf(`/
+  `activityFromKey(`/`lastActivityOf(` calls in `src/`: **35 → 0**.
+- 2026-10-24 — **LIVE DEFECT FIXED in T04:** `ArchivedSection` filtered
+  `archived.filter(...)` in INPUT order, and input order became `sort_order` when
+  T01 swapped the query — so the Archived section had been presenting a MANUAL
+  order under a heading that means recency, with every test still passing. T03
+  shipped `archivedInSpace` for this; T04 wired it and proved the defect with a
+  red DOM test first. LESSON: a query's `ORDER BY` is a load-bearing contract
+  with every consumer that reads position — change it and audit ALL of them.
+- 2026-10-24 — **A 4TH TEST DELETED beyond the spec's list (verified by probe):**
+  `keeps a brand-new live session … at the TOP of the live group` asserted the
+  OPPOSITE of the approved "new rows join at the BOTTOM" rule, and survived T04
+  green only because it never seeded the order map (all ids tie → input order →
+  the reversed live slice leads). The child proved this with a throwaway probe
+  (P1 passes unseeded; the same fixture seeded fails), then deleted it. Store-
+  level coverage of the real rule still exists.
+- 2026-10-24 — **HANDED TO T05:** delete the DEPRECATED `liveSessionIds`/
+  `storedSessionIds` pair from `SpaceView` (zero production readers after T04;
+  8 `it(...)` bodies in `sessions.test.ts` still read them, 3 with the pair as
+  their subject) and fix `SpaceView.liveSessionIds`'s doc, which still says
+  "T04 deletes it". **HANDED TO T06:** a stale citation in
+  `SessionListRow.tsx` naming the old rail-pin test.
 
 ## Changelog
 
