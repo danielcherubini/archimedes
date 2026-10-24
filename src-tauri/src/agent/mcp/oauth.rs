@@ -1,8 +1,8 @@
 //! OAuth 2.1 for MCP HTTP servers (ADR 0018) — the `authenticate` flow:
 //! discovery (RFC 8414 / RFC 9728), DCR, `authorization_code` + PKCE (a
 //! local callback, `callback.rs`), `client_credentials`, refresh (the ADR
-//! 0015 guard), and the `~/.local/share/archimedes/mcp-auth.json` storage
-//! (0600).
+//! 0015 guard), and the platform data dir's `archimedes/mcp-auth.json`
+//! storage (0600) — `auth_file_path` is where the per-OS path is enumerated.
 //!
 //! The `authenticate` orchestrator takes an `open_browser` seam (a
 //! `&dyn Fn(&str)`) so the tests can SIMULATE the browser (a reqwest
@@ -716,19 +716,51 @@ pub fn save_credentials(path: &Path, map: &BTreeMap<String, StoredAuth>) -> Resu
 /// The name comes from a closure so the retry is testable: inside this process
 /// the real counter is shared by every test thread, so no test can predict which
 /// name the next save will choose.
+///
+/// EXHAUSTION SAYS WHAT TO DO. Returning the bare last error made the operator's
+/// only clue `creating the staging file failed: File exists (os error 17)` — no
+/// hint that three names had been tried, and no hint that the cure is deleting a
+/// stale staging file (which is the ONLY realistic cause of three collisions in a
+/// row, since a live writer holds its name for one rename's duration). So the
+/// failure names the attempt count, the diagnosis, and the name pattern, with the
+/// last name tried as the concrete example. The raw OS text stays in the message
+/// so [`is_name_taken`] still recognises it.
 fn stage_with_retry(
     contents: &str,
     mut next_name: impl FnMut() -> PathBuf,
 ) -> Result<Staging, String> {
-    let mut last: Option<String> = None;
-    for _ in 0..3 {
-        match Staging::create(&next_name(), contents) {
+    let mut last: Option<(PathBuf, String)> = None;
+    let mut attempts = 0;
+    for _ in 0..STAGING_ATTEMPTS {
+        attempts += 1;
+        let name = next_name();
+        match Staging::create(&name, contents) {
             Ok(staging) => return Ok(staging),
-            Err(e) if is_name_taken(&e) => last = Some(e),
+            Err(e) if is_name_taken(&e) => last = Some((name, e)),
             Err(e) => return Err(e),
         }
     }
-    Err(last.expect("the loop only ends by exhausting the attempts it recorded"))
+    let (last_name, last_error) =
+        last.expect("the loop only ends by exhausting the attempts it recorded");
+    Err(exhausted_staging_error(attempts, &last_name, &last_error))
+}
+
+/// How many staging names one save may try before giving up (see
+/// [`stage_with_retry`]).
+const STAGING_ATTEMPTS: u32 = 3;
+
+/// The exhausted-retry message (see [`stage_with_retry`]'s doc for why the bare
+/// OS error is not enough). `last_name` doubles as the example of the pattern, so
+/// the operator can glob it literally: the staging names this module produces are
+/// `<stem>.<pid>.<counter>.<ext>.tmp` beside the target.
+fn exhausted_staging_error(attempts: u32, last_name: &Path, last_error: &str) -> String {
+    format!(
+        "staging the credentials file failed after {attempts} attempts: every candidate name was \
+         already taken ({last_error}). That is what a STALE staging file from a killed save looks \
+         like — remove the leftovers matching `<stem>.<pid>.<counter>.<ext>.tmp` next to the \
+         credentials file (the last name this run tried was {}) and re-run",
+        last_name.display()
+    )
 }
 
 /// Is this `save_credentials` error the staging NAME being taken (the one
@@ -759,7 +791,24 @@ const CREDENTIALS_MODE: u32 = 0o600;
 /// Only the leaf gets the mode — the intermediates of a nested path stay at the
 /// umask, which is why the real path's parent (`~/.local/share`) is already
 /// `0700` on the platforms that matter.
+///
+/// A BARE RELATIVE NAME IS REFUSED, LOUDLY. `Path::new("mcp-auth.json").parent()`
+/// is `Some("")`, `create_dir_all("")` answers `Ok(())`, and the `0700` chmod then
+/// fails on `""` with a bare `No such file or directory (os error 2)` that names
+/// neither the path nor the reason (measured). Before this fn existed the same
+/// input silently wrote the token file into the process's cwd; this keeps the
+/// LOUD half of that and drops the baffling half — a credentials file belongs in
+/// the platform data dir (`auth_file_path`), and one named relative to an
+/// arbitrary cwd is a caller bug, so it gets a message that says which.
 fn create_credentials_dir(path: &Path) -> std::io::Result<()> {
+    if path.as_os_str().is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the credentials dir resolved to an empty path (a credentials file named without a \
+             directory, e.g. `mcp-auth.json`) — it would land in the current working directory; \
+             use the platform data dir path (`auth_file_path`)",
+        ));
+    }
     #[cfg(unix)]
     let existed = path.is_dir();
     std::fs::create_dir_all(path)?;
@@ -1468,6 +1517,33 @@ mod tests {
             is_name_taken(&err),
             "the error is the name collision, not something the retry swallowed: {err}"
         );
+        // And the collision is ACTIONABLE (see `exhausted_staging_error`): the
+        // bare OS text alone reads as a filesystem fault, not as "delete the
+        // stale staging leftovers", and does not even admit that a retry
+        // happened. Each of these four was absent before, so a user with a
+        // wedged token store had no way to find the file to remove.
+        assert!(
+            err.contains("3 attempts"),
+            "the message names how many names were tried: {err}"
+        );
+        assert!(
+            err.to_lowercase().contains("stale"),
+            "the message names the diagnosis: {err}"
+        );
+        assert!(
+            err.contains("<stem>.<pid>.<counter>.<ext>.tmp"),
+            "the message names the leftover pattern: {err}"
+        );
+        assert!(
+            err.contains(
+                &taken
+                    .file_name()
+                    .expect("a file name")
+                    .to_string_lossy()
+                    .to_string()
+            ),
+            "and the concrete last name it tried: {err}"
+        );
         assert_eq!(
             std::fs::read_to_string(&taken).expect("still intact"),
             "another writer is mid-save in this file",
@@ -1485,6 +1561,45 @@ mod tests {
             !is_name_taken("creating the credentials dir failed: permission denied"),
             "a permission failure is not a name collision — retrying it 3x would only delay \
              the error the user needs to see"
+        );
+    }
+
+    #[test]
+    fn a_credentials_file_without_a_directory_is_refused_by_name() {
+        // `Path::new("mcp-auth.json").parent()` is `Some("")`, so the guard in
+        // `create_credentials_dir` is the only thing between a bare relative name
+        // and the process's cwd. The old `create_dir_all` answered `Ok(())` for
+        // `""` and wrote the token file into the cwd; the chmod-based version that
+        // replaced it failed on `""` with a bare `No such file or directory (os
+        // error 2)`. Both are wrong for a file holding a token: this pins the
+        // third answer, a refusal that names the path and the cure.
+        //
+        // Asserted against the guard and the SAVE (not by chdir-ing, which is
+        // process-global and would move every other test thread's cwd).
+        let err = create_credentials_dir(std::path::Path::new(""))
+            .expect_err("an empty dir is not a credentials dir");
+        assert!(
+            err.to_string().contains("empty path"),
+            "the failure names what resolved badly, not a bare ENOENT: {err}"
+        );
+
+        let err = save_credentials(std::path::Path::new("mcp-auth.json"), &one_entry())
+            .expect_err("a credentials file with no directory is a caller bug");
+        assert!(
+            err.contains("empty path"),
+            "and the save surfaces that reason, not the chmod's: {err}"
+        );
+        assert!(
+            err.contains("auth_file_path"),
+            "it points at the path that is meant to be used: {err}"
+        );
+        // The refusal happens BEFORE any write, so nothing landed in the cwd.
+        assert!(
+            !std::env::current_dir()
+                .expect("a cwd")
+                .join("mcp-auth.json")
+                .exists(),
+            "a refused bare name must not have written a token file into the cwd"
         );
     }
 

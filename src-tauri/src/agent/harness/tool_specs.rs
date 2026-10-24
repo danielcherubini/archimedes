@@ -308,7 +308,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                     "search": { "type": "string", "description": "Search tools by name/description keyword" },
                     "describe": { "type": "string", "description": "Tool name to show full parameter schema for" },
                     "connect": { "type": "string", "description": "Server name to eagerly connect" },
-                    "server": { "type": "string", "description": "Filter to a specific server (for list, search, or disambiguating calls)" },
+                    "server": { "type": "string", "description": "Scopes the call to one server (search, describe, that server's tool list, or a tool call), and it must name a server that is actually configured — a name the config does not contain fails rather than answering 'not found'" },
                     "action": { "type": "string", "description": "Action string ('status' or 'auth')" }
                 }
             }),
@@ -1005,6 +1005,54 @@ mod tests {
             "`exec_get_search_content` still reads `responseId`, so the alias must \
              stay advertised — removing it from the handler is issue #82's open \
              option (b), and it moves the census tests with it"
+        );
+    }
+
+    /// The `mcp` tool's `server` param, read out of `tool_specs()` — the
+    /// sentence the model writes its call from.
+    fn mcp_server_param_description() -> String {
+        tool_specs()
+            .into_iter()
+            .find(|s| s.name == "mcp")
+            .expect("`mcp` is advertised")
+            .parameters["properties"]["server"]["description"]
+            .as_str()
+            .expect("`server` is advertised with a description")
+            .to_string()
+    }
+
+    #[test]
+    fn the_mcp_server_param_prose_tells_the_model_what_the_scope_actually_does() {
+        // `bd07fbf` widened the CONTRACT — `server` scopes the ANSWER on
+        // `describe` as well as `search`, and a name that was never configured
+        // FAILS instead of returning a clean "not found" — but the advertised
+        // sentence still described the old, narrower one ("Filter to a specific
+        // server (for list, search, or disambiguating calls)"). A model reading
+        // that sentence has two wrong beliefs: that `describe` ignores `server`
+        // (so it would not pass it, and would get a schema from the wrong
+        // server), and that a guessed name is a safe probe (issue #68's
+        // credibility bug — an empty scope must not read as "it doesn't exist").
+        // Pinned as substrings rather than a byte-for-byte copy so the sentence
+        // can still be reworded; the two CLAIMS are the contract.
+        let d = mcp_server_param_description();
+        assert!(
+            d.contains("describe"),
+            "the sentence must say `describe` is scoped, or the model will not pass `server` \
+             to it: {d}"
+        );
+        assert!(d.contains("search"), "and `search`: {d}");
+        assert!(
+            d.to_lowercase().contains("must name") || d.to_lowercase().contains("configured"),
+            "and that the name has to be a real one — a guessed name is a FAILURE, not a \
+             'not found': {d}"
+        );
+        // One sentence: this is the model's only briefing on the param, and the
+        // surrounding workflow lines carry the rest. (No sentence-terminating
+        // period mid-string — a two-sentence param description is one the model
+        // skims.)
+        assert!(
+            !d.contains(". "),
+            "the param description stays ONE sentence: {d}"
         );
     }
 

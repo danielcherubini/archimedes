@@ -172,25 +172,40 @@ fn in_scope(server: Option<&str>, server_name: &str) -> bool {
     server.is_none_or(|srv| srv == server_name)
 }
 
-/// Reject a `server` param naming a server the config does not contain, as
-/// opposed to one that exists and merely did not answer.
+/// Reject a `server` param naming a server the manager does not HOLD, as
+/// opposed to one it holds and merely could not reach.
 ///
 /// The `server` param can name three different things and the model must be
 /// able to tell them apart — this is the same credibility bug class as the
 /// `no such tool` of issue #68:
-/// - NEVER CONFIGURED → the scope named NOTHING, so nothing was actually
+/// - NOT HELD BY THE MANAGER → the scope named NOTHING, so nothing was actually
 ///   searched: a `No tools matching …` / `Tool not found: …` computed over it
 ///   would read as "the tool does not exist" and the model would stop, when the
 ///   real problem is that the scope was empty. This FAILS, naming the unknown
-///   name and the servers that DO exist.
-/// - CONFIGURED BUT UNUSABLE (`NeedsAuth` / `Error` / a failed connect) → it is
-///   in [`Collected::skipped`] and the partial-set rule decides, exactly as
-///   before.
-/// - CONFIGURED AND ANSWERING → an ordinary scoped call.
+///   name and the servers that ARE held.
+/// - HELD BUT UNUSABLE (`NeedsAuth` / `Error` / a failed connect) → it is in
+///   [`Collected::skipped`] and the partial-set rule decides, exactly as before.
+/// - HELD AND ANSWERING → an ordinary scoped call.
 ///
-/// [`McpManager::server_names`] is the authoritative list of configured names:
-/// it is the config's server map keys, so a server that EXISTS but is
-/// unreachable is in it — it is never reported as unknown.
+/// WHAT THE LIST IS. [`McpManager::server_names`] is the manager's own server
+/// map, i.e. the entries `config::load_servers` KEPT after `types::classify_server`
+/// — which DROPS an entry before the manager ever sees it when it is
+/// `disabled: true`, a legacy `sse` server, or malformed (no `url`, no `command`).
+/// So "not in this list" means "not HELD", not "not in the user's JSON": a server
+/// the user configured and switched off is reported here as unknown (measured: a
+/// `disabled: true` entry answers `Unknown MCP server: switched-off`). That is not
+/// a regression — the pre-guard manager failed an unreachable name the same way.
+/// A fourth arm saying "configured but disabled" would need the RAW settings layers,
+/// which this tool is not given (it gets `&McpManager` only, and the dropped entry
+/// is not in it), so there is deliberately no such arm. What is cheap and is done:
+/// the requirement clause of the message says the param must name a server the
+/// session HOLDS and names the drop reasons (`disabled` / legacy `sse` / malformed),
+/// so a user reading it knows to switch the server on rather than invent a name.
+/// The candidate LIST keeps its "configured servers" wording (and the empty-config
+/// case its "no MCP servers are configured" sentence, pinned) — both name the set
+/// the manager holds, which for a healthy config is the config's own set.
+///
+/// [`Collected::skipped`]: Collected::skipped
 fn unknown_server_scope(manager: &McpManager, server: &str) -> Option<ToolResult> {
     let configured = manager.server_names();
     if configured.iter().any(|name| name == server) {
@@ -201,8 +216,16 @@ fn unknown_server_scope(manager: &McpManager, server: &str) -> Option<ToolResult
     } else {
         format!("configured servers: {}", configured.join(", "))
     };
+    // The REQUIREMENT clause says "a server this session holds" and names the
+    // reasons an entry can be missing from that set, because the list below is
+    // what `config::load_servers` KEPT — not the user's JSON — and a clause
+    // claiming the name was never CONFIGURED would contradict the user's own
+    // settings file for a server they merely switched off. Naming the drop reasons
+    // is free (no settings read) and is the actionable half: the fix is to switch
+    // the server on, not to invent a name. The candidate list keeps its
+    // `configured servers:` wording, which a healthy config makes true.
     Some(fail(format!(
-        "Unknown MCP server: {server} ({known}) — the `server` param must name a configured server"
+        "Unknown MCP server: {server} ({known}) — the `server` param must name a server this session holds, and an entry the config marks `disabled` (or a legacy `sse` / malformed entry) is not held"
     )))
 }
 
@@ -230,8 +253,8 @@ fn unknown_server_scope(manager: &McpManager, server: &str) -> Option<ToolResult
 /// dead server, and neither is a miss scoped by the `server` param to a server
 /// that answered (issue #68).
 ///
-/// A `server` param naming a server the config does not contain FAILS (naming
-/// it + the configured servers) on every scoped path — `search`, `describe`,
+/// A `server` param naming a server the manager does not HOLD FAILS (naming
+/// it + the servers it holds) on every scoped path — `search`, `describe`,
 /// the server-list path and a `server`-pinned `tool` call — because an answer
 /// computed over an empty scope is not an answer. `search` / `describe` filter
 /// their ANSWER by `server` too, so a scope never answers with a tool from
@@ -301,17 +324,19 @@ pub async fn mcp_tool(
         }
     }
 
-    // ── the `server` scope must name a CONFIGURED server ──
+    // ── the `server` scope must name a server the manager HOLDS ──
     //
     // Every path below takes `server` as its SCOPE, so the scope is validated
-    // ONCE here: a name the config never contained means the scope named
+    // ONCE here: a name the manager does not hold means the scope named
     // NOTHING, and an answer computed over it is not an answer (issue #68's
     // bug class — the model must not read an empty scope as "it doesn't
-    // exist"). A configured server that is merely unreachable passes here and
+    // exist"). A held server that is merely unreachable passes here and
     // is reported as a SKIP by `collect_tools`, which is the existing,
-    // different rule. (`connect` / `action: "auth"` returned above; they act ON
-    // a server rather than scoping a lookup, and the manager already fails
-    // them naming the unknown name.)
+    // different rule. Note the asymmetry the guard's doc spells out: an entry
+    // `classify_server` DROPPED (`disabled: true`, legacy `sse`, malformed)
+    // never reached the manager and so lands on the unknown side. (`connect` /
+    // `action: "auth"` returned above; they act ON a server rather than scoping
+    // a lookup, and the manager already fails them naming the unknown name.)
     if let Some(name) = &server {
         if let Some(r) = unknown_server_scope(manager, name) {
             return r;
@@ -1217,6 +1242,44 @@ mod tests {
         let t = text(&r);
         assert!(t.contains("Unknown MCP server: anything"), "{t}");
         assert!(t.contains("no MCP servers are configured"), "{t}");
+        manager.close_all();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_disabled_server_is_unknown_to_the_manager_and_says_why() {
+        // The asymmetry `unknown_server_scope`'s doc states, pinned: an entry the
+        // user configured and switched off is DROPPED by `classify_server` before
+        // the manager exists, so it is on the unknown side of the guard. The
+        // pre-guard manager failed the name the same way — this pins that the
+        // message no longer claims the server was never CONFIGURED, which would
+        // contradict the user's own settings file, and that it names the drop
+        // reasons the manager can see without a settings read.
+        let (mut manager, _dir) = manager_with(&serde_json::json!({
+            "ok": "fake",
+            "switched-off": { "command": fake_bin(), "disabled": true },
+        }));
+        let r = mcp_tool(
+            &mut manager,
+            &serde_json::json!({ "search": "echo", "server": "switched-off" }),
+            &cancel(),
+        )
+        .await;
+        assert!(
+            r.is_error,
+            "a scope the manager does not hold names nothing"
+        );
+        let t = text(&r);
+        assert!(t.contains("Unknown MCP server: switched-off"), "{t}");
+        assert!(t.contains("ok"), "the held names are still offered: {t}");
+        assert!(
+            t.contains("servers: ok"),
+            "the candidate list keeps its `configured servers:` wording — the doc says why \
+             that is acceptable while the requirement clause is not: {t}"
+        );
+        assert!(
+            t.contains("disabled"),
+            "and the message says a switched-off entry is not held: {t}"
+        );
         manager.close_all();
     }
 }

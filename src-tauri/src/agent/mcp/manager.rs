@@ -1,8 +1,12 @@
 //! The MCP server manager (ADR 0018): one per `AgentLoop` (constructed with
 //! the space `cwd`); `server → (def, state, client)`; lazy connect on first
 //! use; `tools/list` cached per connection; `connect` / `status` / `auth` /
-//! `close` actions; a failed connect is `Error { text }` / `NeedsAuth`
-//! (never silently dropped).
+//! `close` actions. A failed connect is never silently dropped, but WHERE it
+//! lands differs by transport: an HTTP failure becomes `Error { text }` (or
+//! `NeedsAuth`) on the entry, so `status` reports it, while a STDIO failure
+//! propagates with `?` instead and leaves the entry in `Connecting` — a
+//! documented gap, `docs/features/mcp-known-gaps.md` ("A stdio connect failure
+//! never reaches `McpState::Error`").
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
