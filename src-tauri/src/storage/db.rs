@@ -358,7 +358,8 @@ impl Db {
                 let p = c.display().to_string();
                 let now = now_ms();
                 conn.execute(
-                    "INSERT INTO spaces (path, created_at, last_opened_at) VALUES (?1, ?2, ?2)
+                    "INSERT INTO spaces (path, created_at, last_opened_at, sort_order) \
+                     VALUES (?1, ?2, ?2, COALESCE((SELECT MAX(sort_order) FROM spaces), -1) + 1)
                      ON CONFLICT(path) DO NOTHING",
                     params![p, now],
                 )?;
@@ -373,11 +374,15 @@ impl Db {
     ///
     /// Upserts by session id: `created_at` and `title` are preserved on a
     /// re-record (e.g. a resume), while cwd / capabilities are refreshed.
+    ///
+    /// A NEW row joins the list at the BOTTOM (`MAX + 1`); the CONFLICT branch
+    /// never renumbers — a resume re-runs `record_session`, and a row the user
+    /// has positioned must not move when its session is resumed (ADR 0075).
     pub fn record_session(&self, info: &SessionInfo) -> Result<(), DbError> {
         let capabilities = serde_json::to_string(&info.capabilities)?;
         self.conn.lock().expect("db mutex poisoned").execute(
-            "INSERT INTO sessions (id, cwd, created_at, title, capabilities_json, is_subagent)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO sessions (id, cwd, created_at, title, capabilities_json, is_subagent, sort_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE((SELECT MAX(sort_order) FROM sessions), -1) + 1)
              ON CONFLICT(id) DO UPDATE SET
                cwd = excluded.cwd,
                capabilities_json = excluded.capabilities_json,
@@ -785,6 +790,10 @@ impl Db {
     /// validation happens here — whether the folder exists is the caller's
     /// problem (the canonicalizing gate is in `start_session`/`space_for_path`).
     ///
+    /// A NEW row joins the list at the BOTTOM (`MAX + 1`); the CONFLICT branch
+    /// never renumbers, so a re-touch refreshes recency and leaves the row
+    /// exactly where the user put it (ADR 0075 — only a drag moves a row).
+    ///
     /// `default_trusted` is written ONLY on INSERT (a NEW row is born
     /// `trusted` per the flag — the settings' `default_trust_new_spaces`);
     /// the CONFLICT branch never touches `trusted` (an existing row's flag
@@ -792,7 +801,8 @@ impl Db {
     pub fn upsert_space(&self, path: &str, default_trusted: bool) -> Result<(), DbError> {
         let key = space_key(path).unwrap_or_else(|| path.to_string());
         self.conn.lock().expect("db mutex poisoned").execute(
-            "INSERT INTO spaces (path, created_at, last_opened_at, trusted) VALUES (?1, ?2, ?2, ?3)
+            "INSERT INTO spaces (path, created_at, last_opened_at, trusted, sort_order) \
+             VALUES (?1, ?2, ?2, ?3, COALESCE((SELECT MAX(sort_order) FROM spaces), -1) + 1)
                  ON CONFLICT(path) DO UPDATE SET last_opened_at = excluded.last_opened_at",
             params![key, now_ms(), default_trusted],
         )?;
@@ -2411,6 +2421,61 @@ mod tests {
         rows
     }
 
+    /// The same for an INTEGER column (the `sort_order` values themselves).
+    fn raw_i64s(db: &Db, sql: &str) -> Vec<i64> {
+        let guard = db.conn.lock().expect("db mutex poisoned");
+        let rows = guard
+            .prepare(sql)
+            .expect("prepare should succeed")
+            .query_map([], |row| row.get::<_, i64>(0))
+            .expect("query should succeed")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows should read");
+        rows
+    }
+
+    /// One row's `sort_order`, keyed by a TEXT primary key (a path or an id).
+    fn sort_order_of(db: &Db, table: &str, key_column: &str, key: &str) -> i64 {
+        db.conn
+            .lock()
+            .expect("db mutex poisoned")
+            .query_row(
+                &format!(
+                    "SELECT sort_order FROM {table} WHERE {key_column} = ?1",
+                    table = table,
+                    key_column = key_column
+                ),
+                params![key],
+                |row| row.get(0),
+            )
+            .expect("sort_order should read")
+    }
+
+    /// The one scalar of an INTEGER column (a `COUNT(*)`-shaped assertion).
+    fn raw_scalar(db: &Db, sql: &str) -> i64 {
+        db.conn
+            .lock()
+            .expect("db mutex poisoned")
+            .query_row(sql, [], |row| row.get(0))
+            .expect("scalar query should succeed")
+    }
+
+    /// A minimal session shape on a caller-supplied cwd (the
+    /// `record_session_preserves_the_archived_flag` literal, with the cwd
+    /// and the subagent flag left to the caller).
+    fn session_on(id: &str, cwd: &Path, is_subagent: bool) -> SessionInfo {
+        SessionInfo {
+            session_id: id.to_string(),
+            cwd: cwd.to_path_buf(),
+            capabilities: serde_json::json!({}),
+            config_options: None,
+            archived: false,
+            title: None,
+            context_usage: None,
+            is_subagent,
+        }
+    }
+
     /// (sort_order) A FRESH database gains the column from `SCHEMA` alone —
     /// no migration runs (the pragma gate in `Db::open` skips it).
     #[test]
@@ -2642,6 +2707,212 @@ mod tests {
         assert_eq!(
             at_zero, 1,
             "exactly one row sits at 0 — no tie with the hidden row"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A NEW space row joins the list at the BOTTOM (`MAX + 1`), not at the
+    /// top and not by name. Asserted through raw SQL because `list_spaces`
+    /// still sorts by recency until the `ORDER BY` swap.
+    ///
+    /// The dir names are chosen so that INSERTION order is NOT `path ASC`
+    /// order — otherwise the `path ASC` tie-break would satisfy the assertion
+    /// on its own and the test would pass vacuously.
+    #[test]
+    fn upsert_space_new_row_joins_at_the_bottom() {
+        let dir =
+            std::env::temp_dir().join(format!("db-spacebottom-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).expect("db should open");
+        let a = dir.join("zzz-first-inserted");
+        let b = dir.join("mmm-second-inserted");
+        let c = dir.join("aaa-third-inserted");
+        for d in [&a, &b, &c] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        db.upsert_space(a.to_str().unwrap(), false)
+            .expect("upsert a");
+        db.upsert_space(b.to_str().unwrap(), false)
+            .expect("upsert b");
+        db.upsert_space(c.to_str().unwrap(), false)
+            .expect("upsert c");
+
+        let keys: Vec<String> = [a, b, c]
+            .iter()
+            .map(|d| std::fs::canonicalize(d).unwrap().display().to_string())
+            .collect();
+        let order = raw_column(
+            &db,
+            "SELECT path FROM spaces ORDER BY sort_order ASC, path ASC",
+        );
+        assert_eq!(
+            order, keys,
+            "rows come back in INSERTION order, i.e. each new row joined at the bottom"
+        );
+        assert_eq!(
+            raw_i64s(&db, "SELECT sort_order FROM spaces ORDER BY sort_order ASC"),
+            vec![0, 1, 2],
+            "the numbers grow from the bottom, one per row"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A RE-TOUCH never renumbers: the `ON CONFLICT … DO UPDATE` branch
+    /// refreshes `last_opened_at` and must not touch `sort_order`. This is the
+    /// feature (a click must not move the tab) and simultaneously the resume
+    /// hazard (a re-touch used to be what moved a row to the top).
+    ///
+    /// The dir names make INSERTION order contradict `path ASC`, so the
+    /// assertion cannot be satisfied by the tie-break on rows that all still
+    /// carry `DEFAULT 0`.
+    #[test]
+    fn upsert_space_retouch_does_not_renumber() {
+        let dir =
+            std::env::temp_dir().join(format!("db-spaceretouch-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).expect("db should open");
+        let a = dir.join("zzz-first-and-retouched");
+        let b = dir.join("aaa-second");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let key_a = std::fs::canonicalize(&a).unwrap().display().to_string();
+        let key_b = std::fs::canonicalize(&b).unwrap().display().to_string();
+
+        db.upsert_space(a.to_str().unwrap(), false)
+            .expect("upsert a");
+        db.upsert_space(b.to_str().unwrap(), false)
+            .expect("upsert b");
+        db.upsert_space(a.to_str().unwrap(), false)
+            .expect("re-touch a");
+
+        assert_eq!(
+            sort_order_of(&db, "spaces", "path", &key_a),
+            0,
+            "a re-touched row keeps the number it joined at"
+        );
+        assert_eq!(
+            raw_column(
+                &db,
+                "SELECT path FROM spaces ORDER BY sort_order ASC, path ASC"
+            ),
+            vec![key_a, key_b],
+            "the re-touched row did not move"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A NEW session row joins at the BOTTOM too. The ids are chosen so `id
+    /// DESC` (the old tie-break) contradicts insertion order, so the assertion
+    /// cannot be satisfied by the tie-break alone.
+    #[test]
+    fn record_session_new_row_joins_at_the_bottom() {
+        let dir = std::env::temp_dir().join(format!("db-sessbottom-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).expect("db should open");
+        db.record_session(&session_on("s_first", Path::new("/tmp/proj"), false))
+            .expect("record s_first");
+        db.record_session(&session_on("s_second", Path::new("/tmp/proj"), false))
+            .expect("record s_second");
+
+        assert_eq!(
+            raw_column(
+                &db,
+                "SELECT id FROM sessions ORDER BY sort_order ASC, id DESC"
+            ),
+            vec!["s_first", "s_second"],
+            "rows come back in RECORD order, i.e. each new row joined at the bottom"
+        );
+        assert_eq!(
+            raw_i64s(
+                &db,
+                "SELECT sort_order FROM sessions ORDER BY sort_order ASC"
+            ),
+            vec![0, 1],
+            "the numbers grow from the bottom, one per row"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A RE-RECORD never renumbers: a resume re-runs `record_session`, and the
+    /// `ON CONFLICT … DO UPDATE` branch must leave the row's position alone.
+    ///
+    /// A second row is recorded alongside the re-recorded one on purpose: with
+    /// only one row in the table every number is `0` and "unchanged" is
+    /// trivially true, so the neighbouring row is what makes the assertion
+    /// observable (its id is below the re-recorded one so the `id DESC`
+    /// tie-break cannot hide a shared number).
+    #[test]
+    fn record_session_re_record_does_not_renumber() {
+        let dir =
+            std::env::temp_dir().join(format!("db-sessretouch-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).expect("db should open");
+        let resumed = session_on("s_resumed", Path::new("/tmp/proj"), false);
+        db.record_session(&resumed)
+            .expect("record s_resumed (it joins at 0)");
+        db.record_session(&session_on("s_other", Path::new("/tmp/proj"), false))
+            .expect("record s_other (it joins below at 1)");
+        db.record_session(&resumed)
+            .expect("re-record s_resumed (the resume path re-runs record_session)");
+
+        assert_eq!(
+            sort_order_of(&db, "sessions", "id", "s_resumed"),
+            0,
+            "the re-recorded row keeps the number it joined at"
+        );
+        assert_eq!(
+            sort_order_of(&db, "sessions", "id", "s_other"),
+            1,
+            "and the row below it is not dragged up or pushed down by the re-record"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// (hazard H4) The phase-11 space-backfill INSERT carries the same
+    /// bottom-join expression. On this upgrade path — stored sessions, an
+    /// EMPTY `spaces` table — the seed numbers nothing, so an unpatched
+    /// `DEFAULT 0` would tie every backfilled row and hand the user an
+    /// alphabetical list on the very boot the spec promises is unchanged.
+    ///
+    /// Asserted ORDER-AGNOSTICALLY on purpose: the backfill reads
+    /// `SELECT DISTINCT cwd FROM sessions`, which has no defined order, so the
+    /// test pins distinctness only and never encodes that nondeterminism.
+    #[test]
+    fn backfilled_space_rows_join_at_the_bottom() {
+        let dir =
+            std::env::temp_dir().join(format!("db-spacebackfill-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let cwd_a = dir.join("cwd_a");
+        let cwd_b = dir.join("cwd_b");
+        // The cwds MUST exist for the backfill's canonicalization.
+        std::fs::create_dir_all(&cwd_a).unwrap();
+        std::fs::create_dir_all(&cwd_b).unwrap();
+        create_pre_sort_order_db(&path);
+        let conn = Connection::open(&path).expect("raw open of the fixture db");
+        for (id, cwd) in [("s_a", &cwd_a), ("s_b", &cwd_b)] {
+            conn.execute(
+                "INSERT INTO sessions (id, cwd, created_at, capabilities_json, is_subagent) \
+                 VALUES (?1, ?2, 1, '{}', 0)",
+                params![id, cwd.display().to_string()],
+            )
+            .expect("fixture session row");
+        }
+        drop(conn);
+
+        let db = Db::open(&path).expect("the backfill must number its rows");
+        let total = raw_scalar(&db, "SELECT COUNT(*) FROM spaces");
+        let distinct = raw_scalar(&db, "SELECT COUNT(DISTINCT sort_order) FROM spaces");
+        let at_zero = raw_scalar(&db, "SELECT COUNT(*) FROM spaces WHERE sort_order = 0");
+        assert_eq!(total, 2, "the backfill created one row per existing cwd");
+        assert_eq!(
+            distinct, 2,
+            "the backfilled rows carry DISTINCT numbers — the seed numbered nothing here, \
+             so an unpatched INSERT leaves every row on DEFAULT 0"
+        );
+        assert_eq!(
+            at_zero, 1,
+            "exactly one row sits at 0 — not every backfilled row tied there"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

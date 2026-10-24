@@ -52,3 +52,14 @@ order that contradicts the server's.
 - `src/lib/sessionActivity.ts` is deleted: `sortByActivity`, `activityKeyOf` and
   `activityFromKey` existed only to feed that one sort, including the
   subscription key built so streaming would not re-sort the list on every token.
+- The phase-11 space-backfill `INSERT` in `Db::open` carries the same
+  bottom-join expression (`COALESCE((SELECT MAX(sort_order) …), -1) + 1`) as
+  `Db::upsert_space`, because on the upgrade path where a database has stored
+  sessions but no `spaces` rows the seed numbers nothing — there is nothing to
+  number — so a plain `DEFAULT 0` would tie every backfilled row and hand the
+  user an alphabetical list on the very boot the spec promises is unchanged.
+- The seed queries in `seed_space_sort_order` / `seed_session_sort_order`
+  hardcode the OLD display order (`last_opened_at DESC, path ASC` and
+  last-activity `DESC, id DESC`) and must never be pointed at `sort_order`: at
+  seed time every value in that column is still `DEFAULT 0`, so `ORDER BY
+  sort_order` is a pure tie and would pick an order nobody ever saw.
