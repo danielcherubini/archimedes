@@ -23,6 +23,28 @@
 
 set -euo pipefail
 
+# The payload-shape vocabulary (see the header of that file for why it is shared
+# rather than duplicated). Resolved from THIS script's directory, not the caller's
+# cwd: the composer is invoked as `bash scripts/compose-updater-manifest.sh` from
+# the repo root by release.yml and from anywhere by its harness, and a cwd-relative
+# source path would make the script's location an argument.
+#
+# Guarded, with a plain printf/exit rather than `fail`: `fail` is defined below and
+# needs `$out_file`, which does not exist yet. A missing library is a broken
+# checkout, and bash's own `No such file or directory` from the `source` would read
+# like a bug in this script rather than a missing sibling; the message names the
+# file so the operator can see which of the two is gone. The alternative — sourcing
+# unconditionally and letting the first `$updater_payload_shape_hint` use die under
+# `set -u` — would fail at the point a real asset is rejected, i.e. exactly when the
+# message matters most.
+shape_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/updater-payload-shapes.sh"
+if [[ ! -f "$shape_lib" ]]; then
+  printf 'error: %s is missing — it holds the updater payload shapes this composer matches against, so it cannot decide which signature claims which platform\n' "$shape_lib" >&2
+  exit 1
+fi
+# shellcheck source=./updater-payload-shapes.sh
+. "$shape_lib"
+
 usage() {
   cat >&2 <<'USAGE'
 usage: compose-updater-manifest.sh --sigs-dir DIR --version X.Y.Z --tag TAG \
@@ -181,12 +203,47 @@ fi
 #
 # It runs HERE — after the empty-directory refusal and before any pattern matching
 # or key derivation — so an expected-but-absent signature fails before a single key
-# is built and before `--out` is written. `fail()` removes `$out_file` on every exit
-# path, so a rejected composition leaves nothing for the next step to upload; that
-# property is what this placement protects.
+# is built. `fail()` removes `$out_file` on EVERY exit-1 path, including this one,
+# and that is deliberate rather than incidental — see "WHY THIS REFUSAL DELETES A
+# PRE-EXISTING `--out`" below, because the opposite reading ("the file on disk is
+# the OLD correct manifest, so leave it") is attractive and wrong.
+#
+# WHY THIS REFUSAL DELETES A PRE-EXISTING `--out`. The documented manual flow
+# (AGENTS.md step 4) is download-then-compose: `gh release download -p latest.json`
+# and then re-compose over the downloaded file, so when this refusal fires there IS
+# a real manifest sitting at `--out`, and leaving it untouched looks like the safe
+# answer. Three reasons it is not:
+#
+#   1. The file's own contract. `fail()` exists so that "a rejected manifest can
+#      never be left on disk for the next step to `gh release upload`". That is a
+#      claim about every exit-1 path, and this bare `exit 1` was the only exit-1 in
+#      the script that skipped the cleanup — including pre-write refusals like
+#      `--sigs-dir is not a directory`, which DO delete. An operator cannot reason
+#      about which refusals leave a file behind, and the next step cannot either.
+#      (The one exit-1 that still does not clean up is the missing-shape-library
+#      guard at the top of the file. That is a deliberate exception, pinned by the
+#      composer harness: a broken CHECKOUT is not a refused composition, and the
+#      tool that never started has formed no opinion about this release and should
+#      not destroy the operator's downloaded manifest.)
+#   2. By this ADR's own ruling, "the previous version's manifest where the new
+#      one belongs" is the HAZARD, not the safety net: ADR 0052 lists "the new
+#      version is visible to clients with no manifest, OR WITH THE PREVIOUS
+#      VERSION'S" as the bad window the publish order exists to close. So the
+#      surviving file is not a fallback this script can rely on — it is the second
+#      half of a documented failure mode, and it is what a `--clobber` re-upload
+#      of an ignored exit code publishes.
+#   3. Loudness beats reassurance. With the file gone, the very next thing the
+#      operator types — `gh release upload vX.Y.Z latest.json --clobber` — fails
+#      with "no such file or directory" and the ceremony stops at the right step.
+#      With the file present, that upload SUCCEEDS, and the notes rewrite that was
+#      supposed to be the point of the run silently does not land.
+#
+# Nothing is destroyed by the deletion either: the file being removed is, by
+# construction, a copy of a PUBLISHED release asset, one
+# `gh release download <tag> -p latest.json` away from being recovered.
 #
 # It only ever REFUSES. It never adds a key, never reorders one, and is opt-in:
-# with no `--require-payload` the composer behaves exactly as it always has.
+# with no `--require-payload` the composer behaves exactly as it has always behaved.
 if (( ${#required_payloads[@]} > 0 )); then
   missing_payloads=()
   for required_payload in "${required_payloads[@]}"; do
@@ -203,10 +260,11 @@ if (( ${#required_payloads[@]} > 0 )); then
       printf 'error: expected updater payload %s has no signature in %s (expected %s.sig) — refusing to compose a manifest that silently drops an installed platform\n' \
         "$missing_payload" "$sigs_dir" "$missing_payload" >&2
     done
-    # Not `fail`, which would print the message a third time: every exit-1 path
-    # above funnels through it for the `$out_file` cleanup, and nothing has been
-    # written at this point anyway — this block runs before the emit.
-    exit 1
+    # `fail`, not a bare `exit 1`: the per-offender lines above say WHAT is missing,
+    # and this says what happens to `--out`. Naming the cleanup in the message is
+    # what makes the deletion discoverable to the person standing at the terminal
+    # about to re-upload a manifest from an earlier run.
+    fail "${#missing_payloads[@]} of ${#required_payloads[@]} expected updater payload(s) have no signature in $sigs_dir — nothing was composed, and any manifest already at $out_file has been REMOVED so it cannot be uploaded in place of the one this run refused to write"
   fi
 fi
 
@@ -238,7 +296,12 @@ claim() {
   printf -v "$slot" '%s' "$sig"
 }
 
-accepted_suffixes='*_x64-setup.nsis.zip, *_setup.exe (the raw NSIS installer), *_amd64.AppImage, *_amd64.AppImage.tar.gz, *_amd64.deb, *_x86_64.rpm, *.app.tar.gz (the last one needs --arch)'
+# The operator-facing hint now comes from the SHARED shape file (see its header),
+# so the list an operator is handed cannot drift from the list the release-side
+# gate mirrors. The matcher arms below are the same shapes; the composer harness
+# extracts both lists and asserts they agree, which is what keeps the `case` arms
+# (which also assign slots, so they cannot move) honest against the vocabulary.
+accepted_suffixes="$updater_payload_shape_hint"
 
 for sig_path in "${sig_paths[@]}"; do
   sig_name="${sig_path##*/}"

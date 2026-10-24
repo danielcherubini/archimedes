@@ -12,7 +12,7 @@
 # question asked of a live GitHub release cannot be tested without a fixture, so
 # this file is the whole proof that the gate works.
 #
-# Three failure modes the fixtures exist to kill, each with a case below:
+# Four failure modes the fixtures exist to kill, each with a case below:
 #
 #   1. The allow-list. A `.dmg` is never an updater payload and has no `.sig`,
 #      and `latest.json` IS the manifest, so demanding a signature for either
@@ -28,6 +28,13 @@
 #   3. Vacuity in the new direction too. A release with no installers at all
 #      would satisfy "every installer has a sig" by having nothing to check, so
 #      the empty asset list is a failure in itself (case 5).
+#   4. PAIRING CHECKED ONE WAY ONLY. The allow-list skips every `*.sig` as a
+#      PAYLOAD, which is not the same as ignoring it: a `X.sig` sitting on the
+#      release with no `X` beside it makes the composer emit a platform key whose
+#      URL is not on the release — a 404 every client on that platform downloads,
+#      at exit 0. Case 16 pins the mirror direction; case 17 pins its WIDTH (all
+#      eight bundler shapes, not just the two convenient ones) and the shared
+#      source of truth that keeps it as wide as the composer's matcher.
 #
 # `gh` is replaced by a shim on PATH (below): no network, deterministic, and the
 # shim records every invocation so a case can assert what was ASKED — `--repo`
@@ -91,6 +98,13 @@ trap 'rm -rf "$tmp_root"' EXIT
 #                        "size":…,"contentType":…,"downloadCount":…,"url":…},…]}.
 #                        The fixtures below carry `name` and `state` only, which
 #                        is all the script is allowed to read.
+#   FAKE_ASSETS_RAW      set (even to empty) → the view prints THAT verbatim and
+#                        nothing else, ignoring FAKE_ASSETS_JSON. It exists for the
+#                        one input shape a JSON-building helper cannot express: a
+#                        `gh` that exits 0 and prints something which is not an
+#                        asset list at all — a proxy's HTML error page, gh's own
+#                        secondary-rate-limit notice, or an empty body. Case 18 pins
+#                        what the gate makes of all three.
 #   FAKE_RELEASE_EXISTS  false → the view exits 1 with gh's own "not found" text,
 #                        for the typo'd-tag case.
 #   FAKE_REQUIRE_REPO    true → the view REFUSES to run without an explicit
@@ -134,6 +148,18 @@ case "${1:-}" in
         if [[ "${FAKE_REQUIRE_REPO:-false}" == "true" && -z "$repo_flag" ]]; then
           echo "gh: could not resolve a repository — the caller must name one" >&2
           exit 1
+        fi
+        # FAKE_ASSETS_RAW takes precedence over everything below: it is the ONE way
+        # to make `gh` exit 0 and print something that is not JSON, which no
+        # document-building helper can express. It stands in for the three shapes
+        # measured against the real world — a proxy's HTML error page, gh's own
+        # secondary-rate-limit notice, and an empty body — all of which arrive with
+        # a zero exit, and all of which the gate must refuse rather than parse.
+        # Set-ness, not `-n`: an EMPTY value is itself one of the shapes, so the
+        # variable being set at all is what switches modes.
+        if [[ -n "${FAKE_ASSETS_RAW+set}" ]]; then
+          printf '%s\n' "$FAKE_ASSETS_RAW"
+          exit 0
         fi
         if [[ "${FAKE_RELEASE_EXISTS:-true}" != "true" ]]; then
           printf 'gh: Not Found (HTTP 404)\n' >&2
@@ -337,7 +363,33 @@ assert_contains "the unsigned rpm is named" "$rpm" "$output"
 assert_contains "the rpm's missing signature is named" "$rpm.sig" "$output"
 assert_contains "the unsigned Windows installer is named" "$exe" "$output"
 assert_contains "the Windows installer's missing signature is named" "$exe.sig" "$output"
-assert_contains "the failure counts the offenders" "2" "$output"
+# The needle carries the COUNT AND THE NOUN, because the bare "2" this assertion
+# used to pass could never go red: every message on this path contains the tag
+# `v0.2.0`, so "2" is a substring of the output no matter what the script counts.
+# A mutation that reported one offender where two exist, or that dropped the count
+# line entirely, was invisible. "2 of 4" is the shape of the actual sentence
+# (`error: 2 of 4 installer asset(s) …`), and case 3b below pins the sibling
+# sentence against a ONE-offender fixture, so the count is shown to move with the
+# input rather than being a constant of the fixture.
+assert_contains "the failure counts the offenders (2 of the 4 installers)" "2 of 4 installer" "$output"
+
+# ---------------------------------------------------------------------------
+# 3b. THE SAME SENTENCE WITH ONE OFFENDER. Case 3's needle ("2 of 4 installer")
+#     is only meaningful if the two numbers are the script's, not the fixture's
+#     vocabulary, so this case is case 3 with the rpm's signature restored: one
+#     unsigned installer out of four. Together the two cases pin that the count
+#     MOVES with the input — a hard-coded "2 of 4", or a count taken from the
+#     installer list rather than the offender list, cannot satisfy both.
+# ---------------------------------------------------------------------------
+dir="$tmp_root/one-offender"
+mkdir -p "$dir"
+export FAKE_ASSETS_JSON="$(make_assets \
+  "$rpm" "$rpm.sig" "$appimage" "$appimage.sig" "$deb" "$deb.sig" "$exe" "latest.json")"
+run_check "$dir" --repo "$repo" --tag "$tag"
+assert_fails "one unsigned installer exits 1"
+assert_contains "the failure counts ONE offender out of the four installers" "1 of 4 installer" "$output"
+assert_not_contains "and does not claim two offenders when there is one" "2 of 4 installer" "$output"
+assert_contains "the lone offender is the Windows installer" "$exe -> missing $exe.sig" "$output"
 
 # ---------------------------------------------------------------------------
 # 4. THE ALLOW-LIST. A `.dmg` is never an updater payload and carries no `.sig`
@@ -657,6 +709,28 @@ if [[ -n "$completeness_line" && -n "$compose_line" ]]; then
     "--require-payload" "$compose_body"
   assert_contains "the compose step reads the gate's stdout file" \
     "expected-payloads.txt" "$compose_body"
+  # MENTIONED IS NOT PASSED. The two assertions above are satisfied by the
+  # accumulator alone: `require_args+=(--require-payload "$payload")` builds the
+  # array and never expands it, the composer then runs with NO expectation flags at
+  # all, and the manual-path protection this wiring exists to provide is gone with
+  # nothing red anywhere. Deleting the expansion from the composer invocation while
+  # keeping the accumulator was measured to leave every assertion in this file
+  # green, so what is pinned here is the EXPANSION TOKEN itself, spelled exactly as
+  # the step writes it (`${require_args[@]+"${require_args[@]}"}`, the `set -u`
+  # idiom for an optionally-empty array).
+  assert_contains "the compose step EXPANDS the accumulator into the composer's argv (a built array nobody expands is a dropped flag)" \
+    '${require_args[@]+"${require_args[@]}"}' "$compose_body"
+  # The token pin reads the step's RAW body, so a commented-out expansion —
+  # `# ${require_args[@]+"${require_args[@]}"}`, which is what "we'll re-enable it
+  # later" looks like in YAML — would still contain the token and still pass. This
+  # second assertion reads the SAME body with shell comments stripped, so the token
+  # has to survive as LIVE CODE. (A threshold count of `require_args` mentions was
+  # the other candidate and was rejected as fragile: the `require_args=()`
+  # declaration is a third mention, so any threshold green today is one refactor
+  # away from green while the flag is dropped. The token, live, is the fact.)
+  compose_body_code="$(printf '%s\n' "$compose_body" | sed 's/^[[:space:]]*//; s/#.*$//')"
+  assert_contains "the expansion is LIVE code, not a commented-out line" \
+    '${require_args[@]+"${require_args[@]}"}' "$compose_body_code"
 fi
 
 # The ci.yml wiring, same reasoning: a harness nothing runs is a harness nobody
@@ -705,6 +779,224 @@ run_check "$dir" --repo "$repo" --tag "$tag"
 assert_fails "equal installer and signature counts with the wrong pairing exits 1"
 assert_contains "the unsigned deb is named" "$deb" "$output"
 assert_contains "the deb's missing signature is named" "$deb.sig" "$output"
+assert_eq "nothing is printed on stdout" "" "$stdout"
+
+# ---------------------------------------------------------------------------
+# 16. THE MIRROR DIRECTION — `X.sig` present ⇒ `X` present.
+#
+# The allow-list skips every `*.sig` as a PAYLOAD, and for a long time that also
+# meant the pairing ran one way only: an installer implies its signature, but a
+# signature implied nothing. A signature whose payload is absent is not a healthy
+# release with a spare file on it — no bundler writes a `.sig` without the bytes it
+# signs, so the payload was deleted or a re-tag left the signature behind. The
+# consequence is the OPPOSITE of the shrunk-manifest case 15 describes: the
+# composer derives a key from that orphan and publishes a URL for a file that is
+# not on the release. Measured on this tree, assets `$appimage`, `$appimage.sig`,
+# `$exe.sig` (no `$exe`) made the gate exit 0 and the composer emit FOUR keys, two
+# of them pointing at `…/download/v0.2.0/…-setup.exe` — a 404 every Windows client
+# downloads, at exit 0, on a release this gate certified. The reachable flow is
+# AGENTS.md step 4 with `--clobber`: `latest.json` is cacheable, so a stale `.sig`
+# can outlive the installer it signs.
+# ---------------------------------------------------------------------------
+dir="$tmp_root/orphan-sig-404"
+mkdir -p "$dir"
+export FAKE_ASSETS_JSON="$(make_assets \
+  "$appimage" "$appimage.sig" "$exe.sig" "latest.json")"
+run_check "$dir" --repo "$repo" --tag "$tag"
+assert_fails "a signature with no installer payload beside it exits 1"
+assert_contains "the orphaned signature is named" "$exe.sig" "$output"
+assert_contains "the payload it implies is named" "$exe" "$output"
+assert_contains "the failure says what the orphan would have caused" "404" "$output"
+assert_eq "nothing is printed on stdout — a release with an orphan is not a composeable one" \
+  "" "$stdout"
+
+# Both directions at once: the forward offender and the backward offender are
+# reported in ONE run, so the operator sees the whole hole rather than fixing one
+# side, re-running, and finding the other.
+dir="$tmp_root/orphan-and-unsigned-together"
+mkdir -p "$dir"
+export FAKE_ASSETS_JSON="$(make_assets \
+  "$deb" "$appimage" "$appimage.sig" "Archimedes-0.2.0-1.x86_64.rpm.sig")"
+run_check "$dir" --repo "$repo" --tag "$tag"
+assert_fails "an unsigned installer and an orphaned signature together exit 1"
+assert_contains "the unsigned installer side is reported" "$deb -> missing $deb.sig" "$output"
+assert_contains "the orphaned signature side is reported" \
+  "Archimedes-0.2.0-1.x86_64.rpm.sig -> missing $rpm" "$output"
+assert_eq "nothing is printed on stdout" "" "$stdout"
+
+# Precedence, stated rather than left to chance: a release carrying ONLY orphaned
+# signatures has no installers, so the anti-vacuity gate answers it first, with its
+# own message. Both refusals are exit 1 and both are true of the release; pinning
+# which one speaks keeps the anti-vacuity guard from being silently displaced by the
+# newer check (it is the guard case 5 declares load-bearing).
+dir="$tmp_root/orphans-only"
+mkdir -p "$dir"
+export FAKE_ASSETS_JSON="$(make_assets "$deb.sig" "$exe.sig")"
+run_check "$dir" --repo "$repo" --tag "$tag"
+assert_fails "a release of nothing but orphaned signatures exits 1"
+assert_contains "and the anti-vacuity gate is the one that answers" "no installer assets" "$output"
+
+# ---------------------------------------------------------------------------
+# 17. THE MIRROR'S WIDTH, and the shared source of truth that gives it.
+#
+# Case 16 uses the `.exe` because it is the shape that makes the 404 vivid. The
+# mirror is worth nothing if it covers only the shapes someone thought of while
+# writing it: it must fire for EVERY payload shape the composer would build a key
+# from, because every such key is a URL a client will download. The eight shapes are
+# enumerated here FROM THE SHARED SHAPE FILE, one fixture each — an orphan of that
+# shape, beside a perfectly healthy deb pair so the anti-vacuity gate is satisfied
+# and the mirror is the only thing that can fail. The companion assertion in
+# compose-updater-manifest.test.sh (case 17) is what forces this file's list and the
+# composer's matcher arms to stay the same set.
+# ---------------------------------------------------------------------------
+shape_lib="$test_dir/updater-payload-shapes.sh"
+if [[ ! -f "$shape_lib" ]]; then
+  echo "FATAL: $shape_lib does not exist — the payload shapes are one definition in one file, and neither gate can be tested without it." >&2
+  exit 1
+fi
+# shellcheck source=./updater-payload-shapes.sh
+. "$shape_lib"
+
+# One orphan per shape, in the naming style that shape really ships in.
+for orphan_payload in \
+  "Archimedes_0.2.0_x64-setup.nsis.zip" \
+  "$exe" \
+  "Archimedes_0.2.0_amd64.AppImage.tar.gz" \
+  "$appimage" \
+  "Other_0.2.0_amd64.deb" \
+  "$rpm" \
+  "Archimedes_0.2.0_x86_64.rpm" \
+  "Archimedes.app.tar.gz"
+do
+  # The fixture is only meaningful if the shape file really claims this name —
+  # otherwise the loop below would be pinning nothing and reading as a pass.
+  assert_eq "the shared shape file claims $orphan_payload as an updater payload shape" "yes" \
+    "$(is_updater_payload_shape "$orphan_payload" && printf 'yes\n' || printf 'no\n')"
+  dir="$tmp_root/orphan-width"
+  mkdir -p "$dir"
+  export FAKE_ASSETS_JSON="$(make_assets \
+    "$deb" "$deb.sig" "${orphan_payload}.sig" "latest.json")"
+  run_check "$dir" --repo "$repo" --tag "$tag"
+  assert_fails "an orphaned ${orphan_payload}.sig exits 1 (the mirror covers that shape)"
+  assert_contains "the orphaned ${orphan_payload}.sig names its missing payload" \
+    "${orphan_payload}.sig -> missing $orphan_payload" "$output"
+done
+
+# The mirror is scoped to those shapes on purpose, and the scope is pinned in both
+# directions. (a) A `.dmg`'s signature does NOT demand a `.dmg`: the composer
+# refuses any `.sig` whose payload is not a payload shape, so an orphaned
+# `X.dmg.sig` cannot produce a key and therefore cannot produce a 404 — demanding
+# the `.dmg` would fail the healthy macOS shape this gate must bless (case 4).
+dir="$tmp_root/orphan-dmg-sig-is-out-of-scope"
+mkdir -p "$dir"
+export FAKE_ASSETS_JSON="$(make_assets \
+  "$deb" "$deb.sig" "Archimedes_0.2.0_amd64.dmg.sig" "latest.json")"
+run_check "$dir" --repo "$repo" --tag "$tag"
+assert_passes "an orphaned .dmg.sig does not fail the mirror (the composer would never key it)"
+
+# (b) A name the shape file does NOT claim is not a payload. Asserting this here is
+# what stops the shared list from being widened by accretion (a `.zip`, a
+# `.tar.xz`, a `.json`) without anyone deciding that the composer keys it. Note
+# `Archimedes_0.2.0_aarch64.AppImage`: the arm is `*_amd64.AppImage`, so a cross
+# build has no updater key to land on and must stay out of the mirror's way rather
+# than be guessed at — the same rule the composer applies to an `*.aarch64.rpm`.
+for not_a_payload in "Archimedes_0.2.0_amd64.dmg" "latest.json" "SHA256SUMS" \
+  "Archimedes_0.2.0_amd64.deb.sig" "Archimedes_0.2.0_aarch64.AppImage"
+do
+  assert_eq "the shared shape file does NOT claim $not_a_payload" "no" \
+    "$(is_updater_payload_shape "$not_a_payload" && printf 'yes\n' || printf 'no\n')"
+done
+
+# ---------------------------------------------------------------------------
+# 18. A `gh` that exits 0 and prints something which is NOT the asset list.
+#
+# The three shapes this is measured against — a proxy's HTML error page, gh's own
+# "You have exceeded a secondary rate limit" notice, and an empty body — all arrive
+# with a zero exit, and the script captures `2>&1`, so a warning beside a usable
+# document lands in the same variable too. Before the guard, the next `jq` died with
+# `jq: parse error: Invalid numeric literal at line 1, column 16` and exit 5: a code
+# this script's header does not document, and a message that tells the operator
+# nothing about the tag, the repository, or the rate limit — and a rate limit is the
+# single most likely reason this gate fails on a re-tag run. The failure direction
+# that must never happen is the quiet one: an unparsed document yields EMPTY name
+# sets, and empty name sets are one step from the vacuous pass case 5 exists to
+# refuse, so a `|| echo ""` here would turn a broken read into a certified release.
+# ---------------------------------------------------------------------------
+dir="$tmp_root/non-json-response"
+mkdir -p "$dir"
+unset FAKE_ASSETS_JSON
+for broken_response in \
+  '<html><body>502 Bad Gateway</body></html>' \
+  'gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again.' \
+  ''
+do
+  export FAKE_ASSETS_RAW="$broken_response"
+  run_check "$dir" --repo "$repo" --tag "$tag"
+  assert_fails "a non-JSON gh response ('${broken_response:0:24}…') exits 1, not 5"
+  assert_contains "the failure says gh did not return an asset list" \
+    "not a release asset list" "$output"
+  assert_contains "the failure names the tag so the operator knows which release was being read" \
+    "$tag" "$output"
+  assert_contains "the failure names the repository" "$repo" "$output"
+  assert_contains "the failure quotes what gh actually printed" \
+    "${broken_response:0:24}" "$output"
+  assert_eq "nothing is printed on stdout" "" "$stdout"
+done
+unset FAKE_ASSETS_RAW
+
+# The shapes that ARE a document, and must still be read by the name filters rather
+# than rejected by the guard: `null` (what `gh --json` prints for an all-null
+# object), `{}`, and `{"assets":null}`. All three belong to the anti-vacuity gate,
+# with ITS message about there being no installers — the guard's job is only to stop
+# a response that cannot be a response at all, so pinning the boundary from both
+# sides is what keeps it from being widened into a thing that swallows real releases.
+for empty_but_json in 'null' '{}' '{"assets":[]}'; do
+  dir="$tmp_root/json-but-empty"
+  mkdir -p "$dir"
+  export FAKE_ASSETS_JSON="$empty_but_json"
+  run_check "$dir" --repo "$repo" --tag "$tag"
+  assert_fails "the JSON document $empty_but_json still reaches the anti-vacuity gate"
+  assert_contains "and it is the no-installers message that fires, not a parse refusal" \
+    "no installer assets" "$output"
+  assert_not_contains "the response was not called unparseable" "not a release asset list" "$output"
+done
+
+# ---------------------------------------------------------------------------
+# 19. EXACT name matching — the one comparison in this script, pinned in BOTH
+#     directions of the pairing.
+#
+# `has_asset` compares a name WHOLE. A looser match (a suffix glob, a substring
+# test) keeps every case above green, because in those fixtures no asset name
+# contains another — and then the check stops being a pairing at all: `X` present ⇒
+# `X.sig` present becomes "some asset whose name contains X.sig exists", which an
+# unrelated asset can satisfy. The reviewer's fixture is the forward direction: the
+# deb, plus `X` + `X.deb.sig` where `X` merely ENDS in the deb's name.
+# ---------------------------------------------------------------------------
+dir="$tmp_root/exact-match-installer"
+mkdir -p "$dir"
+export FAKE_ASSETS_JSON="$(make_assets \
+  "$deb" "X$deb" "X$deb.sig" "latest.json")"
+run_check "$dir" --repo "$repo" --tag "$tag"
+assert_fails "an installer whose only look-alike signature is prefixed exits 1"
+assert_contains "the bare deb is named as unsigned" "$deb -> missing $deb.sig" "$output"
+# Exactly ONE offender of the two installers: the prefixed asset really does have
+# its own signature, so a matcher that had gone loose reports ZERO offenders (its
+# glob matches `X$deb.sig` for the bare deb as well) rather than one.
+assert_contains "and it is the only offender of the two installers" "1 of 2 installer" "$output"
+assert_eq "nothing is printed on stdout" "" "$stdout"
+
+# The mirror direction, same trap: a signature whose name merely CONTAINS the
+# payload's name is not that payload's signature.
+dir="$tmp_root/exact-match-signature"
+mkdir -p "$dir"
+export FAKE_ASSETS_JSON="$(make_assets \
+  "$deb" "prefix$deb.sig" "latest.json")"
+run_check "$dir" --repo "$repo" --tag "$tag"
+assert_fails "an installer whose only look-alike signature is prefixed exits 1 (mirror direction)"
+# Asserted as a PAIR, because `$deb.sig` alone is a substring of `prefix$deb.sig`
+# and would be satisfied by the wrong file being named.
+assert_contains "the deb's own signature name is what is reported missing" \
+  "$deb -> missing $deb.sig" "$output"
 assert_eq "nothing is printed on stdout" "" "$stdout"
 
 if ((failures > 0)); then

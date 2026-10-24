@@ -31,9 +31,9 @@
 # which is why this script does not look at `latest.json`'s contents even though
 # it is staring at the release that carries it.
 #
-# THE ALLOW-LIST IS A SKIP FILTER, NOT A REQUIRED SET. Three kinds of asset are
-# legitimately not installers: every `*.sig` (it IS a signature — treating it as a
-# payload would demand `X.sig.sig`), every `.dmg` (README: "a `.dmg` gets no
+# THE ALLOW-LIST IS A SKIP FILTER FOR PAYLOADS, NOT A BLIND EYE. Three kinds of
+# asset are legitimately not installers: every `*.sig` (it IS a signature — treating
+# it as a payload would demand `X.sig.sig`), every `.dmg` (README: "a `.dmg` gets no
 # `.sig` at all and is never an updater payload"), and `latest.json` itself (the
 # manifest, not a payload). NONE of them may be DEMANDED: the gate runs while the
 # release is still a DRAFT and before `Upload the updater manifest`, so on a normal
@@ -43,6 +43,12 @@
 # fails loud and forces someone to add it deliberately. That bias is intended.
 # (`.msi` needs no entry: tauri-cli signs `WindowsMsi`, and it is not in
 # tauri.conf.json's `bundle.targets` anyway.)
+#
+# SKIPPING A `.sig` AS A PAYLOAD IS NOT THE SAME AS IGNORING IT. A signature is
+# exempt from "X present ⇒ X.sig present", but it is NOT exempt from the mirror
+# question, `X.sig` present ⇒ `X` present, which the skip filter used to answer by
+# accident — see "the per-asset requirement, BOTH DIRECTIONS" below. Both directions
+# are checked; the allow-list only ever excuses a file from being a PAYLOAD.
 #
 # Usage:
 #   check-release-signatures.sh --repo owner/name --tag vX.Y.Z
@@ -55,19 +61,39 @@
 # to a file and turns every line into a `--require-payload` flag on the composer,
 # so the two gates share ONE allow-list instead of each keeping a copy.
 #
-# Exit codes: 0 every installer is signed; 1 something is unsigned, the release is
-# not there, or the release carries no installers at all (a vacuous pass is the bug
-# this file exists to kill, so it is refused rather than reported as success).
+# Exit codes: 0 every installer is signed and every signature has its installer;
+# 1 something is unsigned, an orphaned signature names a payload that is not on the
+# release, the release is not there, `gh` answered with something that is not the
+# asset list, or the release carries no installers at all (a vacuous pass is the bug
+# this file exists to kill, so it is refused rather than reported as success). Every
+# failure path is exit 1 with a message naming what was refused — there is no
+# "infrastructure" exit code, so a caller that distinguishes "the release is bad"
+# from "the check could not run" must read the message, not the number.
 
 set -euo pipefail
+
+# The payload-shape vocabulary, shared with the composer (read the header of that
+# file for why it is ONE definition rather than two comments). Resolved from this
+# script's own directory, not the caller's cwd: release.yml calls this as
+# `bash scripts/check-release-signatures.sh` from the repo root and the harness
+# calls it from a temp dir, so a cwd-relative source path would make the script's
+# location an argument.
+shape_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/updater-payload-shapes.sh"
+if [[ ! -f "$shape_lib" ]]; then
+  printf 'error: %s is missing — it holds the updater payload shapes this gate mirrors, so the gate cannot decide which signature implies a payload without it\n' "$shape_lib" >&2
+  exit 1
+fi
+# shellcheck source=./updater-payload-shapes.sh
+. "$shape_lib"
 
 usage() {
   cat >&2 <<'USAGE'
 usage: check-release-signatures.sh --repo owner/name --tag vX.Y.Z
 
-Requires a <name>.sig asset beside every installer asset on a release, and prints
-the installer payload names it accepted (one per line, on stdout) so the caller can
-hand them to compose-updater-manifest.sh --require-payload.
+Requires a <name>.sig asset beside every installer asset on a release, and the
+payload beside every installer-shaped <name>.sig, and prints the installer payload
+names it accepted (one per line, on stdout) so the caller can hand them to
+compose-updater-manifest.sh --require-payload.
 USAGE
 }
 
@@ -159,6 +185,40 @@ if ! assets_json="$(gh release view "$tag" --json assets --repo "$repo" 2>&1)"; 
   fail "no release could be read for tag $tag in $repo — refusing to check signature completeness against a release that is not there: $assets_json"
 fi
 
+# --- the response has to BE the asset list ---------------------------------
+#
+# A zero exit from `gh` is not evidence that anything JSON was printed. Measured
+# here: an HTML error page off a proxy, and gh's own
+# "You have exceeded a secondary rate limit" line, both arrive on stdout with exit
+# 0 — and because the call above captures `2>&1`, a warning gh writes to stderr
+# beside a usable document lands in the same variable. Without this guard the very
+# next `jq` died with `parse error: Invalid numeric literal at line 1, column 16`
+# and exit 5: a number this script's contract does not define, and a message that
+# tells the operator nothing about the release, the tag, the repository, or the
+# token. A rate limit is the MOST likely reason this gate fails on a re-tag run, so
+# it is the message most worth getting right.
+#
+# It goes through `fail` (exit 1) rather than a new code, because the header
+# documents 0/1 and every other caller of this gate in `release.yml` is a plain
+# `run:` step: a third code would be a contract change to the workflow, which this
+# script may not make unilaterally. Refusing loudly beats exiting 0 — the failure
+# direction that matters here is a broken read passing as a healthy release, and it
+# is one `jq` filter away: an unparsed document yields empty name sets, which is
+# precisely the vacuous "all zero installers are signed" pass the anti-vacuity guard
+# below exists to catch. Guarding the SHAPE of the answer is what stops an empty
+# answer from ever reaching that guard looking like a real one.
+#
+# `-s` (slurp) so that "not exactly one JSON document" is one decidable
+# predicate: empty output is `[]`, and two documents — what a future `--paginate`
+# regression would produce — are rejected here rather than quietly checked one page
+# at a time. `null` is accepted because it is what `gh --json` prints for an
+# all-null object and the anti-vacuity guard has to be the one to reject it, with
+# its own message about there being no installers.
+if ! printf '%s\n' "$assets_json" \
+  | jq -es 'length == 1 and ((.[0] | type) == "object" or (.[0] | type) == "null")' >/dev/null 2>&1; then
+  fail "gh returned something that is not a release asset list for tag $tag in $repo (expected one JSON object from 'gh release view --json assets') — refusing to read signature completeness out of a response it cannot parse: ${assets_json:0:200}"
+fi
+
 # --- the two name sets ------------------------------------------------------
 #
 # The SKIP set is `*.sig` (a signature is not an installer), `*.dmg` (never an
@@ -194,6 +254,15 @@ skipped_names="$(
 )"
 all_names="$(
   printf '%s\n' "$assets_json" | jq -r '[ .assets[]? | .name | select(type == "string") ] | .[]'
+)"
+# The signature half of the asset list, kept as its own set because the mirror
+# check below iterates over SIGNATURES (the forward check iterates over installers).
+# Deriving it by filtering `all_names` in bash instead would work but would hide
+# which end of the pairing each loop walks.
+sig_names="$(
+  printf '%s\n' "$assets_json" | jq -r '
+    [ .assets[]? | .name | select(type == "string") | select(endswith(".sig")) ] | .[]
+  '
 )"
 
 # The arrays `set -u` can safely expand, and the lookup table for "is this name on
@@ -234,18 +303,64 @@ if [[ ${#installers[@]} -eq 0 ]]; then
   fail "release $tag in $repo carries no installer assets at all (only ${skipped_names:-nothing}) — refusing to report an empty release as fully signed"
 fi
 
-# --- the per-asset requirement ---------------------------------------------
+# --- the per-asset requirement, BOTH DIRECTIONS -----------------------------
 #
-# `X` present ⇒ `X.sig` present, checked one installer at a time. Every offender is
-# collected and printed before exiting: a gate that stops at the first makes the
-# operator rebuild-and-recheck once per missing signature, and the hole has to be
-# visible whole.
+# FORWARD: `X` present ⇒ `X.sig` present, checked one installer at a time.
+# BACKWARD (the mirror): `X.sig` present ⇒ `X` present, for every `X.sig` whose
+# payload name is one of the bundler shapes in updater-payload-shapes.sh.
+#
+# WHY THE MIRROR IS DECIDABLE AND WHY IT BELONGS IN THIS GATE. No bundler emits a
+# `.sig` without the file it signs: the signature is written by the same
+# `tauri-action` invocation that uploads the payload, from the bytes of that
+# payload. So a signature whose payload is absent is not a healthy release with an
+# extra file on it — it is an installer that was deleted, or a re-tag where the
+# asset list moved under a signature that outlived it. The reachable flow is
+# documented in AGENTS.md step 4: `latest.json` is cacheable, so a re-tag that
+# re-composes with `--clobber` over a DOWNLOADED manifest can keep a `.sig` from a
+# release that no longer carries the installer.
+#
+# What the hole costs is not a shrunk manifest — it is a 404. Measured on this
+# tree, assets `A.AppImage`, `A.AppImage.sig`, `B_x64-setup.exe.sig` (no `.exe`)
+# made this gate exit 0 and the composer emit FOUR keys, two of them
+# (`windows-x86_64`, `windows-x86_64-nsis`) pointing at
+# `…/download/vX.Y.Z/B_x64-setup.exe` — a URL that is not on the release. Every
+# Windows client then downloads a 404 page, or fails at the download, on the
+# version this gate certified. The forward-only check cannot see it because the
+# skip filter drops every `*.sig` from the installer set, so the pairing ran one
+# way only.
+#
+# The mirror is NOT the forward check's contrapositive and does not subsume it: the
+# forward direction tolerates an unsigned `.dmg` (never a payload), and the backward
+# direction must therefore ignore a `.dmg.sig` that could not exist. Restricting it
+# to the SHARED payload-shape list is what makes the two directions consistent —
+# a signature implies a payload exactly when the composer would build a key out of
+# it. That is why the shape list is one definition in one file rather than a copy
+# of a copy: the mirror must be as wide as the composer's matcher, no wider and no
+# narrower, and a widened matcher with a stale mirror re-opens this hole for the
+# new shape alone.
+#
+# Both directions collect every offender before exiting: a gate that stops at the
+# first makes the operator rebuild-and-recheck once per problem, and the hole has to
+# be visible whole.
 missing=()
 for installer in "${installers[@]}"; do
   if ! has_asset "$installer.sig"; then
     missing+=("$installer")
   fi
 done
+
+orphan_sigs=()
+if [[ -n "$sig_names" ]]; then
+  while IFS= read -r sig_name; do
+    payload_name="${sig_name%.sig}"
+    # Only shapes the composer would derive a KEY from. An unrecognised signature
+    # has no key to 404 with — the composer itself refuses it, loudly, by name — so
+    # demanding its payload here would be a claim about a file nothing publishes.
+    if is_updater_payload_shape "$payload_name" && ! has_asset "$payload_name"; then
+      orphan_sigs+=("$sig_name")
+    fi
+  done <<<"$sig_names"
+fi
 
 if [[ ${#missing[@]} -gt 0 ]]; then
   printf 'error: %s of %s installer asset(s) on release %s have no signature beside them:\n' \
@@ -254,6 +369,18 @@ if [[ ${#missing[@]} -gt 0 ]]; then
     printf '  %s -> missing %s.sig\n' "$installer" "$installer" >&2
   done
   printf 'error: upload the missing signatures, or remove the installer from the release — do not compose a manifest over an incomplete sig set (the composer derives its platform keys from the .sig files it is handed, so it would emit a smaller manifest and exit 0)\n' >&2
+fi
+
+if [[ ${#orphan_sigs[@]} -gt 0 ]]; then
+  printf 'error: %s signature asset(s) on release %s have no installer payload beside them:\n' \
+    "${#orphan_sigs[@]}" "$tag" >&2
+  for sig_name in "${orphan_sigs[@]}"; do
+    printf '  %s -> missing %s\n' "$sig_name" "${sig_name%.sig}" >&2
+  done
+  printf 'error: upload the missing payloads, or remove the orphaned signatures — a .sig without its payload makes the composer emit a platform key whose URL is not on the release (a 404 every client on that platform downloads), and it exits 0 doing it\n' >&2
+fi
+
+if [[ ${#missing[@]} -gt 0 || ${#orphan_sigs[@]} -gt 0 ]]; then
   exit 1
 fi
 
