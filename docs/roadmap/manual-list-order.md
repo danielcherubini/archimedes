@@ -102,8 +102,27 @@ order IS the order, do NOT re-sort"* (`src/store/sessions.ts:98`) — stays
 The expression `list_sessions` already sorts by —
 `COALESCE((SELECT MAX(m.created_at) FROM messages m WHERE m.session_id =
 sessions.id), sessions.created_at)` — stops being only a sort key and becomes a
-**selected field** on the row: `SessionRow.last_active_at` → IPC
-`SessionInfo.lastActiveAt`.
+**selected field** on the row, and it reaches the frontend as a **separate
+per-session recency map**, not as a field on `SessionInfo`.
+
+> **Amended 2026-10-24, during T02's grounding.** The original text said
+> `SessionRow.last_active_at` → `SessionInfo.lastActiveAt`. Measured against the
+> tree, that is the expensive shape: `SessionInfo` is constructed by **40 struct
+> literals — 16 of them in production code across 8 files** — and adding any
+> field breaks every one of them at compile time. `SessionInfo` is also the
+> struct ADR 0064 exists to protect (its serialized `cwd` is load-bearing in
+> three joins), so widening it for a display field is the wrong door.
+> `SessionRow`, by contrast, has 3 construction sites — but `SessionRow` never
+> crosses the wire; every session command returns `SessionInfo`.
+>
+> The cheap shape, with repo precedent: a `session_recency()` command returning
+> `Vec<SessionRecency { session_id, last_active_at }>`, fetched in the SAME
+> boot `Promise.all` that already calls `listSessions` + `listSpaces`, and held
+> in the store as a `Record<string, number>` side-channel — exactly the shape
+> `closeReasons: Record<string, CloseReasonStr>` already is. One new small
+> struct, one new command, zero edits to `SessionInfo`. The SQL expression still
+> has exactly ONE copy (the `LAST_ACTIVITY` const), so the no-drift property the
+> original design wanted is preserved.
 
 Zero new write path and zero staleness, because the number is computed from the
 `messages` rows at read time. It preserves the invariant the current code
@@ -117,7 +136,7 @@ handle rows predating their field.
 
 ```
 recencyOf(session, loadedMessages) →
-  loadedMessages?.last.at ?? session.lastActiveAt
+  loadedMessages?.last.at ?? recencyMap[session.sessionId]
 ```
 
 Prefer the transcript we have; else believe the row. This is the same
@@ -326,7 +345,7 @@ survives, only its cause changes.
    (`COALESCE` → 0).
 4. `reorder_spaces` / `reorder_sessions` write the given slice in one
    transaction; a mid-write failure leaves the prior order intact.
-5. **Characterisation:** `last_active_at` equals the old `COALESCE(MAX(messages.
+5. **Characterisation:** `session_recency`'s `last_active_at` equals the old `COALESCE(MAX(messages.
    created_at), created_at)` expression — including the no-messages case, where
    it must fall back to `created_at` rather than `NULL`. This is the pin that
    stops the field drifting from what the row prints.

@@ -128,6 +128,30 @@ deliberately left undone.
 - 2026-10-24 — Decomposition is 8 tasks, 7 waves, ONE parallel wave. Recorded as a finding: the
   single-file `db.rs` plus the one-compilation-unit rule forbid overlapping Rust tasks.
 
+- 2026-10-24 — **T02 SPEC AMENDED before planning — the spec's premise was
+  measurably wrong.** The spec said the recency value travels as
+  `SessionInfo.lastActiveAt`. Measured: `SessionInfo` is built by **40 struct
+  literals, 16 of them in PRODUCTION code across 8 files** (`session/mod.rs` 7,
+  `persist.rs` 2, `normalize.rs` 1, `types.rs` 1, …), so adding a field breaks
+  all 40 at compile time — and `SessionInfo` is the very struct ADR 0064 exists
+  to protect (its serialized `cwd` is load-bearing in three joins). The
+  alternative carrier `SessionRow` has only 3 sites but **never crosses the
+  wire** — every session command returns `SessionInfo`. Cheaper shape adopted,
+  with existing repo precedent: a `session_recency()` command returning
+  `Vec<SessionRecency { session_id, last_active_at }>`, fetched in the SAME boot
+  `Promise.all` that already calls `listSessions` + `listSpaces`, held in the
+  store as a `Record<string, number>` — exactly the shape `closeReasons`
+  already is. The no-drift property survives because `LAST_ACTIVITY` remains the
+  single copy of the SQL expression. The spec at
+  `docs/roadmap/manual-list-order.md` carries the amendment inline (marked, with
+  the counts) so T03 reads the corrected contract.
+- 2026-10-24 — **ROLE COLLAPSE, recorded not hidden:** the `researcher` agent
+  returned an EMPTY result twice on T02 (and once mid-flight on T01's review).
+  Rather than a third dispatch, the ORCHESTRATOR did the grounding directly
+  against the tree — that is where the 40-site count comes from. The plan child
+  still cannot ground or vet itself, so the specify + reviewer dispatches for
+  T02 remain.
+
 ## Changelog
 
 One line per task: hash, what shipped, gate numbers at that moment.
