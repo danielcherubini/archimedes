@@ -827,12 +827,13 @@ async fn drive_subagent(
     // settle-then-exit is the teardown below) vs the `SubagentCancel` (a
     // parent turn abort — `cancel_subagent` flips it).
     //
-    // The bound is a SELF-REARMING silence clock: `dead_bound` is the
-    // child's maximum run of UNEXPLAINED SILENCE, so it is recomputed on
-    // every pass of the loop below — a pass is only ever entered because
-    // something CHANGED. There is no ceiling on how long a delegation may
-    // run, and while a `tool_call_id` is outstanding the bound does not run
-    // at all (the arm is disabled, not merely lengthened).
+    // The bound is a SELF-REARMING silence clock: `dead_bound` is the longest run
+    // of UNEXPLAINED SILENCE THIS DRIVE OBSERVES — the gap between frames that
+    // actually reached `liveness_rx`, NOT a measurement of what the child was
+    // doing — so it is recomputed on every pass of the loop below — a pass is
+    // only ever entered because something CHANGED. There is no ceiling on how
+    // long a delegation may run, and while a `tool_call_id` is outstanding the
+    // bound does not run at all (the arm is disabled, not merely lengthened).
     // The declared-outside binding is only a scope (the value is meaningless
     // before the loop's first pass, which is exactly where it is computed).
     let mut deadline;

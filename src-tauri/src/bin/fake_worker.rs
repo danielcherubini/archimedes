@@ -42,12 +42,12 @@
 //!   empties-out-after-the-guard-minus case).
 //! - a `prompt` whose text is `"__long_stream__"`: a LONG `SinkFrame`
 //!   `session-update` `agent_message_chunk` stream (the chunks land ~100 ms
-//!   apart for ~1.5 s of CONTINUOUS production) and ONLY then the canned
+//!   apart for ~3.0 s of CONTINUOUS production) and ONLY then the canned
 //!   turn + `agent_settled` (the ADR 0055 regression input — a child that
 //!   keeps PRODUCING far past a SHORT injected bound must COMPLETE, not be
 //!   reaped mid-answer).
 //! - a `prompt` whose text is `"__in_tool__"`: a `tool_execution_start`
-//!   held OPEN for ~1.5 s before its `tool_execution_end` +
+//!   held OPEN for ~3.0 s before its `tool_execution_end` +
 //!   `agent_settled` (the "child inside a tool call, producing NOTHING"
 //!   state — legitimately silent, so a duration bound must never cut it).
 //! - a `prompt` whose text is `"__stream_then_silence__"`: a SHORT
@@ -88,20 +88,29 @@ use archimedes_lib::agent::worker::protocol::{decode_inbound, encode_outbound, I
 const VERSION: &str = "fake-worker-0.0.0";
 
 /// The `__long_stream__` chunk count (ADR 0055) — `LONG_STREAM_CHUNKS` ×
-/// `LONG_STREAM_GAP` ≈ 1.5 s of CONTINUOUS production: long enough to blow
-/// the tests' injected 300 ms bound by 5×, short enough to keep the suite
-/// fast (the whole scenario stays under ~2 s).
-const LONG_STREAM_CHUNKS: u32 = 15;
+/// `LONG_STREAM_GAP` = 3.0 s of CONTINUOUS production: TWICE the liveness tests'
+/// injected 1500 ms bound, so a drive that bounds the delegation's DURATION
+/// instead of its OBSERVED silence is still caught mid-stream (issue #34 widened
+/// the bound 300 → 1500 ms to buy 15× margin against the cadence below, and the
+/// stream had to grow with it or the regression would have stopped being RED).
+/// Real sleeps, so this is a floor: `std::thread::sleep` never returns early.
+const LONG_STREAM_CHUNKS: u32 = 30;
 
-/// The gap between two `__long_stream__` chunks (~100 ms — a chunk arrives
-/// well INSIDE the tests' 300 ms bound, so a self-rearming silence clock can
-/// never expire while the child is talking).
+/// The gap between two `__long_stream__` chunks (~100 ms — a chunk arrives 15×
+/// INSIDE the tests' 1500 ms bound, so a self-rearming silence clock cannot
+/// expire while the child is talking unless the PARENT stopped observing for
+/// longer than the bound (issue #34: that is exactly what a loaded macOS runner
+/// does, and it is an observation-stall failure, not a cadence one).
 const LONG_STREAM_GAP: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// How long the `__in_tool__` scenario holds its `tool_execution_start`
-/// open (~1.5 s — the child is silent for 5× the injected bound while it is
-/// legitimately blocked inside the tool).
-const IN_TOOL_HOLD: std::time::Duration = std::time::Duration::from_millis(1500);
+/// open (3.0 s — TWICE the liveness tests' injected 1500 ms bound, so the
+/// pre-ADR 0055 drive this scenario is RED against — whose sleep arm ran even
+/// with a `tool_call_id` outstanding — still expires inside the silent window.
+/// The bound being LONGER than the old 300 ms is only about the COLD
+/// START: once the announce is observed the bound is not armed at all, so the
+/// hold itself needs no margin against runner load).
+const IN_TOOL_HOLD: std::time::Duration = std::time::Duration::from_millis(3000);
 
 /// How long the `__stream_then_silence__` scenario stays SILENT after its
 /// partial production (~10 s — LONGER than any bound the tests inject, so
@@ -131,7 +140,7 @@ fn emit<W: Write>(stdout: &mut W, frame: &Outbound) {
 
 /// The long `agent_message_chunk` stream (ADR 0055 — the `__long_stream__`
 /// scenario's body): `LONG_STREAM_CHUNKS` `SinkFrame` `session-update`
-/// frames ~100 ms apart (~1.5 s of CONTINUOUS production). They ride
+/// frames ~100 ms apart (~3.0 s of CONTINUOUS production). They ride
 /// `messageId: "m2"` — a DIFFERENT id from `emit_canned_turn`'s canned `m1` —
 /// so the stream is an INTERMEDIATE message in the capture's
 /// last-`messageId`-with-non-empty-text rule and never concatenates into the
@@ -538,6 +547,11 @@ fn main() {
             continue;
         }
         let Ok(msg) = decode_inbound(&l) else {
+            // Permissive BY DESIGN (the fixture-side twin of production's LOUD
+            // decode — `worker/mod.rs` at least `eprintln!`s the bad line), so an
+            // unreadable `start` vanishes here and surfaces only as a failed
+            // assertion in the test that spawned this Worker (issue #34/T10
+            // handoff: recorded, the fixture's behaviour deliberately unchanged).
             continue; // a malformed line — the fixture is permissive.
         };
         let sid = session_id.clone().unwrap_or_default();
@@ -687,9 +701,12 @@ fn main() {
                 }
                 // The LONG stream (ADR 0055 — the
                 // `a_streaming_subagent_outlives_the_dead_bound` regression
-                // input): ~1.5 s of CONTINUOUS `agent_message_chunk`
-                // production — 5× the tests' injected 300 ms bound — and
-                // ONLY THEN the canned turn (whose `agent_settled` stays
+                // input): ~3.0 s of CONTINUOUS `agent_message_chunk`
+                // production — 2× the tests' injected 1500 ms bound, so the
+                // arm-once drive is still caught mid-stream (the rearming
+                // drive would have to lose fifteen consecutive frames to reap
+                // it) — and ONLY THEN the canned turn (whose `agent_settled`
+                // stays
                 // LAST, after the whole stream, so the `SubagentCapture` is
                 // fully fed before the settle). A child that keeps
                 // PRODUCING must COMPLETE, not be reaped mid-answer.
@@ -700,7 +717,7 @@ fn main() {
                 // A tool call held OPEN (ADR 0055 — the
                 // `a_child_inside_a_tool_call_is_never_reaped` regression
                 // input): the `tool_execution_start` ANNOUNCE, then
-                // NOTHING for ~1.5 s (the tool runs — the child is silent
+                // NOTHING for ~3.0 s (the tool runs — the child is silent
                 // BY CONSTRUCTION and legitimately blocked), then the
                 // matching `tool_execution_end` + `agent_settled`. The
                 // frames mirror `emit_tool_execution_and_settle`'s shapes
@@ -712,7 +729,7 @@ fn main() {
                             event: RpcEvent::tool_execution_start {
                                 tool_call_id: "t1".to_string(),
                                 tool_name: "bash".to_string(),
-                                args: serde_json::json!({ "command": "sleep 1.5" }),
+                                args: serde_json::json!({ "command": "sleep 3" }),
                             },
                         },
                     );

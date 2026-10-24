@@ -105,7 +105,7 @@ A **Session**'s paused-on-the-user wait for an answer to one interactive request
 _Avoid_: Modal, prompt (bare — that is the `Permission prompt` specifically), blocking tool, pending dialog
 
 **Dead bound**:
-The idle-based bound that reaps a **Dead Subagent** (`DEFAULT_SUBAGENT_DEAD_BOUND`, Supervisor-side, one per dispatch, 30 minutes). It measures a duration of UNEXPLAINED SILENCE, never a duration of the delegation, and it is rearmed on every frame and disabled while any `tool_call_id` is outstanding. Distinct from the provider's `read_timeout` (an idle bound on the time BETWEEN BYTES of one model response) and from a tool's own `timeout_ms` (per command) — three unrelated bounds that all used to be called "timeout".
+The idle-based bound that reaps a **Dead Subagent** (`DEFAULT_SUBAGENT_DEAD_BOUND`, Supervisor-side, one per dispatch, 30 minutes). It measures a duration of UNEXPLAINED SILENCE **as the Supervisor OBSERVES it** — the gap between frames the pump actually read, not the frames the child sent, so a starved parent can observe silence in a child that never stopped producing — never a duration of the delegation, and it is rearmed on every observed frame and disabled while any `tool_call_id` is outstanding. Distinct from the provider's `read_timeout` (an idle bound on the time BETWEEN BYTES of one model response) and from a tool's own `timeout_ms` (per command) — three unrelated bounds that all used to be called "timeout".
 _Avoid_: Settle timeout (the old name — `DEFAULT_SUBAGENT_SETTLE_TIMEOUT` read as an idle timer but was an absolute wall-clock cap on the whole delegation), subagent timeout
 
 **Agent definition**:

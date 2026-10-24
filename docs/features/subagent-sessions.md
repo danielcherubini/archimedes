@@ -152,9 +152,14 @@ follow-up, not a bug to fix here.
 
 A **Subagent session** is **Active** — NO timeout of any kind — while it produces
 frames OR holds an outstanding `tool_call_id`, and **Dead** only after
-`DEFAULT_SUBAGENT_DEAD_BOUND` of silence with NOTHING in flight: only a Dead
-child is reaped, as `Failed { reason: Unresponsive }` with its partial output +
-REAL usage (ADR 0055, whose rationale stays there).
+`DEFAULT_SUBAGENT_DEAD_BOUND` of silence **the pump actually observed** with
+NOTHING in flight: only a Dead child is reaped, as
+`Failed { reason: Unresponsive }` with its partial output + REAL usage (ADR 0055,
+whose rationale stays there). The clock reads observed frames, not the child: a
+parent starved of CPU can observe a gap a live child never stopped producing
+into, which is why the default is 30 min and not a second (issue #34's one
+recorded CI failure implies ~700 ms of observation stall on a loaded runner —
+0.04% of the bound).
 
 Four legitimately-silent states, each covered by a frame the pump already sees:
 
