@@ -112,6 +112,15 @@ None. Everything deliberately not fixed is in `docs/roadmap/issue-triage-backlog
 
 ## Decisions log
 
+- 2026-10-24 — **USER STANDING INSTRUCTION: any future `specify` expansion dispatches the `researcher`
+  agent definition (`subagent agentName:"researcher"`), not a config-less dispatch.** Recorded here for
+  the remainder of this loop and stated to the user as needing a durable home (the `implement` skill's
+  Step 4 or AGENTS.md Conventions) if it is to survive this file's deletion on ship.
+- 2026-10-24 — **Review Phase 4 outcome**: Rust reviewer returned 2 important + 6 minor + 5 nits; the
+  scripts/CI reviewer STALLED on a false premise (claimed scoped files absent after reading them), but
+  its one concrete claim was verified true by the orchestrator — `scripts/check-release-signatures.test.sh`
+  is mode 100644 while every sibling harness is 100755. Fixing that here; the scripts/CI scope needs a
+  re-dispatch with explicit authorization to run the harnesses.
 - 2026-10-23 — **Waves re-derived to serial after measuring the crate-compile coupling** (planted-error
   experiment). Original 5-wave plan is superseded by the table above; gate 4 cannot hold for two Rust
   tasks in one tree.
@@ -162,6 +171,20 @@ None. Everything deliberately not fixed is in `docs/roadmap/issue-triage-backlog
   STOP rule fires when a test PASSES under its own mutation; the opposite happened. The doc paragraph
   now states the measured behaviour, and mutation B (deterministic RED) is named as what actually pins
   that test.
+- 2026-10-24 — **`review` loop, rounds 1–3 complete** (skill loaded as `implement`'s "Review loop" option).
+  R1: 13 findings (2 important) → fixed in `058b097 049e774 64dd301 698cc26 fc01e31 c4cf167`. R2
+  (verify-pass + the scripts/CI scope that had stalled): 1 critical + 3 major + 8 minor → `1217805
+  2416a2e bd07fbf 774039d 05e707b`. R3 (verify-pass of those): 0 blocking, 7 minor/doc-width →
+  `4f87244 d5b5d40`. Every finding mutation-proved by its fixer or the reviewer; both reviewers restore
+  their mutations with `git status` proof. The stalled scripts reviewer (R1) died on a FALSE premise
+  (claimed files absent after reading them); re-dispatch with "AUTHORISED to run the harnesses + trust
+  what `git branch --show-current` says" worked twice. Gate after R3: Rust 1436/0/4, clippy 0, fmt
+  clean, gnu check, FE 3063/149, build 0, harnesses 155+156+others.
+  Round 4 dispatched to confirm zero actionable.
+- 2026-10-24 — **`/tmp` hygiene**: tmpfs hit 80% (77k entries: 1,570 abandoned vitest `client`/`ssr`
+  caches + ~2,400 stale test data dirs `UUID/archimedes.db`) and vitest began ENOENT-ing its mock cache
+  — environment, not the diff (proved by stashing). Cleaned ~6 GB (mine, >1-day, provably single-child;
+  the running `.mount_archim*` untouched). If `pnpm test` ENOENTs on `/tmp/*`, that is this again.
 
 ## Changelog
 
