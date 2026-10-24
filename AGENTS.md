@@ -76,7 +76,7 @@ because the workflow "already did it"). `release.yml` now puts GitHub's
 workflow can do — is writing notes a person would read.
 
 1. Generate the draft:
-   `bash scripts/release-notes.sh --repo <owner>/<repo> --tag vX.Y.Z --out /tmp/notes.md`
+   `bash scripts/release-notes.sh --repo "<owner>/<repo>" --tag vX.Y.Z --out /tmp/notes.md`
    — the markdown body goes to `--out`, the one-line summary to stdout. Do NOT
    call `POST /releases/generate-notes` by hand: it does not validate
    `tag_name`, so a tag with no release behind it answers 200 with confident,
@@ -103,7 +103,7 @@ workflow can do — is writing notes a person would read.
    gh release download vX.Y.Z --pattern '*.sig' --dir sigs --clobber
    gh release download vX.Y.Z --pattern latest.json --clobber
    bash scripts/check-release-signatures.sh \
-     --repo <owner>/<repo> --tag vX.Y.Z > expected-payloads.txt
+     --repo "<owner>/<repo>" --tag vX.Y.Z > expected-payloads.txt
    require_args=()
    while IFS= read -r payload; do
      # `if`, not `[[ … ]] && …` — mirrored from the workflow comment: the runner's
@@ -119,7 +119,7 @@ workflow can do — is writing notes a person would read.
      --sigs-dir sigs \
      --version X.Y.Z \
      --tag vX.Y.Z \
-     --repo <owner>/<repo> \
+     --repo "<owner>/<repo>" \
      --out latest.json \
      --notes "<the new one-liner>" \
      ${require_args[@]+"${require_args[@]}"}
@@ -136,6 +136,19 @@ workflow can do — is writing notes a person would read.
    `${NOTES_SUMMARY:-Archimedes $TAG}` rather than omitting it: an empty `notes` is
    legal JSON that passes self-validation, and the in-app panel renders it as the
    whole update description. Pass the one-line summary, never the markdown body.
+   **The quotes around the two angle-bracket placeholders above are load-bearing, not
+   punctuation:** an UNQUOTED `<owner>/<repo>` is two bash redirections, not an
+   argument, so pasting the block never runs the command at all — `<owner` is an
+   INPUT redirect from a file called `owner`, and with no such file in the terminal's
+   cwd the line dies as `owner: No such file or directory` before the gate or the
+   composer is reached (measured; exit 1, no `expected-payloads.txt` created, so the
+   loop below would feed the composer ZERO expectations if the line ever got past
+   that). If a file called `owner` does exist, the second half bites: `/<repo>`
+   redirects output to `/` and bash says `/: Is a directory`. The workflow quotes the
+   same argument as `--repo "$GITHUB_REPOSITORY"` for the same reason. Every other
+   placeholder in the block is safe to paste: `X.Y.Z` / `vX.Y.Z` are literal-shaped,
+   `'*.sig'` is quoted for globbing, `latest.json` / `sigs` / `expected-payloads.txt`
+   are plain paths, and the `${require_args…}` expansion is quoted inside.
    `${require_args[@]+…}`
    is copied from the workflow rather than tidied: a bare `"${require_args[@]}"` on
    an EMPTY array is an unbound-variable error under `set -u` on the older bash
@@ -169,7 +182,7 @@ workflow can do — is writing notes a person would read.
    Windows release has **4 sigs serving 6 keys**: `windows-x86_64` and
    `-nsis` share the `.exe`, `linux-x86_64` and `-appimage` share the
    `.AppImage`. **Decide completeness with
-   `bash scripts/check-release-signatures.sh --repo <owner>/<repo> --tag vX.Y.Z`,
+   `bash scripts/check-release-signatures.sh --repo "<owner>/<repo>" --tag vX.Y.Z`,
    which asks the RELEASE's asset list — never the manifest.** Completeness
    cannot be checked against the manifest at all: the composer builds its
    `.platforms[].url` values FROM the very signatures under test, so counting the
@@ -192,9 +205,13 @@ workflow can do — is writing notes a person would read.
    means stop — stale-but-correct notes beat a broken manifest.
 
    **When the composer refuses, it deletes `latest.json`, so re-download before you
-   retry.** Every exit-1 in it removes a pre-existing `--out` — including a
-   `--require-payload` refusal — so after such a refusal the `latest.json` the second
-   download put there is GONE, and the `gh release upload` you are about to type
+   retry.** Every refusal it reports — every path through its `fail()`, including a
+   `--require-payload` refusal — removes a pre-existing `--out`, and it does so
+   whatever the flag order: the target is the `--out` you TYPED, found in the
+   invocation's own arguments, so a typo two flags short of the end
+   (`--verison`, with `--out` last) cannot leave the old manifest behind. So after
+   such a refusal the `latest.json` the second download put there is GONE, and the
+   `gh release upload` you are about to type
    fails with "no such file or directory" instead of silently `--clobber`-ing the
    OLD manifest over a release whose notes rewrite never landed. (A refusal by the
    GATE is different and safer: the block stops before the compose, so the download
@@ -203,11 +220,18 @@ workflow can do — is writing notes a person would read.
    It is also cheap to undo, because the file being removed is a copy of a published
    asset — so fix the sig set, run
    `gh release download vX.Y.Z --pattern latest.json --clobber` to put the baseline
-   back, and re-compose from there. The one composer refusal that does NOT touch
-   `--out` is
-   a missing `scripts/updater-payload-shapes.sh`: a broken checkout is not a refused
+   back, and re-compose from there. What does NOT touch `--out` is everything that
+   never reaches `fail()` — i.e. everything that reports no refusal at all: a missing
+   `scripts/updater-payload-shapes.sh` (a broken checkout is not a refused
    composition, and a tool that never started has formed no opinion about this
-   release, so it must not destroy the operator's download.
+   release, so it must not destroy the operator's download); a legacy value-less flag
+   at the END of the line (`… --out latest.json --notes` shifts past the end of argv
+   and dies as a shell fault with no message — the flag is the `--notes` / `--arch` /
+   `--repo` family, and the fix is to give it a value); and an `--out` path the OS
+   refuses (`mkdir: cannot create directory …` before the write). Treat any of them
+   as "nothing was decided about `--out`": the file there is still the one you
+   downloaded, and uploading it would publish the PREVIOUS
+   release's manifest.
 5. Confirm, since `release.yml`'s notes step is `continue-on-error` on purpose (a
    release whose notes failed must still ship): `gh release view vX.Y.Z --json
    body -q .body` must show the curated text, not `Archimedes vX.Y.Z` — that

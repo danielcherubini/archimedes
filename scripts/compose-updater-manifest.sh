@@ -57,13 +57,53 @@ USAGE
 # Every exit-1 path funnels through here so a rejected manifest can never be
 # left on disk for the next step to `gh release upload` — a partial `latest.json`
 # published over a good one is worse than no manifest at all.
+#
+# THE TARGET IS THE INVOCATION'S `--out`, NOT THE `$out_file` VARIABLE. The parse
+# loop fills `$out_file` only when it REACHES `--out`, and a refusal can fire before
+# it does: `… --repo r/x --verison 0.2.0 --out latest.json` — a typo two flags short
+# of the end — dies on `unknown argument: --verison` with `$out_file` still empty,
+# and the old `[[ -n "$out_file" ]]` guard then skipped the cleanup, so the manifest
+# the operator had just downloaded survived a refused run behind a clean exit 1. That
+# is ADR 0052's stale-manifest hazard arriving through the door the harness never
+# opened: every case there types `--out` FIRST, so the variable was always populated.
+# Hence `$invocation_args` (below, captured before the loop consumes argv): when
+# `$out_file` is empty, `fail()` looks for the `--out` the operator typed and removes
+# THAT, so the promise holds for every refusal regardless of flag order.
+#
+# One knowingly-accepted widening: the scan reads the whole typed argv, so in
+# `--notes --out path` — where the parser ate `--out` as `--notes`' VALUE and the
+# refusal is `unknown argument: path` — `path` is treated as the designated manifest
+# and removed. A literal `--out` token means the operator was naming a manifest path
+# in every realistic invocation, and the only file this can ever reach is one that
+# `gh release download <tag> -p latest.json` restores in one step.
 fail() {
   printf 'error: %s\n' "$1" >&2
-  if [[ -n "$out_file" && -e "$out_file" ]]; then
-    rm -f -- "$out_file"
+  local target="$out_file"
+  if [[ -z "$target" ]]; then
+    local previous="" argument
+    for argument in ${invocation_args[@]+"${invocation_args[@]}"}; do
+      if [[ "$previous" == "--out" ]]; then
+        target="$argument"
+        break
+      fi
+      if [[ "$argument" == --out=* ]]; then
+        target="${argument#--out=}"
+        break
+      fi
+      previous="$argument"
+    done
+  fi
+  if [[ -n "$target" && -e "$target" ]]; then
+    rm -f -- "$target"
   fi
   exit 1
 }
+
+# The invocation as typed, captured before the loop below shifts it away, for the
+# argv scan in `fail()`. `${invocation_args[@]+…}` guards the empty case for the
+# same reason AGENTS.md step 4 guards `require_args`: a bare `"${arr[@]}"` on an
+# EMPTY array is an unbound-variable fault under `set -u` on bash 3.2 (macOS).
+invocation_args=("$@")
 
 sigs_dir=""
 version=""
@@ -203,9 +243,10 @@ fi
 #
 # It runs HERE — after the empty-directory refusal and before any pattern matching
 # or key derivation — so an expected-but-absent signature fails before a single key
-# is built. `fail()` removes `$out_file` on EVERY exit-1 path, including this one,
-# and that is deliberate rather than incidental — see "WHY THIS REFUSAL DELETES A
-# PRE-EXISTING `--out`" below, because the opposite reading ("the file on disk is
+# is built. Every refusal routed through `fail()` removes the invocation's
+# `--out`, this one included, and that is deliberate rather than incidental — see
+# "WHY THIS REFUSAL DELETES A PRE-EXISTING `--out`" below, because the opposite
+# reading ("the file on disk is
 # the OLD correct manifest, so leave it") is attractive and wrong.
 #
 # WHY THIS REFUSAL DELETES A PRE-EXISTING `--out`. The documented manual flow
@@ -216,15 +257,23 @@ fi
 #
 #   1. The file's own contract. `fail()` exists so that "a rejected manifest can
 #      never be left on disk for the next step to `gh release upload`". That is a
-#      claim about every exit-1 path, and this bare `exit 1` was the only exit-1 in
-#      the script that skipped the cleanup — including pre-write refusals like
+#      claim about every exit-1 path, and this bare `exit 1` skipped the cleanup
+#      outright — unlike pre-write refusals like
 #      `--sigs-dir is not a directory`, which DO delete. An operator cannot reason
 #      about which refusals leave a file behind, and the next step cannot either.
-#      (The one exit-1 that still does not clean up is the missing-shape-library
-#      guard at the top of the file. That is a deliberate exception, pinned by the
-#      composer harness: a broken CHECKOUT is not a refused composition, and the
-#      tool that never started has formed no opinion about this release and should
-#      not destroy the operator's downloaded manifest.)
+#      (The other way was subtler and is fixed at the definition of `fail()` above:
+#      cleanup keyed on the `$out_file` VARIABLE, which a typo typed before `--out`
+#      left empty, so a reported refusal deleted nothing.)
+#      (What still does not clean up is everything that never reaches `fail()`,
+#      i.e. everything that reports no refusal: the missing-shape-library guard at
+#      the top of the file; a legacy value-less flag at the very END of the line
+#      (`… --out latest.json --notes`), whose `shift 2` runs past the end of argv
+#      and dies as a shell fault — that pre-existing behaviour is deliberately left
+#      alone, see the `--require-payload` guard below; and an `--out` path the OS
+#      refuses at `mkdir -p` / the write. The library case is pinned by the composer
+#      harness: a broken CHECKOUT is not a refused composition, and the tool that
+#      never started has formed no opinion about this release and should not destroy
+#      the operator's downloaded manifest.)
 #   2. By this ADR's own ruling, "the previous version's manifest where the new
 #      one belongs" is the HAZARD, not the safety net: ADR 0052 lists "the new
 #      version is visible to clients with no manifest, OR WITH THE PREVIOUS

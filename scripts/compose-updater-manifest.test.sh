@@ -508,6 +508,58 @@ assert_fails "a --sigs-dir that does not exist exits 1"
 assert_contains "the missing sigs dir names the path" "$dir/nope" "$output"
 
 # ---------------------------------------------------------------------------
+# 8a. FLAG ORDER: the cleanup promise is about the INVOCATION, not about how far
+#     the parser got.
+#
+#     Every other case here goes through `run_compose`, which puts `--out` FIRST —
+#     so `out_file` is already populated by the time any refusal fires, and the
+#     cleanup works. This case types `--out` LAST with a typo BEFORE it
+#     (`--verison`, the reviewer's measured repro), and that order used to defeat
+#     the policy completely: the argv loop hits the unknown flag, `out_file` is
+#     still "", `fail()`'s `[[ -n "$out_file" ]]` guard is false, and the refusal
+#     leaves the seeded 0.1.9 manifest on disk with a clean exit 1. That is the
+#     exact hazard ADR 0052's amendment names — a stale manifest at the path the
+#     upload step reads — arriving through the door nobody tested, and it is what
+#     `gh release upload --clobber` publishes when the exit code is ignored.
+#
+#     So `fail()` must locate `--out` in the argv it was invoked with rather than
+#     trusting a variable the parser may not have reached. The two assertions that
+#     must go RED before the fix are the state assertion and the survival one; the
+#     exit code and the message were already correct, which is precisely why this
+#     survived review once.
+# ---------------------------------------------------------------------------
+dir="$tmp_root/argv-typo-with-out-last"
+make_sigs_dir "$dir/sigs" "$win_sig" "$appimage_bare_sig" "$deb_sig"
+out_file="$dir/out/latest.json"
+seed_previous_manifest "$out_file"
+status=0
+output="$("$compose_script" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" \
+  --repo "$repo" --verison "$version" --out "$out_file" 2>&1)" || status=$?
+assert_fails "a mistyped flag before --out still exits 1"
+assert_contains "and still names the flag that is wrong" "unknown argument: --verison" "$output"
+assert_eq "the seeded manifest does NOT survive a typo typed before --out" \
+  "no" "$(path_exists "$out_file")"
+assert_eq "and it is GONE rather than intact-previous (the stale file the upload step would clobber onto the release)" \
+  "absent" "$(previous_manifest_state "$out_file")"
+
+# The same order trap on the SECOND gate's flag, so the fix is not pinned only to
+# the `unknown argument` arm: `--require-payload` refuses deep in the run, and with
+# `--out` typed last the parser had reached `--out` by then. Green before the fix
+# and after it — it is here to say the ORDER-INDEPENDENT promise covers the
+# refusal paths too, so a future `fail()` that reads only `$out_file` and forgets
+# the argv scan stays green only while this pair of paths is intact.
+dir="$tmp_root/require-payload-with-out-last"
+make_sigs_dir "$dir/sigs" "$win_sig" "$appimage_bare_sig"
+out_file="$dir/out/latest.json"
+seed_previous_manifest "$out_file"
+status=0
+output="$("$compose_script" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" \
+  --repo "$repo" --require-payload "$deb_payload" --out "$out_file" 2>&1)" || status=$?
+assert_fails "--require-payload with --out typed last exits 1"
+assert_eq "and the seeded manifest is removed on that path too" \
+  "absent" "$(previous_manifest_state "$out_file")"
+
+# ---------------------------------------------------------------------------
 # 8b. A zero-byte `.sig` is the emptiest version of the same trap: it encodes
 #     into JSON as `""`, parses perfectly, and the client discovers the problem
 #     only when minisign has nothing to verify. The composer writes, re-reads,
