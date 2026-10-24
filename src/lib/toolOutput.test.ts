@@ -628,5 +628,33 @@ describe("subagent metadata and activity formatting helpers", () => {
     expect(getModelContextWindow("deepseek/deepseek-chat")).toBe(64_000);
     expect(getModelContextWindow(undefined)).toBe(200_000);
   });
+
+  it("prefers the live catalog's window over the hardcoded table (#85)", () => {
+    // The reported bug: the table answers 64k for ANY deepseek, so a session on
+    // a 1M-window deepseek model read a % three orders of magnitude wrong.
+    // The catalog is the authority when it knows the model.
+    const catalog = [
+      { id: "deepseek-v4.1-flash", provider: "litellm", contextWindow: 1_000_000 },
+    ];
+    expect(
+      getModelContextWindow("litellm/deepseek-v4.1-flash", catalog),
+    ).toBe(1_000_000);
+    // A model the catalog does NOT know still gets the table's best guess (the
+    // catalog is the authority only for what it actually carries).
+    expect(getModelContextWindow("deepseek/deepseek-chat", catalog)).toBe(64_000);
+    // No catalog at all (every existing caller) is the table, unchanged.
+    expect(getModelContextWindow("deepseek/deepseek-chat")).toBe(64_000);
+  });
+
+  it("matches the catalog on the composed key, not a substring (#85)", () => {
+    // `ModelKey`'s rule: the provider id never contains `/`, the MODEL id may,
+    // so the FIRST `/` is the boundary. A catalog entry for a DIFFERENT provider
+    // holding the same bare id must not answer for this one.
+    const catalog = [
+      { id: "m/1", provider: "other", contextWindow: 999 },
+      { id: "m/1", provider: "mine", contextWindow: 4242 },
+    ];
+    expect(getModelContextWindow("mine/m/1", catalog)).toBe(4242);
+  });
 });
 

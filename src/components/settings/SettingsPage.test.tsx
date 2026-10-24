@@ -13,6 +13,7 @@ import {
   externalOpen,
   getSettings,
   listModels,
+  listSessions,
   saveSettings,
   shellSandboxAvailable,
   testMcpServer,
@@ -143,6 +144,10 @@ vi.mock("../../lib/tauri", async () => {
     // tier is offered); the grey-out test overrides with
     // `mockResolvedValueOnce(false)`.
     shellSandboxAvailable: vi.fn().mockResolvedValue(true),
+    // (#85) The stored-session read the provider refresh re-runs so a corrected
+    // context window reaches CLOSED sessions without a restart. Empty by
+    // default; the #85 test overrides it.
+    listSessions: vi.fn().mockResolvedValue([]),
     // The effective catalog (Task 2's `ModelDto` camelCase shape): two
     // models advertising OVERLAPPING thinking levels (the union is
     // deduped in FIRST-SEEN order — `medium` / `high` appear in both;
@@ -501,6 +506,52 @@ describe("SettingsPage (the ZCode port — sections + immediate save)", () => {
     expect(saved.providers[0].name).toBe("Tama2");
     expect(saved.providers[0].id).toBe("tama2");
     expect(listModels).toHaveBeenCalledWith("tama2");
+  });
+
+  it("a provider refresh merges the corrected stored-session windows into the store (#85)", async () => {
+    // The refresh button is a separate affordance from the name-blur commit
+    // above, and this is the surface the user actually presses when a model's
+    // context window was wrong: the corrected window must reach the CLOSED
+    // session's context bar, which reads `list_sessions`'s `contextUsage`.
+    useSessions.setState({
+      sessions: [],
+      historySessions: [
+        {
+          sessionId: "stored-1",
+          cwd: "/x",
+          capabilities: {},
+          archived: false,
+          contextUsage: { used: 53_760, window: 256_000 },
+        },
+      ],
+      archivedSessions: [],
+      contextUsage: {},
+      configOptions: {},
+      messages: {},
+    });
+    // The backend now reports the CORRECTED window for the stored row.
+    vi.mocked(listSessions).mockResolvedValueOnce([
+      {
+        sessionId: "stored-1",
+        cwd: "/x",
+        capabilities: {},
+        archived: false,
+        contextUsage: { used: 53_760, window: 1_000_000 },
+      },
+    ]);
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    await go("Providers");
+    fireEvent.click(await screen.findByRole("button", { name: "Refresh models" }));
+    await waitFor(() =>
+      expect(useSessions.getState().contextUsage["stored-1"]).toEqual({
+        used: 53_760,
+        window: 1_000_000,
+      }),
+    );
+    // The read only happens on a REFRESH, and it is a `list_sessions` over the
+    // stored rows (archived included — the boot list's flag).
+    expect(listSessions).toHaveBeenCalledWith(true);
   });
 
   it("add_provider_appends_a_row_and_the_name_commit_derives_the_id", async () => {

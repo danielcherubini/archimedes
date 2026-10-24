@@ -15,6 +15,7 @@ import { getAppInfo } from "@/lib/version";
 import {
   listKnownProviders,
   listModels,
+  listSessions,
   listTools,
   shellSandboxAvailable,
   type AppSettings,
@@ -28,6 +29,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { SettingsSidebarButton } from "./primitives";
 import { useSettingsDocument } from "@/hooks/useSettingsDocument";
+import { useSessions } from "@/store/sessions";
+import { useModelCatalog } from "@/store/modelCatalog";
 import GeneralSection from "./GeneralSection";
 import AppearanceSection from "./AppearanceSection";
 import ProviderSection from "./ProviderSection";
@@ -344,7 +347,25 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
   };
 
   const refreshProvider = (id: string): Promise<void> =>
-    listModels(id).then(setModels).catch(() => {});
+    listModels(id)
+      .then(setModels)
+      .then(() =>
+        // (#85) The refreshed window must reach STORED sessions too, not just
+        // this page's list: a closed session's bar reads the row's
+        // `contextUsage`, and `listSessions` is fetched once at boot, so without
+        // this the corrected window would not appear until a restart. The merge
+        // action deliberately touches only the per-id maps (never membership).
+        listSessions(true).then((rows) =>
+          useSessions.getState().mergeRefreshedSessionRows(rows),
+        ),
+      )
+      .then(() =>
+        // …and the shared catalog, which is what the subagent card's context %
+        // reads. `forceRefresh` keeps the backend's own bypass in play (it is
+        // what pushes the corrected window to LIVE sessions).
+        useModelCatalog.getState().loadModels(id),
+      )
+      .catch(() => {});
 
   const generalSection = (
     <GeneralSection

@@ -5,6 +5,7 @@ import { useSubagents } from "../store/subagents";
 import { useSubagentSelection } from "../store/subagentSelection";
 import { useSessions } from "../store/sessions";
 import { useInteractive } from "../store/interactive";
+import { useModelCatalog } from "../store/modelCatalog";
 import type { SubagentEntry } from "../store/subagents";
 import { unmatchedAgentTooltip } from "../lib/subagentActivity";
 
@@ -24,6 +25,7 @@ beforeEach(() => {
   }
   useSubagentSelection.getState().select(null);
   useInteractive.setState({ cost: {} });
+  useModelCatalog.setState({ models: [], loadStarted: false, loadedOk: false });
 });
 
 describe("SubagentDelegatingCard (the subagent tool card with the nested list)", () => {
@@ -270,6 +272,51 @@ describe("SubagentDelegatingCard (the subagent tool card with the nested list)",
     // Shows 30k tokens with calculated 3% context window for Gemini (1M context) and cost
     expect(screen.getByText("30k tok (3%)")).toBeTruthy();
     expect(screen.getByText("$0.04")).toBeTruthy();
+  });
+
+  it("computes the context % against the CATALOG window, not the name table (#85)", () => {
+    // The reported bug, exactly: the hardcoded table scores every deepseek model
+    // at 64k, so a 1M-window model's 250k read as 391% — clamped to a red bar
+    // and a number three digits off. The catalog says 1M, so it is 25%.
+    useModelCatalog.setState({
+      models: [
+        {
+          id: "deepseek-v4.1-flash",
+          provider: "litellm",
+          contextWindow: 1_000_000,
+          supportsThinking: true,
+          thinkingLevels: ["high"],
+        },
+      ],
+      loadStarted: true,
+      loadedOk: true,
+    });
+    useSubagents.getState().addSession(
+      entry({
+        sessionId: "sub1",
+        agentName: "coder",
+        task: "Task 9",
+        status: "running",
+        model: "litellm/deepseek-v4.1-flash",
+      }),
+    );
+    useInteractive.getState().applyCost("sub1", {
+      inputTokens: 200_000,
+      outputTokens: 50_000,
+    });
+    render(
+      <SubagentDelegatingCard
+        title="subagent"
+        status="pending"
+        rawInput={{ task: "Task 9" }}
+        sessionId="main1"
+      />,
+    );
+    // 250k of 1M = 25%.
+    expect(screen.getByText("250k tok (25%)")).toBeTruthy();
+    // The old table would have said 64k → 391%; the clamp and the raw number
+    // are both wrong, so assert the ABSENCE of the name-table answer.
+    expect(screen.queryByText(/391%/)).toBeNull();
   });
 
   it("renders NO rows for entries whose parentSessionId does not match", () => {
