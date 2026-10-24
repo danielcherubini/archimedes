@@ -662,8 +662,8 @@ describe("rowToMessages — an empty retraction row (ADR 0048)", () => {
 });
 
 describe("spaceViewFor (per-space grouping, pure)", () => {
-  // Spaces arrive `lastOpenedAt`-desc from `list_spaces`; `historySessions`
-  // most-recently-ACTIVE first from `list_sessions` — input order is the semantics.
+  // Both lists arrive in the user's MANUAL ORDER from the server (ADR 0075) —
+  // input order IS the display order, and it is evidence of nothing else.
   const spaces = [
     row("/workspaces/alpha", 3000),
     row("/workspaces/bravo", 2000),
@@ -953,8 +953,8 @@ describe("liveSessionsInSpace (pure ordering and filtering)", () => {
 });
 
 describe("autoSelectActive (boot auto-select, pure)", () => {
-  // `spaces` arrives `lastOpenedAt`-desc — that IS input order; the function
-  // must NOT re-sort.
+  // `spaces` arrives in the user's MANUAL ORDER — that IS input order (the
+  // leftmost tab first); the function must NOT re-sort.
   const spaces = [
     row("/a/space-one", 3000),
     row("/a/space-two", 2000),
@@ -3402,7 +3402,10 @@ describe("activeSpacePath (the selected Space — the top tabs' state)", () => {
       spaces: [space("/a"), space("/b")],
       activeSpacePath: "/a",
     });
-    // `removeSpace` awaits the backend command (the mock resolves).
+    // `removeSpace` awaits the backend command (the mock resolves). The
+    // fallback is the LEFTMOST remaining TAB (the first row of the manual
+    // order, ADR 0075) — and this fixture keeps the `null`-when-nothing-remains
+    // half, which is the half only this test pins.
     await useSessions.getState().removeSpace("/a");
     expect(useSessions.getState().activeSpacePath).toBe("/b");
     await useSessions.getState().removeSpace("/b");
@@ -4626,10 +4629,11 @@ describe("detachedSessions (sessions with no open Space — CONTEXT.md's Detache
   });
 
   it("keeps input order: stored rows first, then archived, neither re-sorted", () => {
-    // `sortByActivity` cannot be used (it needs loaded transcripts, which the
-    // consuming section has none of) and `SessionInfo` carries no `createdAt`,
-    // so the order IS `list_sessions` order for the stored rows followed by the
-    // archived rows in their input order.
+    // The order IS the store's input order — the user's MANUAL ORDER for the
+    // stored rows, then the archived rows in theirs — and that is deliberate:
+    // Settings → Detached sessions is a management list, not a recency list
+    // (ADR 0075). The assertion is the pre-ADR-0075 one; only the REASON for it
+    // changed, which is exactly what a test that cannot see recency proves.
     const rows = detachedSessions(
       openSpaces,
       [stored("h2", "/tmp/gamma"), stored("h1", "/tmp/delta")],

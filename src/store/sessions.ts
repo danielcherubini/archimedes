@@ -90,35 +90,35 @@ export function discardSessionMessages(sessionId: string): void {
 }
 
 /**
- * The session a fresh boot should land on: the most recently opened
- * space's newest session, live (in `sessions`) preferred over stored.
- * `null` when there's nothing.
+ * **Ordering note.** Both read queries the store boots from — `Db::list_spaces`
+ * and `Db::list_sessions` — return the user's MANUAL ORDER, so the store's input
+ * order IS the display order and the store still NEVER re-sorts. That rule is
+ * unchanged by ADR 0075 and it is now true for a better reason: the order is
+ * something the user arranged, not something the server inferred.
  *
- * **Ordering note:** `SessionInfo` over IPC has NO `createdAt` field (it is
- * `{ sessionId, cwd, capabilities }` — the Rust `SessionInfo` struct has no
- * such field). So we CANNOT sort by `createdAt`.
- * We rely on SERVER order instead: `Db::list_sessions` returns
- * `ORDER BY COALESCE(last message's created_at, created_at) DESC, id DESC` —
- * LAST ACTIVITY, so the head of a space's `historySessions` subsequence is the
- * session of that space the user used most recently, not the one they started
- * most recently — and `Db::list_spaces` returns
- * `ORDER BY last_opened_at DESC, path ASC`, and the store slices only
- * `filter`/`map` those rows (preserving order). Therefore "most recently active
- * first" **is** the input order — `spaces[0]` is the most recently opened space.
- * Do NOT re-sort by a field that doesn't exist.
+ * What ADR 0075 took away is the other half. Position carries NO evidence: it is
+ * not a proxy for recency, and since the columns became user-owned nothing moves
+ * a row again — not a new message, not a close, not a boot. So:
+ *  - RECENCY is a FIELD the store holds (`sessionRecency`, fed by the boot
+ *    `sessionRecency()` command) and a RULE `lib/sessionRecency` owns — ask it
+ *    with `recencyOf` / `mostRecentByRecency`, never by looking at a list head;
+ *  - so is POSITION (`sessionOrder`, from the SAME payload), merged into
+ *    `SpaceView.sessionIds` by `mergeSessionOrder`. A Space's sidebar rows are
+ *    ONE sequence spanning live and stored — there is no live block to keep at
+ *    the front, and a Session RESUMED this boot keeps the slot its row holds.
+ *    Re-introducing a live-first group here would move a row the user positioned.
  *
- * (The SIDEBAR additionally re-sorts by the loaded transcript's last stamp —
- * `lib/sessionActivity` — because a session that CLOSED this boot is appended
- * to `historySessions` by `handleSessionClosed` and no server order can know
- * about it.)
+ * Therefore `spaces[0]` is the LEFTMOST tab, not the tab that was opened last,
+ * and the head of a Space's stored subsequence is the first row of a manual
+ * arrangement, not the Session the user used last.
  */
 
 /**
- * All live session IDs belonging to a space, ordered newest-first (most
- * recently started at index 0).
+ * All live session IDs belonging to a space, most recently STARTED first (that
+ * one at index 0 — a fact about when the Worker began, NOT recency: ADR 0075).
  *
  * `sessions` is in insertion order (appended by `addSession` / `resumeSession`),
- * so reversing the filtered slice yields newest-first.
+ * so reversing the filtered slice yields most-recently-STARTED first.
  */
 export function liveSessionsInSpace(
   sessions: SessionInfo[],
@@ -179,8 +179,9 @@ export function autoSelectActive(
  * components). Built with the same input-order rule as `autoSelectActive`.
  *
  * Supports multiple coexisting live sessions per space: `liveSessionIds`
- * contains all active live sessions ordered newest-first, while `liveSessionId`
- * points to the most recently started live session (or `null`).
+ * contains all active live sessions most-recently-STARTED first, while
+ * `liveSessionId` points to the most recently started live session (or `null`).
+ * `sessionIds` is what the rows RENDER — one sequence, not a live block.
  *
  * Note: a session without a space is NOT a case here by design — a space is
  * born at the same time as a session (the `record_session → upsert_space`
@@ -209,7 +210,10 @@ export interface SpaceView {
   liveSessionId: string | null;
   /** DEPRECATED — the other INPUT to `sessionIds`, in the server's manual order;
    * T04 deletes it. Do NOT re-sort: the input order IS the user's Manual order,
-   * and since ADR 0075 it is evidence of nothing but position. */
+   * and since ADR 0075 it is evidence of nothing but position. (This used to be
+   * re-sorted for display by `lib/sessionActivity`; that module still runs in
+   * the sidebar until T04 deletes it, and this field is where its last caller
+   * reads its input from.) */
   storedSessionIds: string[];
   /**
    * Archived sessions of this space (NOT rendered in the Space group —
@@ -364,11 +368,13 @@ export function archivedInSpace(
  * Close-anyway path calls `closeSpace` with no `stopSessionIds` (ADR 0043), so
  * a live session with no Space row is reachable.
  *
- * Order is the input order — `historySessions` first (stored rows in
- * `list_sessions` order, most-recently-ACTIVE first), then `archivedSessions`.
- * Do NOT "fix" this by sorting: `sortByActivity` needs loaded transcripts,
- * which the consuming Settings section has none of, and `SessionInfo` carries
- * no `createdAt` (see the ordering note above).
+ * Order is the store's input order — `historySessions` first (stored rows in
+ * the user's MANUAL ORDER, which is what `list_sessions` now returns), then
+ * `archivedSessions` in theirs. That is deliberate, not an oversight: Settings →
+ * Detached sessions is a MANAGEMENT list, not a recency list, so inheriting the
+ * manual order is the right answer and needs no sort. (It used to inherit
+ * recency by accident, because the query used to sort that way — see the
+ * ordering note above and ADR 0075.)
  */
 export function detachedSessions(
   spaces: { path: string }[],
@@ -557,20 +563,22 @@ interface SessionsState {
   setActiveSession: (sessionId: string | null) => void;
   /**
    * Select a Space (the tab click): it becomes `activeSpacePath` and its
-   * most recent session opens — a LIVE session first (the most-recently
-   * started one, the one-live-cap-lifted rule), then the newest stored
-   * (input order — do NOT re-sort), then NOTHING (an empty space lands
-   * on the chat's empty state). A no-op for an unknown path.
+   * **Landing Session** opens — a LIVE session first (the most-recently
+   * started one, the one-live-cap-lifted rule), then the most RECENT stored
+   * one (`recencyOf`, which is NOT necessarily the first row of the Space's
+   * manual order), then NOTHING (an empty space lands on the chat's empty
+   * state). A no-op for an unknown path.
    */
   selectSpace: (path: string) => void;
   /**
-   * Boot: replace the spaces list (from `list_spaces`, `lastOpenedAt`-desc).
-   * If nothing is active yet, select via `autoSelectActive` (the most recent
-   * space's newest session, live preferred) and load it: `autoSelectActive`
-   * lands on a stored session (live ones never survive a restart), so the
-   * `openSession` call loads its transcript and boot lands on CONTENT, not
-   * an empty chat (no-op for live / already-loaded sessions; the fetch is
-   * self-guarding against a mid-flight switch).
+   * Boot: replace the spaces list (from `list_spaces`, in the user's MANUAL
+   * ORDER). If nothing is active yet, select via `autoSelectActive` (the
+   * LEFTMOST Space that owns a session, its most RECENT session, live
+   * preferred) and load it: `autoSelectActive` lands on a stored session (live
+   * ones never survive a restart), so the `openSession` call loads its
+   * transcript and boot lands on CONTENT, not an empty chat (no-op for live /
+   * already-loaded sessions; the fetch is self-guarding against a mid-flight
+   * switch).
    */
   setSpaces: (rows: SpaceRow[]) => void;
   /**
@@ -587,8 +595,9 @@ interface SessionsState {
    * gone, not what the user should be looking at next.
    *
    * RETURNS the Space the view has to fall back to when the removed one WAS
-   * the selected one: the first remaining row (input order — `lastOpenedAt`
-   * desc), or `null` when none remains. Removing a Space that was NOT selected
+   * the selected one: the LEFTMOST remaining tab (the first row of the manual
+   * order — since ADR 0075 that is what a neighbour tab means), or `null` when
+   * none remains. Removing a Space that was NOT selected
    * also answers `null` (there is nothing to fall back to), so a caller that
    * must tell "no Space left" from "a background Space went" has to remember
    * whether the removed Space was the selected one — which is exactly what
@@ -610,10 +619,11 @@ interface SessionsState {
    * standing decision recorded on it), so re-opening the folder returns the
    * Space WITH its history.
    * 3. Closing the SELECTED tab lands the user on the neighbour it fell back
-   * to, through `selectSpace` — so the chat shows that Space's most recent
-   * Session (live first, else newest stored) rather than a transcript whose
-   * tab is gone. The fallback path itself is `removeSpace`'s decision; this
-   * reads the result instead of restating the rule. When there is NO fallback
+   * to (the LEFTMOST remaining tab), through `selectSpace` — so the chat shows
+   * that Space's **Landing Session** (a live one first, else the most RECENT
+   * stored one by `recencyOf`) rather than a transcript whose tab is gone. The
+   * fallback path itself is `removeSpace`'s decision; this reads the result
+   * instead of restating the rule. When there is NO fallback
    * (the last tab), this clears `activeSessionId` so the chat shows its empty
    * state — see the note in the implementation.
    */
@@ -796,8 +806,8 @@ export const useSessions = create<SessionsState>((set, get) => ({
           })
         : state.activeSessionId;
     // The selected session's space (matched by `cwd` — the session's `cwd`
-    // IS the Space's folder); when nothing is selected, the most recent
-    // space (the FIRST row — `list_spaces` order is `lastOpenedAt` desc).
+    // IS the Space's folder); when nothing is selected, the LEFTMOST tab (the
+    // FIRST row — `list_spaces` returns the user's MANUAL ORDER).
     const owner =
       selectedId === null
         ? null
