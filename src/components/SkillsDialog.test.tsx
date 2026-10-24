@@ -2,7 +2,18 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ShadowedSkill, SkillInfo } from "../lib/tauri";
 import { IPC_EVENTS } from "../lib/ipc/events";
-import SkillsDialog from "./SkillsDialog";
+import SkillsDialog, { UNMENTIONABLE_ROW_REASON } from "./SkillsDialog";
+
+/**
+ * The inert row's reason, spelled VERBATIM so a reader of this file sees the
+ * sentence the user sees. `UNMENTIONABLE_ROW_REASON` (exported from
+ * `SkillsDialog.tsx`) is the ONE owner of the string; the equality pin below is
+ * what makes the literal here a real pin instead of a second copy that can
+ * drift — drop the `— rename the Skill to give it one` clause from the
+ * component and both this literal and the assertions that use it go red.
+ */
+const REASON =
+  "This name can't be typed as a mention — rename the Skill to give it one";
 
 // The dialog is PROP-DRIVEN (it does not fetch — the fetch lives in
 // `useSkillCatalog` in `SpacesList`, covered by `useSkillCatalog.test.ts`),
@@ -36,6 +47,17 @@ function shadow(overrides: Partial<ShadowedSkill> = {}): ShadowedSkill {
 }
 
 describe("SkillsDialog", () => {
+  it("the test's literal reason IS the component's one owned string", () => {
+    // Single-ownership pin: the literal above is what the user reads, and this
+    // asserts it is byte-identical to the component's const, so the two cannot
+    // drift (the reason line, the tooltip that repeats it and these assertions
+    // all come from ONE place).
+    expect(REASON).toBe(UNMENTIONABLE_ROW_REASON);
+    // The `$`-free rule is a property of the STRING, so it is pinned on the
+    // string too — every surface that renders it inherits it.
+    expect(UNMENTIONABLE_ROW_REASON).not.toMatch(/\$/);
+  });
+
   it("renders_one_row_per_skill_with_name_and_description", async () => {
     render(
       <SkillsDialog
@@ -185,6 +207,216 @@ describe("SkillsDialog", () => {
         "read_skill refuses it now. Send it yourself with $omega",
     );
   });
+
+  // ---------------------------------------------------------------------------
+  // The inert row (issue #10, amending ADR 0036). A `$` Mention token is
+  // `[a-z0-9]+(?:-[a-z0-9]+)*` (ADR 0031) while discovery screens a name merely
+  // for tag-safety, so `has space` IS discovered yet NO token can ever equal it
+  // — and `expandMentions` leaves an unmatched token VERBATIM. Inserting
+  // `$has space ` therefore put dead text into the SENT message, while the
+  // tooltip one node away already said the name can't be typed as a mention.
+  // Two rules the tests below own:
+  //
+  // 1. The row is LISTED and INERT. The `$` catalog stays total (ADR 0036 — it
+  //    feeds model-facing discovery), so the fix is the row's AFFORDANCE, not
+  //    its presence: `aria-disabled="true"`, out of the tab order, click and
+  //    Enter both inert, and the dialog stays open.
+  // 2. The reason carries NO `$` glyph — the badge tooltip's rule, extended to
+  //    the new surface, because a lie one node from the truth is this bug.
+  // ---------------------------------------------------------------------------
+
+  it("an unmentionable name is listed but its row is inert", async () => {
+    // Model-VISIBLE on purpose: the flag is irrelevant to the defect (the bug
+    // predates ADR 0036), and the `manual only` badge does not exist for this
+    // row — a fixture with the flag set would let the fix lean on the badge.
+    const events: CustomEvent[] = [];
+    const listener = (e: Event) => {
+      events.push(e as CustomEvent);
+    };
+    window.addEventListener(IPC_EVENTS.insertSkill, listener);
+    const onClose = vi.fn();
+    try {
+      render(
+        <SkillsDialog
+          skills={[skill({ name: "has space", disableModelInvocation: false })]}
+          onClose={onClose}
+        />,
+      );
+      // Still LISTED — discovery stays total (ADR 0036), so the fix may not
+      // delete a row the user owns. Asserted as presence, not absence.
+      const name = await screen.findByText("has space");
+      expect(screen.getAllByRole("button")).toContain(
+        name.closest('[role="button"]'),
+      );
+      const row = name.closest('[role="button"]');
+      expect(row).not.toBeNull();
+      // The affordance is OFF: `aria-disabled` + out of the tab order (the
+      // same pair `RowButton` emits for the Model picker's stale override).
+      expect(row!.getAttribute("aria-disabled")).toBe("true");
+      expect(row!.getAttribute("tabindex")).toBe("-1");
+      // Neither activation path dispatches anything, and neither closes the
+      // dialog — the guard sits in `insertSkill`, which owns the `onClose()`
+      // too, not only in the click handler.
+      fireEvent.click(row!);
+      fireEvent.keyDown(row!, { key: "Enter" });
+      expect(
+        events.find((e) => e.type === IPC_EVENTS.insertSkill),
+      ).toBeUndefined();
+      expect(onClose).not.toHaveBeenCalled();
+      // NOT merely styled away: the click-shaped classes are GONE and the
+      // not-allowed cue is present, so the row does not look clickable.
+      const tokens = row!.className.split(/\s+/);
+      expect(tokens).toContain("cursor-not-allowed");
+      expect(tokens).not.toContain("cursor-pointer");
+      expect(tokens).not.toContain("hover:bg-surface-hover");
+      // The truncation chain still holds (the row is still a flex item of the
+      // scroll container — `SkillsDialog.test.tsx`'s other layout pin).
+      expect(tokens).toContain("min-w-0");
+    } finally {
+      window.removeEventListener(IPC_EVENTS.insertSkill, listener);
+    }
+  });
+
+  it("the inert row says why without emitting a $ glyph", async () => {
+    // The hard constraint, applied to the node this task adds: the row explains
+    // itself in prose that carries NO `$`, because a tooltip that reads
+    // `$has space` is the exact dead token the row just stopped inserting.
+    //
+    // The reason is now VISIBLE TEXT (the row's second line), not a native
+    // `title` only. The reason: an inert row is `tabIndex={-1}`, so a
+    // keyboard-only user can never focus it, and a `title` is not reliably
+    // exposed to assistive technology either — a `title`-only reason is
+    // reachable with a MOUSE and with nothing else, which makes the dialog's
+    // accessibility claim true for pointer users only. Visible text in the row
+    // is read by everyone: it participates in the row's accessible name (the
+    // `textContent` assertion below is that claim, not decoration) and needs no
+    // ARIA gymnastics. The `$`-free rule applies to BOTH surfaces — the visible
+    // sentence and the tooltip that carries it in full when the line truncates.
+    const first = render(
+      <SkillsDialog
+        skills={[skill({ name: "has space", disableModelInvocation: false })]}
+        onClose={() => {}}
+      />,
+    );
+    const row = (await screen.findByText("has space")).closest(
+      '[role="button"]',
+    );
+    expect(row).not.toBeNull();
+    // VISIBLE, and INSIDE the row — a caption parked outside the row would be
+    // prose the AT tree attaches to nothing in particular.
+    const reason = screen.getByText(REASON);
+    expect(row!.contains(reason)).toBe(true);
+    // The programmatic half: the row's own text content (what the accessible
+    // name computation walks for a `role="button"` with no explicit label) now
+    // carries the reason, so a screen reader reads it without a hover.
+    expect(row!.textContent).toMatch(/can't be typed/i);
+    // Neither channel emits a `$`.
+    expect(reason.textContent).not.toMatch(/\$/);
+    // The tooltip survives ON THE LINE THAT NEEDS IT: this line is `truncate`d
+    // (the row's pinned truncation chain), so at a narrow dialog width the
+    // visible sentence clips and the full text is one hover away. The ROW no
+    // longer carries a `title` of its own — the sentence is in its accessible
+    // name already, and a row-level `title` would have AT say it twice.
+    expect(reason.getAttribute("title")).toBe(REASON);
+    expect(reason.getAttribute("title")).not.toMatch(/\$/);
+    expect(row!.getAttribute("title")).toBeNull();
+    // It reads as an explanation, not as a second clickable thing: no role, no
+    // tabindex, no affordance classes (the shadow report's non-row lines are
+    // pinned the same way).
+    expect(reason.getAttribute("role")).toBeNull();
+    expect(reason.getAttribute("tabindex")).toBeNull();
+    first.unmount();
+
+    // Model-hidden AND unmentionable: BOTH tooltips in the tree are `$`-free —
+    // the badge's (pinned elsewhere) and the reason line's (pinned here). This
+    // is what stops a future edit from folding the explanation into a
+    // `$`-carrying string for the flagged shape only.
+    const second = render(
+      <SkillsDialog
+        skills={[skill({ name: "has space", disableModelInvocation: true })]}
+        onClose={() => {}}
+      />,
+    );
+    const badge = await screen.findByText("manual only");
+    expect(badge.getAttribute("title")).not.toMatch(/\$/);
+    const flaggedRow = badge.closest('[role="button"]');
+    // The row itself carries NO tooltip now (the sentence is in its text), and
+    // the reason LINE's does — both `$`-free, and the badge's own tooltip too.
+    expect(flaggedRow!.getAttribute("title")).toBeNull();
+    const flaggedReason = screen.getByText(REASON);
+    expect(flaggedReason.getAttribute("title")).not.toMatch(/\$/);
+    expect(flaggedRow!.textContent).toMatch(/can't be typed/i);
+    // The reason line is INSIDE the flagged row too (the badge's tooltip is not
+    // a substitute: it is a `title` on a badge inside a row that cannot be
+    // focused, i.e. the same mouse-only channel this task removes).
+    expect(
+      flaggedRow!.contains(screen.getByText(REASON)),
+    ).toBe(true);
+    second.unmount();
+
+    // The mentionable arm is UNCHANGED — the regression pin for every row that
+    // works today (no `aria-disabled` attribute at all, focusable, no tooltip
+    // stealing the row's own click affordance, and NO reason line — a row that
+    // can act has nothing to apologise for).
+    const third = render(
+      <SkillsDialog skills={[skill({ name: "Omega" })]} onClose={() => {}} />,
+    );
+    const activeRow = (await screen.findByText("Omega")).closest(
+      '[role="button"]',
+    );
+    expect(activeRow).not.toBeNull();
+    expect(activeRow!.hasAttribute("aria-disabled")).toBe(false);
+    expect(activeRow!.getAttribute("tabindex")).toBe("0");
+    expect(activeRow!.getAttribute("title")).toBeNull();
+    expect(activeRow!.textContent).not.toMatch(/can't be typed/i);
+    const tokens = activeRow!.className.split(/\s+/);
+    expect(tokens).toContain("cursor-pointer");
+    expect(tokens).toContain("hover:bg-surface-hover");
+    expect(tokens).not.toContain("cursor-not-allowed");
+    third.unmount();
+  });
+
+  it("the reason line coexists with the description line and never replaces it", async () => {
+    // The row already explains itself with a second line (the description). The
+    // reason is an ADDITIONAL line, and the description keeps its own node, its
+    // own `title` and its truncation classes — the pinned truncation-chain test
+    // walks those leaves by text, so folding the reason into the description
+    // span (or dropping the description) would break it.
+    render(
+      <SkillsDialog
+        skills={[
+          skill({
+            name: "has space",
+            description: "Alpha skill",
+            disableModelInvocation: false,
+          }),
+        ]}
+        onClose={() => {}}
+      />,
+    );
+    const row = (await screen.findByText("has space")).closest(
+      '[role="button"]',
+    );
+    const description = await screen.findByText("Alpha skill");
+    expect(row!.contains(description)).toBe(true);
+    expect(description.getAttribute("title")).toBe("Alpha skill");
+    const reason = screen.getByText(REASON);
+    expect(row!.contains(reason)).toBe(true);
+    // Both lines truncate (`min-w-0` + `truncate`) — the row's pinned chain.
+    for (const line of [description, reason]) {
+      expect(line.className).toContain("min-w-0");
+      expect(line.className).toContain("truncate");
+    }
+    // The reason reads at the ROW'S explanation tone, not the app's quietest
+    // caption token: the inert arm's `opacity-50` composes with
+    // `text-foreground-subtlest` (foreground at 40%) into text nobody can read,
+    // and the reason is the one sentence this row must deliver. MUTATION-CHECKED
+    // — swap this span for a `MutedCaption` and this reddens.
+    expect(reason.className).toContain("text-foreground-subtle");
+    expect(reason.className.split(/\s+/)).not.toContain("text-foreground-subtlest");
+    expect(reason.className).toContain("text-ui-sm");
+  });
+
 
   it("a_model_visible_skill_carries_no_manual_only_marker", async () => {
     // The default (`disableModelInvocation: false`) renders no marker.

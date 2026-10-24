@@ -4,6 +4,7 @@ import {
   extractTargetInfo,
   FAILURE_LABELS,
   getActivityDisplay,
+  unmatchedAgentTooltip,
   type ActivityRow,
 } from "./subagentActivity";
 import type { ToolCallUiStatus } from "../lib/sessionTypes";
@@ -375,5 +376,54 @@ describe("getActivityDisplay (line 3 of a subagent row)", () => {
     // stays a silent no-render rather than becoming a wrong "Done".
     const row: ActivityRow = { status: "queued" as unknown as ActivityRow["status"] };
     expect(getActivityDisplay(row, undefined, 0)).toBeUndefined();
+  });
+});
+
+/**
+ * (issue #47, review E3) The resolve-miss tooltip's ONE owner.
+ *
+ * The directory row (`SubagentDelegatingCard`) and the transcript sheet
+ * (`SubagentDetailHost`) both carry this sentence on a `MutedCaption`, and for
+ * one period the two carried it as two verbatim 160-char literals — the shape
+ * that drifts the first time someone rewords one of them. This module owns it
+ * for the same reason `FAILURE_LABELS` does: it is UI COPY derived from a store
+ * field, shared by more than one surface, and nothing else in the tree would
+ * notice a divergence.
+ *
+ * The literal below is the sentence a reader sees in the tooltip, written out in
+ * full so the pin is legible; the equality assertion is what makes it a pin
+ * rather than a second copy that can drift.
+ */
+describe("unmatchedAgentTooltip (the resolve-miss sentence, one owner)", () => {
+  it("spells the sentence for a name that matched no Agent definition", () => {
+    expect(unmatchedAgentTooltip("reviewr")).toBe(
+      'No Agent definition named "reviewr" — this child loaded no persona, ' +
+        "no tool allowlist and no model override, and ran the parent's config instead.",
+    );
+  });
+
+  it("interpolates the name VERBATIM (no case fold, no trim, no quoting tricks)", () => {
+    // The name is the model's own claim about a definition, and the marker's
+    // whole job is to quote it back so the typo is visible: `"Reviewr"` must
+    // render with its capital, and a name carrying a quote must not be
+    // silently mangled (the tooltip is a plain string attribute).
+    expect(unmatchedAgentTooltip("Reviewr")).toContain('"Reviewr"');
+    expect(unmatchedAgentTooltip('we"ird')).toContain('"we"ird"');
+    expect(unmatchedAgentTooltip(" spaced ")).toContain('" spaced "');
+  });
+
+  it("names what the child actually lost, and never reads as a failure", () => {
+    // The three losses the sentence owes the user (persona / tool allowlist /
+    // model override) plus the reassurance that the child RAN with the parent's
+    // config — ADR 0020 says an unmatched name is a config-less dispatch, not
+    // an error, so the copy may not use a failure word. MUTATION-CHECKED: drop
+    // any of the three, or say "failed", and this reddens.
+    const text = unmatchedAgentTooltip("reviewr");
+    for (const clause of ["no persona", "no tool allowlist", "no model override"]) {
+      expect(text).toContain(clause);
+    }
+    expect(text).toContain("ran the parent's config instead");
+    expect(text.toLowerCase()).not.toContain("fail");
+    expect(text.toLowerCase()).not.toContain("error");
   });
 });

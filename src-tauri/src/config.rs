@@ -316,12 +316,14 @@ pub struct Settings {
     pub attention_alert_delay_secs: u64,
     /// The ADR 0055 **Dead bound**: SECONDS a **Subagent session** may stay
     /// silent with no tool execution outstanding before it is reaped as Dead.
-    /// It bounds UNEXPLAINED SILENCE, never the length of the delegation — an
-    /// **Active Subagent** (producing frames, or holding an outstanding
-    /// `tool_call_id`) has no timeout of any kind, so no value here can cut a
-    /// working child. 1800 s: the provider layer already self-bounds a stalled
-    /// stream at a 5-minute idle `read_timeout`, so silence past twice that
-    /// with nothing in flight is a wedged Worker, not a slow model.
+    /// It bounds UNEXPLAINED SILENCE **as the Supervisor observes it** (the gap
+    /// between frames the pump actually read — a parent starved of CPU can
+    /// observe a gap a live child never stopped producing into), never the length
+    /// of the delegation — an **Active Subagent** (producing frames, or holding an
+    /// outstanding `tool_call_id`) has no timeout of any kind, so no value here
+    /// can cut a working child. 1800 s: the provider layer already self-bounds a
+    /// stalled stream at a 5-minute idle `read_timeout`, so silence past twice
+    /// that with nothing in flight is a wedged Worker, not a slow model.
     /// `settings.json`-only (no Settings-UI control, deliberately — the
     /// `session_naming_reasoning` precedent).
     #[serde(default = "default_subagent_dead_bound_secs")]

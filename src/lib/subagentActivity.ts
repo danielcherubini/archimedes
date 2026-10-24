@@ -344,3 +344,44 @@ export function getActivityDisplay(
 
   return undefined;
 }
+
+/**
+ * The resolve-miss tooltip — the ONE owner of the sentence a `no matching
+ * Agent` caption explains (issue #47; the single-owner extraction is the review
+ * follow-up).
+ *
+ * TWO surfaces print it: the Subagent directory row
+ * (`SubagentDelegatingCard`) and the transcript sheet header
+ * (`SubagentDetailHost`). Both hang it on the same quiet `MutedCaption`, and
+ * for one period both carried the SAME literal (154 source characters, 145
+ * rendered for a name as short as `reviewr`) — the shape that desynchronises
+ * the first time someone rewords one of them while the other keeps the old
+ * wording, which is exactly what `PROTECTED_WRITE_ROUTE` (Rust-side, same
+ * program) exists to prevent on the refusal sentence. This is
+ * that pattern in `src/lib/`: one exported producer, two consumers, and both
+ * components' tests assert through the helper so the sentence cannot drift.
+ * The extraction is output-preserving: the rendered sentence is byte-identical
+ * to what the two literals produced (measured by diffing the moved string).
+ *
+ * WHAT THE SENTENCE OWES THE READER, and why each clause stays:
+ *  - it QUOTES the name verbatim (no case fold, no trim): the marker's whole
+ *    job is to make a typo visible, so it must show the exact string the
+ *    resolver could not match;
+ *  - it names the THREE things the child did not get — persona, tool
+ *    allowlist, model override — because "no matching Agent" alone does not
+ *    say what that costs;
+ *  - it says the child RAN, on the parent's config: ADR 0020 makes an
+ *    unmatched name a config-less dispatch and NOT an error, so copy that reads
+ *    as a failure is a new bug (the same reason the caption is a quiet
+ *    `text-warning` line and the row keeps its running glyph).
+ *
+ * It is a `title` (a hover affordance) and NOT the caption's text: the visible
+ * caption stays one short phrase, and the sentence is the depth behind it. Both
+ * captions' visible text is pinned in the component tests.
+ */
+export function unmatchedAgentTooltip(agentName: string): string {
+  return (
+    `No Agent definition named "${agentName}" — this child loaded no persona, ` +
+    "no tool allowlist and no model override, and ran the parent's config instead."
+  );
+}

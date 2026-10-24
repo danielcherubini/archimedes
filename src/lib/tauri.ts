@@ -74,6 +74,7 @@ export type {
   InteractiveRequestPayload,
   InteractiveEventPayload,
   InteractiveResponseDto,
+  AgentNameResolution,
   SubagentMetrics,
   SubagentSessionStartedPayload,
   SubagentClosedPayload,

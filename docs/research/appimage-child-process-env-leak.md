@@ -1,6 +1,6 @@
 ---
 status: current
-last-verified: 2026-10-16
+last-verified: 2026-10-24
 verified-by: web research — 4 researcher angles (AppImage env semantics, cross-framework prior art, local spawn audit, Rust fix mechanism) + inline verification against this tree, 2026-10-16
 ---
 
@@ -181,4 +181,4 @@ Highest credibility: the glibc and AppImage/linuxdeploy/Tauri **source**, read d
 - **No framework-blessed "must preserve" list exists anywhere** — every source enumerates *strip* lists only. The preserve set (`HOME`, `DISPLAY`, `WAYLAND_DISPLAY`, `DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, `XDG_CURRENT_DESKTOP`, `LANG`/`LC_*`, `TERM`, `SHELL`, `USER`, `TZ`, `SSH_AUTH_SOCK`, `PULSE_SERVER`, and `PATH` **filtered rather than dropped**) is reconstructed from absence, not authoritative.
 - **Cert/TLS variables unverified.** `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`, `GIT_SSL_CAINFO`, `CURL_CA_BUNDLE` appear on no list — so preserve them — but **`OPENSSL_CONF` *is* on `anylinux.so`'s strip list**. Needs a deliberate decision, not an assumption.
 - **Only one test can prove the real defect** — a `bash`-tool test asserting the child sees no mount path. It is environment-sensitive: green on CI's `cargo test` path, red only on an AppImage-running box. Borrow `sandbox.rs:735-745`'s skip-visibility discipline so "nothing was tainted" is never mistaken for "the fix works".
-- **Adjacent, out of scope.** (a) The AppImage ships `fake_worker` and `fake_mcp_stdio` into `usr/bin` and prepends it to `PATH` — test fixtures in the release, reachable by name from the poisoned `PATH` (`readelf`/`ls` confirmed both present). (b) `exec.rs:1004` passes `--max-results` to `fd`, which is not an `fd` flag, so that fast path likely always errors and silently falls through to the `walkdir` walker.
+- **Adjacent, out of scope.** (a) The AppImage ships `fake_worker` and `fake_mcp_stdio` into `usr/bin` and prepends it to `PATH` — test fixtures in the release, reachable by name from the poisoned `PATH` (`readelf`/`ls` confirmed both present). ~~(b) `exec.rs:1004` passes `--max-results` to `fd`, which is not an `fd` flag, so that fast path likely always errors and silently falls through to the `walkdir` walker.~~ **Struck 2026-10-24: measured wrong.** `--max-results` IS a real `fd` flag (`fd --max-results 10 -g a.txt -- <dir>` → exit 0 with results, fd 10.4.2), so the fast path does run — measured while fixing the cwd half of this leak (issue #81, `f571a0b`).

@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use archimedes_lib::agent::harness::{Model, ModelCatalog};
 use archimedes_lib::agent::subagent::{
-    LaunchConfig, SubagentCancel, SubagentFailureReason, SubagentOutcome, SubagentSessionManager,
+    AgentNameResolution, LaunchConfig, SubagentCancel, SubagentFailureReason, SubagentOutcome,
+    SubagentSessionManager,
 };
 use archimedes_lib::agent::worker::client::{WorkerError, WorkerHandle, WorkerInboundEvent};
 use archimedes_lib::agent::worker::manager::{WorkerFactory, WorkerManager};
@@ -130,6 +131,10 @@ fn dispatch(
         parent_model,
         Vec::new(),
         "tester".to_string(),
+        // The fixture names `"tester"` and asserts nothing about the
+        // resolution (the tri-state's pins live in `harness::launch` and the
+        // `subagent_flow` tests).
+        AgentNameResolution::Matched,
         launch,
         task.to_string(),
         &sink,
@@ -330,6 +335,7 @@ fn dispatch_native_without_a_worker_manager_fails_immediately() {
         &m1,
         Vec::new(),
         "tester".to_string(),
+        AgentNameResolution::Matched,
         default_launch(),
         "do the thing".to_string(),
         &sink,

@@ -3,7 +3,9 @@ import { X } from "lucide-react";
 import { useSubagents } from "../store/subagents";
 import { useSubagentSelection } from "../store/subagentSelection";
 import { SHEET_WIDTH_CLASS } from "../lib/subagentSheetLayout";
+import { unmatchedAgentTooltip } from "../lib/subagentActivity";
 import { SubagentTranscript } from "./SubagentTranscript";
+import { MutedCaption } from "./MutedCaption";
 import { StatusIcon, STATUS_CHIP_STYLES } from "./SubagentStatusIcon";
 import { Button } from "./ui/button";
 import { cn } from "./lib/utils";
@@ -104,6 +106,22 @@ export default function SubagentDetailHost() {
               >
                 {selected.status}
               </span>
+              {/* (issue #47) The resolve miss, mirroring the directory row: ONE
+                  quiet caption and ONLY for `unmatched` (the dialog's
+                  `aria-label` above is untouched — the name stays whatever the
+                  model asked for). A child named after no definition still
+                  runs, so this says "no persona loaded", not "failed". */}
+              {selected.nameResolution === "unmatched" && (
+                <MutedCaption
+                  className="shrink-0 text-warning"
+                  // ONE owner for the sentence — see `unmatchedAgentTooltip`
+                  // (`lib/subagentActivity.ts`); the directory row calls the
+                  // same function.
+                  title={unmatchedAgentTooltip(selected.agentName)}
+                >
+                  no matching Agent
+                </MutedCaption>
+              )}
             </div>
             <Button
               type="button"

@@ -25,3 +25,39 @@ The tool boundary is the signal because it is the one observation that already c
 - The 30-minute silence bound is safe rather than arbitrary because the provider layer already self-bounds at a 5-minute IDLE `read_timeout` (`provider/transport.rs`): a stalled stream errors long before 30 minutes, so a child silent that long with nothing in flight cannot be waiting on the model.
 - This changes what ADR 0040 relied on. That ADR named the 30-minute bound as the only thing that resolves a **Subagent session** parked on an unanswered gate; under this decision such a child is Active and is NEVER resolved by the clock. ADR 0040's known hole (a child's open gate is not auto-closed) is therefore no longer rescued by a timer and needs its own fix.
 - The outcome vocabulary changes: `Failed { "timed out" }` becomes `Failed { "unresponsive" }`, because "timed out" told the parent nothing about which predicate fired and invited the misreading this decision exists to remove.
+
+> **Amended 2026-10-24 (the bound reads OBSERVED frames, not the child's liveness).**
+> The decision's opening sentence — "only a child that is silent with nothing in
+> flight for `DEFAULT_SUBAGENT_DEAD_BOUND` (30 min) is **Dead** and reaped" — reads
+> as a property of the child. It is a property of the Supervisor's OBSERVATION: the
+> clock is rearmed by the frames that reach the drive's `liveness_rx`
+> (`worker/manager/subagent_flow.rs`), so what it bounds is the inter-frame gap the
+> PARENT observed. A parent starved of CPU can therefore reap a child that never
+> stopped producing, `Failed { reason: Unresponsive }` with its partial output and
+> real usage — the child was Active, the measurement said otherwise. Nothing above
+> is superseded and `superseded-by:` stays EMPTY: the predicate (silence, not
+> duration), the rearming and the gate/tool-boundary signal are exactly as decided,
+> and at a 30-minute default the exposure is arithmetic rather than operational —
+> the observation lag implied by the one recorded failure was ~700 ms on a loaded
+> `macos-latest` runner (issue #34 — derived from 8 of 15 frames seen at 1.9 s, not
+> instrumented as a single gap), 0.04% of the bound, against a provider layer that
+> already self-bounds a stalled stream at 5 minutes (the Consequences bullet above
+> that reasons from the 5-minute `read_timeout` still holds; it now has a second
+> number beside it). What changed is the WORDING the decision is quoted with —
+> `DEFAULT_SUBAGENT_DEAD_BOUND`'s doc, `with_dead_bound_secs`, the
+> `subagentDeadBoundSecs` setting doc, `CONTEXT.md`'s **Dead bound** entry,
+> `docs/features/subagent-sessions.md`, and the clock comment in `subagent_flow.rs`
+> that implements this decision — and the test that tripped over it:
+> `a_streaming_subagent_outlives_the_dead_bound` ran a 3× margin between its
+> injected 300 ms bound and the fixture's 100 ms cadence, so one >300 ms
+> observation gap reddened CI while its panic text accused THIS decision's fix of
+> not having landed. The margin is 15× now (1500 ms against a 100 ms cadence, with
+> the fixture's stream and its open-tool hold both doubled to 3.0 s so the test
+> stays RED against the drive this decision replaced — the never-rearmed sleep for
+> the streaming test, and the sleep arm that ran even with a `tool_call_id`
+> outstanding for the in-tool one), and the panic text names observation latency
+> first. Requiring a SECOND expired deadline before reaping — the obvious way to
+> turn a transient stall into a non-event in test and production alike — was
+> considered and rejected as invasive to the race for a default whose measured
+> exposure is 0.04%; it is recorded as a live follow-up against issue #34, not
+> silently dropped.

@@ -183,6 +183,7 @@ const TAURI_PUBLIC_API = [
   "AcpToolCallStatus",
   "AgentConfigDto",
   "AgentDefinitionDto",
+  "AgentNameResolution",
   "AgentOverride",
   "AgentOverrideFields",
   "AgentOverrides",

@@ -36,7 +36,15 @@ export function makeSubagentEntry(
   // matches what the store actually holds (the card branches on
   // `entry.reason ?? entry.error`, and an `undefined`-valued key reads
   // differently to an absent one in an `in`/spread-based assertion).
-  for (const optional of ["endedAt", "metrics", "reason", "error"] as const) {
+  // `nameResolution` belongs to the STARTED frame, not to any status, and is
+  // absent unless a caller names it (an older backend omits it).
+  for (const optional of [
+    "endedAt",
+    "metrics",
+    "reason",
+    "error",
+    "nameResolution",
+  ] as const) {
     if (optional in entry && entry[optional] === undefined) {
       delete entry[optional];
     }

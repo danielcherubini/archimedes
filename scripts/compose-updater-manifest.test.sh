@@ -61,9 +61,20 @@ make_sigs_dir() {
 # `|| status=$?` that keeps `set -e` from aborting the driver on the exits this
 # test asserts. Every invocation writes into its own directory, so a case that
 # asserts "no --out file survived" is not polluted by an earlier case's file.
+#
+# It SEEDS `$dir/out/latest.json` with a valid previous-release manifest first (see
+# seed_previous_manifest below for why), which means:
+#   * every `path_exists "$out_file"` → `no` in this file is now a claim that a
+#     file which WAS there got removed, not a claim about an empty directory;
+#   * a successful composition is still asserted against the manifest THIS run
+#     wrote, because the composer writes with `>` and the seed is gone — and if a
+#     mutation ever skipped the write while still exiting 0, the key-set assertions
+#     would read the 0.1.9 seed and go red rather than describing a stale manifest
+#     as a fresh one.
 run_compose() {
   local dir="$1"
   shift
+  seed_previous_manifest "$dir/out/latest.json"
   status=0
   output="$("$compose_script" --out "$dir/out/latest.json" "$@" 2>&1)" || status=$?
 }
@@ -141,6 +152,56 @@ assert_manifest_eq() {
 
 # Case 5 asserts the file does NOT survive; the other cases need it to.
 path_exists() { [[ -e "$1" ]] && printf 'yes\n' || printf 'no\n'; }
+
+# seed_previous_manifest PATH — puts a VALID, complete, PREVIOUS-release manifest
+# at the composer's `--out` path before the run.
+#
+# WHY EVERY "no manifest survives" ASSERTION NEEDS THIS. Each of them reads
+# `path_exists "$out_file"` and expects `no`, and `run_compose` writes into a fresh
+# directory, so before this helper the file could only appear if the run itself
+# created one. For a refusal that happens AFTER the emit (the zero-byte-signature
+# case, which writes, re-reads, rejects and deletes) the assertion is therefore real.
+# For every refusal that happens BEFORE the emit — a bad `--version`, an
+# unrecognized `.sig`, a collision, the whole `--require-payload` block — the
+# assertion was satisfied by an empty directory and could not go red for any reason:
+# deleting `fail()`'s `rm -f` left all of them green, which is the difference
+# between pinning a policy and describing an empty room.
+#
+# It also models the flow the operator is actually in. AGENTS.md step 4 is
+# download-then-compose: `gh release download -p latest.json` and then re-compose
+# over the downloaded file, so a real invocation of this script very often has a
+# real previous manifest sitting at `--out`. What that file must do when the run
+# refuses — be REMOVED, so the next `gh release upload --clobber` cannot publish the
+# old manifest in place of the one that was refused — is the behaviour pinned below,
+# and it is a claim about a file that exists.
+seed_previous_manifest() {
+  local path="$1"
+  mkdir -p -- "${path%/*}"
+  jq -cn \
+    --arg version "0.1.9" \
+    --arg url "https://github.com/$repo/releases/download/v0.1.9/Archimedes_0.1.9_amd64.AppImage" \
+    '{version: $version, notes: "the PREVIOUS release notes, downloaded by the step 4 flow",
+      pub_date: "2020-01-01T00:00:00Z",
+      platforms: {"linux-x86_64": {signature: "cHJldmlvdXNzaWduYXR1cmU=", url: $url}}}' \
+    >"$path"
+}
+
+# previous_manifest_state PATH — `absent`, `intact-previous`, or `rewritten`.
+# Three states, because the two failure modes this pins are different: a refusal
+# that leaves the downloaded 0.1.9 manifest sitting there (`intact-previous`, the
+# bug the bare `exit 1` had), and a refusal that leaves a NEWER but rejected
+# document on disk (`rewritten`, the bug a missing post-emit cleanup would have).
+# A path-only check reports both as "the file is there" and reports the correct
+# `absent` identically to neither, so it cannot pin the policy.
+previous_manifest_state() {
+  local path="$1"
+  [[ -e "$path" ]] || { printf 'absent\n'; return; }
+  jq -e --arg url "https://github.com/$repo/releases/download/v0.1.9/Archimedes_0.1.9_amd64.AppImage" '
+    .version == "0.1.9" and (.notes | test("PREVIOUS")) and
+    (.platforms | keys) == ["linux-x86_64"] and
+    (.platforms["linux-x86_64"].url == $url)
+  ' "$path" >/dev/null 2>&1 && printf 'intact-previous\n' || printf 'rewritten\n'
+}
 
 tag="v0.2.0"
 version="0.2.0"
@@ -447,6 +508,79 @@ assert_fails "a --sigs-dir that does not exist exits 1"
 assert_contains "the missing sigs dir names the path" "$dir/nope" "$output"
 
 # ---------------------------------------------------------------------------
+# 8a. FLAG ORDER: the cleanup promise is about the INVOCATION, not about how far
+#     the parser got.
+#
+#     Every other case here goes through `run_compose`, which puts `--out` FIRST —
+#     so `out_file` is already populated by the time any refusal fires, and the
+#     cleanup works. This case types `--out` LAST with a typo BEFORE it
+#     (`--verison`, the reviewer's measured repro), and that order used to defeat
+#     the policy completely: the argv loop hits the unknown flag, `out_file` is
+#     still "", `fail()`'s `[[ -n "$out_file" ]]` guard is false, and the refusal
+#     leaves the seeded 0.1.9 manifest on disk with a clean exit 1. That is the
+#     exact hazard ADR 0052's amendment names — a stale manifest at the path the
+#     upload step reads — arriving through the door nobody tested, and it is what
+#     `gh release upload --clobber` publishes when the exit code is ignored.
+#
+#     So `fail()` must locate `--out` in the argv it was invoked with rather than
+#     trusting a variable the parser may not have reached. The two assertions that
+#     must go RED before the fix are the state assertion and the survival one; the
+#     exit code and the message were already correct, which is precisely why this
+#     survived review once.
+# ---------------------------------------------------------------------------
+dir="$tmp_root/argv-typo-with-out-last"
+make_sigs_dir "$dir/sigs" "$win_sig" "$appimage_bare_sig" "$deb_sig"
+out_file="$dir/out/latest.json"
+seed_previous_manifest "$out_file"
+status=0
+output="$("$compose_script" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" \
+  --repo "$repo" --verison "$version" --out "$out_file" 2>&1)" || status=$?
+assert_fails "a mistyped flag before --out still exits 1"
+assert_contains "and still names the flag that is wrong" "unknown argument: --verison" "$output"
+assert_eq "the seeded manifest does NOT survive a typo typed before --out" \
+  "no" "$(path_exists "$out_file")"
+assert_eq "and it is GONE rather than intact-previous (the stale file the upload step would clobber onto the release)" \
+  "absent" "$(previous_manifest_state "$out_file")"
+
+#     The `--out=FILE` arm of that scan, pinned. This composer has NO `--out=`
+#     parse arm, so the glued spelling is itself refused as an unknown argument —
+#     that refusal is the FIRST assertion, not something the case papers over: the
+#     tool does not accept this spelling and does not pretend to. What the arm is
+#     for is the cleanup, and it is the only thing that can serve it here, because
+#     the refusal fires before the loop assigns anything, so `$out_file` is empty
+#     and the designated path exists ONLY inside the typed argv. Deleting the arm
+#     leaves the seeded manifest on disk and reddens the state assertion below
+#     (measured: `intact-previous`) — which is what makes a defensive branch
+#     tested rather than dead. No separate exit-code assertion: were the parser
+#     ever to grow an `--out=` arm, the run would SUCCEED and rewrite the path,
+#     and the state assertion would read `rewritten` and go red on that too.
+seed_previous_manifest "$out_file"
+status=0
+output="$("$compose_script" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" \
+  --repo "$repo" --out="$out_file" 2>&1)" || status=$?
+assert_contains "the glued --out=FILE spelling is refused as an unknown argument" \
+  "unknown argument: --out=" "$output"
+assert_eq "and the seeded manifest at that glued path is still removed by the scan" \
+  "absent" "$(previous_manifest_state "$out_file")"
+
+# The same order trap on the SECOND gate's flag, so the fix is not pinned only to
+# the `unknown argument` arm: `--require-payload` refuses deep in the run, and with
+# `--out` typed last the parser had reached `--out` by then. Green before the fix
+# and after it — it is here to say the ORDER-INDEPENDENT promise covers the
+# refusal paths too, so a future `fail()` that reads only `$out_file` and forgets
+# the argv scan stays green only while this pair of paths is intact.
+dir="$tmp_root/require-payload-with-out-last"
+make_sigs_dir "$dir/sigs" "$win_sig" "$appimage_bare_sig"
+out_file="$dir/out/latest.json"
+seed_previous_manifest "$out_file"
+status=0
+output="$("$compose_script" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" \
+  --repo "$repo" --require-payload "$deb_payload" --out "$out_file" 2>&1)" || status=$?
+assert_fails "--require-payload with --out typed last exits 1"
+assert_eq "and the seeded manifest is removed on that path too" \
+  "absent" "$(previous_manifest_state "$out_file")"
+
+# ---------------------------------------------------------------------------
 # 8b. A zero-byte `.sig` is the emptiest version of the same trap: it encodes
 #     into JSON as `""`, parses perfectly, and the client discovers the problem
 #     only when minisign has nothing to verify. The composer writes, re-reads,
@@ -461,6 +595,15 @@ out_file="$dir/out/latest.json"
 run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo"
 assert_fails "a zero-byte signature exits 1"
 assert_eq "no manifest survives an empty signature" "no" "$(path_exists "$out_file")"
+# The post-emit half of the cleanup policy, stated as a state: this failure happens
+# AFTER the composer has written, so the file at `--out` is a NEWER document than the
+# seeded one and the only correct answer is that it was deleted. `rewritten` here
+# means "a rejected manifest was left on disk for the upload step" — the exact thing
+# `fail()` exists to prevent — and it is a different red state from the
+# `intact-previous` one case 16 pins, so the two together cover both halves of the
+# policy rather than asserting the same sentence twice.
+assert_eq "and what was written before the rejection is gone too, not left as a rewritten manifest" \
+  "absent" "$(previous_manifest_state "$out_file")"
 
 # ---------------------------------------------------------------------------
 # 9. The three shapes the composer self-validates, asserted here independently
@@ -617,6 +760,250 @@ run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --re
 assert_fails "a Linux set with an rpm sig and no AppImage sig exits 1"
 assert_contains "that failure names the AppImage as the missing payload" "AppImage" "$output"
 assert_eq "no manifest survives the orphaned rpm signature" "no" "$(path_exists "$out_file")"
+
+# ---------------------------------------------------------------------------
+# 16. `--require-payload` — the composer-side half of issue #41(d).
+#
+# The PRIMARY gate is `scripts/check-release-signatures.sh`, which asks the
+# RELEASE whether every installer has its `.sig`. This flag is the SECONDARY one,
+# defence-in-depth for the path that never runs the release check: AGENTS.md step
+# 4, a human re-composing `latest.json` by hand after rewriting the notes. That
+# path downloads `*.sig` into a directory and hands the composer whatever came
+# back, so without an expectation list the composer shrinks the manifest and
+# **exits 0** — the silent omission this task exists to end (reproduced below, in
+# sub-case (c), on the exact input the pre-change composer accepted).
+#
+# SEMANTICS: a claim about a NAME, not about bytes. `--require-payload NAME`
+# asserts that `$sigs_dir/NAME.sig` exists. It does NOT require `NAME` itself to
+# be on disk, and must not: on the real pipeline `--sigs-dir` holds SIGNATURES
+# ONLY (`gh release download --pattern '*.sig'`). Hence there is no
+# "--installers-dir" — scanning for installer files that lack a `.sig` would make
+# release.yml download ~300 MB of installers into the publish job to obtain
+# information `gh release view --json assets` already gives for free.
+#
+# The flag is OPT-IN: every case above calls the composer without it and must keep
+# passing unchanged, because the flag only ever REFUSES — it never adds a key.
+# ---------------------------------------------------------------------------
+
+# (a) The flag is satisfied: both named payloads have their sigs on disk, so the
+#     composition is exactly what it was without the flag. The assertion that
+#     matters here is the KEY SET — the flag adds nothing to any manifest.
+dir="$tmp_root/require-payload-satisfied"
+make_sigs_dir "$dir/sigs" "$win_sig" "$appimage_bare_sig" "$deb_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo" \
+  --require-payload "$deb_payload" --require-payload "$appimage_bare_payload"
+assert_eq "--require-payload for payloads whose sigs are present exits 0" "0" "$status"
+assert_manifest_eq "the flag adds no key to a five-key manifest" \
+  '.platforms | keys | sort | join(" ")' "$five_keys"
+
+# (b) The expected-but-unsigned target: the deb signature is missing from a set
+#     that would otherwise compose perfectly. Pre-implementation this case ALREADY
+#     exits 1, because `--require-payload` is an unknown argument — so
+#     `assert_fails` is not the assertion under test. The assertions that must go
+#     RED first are the two that name the payload and the missing signature (an
+#     unknown-argument message names the FLAG, not the payload), plus the
+#     no-manifest-survives one below.
+dir="$tmp_root/require-payload-unsigned-deb"
+make_sigs_dir "$dir/sigs" "$win_sig" "$appimage_bare_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo" \
+  --require-payload "$deb_payload"
+assert_fails "an expected payload with no signature in --sigs-dir exits 1"
+assert_contains "the failure names the payload that was expected" "$deb_payload" "$output"
+assert_contains "the failure names the signature file it looked for" "expected $deb_sig" "$output"
+assert_contains "the failure names the directory it looked in" "$dir/sigs" "$output"
+assert_eq "no manifest survives an expected-but-unsigned target" "no" "$(path_exists "$out_file")"
+# THE ASSERTION WITH A REAL RED STATE. `out_file` was seeded with a valid 0.1.9
+# manifest before this run (run_compose does it for every case), so the line above
+# says a file that WAS there was REMOVED, and this one says the removal took the
+# previous document with it rather than leaving it half-written. This is the
+# download-then-compose shape of AGENTS.md step 4, where the file at `--out` is the
+# manifest an operator downloaded moments ago — and the refusal used to leave it
+# there with a bare `exit 1`, so `gh release upload --clobber` would have published
+# the OLD manifest in place of the one this run refused to write, exit code ignored.
+# Deleting `fail()`'s `rm -f` reddens both lines; it reddened neither before the
+# seeding existed.
+assert_eq "the downloaded previous manifest is GONE, not left in place to be re-uploaded" \
+  "absent" "$(previous_manifest_state "$out_file")"
+assert_contains "the refusal says the cleanup happened, so the operator at the terminal is not surprised by a missing file" \
+  "has been REMOVED" "$output"
+
+# (c) THE #41(d) REGRESSION ITSELF, composer side: four payloads expected, two of
+#     their signatures never uploaded. Both offenders are reported in ONE run, so
+#     the operator sees the whole hole instead of discovering the second missing
+#     sig after fixing the first.
+dir="$tmp_root/require-payload-two-missing"
+make_sigs_dir "$dir/sigs" "$appimage_bare_sig" "$deb_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo" \
+  --require-payload "$deb_payload" \
+  --require-payload "$appimage_bare_payload" \
+  --require-payload "$rpm_payload" \
+  --require-payload "$win_exe_payload"
+assert_fails "two expected payloads with no signatures exit 1"
+assert_contains "the missing rpm signature is named by payload" "$rpm_payload" "$output"
+assert_contains "the rpm's expected signature file is named" "expected $rpm_sig" "$output"
+assert_contains "the missing Windows installer signature is named by payload" "$win_exe_payload" "$output"
+assert_contains "the Windows installer's expected signature file is named" "expected $win_exe_sig" "$output"
+assert_eq "no manifest survives the two missing signatures" "no" "$(path_exists "$out_file")"
+
+# (d) A `.sig` handed to a flag that takes a PAYLOAD name is refused rather than
+#     quietly becoming a check for `X.sig.sig` — which can never exist, so the
+#     flag would become a permanent failure, or worse a no-op if the check were
+#     written the other way round.
+dir="$tmp_root/require-payload-sig-name"
+make_sigs_dir "$dir/sigs" "$win_sig" "$appimage_bare_sig" "$deb_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo" \
+  --require-payload "$deb_sig"
+assert_fails "--require-payload with a .sig name exits 1"
+assert_contains "the failure says to pass the payload name" "pass the payload name" "$output"
+assert_eq "no manifest survives a mistyped flag value" "no" "$(path_exists "$out_file")"
+
+# (e) The missing-value guard. The composer's PRE-EXISTING flags (`--notes`,
+#     `--arch`, …) shift past the end of argv when given no value and die under
+#     `set -e` with exit 1 and no message; that behaviour is deliberately left
+#     alone here — fixing it would re-pin existing cases for no #41(d) benefit.
+#     The NEW flag gets the guarding idiom from check-versions.sh, and this case
+#     is what pins that it has one.
+dir="$tmp_root/require-payload-no-value"
+make_sigs_dir "$dir/sigs" "$win_sig" "$appimage_bare_sig" "$deb_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo" \
+  --require-payload
+assert_fails "--require-payload with no value exits 1"
+assert_contains "and it says which flag needs a value" "requires a payload asset name" "$output"
+
+# (f) Opt-in, stated explicitly as a regression pin: a set that composes without
+#     the flag still composes with exit 0 when the flag is simply not passed. This
+#     case is green before AND after the implementation — it exists to catch
+#     someone making the expectation list mandatory, which would break every
+#     manual invocation.
+dir="$tmp_root/require-payload-absent"
+make_sigs_dir "$dir/sigs" "$win_sig" "$appimage_bare_sig" "$deb_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo"
+assert_eq "composing with no --require-payload at all still exits 0" "0" "$status"
+assert_manifest_eq "and the key set is the plain five keys" \
+  '.platforms | keys | sort | join(" ")' "$five_keys"
+
+# (g) The check runs BEFORE any key is derived, so an expected-but-absent
+#     signature fails on a set that the composer would otherwise have refused for
+#     a different reason too — and the EXPECTATION failure is the one reported.
+#     Ordering matters: after derivation the failure would land next to `--out`
+#     having been written, and `fail()`'s cleanup is the only thing standing
+#     between a partial manifest and the upload step.
+dir="$tmp_root/require-payload-before-derivation"
+make_sigs_dir "$dir/sigs" "$win_sig" "$deb_sig"
+out_file="$dir/out/latest.json"
+run_compose "$dir" --sigs-dir "$dir/sigs" --version "$version" --tag "$tag" --repo "$repo" \
+  --require-payload "$appimage_bare_payload"
+assert_fails "an expected payload with no signature beats the AppImage rule it would otherwise hit"
+assert_contains "the expectation failure is what is reported" "expected $appimage_bare_sig" "$output"
+assert_eq "nothing is written on that path" "no" "$(path_exists "$out_file")"
+
+# ---------------------------------------------------------------------------
+# 17. THE SHARED VOCABULARY — the composer's matcher arms and the payload-shape
+#     file must name the SAME set of shapes.
+#
+# `scripts/updater-payload-shapes.sh` is the single definition of "which asset
+# names are updater payloads", sourced by this composer (for the operator-facing
+# hint) and by `scripts/check-release-signatures.sh` (for the mirror check: a
+# `X.sig` on the release demands `X` on the release, for every shape here). The
+# matcher itself stays here, because its arms do more than match — each assigns a
+# platform slot and carries per-format reasoning that cannot live in a shared
+# file. That is precisely the drift a sourced file cannot prevent on its own:
+# someone can add an arm to this `case` without adding it to the shape file, and
+# the release-side gate then silently stops requiring the payload for THAT shape's
+# orphaned signature, re-opening the 404 hole for one platform and nothing else.
+#
+# So both lists are EXTRACTED FROM THE SOURCE TEXT and compared as sets. The
+# extraction is deliberately dumb — the text between the `case` header and its
+# `esac`, comment lines dropped, patterns split on `|`, sorted — because a clever
+# extractor would need to know the answer to check the answer.
+#
+# This is the pin that makes the shared file sufficient rather than merely
+# better-than-a-comment. Without it the two lists could agree today and diverge in
+# the commit that matters.
+# ---------------------------------------------------------------------------
+shape_lib="$test_dir/updater-payload-shapes.sh"
+if [[ ! -f "$shape_lib" ]]; then
+  echo "FATAL: $shape_lib does not exist — the payload shapes are one definition in one file." >&2
+  exit 1
+fi
+
+# matcher_patterns FILE HEADER — the pattern list of the first `case` whose header
+# line contains HEADER, up to the first line that is exactly `esac`.
+matcher_patterns() {
+  awk -v hdr="$2" 'index($0, hdr){inside=1} inside{print} inside && /^[[:space:]]*esac[[:space:]]*$/{exit}' "$1" \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+    | grep -v '^#' \
+    | grep -E '^\*.*\)' \
+    | sed 's/).*//' \
+    | tr '|' '\n' \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/)$//' \
+    | grep -v '^\*\?$' \
+    | LC_ALL=C sort -u
+}
+
+composer_patterns="$(matcher_patterns "$compose_script" 'case "$payload" in')"
+shape_patterns="$(matcher_patterns "$shape_lib" 'case "$1" in')"
+
+assert_eq "the composer's matcher arms and the shared shape file name the SAME payload shapes" \
+  "$composer_patterns" "$shape_patterns"
+# The extraction is load-bearing, not vacuous: two empty strings "agree". Pinning
+# the count of shapes the matcher has (eight) means a refactor that makes the
+# extractor blind — a renamed variable, a reindented `esac` — fails HERE rather
+# than turning the comparison above into a tautology.
+assert_eq "the extractor really sees the composer's eight matcher arms" "8" \
+  "$(printf '%s\n' "$composer_patterns" | grep -c .)"
+assert_eq "and the shared file's eight arms" "8" \
+  "$(printf '%s\n' "$shape_patterns" | grep -c .)"
+
+# The hint an operator is handed on an unrecognized signature must mention every
+# shape the matcher accepts, or a rejected-but-valid asset gives no clue what the
+# matcher wanted. This is the string the release-side gate shares, so it is asserted
+# from the sourced variable rather than from a literal copy.
+# shellcheck source=./updater-payload-shapes.sh
+. "$shape_lib"
+for pattern in $shape_patterns; do
+  assert_contains "the accepted-suffix hint mentions $pattern" "$pattern" "$updater_payload_shape_hint"
+done
+
+# Both scripts SOURCE that file, so a checkout missing it must be a named missing
+# file rather than bash's `No such file or directory` from inside a `source`, and —
+# in the composer's case — rather than a `$updater_payload_shape_hint` unbound under
+# `set -u` at the moment a real asset is being rejected. The test runs a COPY of the
+# composer from a directory with no sibling library, because the real one must keep
+# its sibling (and because deleting a file from the working tree to test a guard is
+# not a thing a harness should do to the tree it is run from).
+lonely_dir="$tmp_root/composer-without-its-library"
+mkdir -p "$lonely_dir"
+cp "$compose_script" "$lonely_dir/compose-updater-manifest.sh"
+mkdir -p "$lonely_dir/sigs"
+printf '%s\n' "$sig_text" >"$lonely_dir/sigs/$deb_sig"
+lonely_out="$lonely_dir/out/latest.json"
+lonely_status=0
+lonely_output="$("$lonely_dir/compose-updater-manifest.sh" --sigs-dir "$lonely_dir/sigs" \
+  --version "$version" --tag "$tag" --repo "$repo" --out "$lonely_out" 2>&1)" \
+  || lonely_status=$?
+assert_eq "the composer refuses to run with no shape library beside it" "1" "$lonely_status"
+assert_contains "and names the library that is missing" "updater-payload-shapes.sh" "$lonely_output"
+assert_contains "instead of a bare bash source error" "is missing" "$lonely_output"
+# The cleanup policy, stated by its ABSENCE here: `fail()` removes `--out` because a
+# REFUSED composition must not leave a manifest for the upload step. A missing
+# library is not a refusal — the tool could not start, it read no arguments, matched
+# no asset and formed no opinion about this release — so the operator's downloaded
+# manifest is left exactly where it was. Destroying a good file on the strength of a
+# broken checkout is the worse failure, and this pins that the guard does not do it.
+seed_previous_manifest "$lonely_out"
+lonely_status=0
+"$lonely_dir/compose-updater-manifest.sh" --sigs-dir "$lonely_dir/sigs" \
+  --version "$version" --tag "$tag" --repo "$repo" --out "$lonely_out" >/dev/null 2>&1 \
+  || lonely_status=$?
+assert_eq "a broken checkout leaves the downloaded manifest alone (cleanup is for refusals, not for a tool that never started)" \
+  "intact-previous" "$(previous_manifest_state "$lonely_out")"
 
 if ((failures > 0)); then
   echo

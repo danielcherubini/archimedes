@@ -7,6 +7,7 @@ import {
   listenInteractiveRequestClose,
   listenSessionTitled,
   listenSubagentClosed,
+  listenSubagentSessionStarted,
   startSession,
 } from "./lib/tauri";
 import { useSessions } from "./store/sessions";
@@ -1072,6 +1073,76 @@ describe("App (the `subagent-closed` listener)", () => {
     // 0040's amendment records (paraphrased here, not quoted): a closed child
     // keeps its gate card on screen until its entry is evicted.
     expect(useInteractive.getState().requests["sub1"]).toHaveLength(1);
+  });
+});
+
+/**
+ * (issue #47) The `subagent-session-started` listener's wiring.
+ *
+ * This is the one thing no component test can see: `SubagentDelegatingCard` and
+ * `SubagentDetailHost` are both tested against a store they seed themselves, so
+ * a handler that dropped `nameResolution` on the way in would leave every one of
+ * them green while the marker never appeared in the app.
+ */
+describe("App (the `subagent-session-started` listener)", () => {
+  const clearStore = () => {
+    for (const id of Object.keys(useSubagents.getState().entries)) {
+      useSubagents.getState().dismiss(id);
+    }
+    useSubagentSelection.getState().select(null);
+  };
+  beforeEach(clearStore);
+  afterEach(clearStore);
+
+  it("carries the payload's `nameResolution` into the store entry", () => {
+    render(<App />);
+    // The LAST registration is this render's (the file never clears mocks).
+    const calls = vi.mocked(listenSubagentSessionStarted).mock.calls;
+    const onStarted = calls[calls.length - 1][0];
+    act(() => {
+      onStarted({
+        sessionId: "sub1",
+        parentSessionId: "main1",
+        agentName: "reviewr",
+        task: "t",
+        // The issue's exact case: a typo in a correctly-spelled key.
+        nameResolution: "unmatched",
+      });
+    });
+    expect(useSubagents.getState().entries["sub1"].nameResolution).toBe(
+      "unmatched",
+    );
+    expect(useSubagents.getState().entries["sub1"].agentName).toBe("reviewr");
+  });
+
+  it("OMITS the `nameResolution` key entirely for a payload from an older backend", () => {
+    // The invariant `store/subagents.ts` documents and `subagents.test.ts`
+    // pins — "an older backend OMITS it" — was only ever tested against a
+    // fixture that went straight into `addSession`. The real wire path runs
+    // through THIS handler, and an unconditional `nameResolution: p.nameResolution`
+    // turns an absent wire field into a PRESENT-BUT-`undefined` key, which is
+    // exactly the shape the store test says must not occur (an `undefined`-valued
+    // key reads differently from an absent one in an `in` / spread-based
+    // assertion — the same reason `makeSubagentEntry` deletes its own
+    // explicitly-`undefined` optionals). So this asserts KEY ABSENCE, not that
+    // the value merely reads `undefined`.
+    render(<App />);
+    const calls = vi.mocked(listenSubagentSessionStarted).mock.calls;
+    const onStarted = calls[calls.length - 1][0];
+    act(() => {
+      onStarted({
+        sessionId: "sub1",
+        parentSessionId: "main1",
+        agentName: "reviewr",
+        task: "t",
+        // An older backend: the field is not on the wire at all.
+      });
+    });
+    const entry = useSubagents.getState().entries["sub1"];
+    expect("nameResolution" in entry).toBe(false);
+    // The rest of the entry is untouched by the omission.
+    expect(entry.agentName).toBe("reviewr");
+    expect(entry.status).toBe("running");
   });
 });
 

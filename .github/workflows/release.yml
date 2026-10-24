@@ -397,6 +397,33 @@ jobs:
             exit 1
           }
 
+      # The completeness gate, asked of the RELEASE, and deliberately BEFORE the
+      # manifest is composed: the composer derives its keys FROM the `.sig` files
+      # it is handed, so any completeness question put to the manifest afterwards
+      # is answered by a projection of the manifest itself (issue #41(d) — the
+      # check AGENTS.md used to prescribe passed exactly when it should fail).
+      # Running it before the notes step also means a release that is not complete
+      # is never edited, never composed over, and stays a draft.
+      #
+      # Why it is still worth passing the composer `--require-payload` below even
+      # though this gate just passed: the two read DIFFERENT things. This gate
+      # reads the release's asset LIST (`gh release view --json assets`); the
+      # composer reads the DOWNLOADED signatures (`gh release download
+      # --pattern '*.sig'`, the step above). A download that came back short — a
+      # glob mismatch, a runner hiccup, a pattern change — leaves a complete
+      # release and an incomplete `sigs/` directory, and only `--require-payload`
+      # catches that. Complementary, not duplicated.
+      #
+      # stdout is the accepted installer payload list, one per line; the compose
+      # step feeds it back as --require-payload so the two gates share ONE
+      # allow-list rather than each keeping a copy.
+      - name: Check every installer asset is signed
+        run: |
+          bash scripts/check-release-signatures.sh \
+            --repo "$GITHUB_REPOSITORY" --tag "$TAG" > expected-payloads.txt
+          echo "signed installer payloads:"
+          cat expected-payloads.txt
+
       # The notes are generated BEFORE the manifest is composed, and that order
       # is the design, not a preference: the composer already writes the `notes`
       # field of `latest.json`, which is the ONLY release text an installed app
@@ -443,13 +470,25 @@ jobs:
           # `notes` field into the manifest of a shipped release.
           NOTES_SUMMARY: ${{ steps.generate-notes.outputs.summary }}
         run: |
+          # One --require-payload per installer the completeness gate accepted, so
+          # the composer refuses a `sigs/` directory that came back short instead
+          # of emitting a smaller manifest and exiting 0.
+          require_args=()
+          while IFS= read -r payload; do
+            # `if`, not `[[ … ]] && …` — the runner's default shell is `bash -e`,
+            # where a false test at the end of a compound list aborts the step.
+            if [[ -n "$payload" ]]; then
+              require_args+=(--require-payload "$payload")
+            fi
+          done < expected-payloads.txt
           bash scripts/compose-updater-manifest.sh \
             --sigs-dir sigs \
             --version "$VER" \
             --tag "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --out latest.json \
-            --notes "${NOTES_SUMMARY:-Archimedes $TAG}"
+            --notes "${NOTES_SUMMARY:-Archimedes $TAG}" \
+            ${require_args[@]+"${require_args[@]}"}
 
       # The one and only `latest.json` upload (ADR 0052).
       - name: Upload the updater manifest

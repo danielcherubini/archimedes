@@ -130,10 +130,23 @@ order a release actually takes:
 
 **skill version bump (all three files) → tag `vX.Y.Z` → `release.yml` creates
 the DRAFT → the Windows and Linux builds upload their bundles and `.sig`s →
-the `publish` job generates the release notes (`scripts/release-notes.sh`) and
-applies them to the still-draft release, then composes and uploads
-`latest.json`, and only then flips the draft to published.** A draft is not a
-shipped release — it 404s from the updater endpoint.
+the `publish` job checks that every installer asset on the release has its
+`.sig` (`scripts/check-release-signatures.sh`), generates the release notes
+(`scripts/release-notes.sh`) and applies them to the still-draft release, then
+composes and uploads `latest.json`, and only then flips the draft to
+published.** A draft is not a shipped release — it 404s from the updater
+endpoint.
+
+That first publish-job step is a gate, not a log line: the job refuses to compose
+over a release where any installer lacks its `.sig`, because the composer derives
+its platform keys from the signatures it is handed and would otherwise emit a
+smaller manifest and exit 0 — leaving the platform that lost its signature frozen
+on the previous version with nothing anywhere red (issue #41(d)). Completeness is
+therefore asked of the **release's asset list**, never of the manifest, whose URLs
+are built from the very signatures being tested. `.dmg` and `latest.json` are on
+that check's allow-list for the reason given above — a `.dmg` gets no `.sig` and is
+never an updater payload, and `latest.json` is the manifest rather than a payload —
+so an unsigned `.dmg` on a release is normal, not a broken build.
 
 Notes are generated from GitHub's own generator, which is why the release page
 and the in-app "update available" line both say something: the app reads the

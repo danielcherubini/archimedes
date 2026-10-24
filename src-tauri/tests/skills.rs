@@ -147,6 +147,223 @@ fn unicode_whitespace_in_block_indent_does_not_panic() {
     assert_eq!(rows[0].description, "x\n y");
 }
 
+/// pi's own `parseFrontmatter` (`yaml@2.9.0`) outputs, pinned row by row: the
+/// reader is a MIRROR of pi, not an inventor of YAML semantics (ADR 0036). Each
+/// row is (frontmatter lines, expected name, expected description); `""` is pi's
+/// `null` — no value — which the tolerant reader carries as an empty description.
+///
+/// THREE rows are rows where pi has NO SKILL AT ALL and the desktop lists one:
+/// the `description: # internal` / `description: #` / `description: #glued` rows
+/// resolve to `null`, and pi drops a file whose description is missing or blank
+/// (`core/skills.js`: `hasDescription = typeof description === "string" &&
+/// description.trim() !== ""`, then `if (!isDeclaredSkill && !hasDescription)
+/// return { skill: null }`). The desktop has never had a description-required
+/// skip, and this task does NOT add one — closing that gap is a separate,
+/// larger parity decision (it would DROP skills, the fail-CLOSED direction,
+/// where every other documented divergence here fails open). The rows pin the
+/// PARSING (`""`, not `# internal`), which is what changed; the extra row pi
+/// does not have is pre-existing and is what `no_frontmatter_uses_the_directory_name`
+/// already tolerates.
+#[test]
+fn inline_values_strip_the_comment_pi_strips() {
+    const CASES: &[(&str, &str, &str)] = &[
+        // the exact file from issue #11
+        (
+            "name: a # note\ndescription: Do the thing # internal",
+            "a",
+            "Do the thing",
+        ),
+        ("name: a # note\ndescription: d", "a", "d"),
+        // a quoted `#` survives; a comment after the closing quote does not
+        ("name: alpha\ndescription: \"# keep\"", "alpha", "# keep"),
+        ("name: alpha\ndescription: '# keep'", "alpha", "# keep"),
+        ("name: alpha\ndescription: \"a # b\"", "alpha", "a # b"),
+        ("name: alpha\ndescription: 'a # b'", "alpha", "a # b"),
+        (
+            "name: alpha\ndescription: \"a # b\" # note",
+            "alpha",
+            "a # b",
+        ),
+        ("name: alpha\ndescription: \"text\" # note", "alpha", "text"),
+        ("name: \"a b\" # note\ndescription: d", "a b", "d"),
+        // THE SINGLE-QUOTED SHAPE, where YAML's own escape is a DOUBLED `''`
+        // and NOT a backslash. The pair is what makes these rows the interesting
+        // ones: a scanner that treats every `'` as a closer ends the scalar at
+        // the SECOND quote of `''`, and the tail it then tests (`s fine' # note`)
+        // starts with no space-then-`#`, so the strip silently does NOTHING and
+        // both quotes plus the comment reach the description. pi's
+        // `yaml@2.9.0` un-doubles the pair and closes at the LAST `'`, giving
+        // `it's fine`.
+        (
+            "name: x\ndescription: 'it''s fine' # note",
+            "x",
+            "it's fine",
+        ),
+        // …the same scalar with NO comment after it (the pair still un-doubles
+        // rather than reading as a closed scalar plus junk).
+        ("name: alpha\ndescription: 'it''s'", "alpha", "it's"),
+        // a `#` INSIDE the doubled-quote scalar is scalar text; the comment is
+        // the one that follows the REAL closing quote.
+        (
+            "name: alpha\ndescription: 'don''t # say' # note",
+            "alpha",
+            "don't # say",
+        ),
+        // no ASCII space/tab before the `#` ⇒ scalar text, NOT a comment
+        (
+            "name: alpha\ndescription: has#nospace",
+            "alpha",
+            "has#nospace",
+        ),
+        ("name: alpha\ndescription: a#b # real", "alpha", "a#b"),
+        // Unicode whitespace is not a YAML separator ⇒ pi keeps the whole text
+        (
+            "name: alpha\ndescription: a \u{A0}# note",
+            "alpha",
+            "a \u{A0}# note",
+        ),
+        (
+            "name: alpha\ndescription: a\u{A0}# note",
+            "alpha",
+            "a\u{A0}# note",
+        ),
+        (
+            "name: alpha\ndescription: a \u{3000}# note",
+            "alpha",
+            "a \u{3000}# note",
+        ),
+        // a TAB introduces a comment exactly like a space
+        ("name: alpha\ndescription: a\t# note", "alpha", "a"),
+        ("name: alpha\ndescription: value\t", "alpha", "value"),
+        // a `#` that opens the value ⇒ the whole value is a comment ⇒ no value
+        ("name: alpha\ndescription: # internal", "alpha", ""),
+        ("name: alpha\ndescription: #", "alpha", ""),
+        ("name: alpha\ndescription: #glued", "alpha", ""),
+        // the FIRST comment-eligible `#` wins, and the `: ` guard must not fire
+        // on the stripped value
+        ("name: alpha\ndescription: a #b # c", "alpha", "a"),
+        (
+            "name: alpha\ndescription: a # note: with a colon",
+            "alpha",
+            "a",
+        ),
+        (
+            "name: alpha\ndescription: ends with hash #",
+            "alpha",
+            "ends with hash",
+        ),
+        // a `#` after a block indicator is a comment and the BLOCK still reads
+        // (pi gives `"folded line more\n"`; our block path has always trimmed —
+        // the pre-existing difference `quoted_and_block_values` already pins.
+        // What this row pins is that the `# note` no longer swallows the block
+        // indicator itself.)
+        (
+            "name: alpha\ndescription: > # note\n  folded line\n  more",
+            "alpha",
+            "folded line more",
+        ),
+        // …and a `#` INSIDE a block scalar is scalar text (unchanged behaviour)
+        (
+            "name: alpha\ndescription: >-\n  chomped # keeps",
+            "alpha",
+            "chomped # keeps",
+        ),
+        (
+            "name: alpha\ndescription: |\n  line one\n  line two",
+            "alpha",
+            "line one\nline two",
+        ),
+        // no comment at all ⇒ nothing moves
+        ("name: alpha\ndescription: alpha", "alpha", "alpha"),
+    ];
+    for (fm, name, description) in CASES {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_skill(root, "alpha", &format!("---\n{fm}\n---\nBody.\n"));
+        let rows = discover_in_roots(&[(root.to_path_buf(), SkillScope::User)]);
+        assert_eq!(
+            rows.len(),
+            1,
+            "case {fm:?} must still be discovered: {rows:?}"
+        );
+        assert_eq!(rows[0].name, *name, "case {fm:?}");
+        assert_eq!(rows[0].description, *description, "case {fm:?}");
+    }
+}
+
+#[test]
+fn a_commented_name_keeps_the_skill_addressable_by_pis_name() {
+    // Issue #11: `name: a # note` used to yield the name `a # note`. A space is
+    // not a control character, so `is_tag_safe_name` ACCEPTED it and the skill was
+    // discovered — but `is_mentionable_name` rejects it, so no `$` token could ever
+    // address it. pi names the same file `a`, so one shared `~/.agents/skills`
+    // entry had two different names across the two tools.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_skill(
+        root,
+        "commented",
+        "---\nname: a # note\ndescription: D\n---\nB.\n",
+    );
+    let rows = discover_in_roots(&[(root.to_path_buf(), SkillScope::User)]);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        find_row(&rows, "a").name,
+        "a",
+        "the pi name must be the row name"
+    );
+    assert!(
+        rows.iter().all(|s| s.name != "a # note"),
+        "the comment must never reach the name: {rows:?}"
+    );
+}
+
+#[test]
+fn a_commented_description_no_longer_pushes_a_skill_over_the_1024_limit() {
+    // 1020 chars + ` # internal note` is 1036 CHARS to the old reader, so the
+    // 1024-char skip dropped a skill pi advertises (pi's own description is 1020).
+    // Stripping the comment first is what makes the two agree.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let long = "x".repeat(1020);
+    write_skill(
+        root,
+        "edge",
+        &format!("---\nname: edge\ndescription: {long} # internal note\n---\nB.\n"),
+    );
+    let rows = discover_in_roots(&[(root.to_path_buf(), SkillScope::User)]);
+    assert_eq!(
+        rows.len(),
+        1,
+        "a 1020-char description must be listed: {rows:?}"
+    );
+    assert_eq!(rows[0].description, long, "{:?}", rows[0].description.len());
+}
+
+#[test]
+fn glued_colon_description_is_a_value_not_a_comment() {
+    // `description:# glued` (no space after the colon) is where pi's `yaml` throws
+    // `MISSING_CHAR` and drops the WHOLE file — the same EXISTENCE divergence the
+    // glued flag shape has (`glued_colon_flag_shape_hides_where_pi_drops_the_whole_file`),
+    // reached here through `strip_prefix("description:")`. We keep the file, and the
+    // `#` now opens a comment, so the description is EMPTY (matching what pi's
+    // `description: # glued` resolves to) rather than the literal `# glued`.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_skill(
+        root,
+        "glued",
+        "---\nname: glued\ndescription:# glued\n---\nB.\n",
+    );
+    let rows = discover_in_roots(&[(root.to_path_buf(), SkillScope::User)]);
+    assert_eq!(
+        rows.len(),
+        1,
+        "the glued form is still read by our prefix match: {rows:?}"
+    );
+    assert_eq!(rows[0].description, "", "{:?}", rows[0]);
+}
+
 #[test]
 fn empty_inline_name_falls_back_to_the_directory_name() {
     // Regression: `name: ""` parsed to `Some("")` and the fallback only
@@ -634,6 +851,9 @@ fn frontmatter_flag_matches_pi_yaml_bool_resolution() {
         // scalar on, so the comment still ends the scalar here.
         "true ",
         "true\t",
+        // A run of SPACES AND TABS before the `#` still ends the scalar (the
+        // shared `strip_trailing_comment` trims the whole run, not one char).
+        "true  \t  # a tab-and-space run before the comment",
     ];
     const MODEL_VISIBLE: &[&str] = &[
         "yes",
@@ -656,6 +876,15 @@ fn frontmatter_flag_matches_pi_yaml_bool_resolution() {
         "true\u{C}",        // U+000C FORM FEED
         "true\u{85}",       // U+0085 NEXT LINE
         "true\u{A0}# note", // an NBSP before a `#` does NOT open a comment
+        // A comment-only value resolves to `null` (never the boolean), and a
+        // QUOTED "true" with a comment after the closing quote is the STRING
+        // `"true"` to `yaml` — the strip runs before the resolution in the
+        // shared helper, so none of these hide. Pinned so the shared-helper
+        // refactor cannot move a boolean.
+        "# note",          // a comment-only value ⇒ no value ⇒ not `true`
+        "#",               // the same, empty
+        "\"true\" # note", // quoted ⇒ a STRING to yaml, comment stripped first
+        "'true' # note",   // the single-quoted spelling
     ];
 
     for (value, expect_hidden) in HIDES

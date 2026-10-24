@@ -284,6 +284,15 @@ jobs:
       - name: Test the updater-manifest composer
         run: bash scripts/compose-updater-manifest.test.sh
 
+      # The release signature-completeness gate is a script for the same reason the
+      # three above are: the check it replaces was a sentence in AGENTS.md that
+      # could not fail (it tested the manifest against the signatures that
+      # generated it), and a fixture release — an installer with no `.sig` beside
+      # it — is the only way to prove the replacement does. That fixture cannot
+      # exist in YAML.
+      - name: Test the release signature completeness check
+        run: bash scripts/check-release-signatures.test.sh
+
       # The release-notes generator is the third script with a silent failure
       # mode (GitHub's endpoint answers 200 for a tag that has no release), so it
       # is under scripts/ with tests here rather than inlined into release.yml —

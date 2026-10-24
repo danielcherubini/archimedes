@@ -6,6 +6,7 @@ import { useSubagentSelection } from "../store/subagentSelection";
 import { useSessions } from "../store/sessions";
 import { useInteractive } from "../store/interactive";
 import type { SubagentEntry } from "../store/subagents";
+import { unmatchedAgentTooltip } from "../lib/subagentActivity";
 
 const entry = (over: Partial<SubagentEntry>): SubagentEntry => ({
   sessionId: "sub1",
@@ -686,5 +687,92 @@ describe("SubagentDelegatingCard (D3: one row derivation, no drift)", () => {
       <SubagentDelegatingCard title="subagent" status="pending" sessionId="main1" />,
     );
     expect(screen.getByText("No subagents yet.")).toBeTruthy();
+  });
+});
+
+/**
+ * D4 (issue #47) — a name that matched no Agent definition is VISIBLE.
+ *
+ * `subagent({ agentName: "reviewr" })` is a typo in a correctly-spelled key, so
+ * nothing else in the app announces it: T9's checker fires on unknown KEYS, and
+ * `agentName` is a known one. `resolve_launch` still hands back the launch
+ * verbatim (ADR 0020) and the child still runs — so the row must gain ONE quiet
+ * caption and change NOTHING else: not the name, not the status glyph, not the
+ * metadata line, not the click handler.
+ *
+ * The second case is the half that keeps the tri-state a tri-state: `"no_name"`
+ * is ADR 0020's DELIBERATE config-less dispatch, and a UI that flags it is a new
+ * bug. An absent field (an older backend) renders today's output too.
+ */
+describe("SubagentDelegatingCard (the resolve-miss marker, issue #47)", () => {
+  it("renders the resolve-miss caption for an unmatched name, and everything else unchanged", () => {
+    useSubagents.getState().addSession(
+      entry({
+        sessionId: "sub1",
+        agentName: "reviewr",
+        nameResolution: "unmatched",
+      }),
+    );
+    render(
+      <SubagentDelegatingCard
+        title="subagent"
+        status="pending"
+        rawInput={{ task: "review the diff", agent: "reviewr" }}
+        sessionId="main1"
+      />,
+    );
+    expect(screen.getByText("no matching Agent")).toBeTruthy();
+    // The tooltip is the SHARED sentence, asserted THROUGH the helper
+    // (issue #47 review): the point of `unmatchedAgentTooltip` is that the
+    // directory row and the transcript sheet cannot carry different words, so
+    // a literal here would re-create the copy it replaces. The sentence itself
+    // is pinned verbatim in `subagentActivity.test.ts`.
+    expect(screen.getByText("no matching Agent").getAttribute("title")).toBe(
+      unmatchedAgentTooltip("reviewr"),
+    );
+    // ADDITIVE: the name is never replaced by the marker.
+    expect(screen.getByText("reviewr")).toBeTruthy();
+    // Click-to-open survives — the caption sits INSIDE the `<Button>`, and the
+    // explicit `aria-label` wins the accname computation, so the accessible
+    // name is unchanged.
+    expect(
+      screen.getByRole("button", { name: "Open reviewr transcript" }),
+    ).toBeTruthy();
+    // The status glyph is UNCHANGED: the child is running, not failed — a miss
+    // never fails a dispatch.
+    expect(document.querySelector("svg.animate-spin")).toBeTruthy();
+    expect(screen.queryByText("Crashed")).toBeNull();
+  });
+
+  it("renders NOTHING extra for a matched name, a config-less dispatch, or an older payload", () => {
+    // Three arms, one assertion each. `matched` is a working dispatch;
+    // `no_name` is the DELIBERATE config-less case (flagging it would be the
+    // bug the tri-state exists to prevent); the absent field is a backend that
+    // predates it, which must render exactly what it rendered before.
+    for (const over of [
+      { nameResolution: "matched" as const },
+      { nameResolution: "no_name" as const },
+      {},
+    ]) {
+      for (const id of Object.keys(useSubagents.getState().entries)) {
+        useSubagents.getState().dismiss(id);
+      }
+      useSubagents.getState().addSession(
+        entry({ sessionId: "sub1", agentName: "reviewr", ...over }),
+      );
+      const { unmount } = render(
+        <SubagentDelegatingCard
+          title="subagent"
+          status="pending"
+          rawInput={{ task: "review the diff", agent: "reviewr" }}
+          sessionId="main1"
+        />,
+      );
+      expect(screen.queryByText("no matching Agent")).toBeNull();
+      expect(
+        screen.getByRole("button", { name: "Open reviewr transcript" }),
+      ).toBeTruthy();
+      unmount();
+    }
   });
 });

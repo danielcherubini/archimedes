@@ -211,6 +211,22 @@ function App() {
           sessionId: p.sessionId,
           parentSessionId: p.parentSessionId,
           agentName: p.agentName,
+          // (issue #47) Copied verbatim — the store never derives it, and an
+          // older payload leaves it absent (which renders nothing).
+          //
+          // ABSENT, not present-and-`undefined`, and that is why this is a
+          // conditional spread instead of a plain assignment: the field is
+          // OPTIONAL precisely so a backend that predates it OMITS it, and
+          // `store/subagents.ts` documents + tests that an `undefined`-valued
+          // key is NOT the same shape as an absent one (`"nameResolution" in
+          // entry`). An unconditional `nameResolution: p.nameResolution` made
+          // every older payload through this real wiring produce the one shape
+          // the store test forbids. Harmless while every reader branches on
+          // `=== "unmatched"`, but the invariant is only worth having if the
+          // wire path upholds it — `App.test.tsx` now pins the key's ABSENCE.
+          ...(p.nameResolution !== undefined
+            ? { nameResolution: p.nameResolution }
+            : {}),
           task: p.task,
           status: "running",
           model: p.model,

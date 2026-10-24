@@ -7,6 +7,7 @@ import { useInteractive } from "../store/interactive";
 import { usePermissions } from "../store/permissions";
 import { useSessions } from "../store/sessions";
 import * as statusIconModule from "./SubagentStatusIcon";
+import { unmatchedAgentTooltip } from "../lib/subagentActivity";
 
 // NO `vi.mock("../lib/tauri")` here on purpose. This file used to mock
 // `respondInteractiveRequest` / `respondPermission`, which implied the sheet
@@ -243,4 +244,43 @@ describe("SubagentDetailHost (the subagent transcript sheet)", () => {
   // parent's transcript when the parent is active, the `SubagentModals` panel
   // otherwise (pinned there by `an `ask` card's OWN Escape still dismisses the
   // card (the wrapper's stop does not swallow it)`).
+});
+
+/**
+ * (issue #47) The transcript sheet is the second surface that prints a child's
+ * name as a claim about its identity, so it carries the same one quiet caption
+ * as the directory row — and, like the row, ONLY for `unmatched`.
+ *
+ * The dialog is looked up as `{ name: /transcript/ }` on purpose: the sheet's
+ * `aria-label` (`"<agentName> — transcript"`) is byte-identical before and after
+ * the marker, because the marker is additive and the label is explicit.
+ */
+describe("SubagentDetailHost (the resolve-miss marker, issue #47)", () => {
+  it("shows the resolve-miss marker in the sheet header for an unmatched name, and nothing for a matched one", () => {
+    useSubagents.getState().addSession({ ...entry, nameResolution: "unmatched" });
+    render(<SubagentDetailHost />);
+    select("sub1");
+    const dialog = screen.getByRole("dialog", { name: /transcript/ });
+    const marker = screen.getByText("no matching Agent");
+    // INSIDE the dialog (a stray caption outside the sheet would be a second
+    // host, which this file's whole partition argument forbids).
+    expect(dialog.contains(marker)).toBe(true);
+    // The tooltip is the SHARED sentence from `unmatchedAgentTooltip`
+    // (`lib/subagentActivity.ts`) — asserted through the helper, because the
+    // single-ownership of this copy IS the claim (issue #47 review). The
+    // directory row (`SubagentDelegatingCard.test.tsx`) pins the same call, so
+    // the two surfaces cannot reword independently; the sentence's own wording
+    // is pinned verbatim in `subagentActivity.test.ts`.
+    expect(marker.getAttribute("title")).toBe(unmatchedAgentTooltip("reviewer"));
+    // The header is otherwise UNCHANGED: the name and the status chip survive.
+    expect(screen.getByText("reviewer")).toBeTruthy();
+    expect(screen.getByText("running")).toBeTruthy();
+
+    // A matched name renders nothing extra — the child loaded a real persona.
+    act(() => {
+      useSubagents.getState().addSession({ ...entry, nameResolution: "matched" });
+    });
+    expect(screen.queryByText("no matching Agent")).toBeNull();
+    expect(screen.getByText("reviewer")).toBeTruthy();
+  });
 });

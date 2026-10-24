@@ -19,28 +19,107 @@
 # Usage:
 #   compose-updater-manifest.sh \
 #     --sigs-dir DIR --version X.Y.Z --tag v0.2.0 --repo owner/name --out latest.json \
-#     [--notes TEXT] [--arch darwin-arm64|darwin-x64]
+#     [--notes TEXT] [--arch darwin-arm64|darwin-x64] [--require-payload NAME]...
 
 set -euo pipefail
+
+# The payload-shape vocabulary (see the header of that file for why it is shared
+# rather than duplicated). Resolved from THIS script's directory, not the caller's
+# cwd: the composer is invoked as `bash scripts/compose-updater-manifest.sh` from
+# the repo root by release.yml and from anywhere by its harness, and a cwd-relative
+# source path would make the script's location an argument.
+#
+# Guarded, with a plain printf/exit rather than `fail`: `fail` is defined below and
+# needs `$out_file`, which does not exist yet. A missing library is a broken
+# checkout, and bash's own `No such file or directory` from the `source` would read
+# like a bug in this script rather than a missing sibling; the message names the
+# file so the operator can see which of the two is gone. The alternative — sourcing
+# unconditionally and letting the first `$updater_payload_shape_hint` use die under
+# `set -u` — would fail at the point a real asset is rejected, i.e. exactly when the
+# message matters most.
+shape_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/updater-payload-shapes.sh"
+if [[ ! -f "$shape_lib" ]]; then
+  printf 'error: %s is missing — it holds the updater payload shapes this composer matches against, so it cannot decide which signature claims which platform\n' "$shape_lib" >&2
+  exit 1
+fi
+# shellcheck source=./updater-payload-shapes.sh
+. "$shape_lib"
 
 usage() {
   cat >&2 <<'USAGE'
 usage: compose-updater-manifest.sh --sigs-dir DIR --version X.Y.Z --tag TAG \
                                    --repo owner/name --out FILE \
                                    [--notes TEXT] [--arch darwin-arm64|darwin-x64]
+                                   [--require-payload PAYLOAD_NAME]...
 USAGE
 }
 
-# Every exit-1 path funnels through here so a rejected manifest can never be
+# Every refusal funnels through here so a rejected manifest can never be
 # left on disk for the next step to `gh release upload` — a partial `latest.json`
 # published over a good one is worse than no manifest at all.
+#
+# "Every refusal", NOT "every exit 1": a few paths leave 1 behind without ever
+# reaching this function — the missing shape library at the top of the file, a
+# value-less flag at the END of the line (a bash shift fault, so no message at
+# all), and an `--out` path the OS refuses. None of those reports a refusal, and
+# none of them touches the manifest, so the promise above is exactly as wide as
+# this function is. (AGENTS.md step 4 and ADR 0052's amendment state this RULE by
+# name — "everything that reports no refusal" — rather than by counting paths, so
+# the set here can grow without the prose going stale.)
+#
+# THE TARGET IS THE INVOCATION'S `--out`, NOT THE `$out_file` VARIABLE. The parse
+# loop fills `$out_file` only when it REACHES `--out`, and a refusal can fire before
+# it does: `… --repo r/x --verison 0.2.0 --out latest.json` — a typo two flags short
+# of the end — dies on `unknown argument: --verison` with `$out_file` still empty,
+# and the old `[[ -n "$out_file" ]]` guard then skipped the cleanup, so the manifest
+# the operator had just downloaded survived a refused run behind a clean exit 1. That
+# is ADR 0052's stale-manifest hazard arriving through the door the harness never
+# opened: every case there types `--out` FIRST, so the variable was always populated.
+# Hence `$invocation_args` (below, captured before the loop consumes argv): when
+# `$out_file` is empty, `fail()` looks for the `--out` the operator typed and removes
+# THAT, so the promise holds for every refusal regardless of flag order.
+#
+# One knowingly-accepted widening: the scan reads the whole typed argv, so in
+# `--notes --out path` — where the parser ate `--out` as `--notes`' VALUE and the
+# refusal is `unknown argument: path` — `path` is treated as the designated manifest
+# and removed. A literal `--out` token means the operator was naming a manifest path
+# in every realistic invocation, and the only file this can ever reach is one that
+# `gh release download <tag> -p latest.json` restores in one step.
 fail() {
   printf 'error: %s\n' "$1" >&2
-  if [[ -n "$out_file" && -e "$out_file" ]]; then
-    rm -f -- "$out_file"
+  local target="$out_file"
+  if [[ -z "$target" ]]; then
+    local previous="" argument
+    for argument in ${invocation_args[@]+"${invocation_args[@]}"}; do
+      if [[ "$previous" == "--out" ]]; then
+        target="$argument"
+        break
+      fi
+      # DEFENSIVE by design: the parse loop has no `--out=FILE` arm, so this
+      # spelling is refused as `unknown argument: --out=FILE` and `$out_file` is
+      # left empty — which is exactly when the scan runs, and exactly the case
+      # where it is the ONLY way to find the designated path. It is here so the
+      # cleanup promise does not depend on a future `--out=FILE` arm being added
+      # or on the operator's spelling; the harness pins it by typing `--out=`
+      # once and asserting both the refusal and the seeded manifest being gone.
+      if [[ "$argument" == --out=* ]]; then
+        target="${argument#--out=}"
+        break
+      fi
+      previous="$argument"
+    done
+  fi
+  if [[ -n "$target" && -e "$target" ]]; then
+    rm -f -- "$target"
   fi
   exit 1
 }
+
+# The invocation as typed, captured before the loop below shifts it away, for the
+# argv scan in `fail()`. `${invocation_args[@]+…}` guards the empty case for the
+# same reason AGENTS.md step 4 guards `require_args`: a bare `"${arr[@]}"` on an
+# EMPTY array is an unbound-variable fault under `set -u` on bash 3.2 (macOS).
+invocation_args=("$@")
 
 sigs_dir=""
 version=""
@@ -49,6 +128,10 @@ repo=""
 out_file=""
 notes=""
 arch=""
+# The expectation list for `--require-payload` (repeatable; several flags of the
+# same name is the normal call shape — release.yml passes one line per installer
+# the completeness gate accepted).
+required_payloads=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -63,6 +146,31 @@ while [[ $# -gt 0 ]]; do
     --out) out_file="${2:-}"; shift 2 ;;
     --notes) notes="${2:-}"; shift 2 ;;
     --arch) arch="${2:-}"; shift 2 ;;
+    --require-payload)
+      # The guarding idiom from check-versions.sh, checked BEFORE `shift 2`: a
+      # value-less flag otherwise shifts past the end of argv and dies under
+      # `set -e` with exit 1 and no message at all. (The composer's pre-existing
+      # flags have exactly that behaviour and are deliberately left alone —
+      # fixing them would re-pin existing cases for no issue-#41 benefit.)
+      if [[ $# -lt 2 || -z "${2:-}" ]]; then
+        fail "--require-payload requires a payload asset name (e.g. Archimedes_0.2.0_amd64.deb)"
+      fi
+      # A claim about a NAME, not about bytes: `--require-payload NAME` asserts
+      # that `$sigs_dir/NAME.sig` exists. It does NOT require NAME itself to be on
+      # disk, and must not — on the real pipeline `--sigs-dir` holds SIGNATURES
+      # ONLY (`gh release download --pattern '*.sig'`), so an installer-present
+      # requirement could never be satisfied there. The rejected alternative —
+      # scanning a directory for installer files that lack a `.sig` — would make
+      # release.yml download ~300 MB of installers into the publish job to obtain
+      # information `gh release view --json assets` already gives for free; that
+      # is why there is no `--installers-dir` and why the release-side gate is a
+      # separate script (scripts/check-release-signatures.sh).
+      if [[ "$2" == *.sig ]]; then
+        fail "--require-payload got a signature name ($2) — pass the payload name instead (pass ${2%.sig}): a `.sig` is never itself an updater payload, so requiring one would be a check for X.sig.sig that can never be satisfied"
+      fi
+      required_payloads+=("$2")
+      shift 2
+      ;;
     *)
       usage
       fail "unknown argument: $1"
@@ -135,6 +243,97 @@ if [[ ${#sig_paths[@]} -eq 0 ]]; then
   fail "no .sig files found in $sigs_dir — refusing to write a manifest with zero platforms"
 fi
 
+# --- the expectation list (issue #41(d), the secondary gate) ----------------
+#
+# WHY THIS EXISTS. The composer's keys are derived FROM the `.sig` files it was
+# handed, so an installer whose signature was never uploaded is simply absent from
+# the output — and the composition exits 0. Every completeness question put to the
+# RESULT of that derivation is therefore answered by a projection of the result
+# itself, which is why AGENTS.md's old "count the distinct manifest URL basenames
+# and require a `.sig` for each" could never fail. The primary gate is
+# `scripts/check-release-signatures.sh`, which asks the RELEASE (per asset: `X`
+# present ⇒ `X.sig` present). This flag is the secondary one, and it exists for the
+# path that never runs that script: a human re-composing `latest.json` by hand
+# after rewriting the notes (AGENTS.md step 4), who downloads whatever `.sig`s come
+# back and hands them over with no expectation list at all.
+#
+# It runs HERE — after the empty-directory refusal and before any pattern matching
+# or key derivation — so an expected-but-absent signature fails before a single key
+# is built. Every refusal routed through `fail()` removes the invocation's
+# `--out`, this one included, and that is deliberate rather than incidental — see
+# "WHY THIS REFUSAL DELETES A PRE-EXISTING `--out`" below, because the opposite
+# reading ("the file on disk is
+# the OLD correct manifest, so leave it") is attractive and wrong.
+#
+# WHY THIS REFUSAL DELETES A PRE-EXISTING `--out`. The documented manual flow
+# (AGENTS.md step 4) is download-then-compose: `gh release download -p latest.json`
+# and then re-compose over the downloaded file, so when this refusal fires there IS
+# a real manifest sitting at `--out`, and leaving it untouched looks like the safe
+# answer. Three reasons it is not:
+#
+#   1. The file's own contract. `fail()` exists so that "a rejected manifest can
+#      never be left on disk for the next step to `gh release upload`". That is a
+#      claim about every refusal that reaches this function — not about every exit 1,
+#      whose exceptions the header above names — and this bare `exit 1` skipped the
+#      cleanup outright — unlike pre-write refusals like
+#      `--sigs-dir is not a directory`, which DO delete. An operator cannot reason
+#      about which refusals leave a file behind, and the next step cannot either.
+#      (The other way was subtler and is fixed at the definition of `fail()` above:
+#      cleanup keyed on the `$out_file` VARIABLE, which a typo typed before `--out`
+#      left empty, so a reported refusal deleted nothing.)
+#      (What still does not clean up is everything that never reaches `fail()`,
+#      i.e. everything that reports no refusal: the missing-shape-library guard at
+#      the top of the file; a legacy value-less flag at the very END of the line
+#      (`… --out latest.json --notes`), whose `shift 2` runs past the end of argv
+#      and dies as a shell fault — that pre-existing behaviour is deliberately left
+#      alone, see the `--require-payload` guard below; and an `--out` path the OS
+#      refuses at `mkdir -p` / the write. The library case is pinned by the composer
+#      harness: a broken CHECKOUT is not a refused composition, and the tool that
+#      never started has formed no opinion about this release and should not destroy
+#      the operator's downloaded manifest.)
+#   2. By this ADR's own ruling, "the previous version's manifest where the new
+#      one belongs" is the HAZARD, not the safety net: ADR 0052 lists "the new
+#      version is visible to clients with no manifest, OR WITH THE PREVIOUS
+#      VERSION'S" as the bad window the publish order exists to close. So the
+#      surviving file is not a fallback this script can rely on — it is the second
+#      half of a documented failure mode, and it is what a `--clobber` re-upload
+#      of an ignored exit code publishes.
+#   3. Loudness beats reassurance. With the file gone, the very next thing the
+#      operator types — `gh release upload vX.Y.Z latest.json --clobber` — fails
+#      with "no such file or directory" and the ceremony stops at the right step.
+#      With the file present, that upload SUCCEEDS, and the notes rewrite that was
+#      supposed to be the point of the run silently does not land.
+#
+# Nothing is destroyed by the deletion either: the file being removed is, by
+# construction, a copy of a PUBLISHED release asset, one
+# `gh release download <tag> -p latest.json` away from being recovered.
+#
+# It only ever REFUSES. It never adds a key, never reorders one, and is opt-in:
+# with no `--require-payload` the composer behaves exactly as it has always behaved.
+if (( ${#required_payloads[@]} > 0 )); then
+  missing_payloads=()
+  for required_payload in "${required_payloads[@]}"; do
+    if [[ ! -e "$sigs_dir/$required_payload.sig" ]]; then
+      missing_payloads+=("$required_payload")
+    fi
+  done
+  if (( ${#missing_payloads[@]} > 0 )); then
+    # EVERY offender, in one run — the same rule the release-side gate follows.
+    # Stopping at the first makes the operator fix one signature, re-run, and
+    # discover the second, which is how a partially-uploaded sig set survives a
+    # release ceremony.
+    for missing_payload in "${missing_payloads[@]}"; do
+      printf 'error: expected updater payload %s has no signature in %s (expected %s.sig) — refusing to compose a manifest that silently drops an installed platform\n' \
+        "$missing_payload" "$sigs_dir" "$missing_payload" >&2
+    done
+    # `fail`, not a bare `exit 1`: the per-offender lines above say WHAT is missing,
+    # and this says what happens to `--out`. Naming the cleanup in the message is
+    # what makes the deletion discoverable to the person standing at the terminal
+    # about to re-upload a manifest from an earlier run.
+    fail "${#missing_payloads[@]} of ${#required_payloads[@]} expected updater payload(s) have no signature in $sigs_dir — nothing was composed, and any manifest already at $out_file has been REMOVED so it cannot be uploaded in place of the one this run refused to write"
+  fi
+fi
+
 # --- pattern matching -------------------------------------------------------
 #
 # Asset names are matched by SUFFIX, never compared whole: they carry
@@ -163,7 +362,12 @@ claim() {
   printf -v "$slot" '%s' "$sig"
 }
 
-accepted_suffixes='*_x64-setup.nsis.zip, *_setup.exe (the raw NSIS installer), *_amd64.AppImage, *_amd64.AppImage.tar.gz, *_amd64.deb, *_x86_64.rpm, *.app.tar.gz (the last one needs --arch)'
+# The operator-facing hint now comes from the SHARED shape file (see its header),
+# so the list an operator is handed cannot drift from the list the release-side
+# gate mirrors. The matcher arms below are the same shapes; the composer harness
+# extracts both lists and asserts they agree, which is what keeps the `case` arms
+# (which also assign slots, so they cannot move) honest against the vocabulary.
+accepted_suffixes="$updater_payload_shape_hint"
 
 for sig_path in "${sig_paths[@]}"; do
   sig_name="${sig_path##*/}"

@@ -5,6 +5,7 @@ import { isMentionableSkillName } from "../lib/skills";
 import { CatalogSearchDialog } from "./CatalogSearchDialog";
 import { MutedCaption } from "./MutedCaption";
 import { RowButton } from "./RowButton";
+import { cn } from "./lib/utils";
 
 /**
  * The `manual only` tooltip for a model-hidden row (ADR 0036). Two honesty
@@ -47,6 +48,64 @@ function manualOnlyTooltip(name: string): string {
 }
 
 /**
+ * Why a row is inert, in the row's OWN visible line (issue #10, amending
+ * ADR 0036; rendering it visibly is the accessibility follow-up). Two wording
+ * rules, both inherited from `manualOnlyTooltip`:
+ *
+ * 1. NO `$` glyph anywhere. A sentence spelling `$has space` would print the
+ *    exact dead token the row just stopped inserting — and the bug this fixes
+ *    was a lie one node from the truth, so the new surface obeys the same rule
+ *    as the old one.
+ * 2. TRUE FOR A MODEL-VISIBLE ROW TOO. The `manual only` badge (and its
+ *    tooltip) renders only for a `disableModelInvocation` row, while the defect
+ *    is older than and independent of that flag, so the reason must stand on
+ *    its own: the first half repeats the badge's phrase VERBATIM (so the two
+ *    surfaces cannot drift) and the second half names the user's own one-line
+ *    fix — the frontmatter `name`, else the directory name it falls back to
+ *    (ADR 0036).
+ *
+ * WHY IT IS RENDERED AS VISIBLE TEXT AND NOT ONLY AS A `title`. An inert row is
+ * `tabIndex={-1}` on purpose (click and Enter must stay inert), so a
+ * keyboard-only user can never focus it — and a native `title` is not reliably
+ * exposed to assistive technology anyway. A `title`-only reason was therefore
+ * reachable with a MOUSE and with nothing else, which made the dialog's
+ * accessibility claim true for pointer users only. The sentence now sits in the
+ * row as a visible line the way the dialog already explains things: every
+ * reader gets it (it is part of the row's `textContent`, hence of the
+ * accessible-name computation for a `role="button"` with no explicit label)
+ * and no ARIA gymnastics are involved. The `title` survives ON THAT LINE, where
+ * `truncate` can clip the sentence and the full text is one hover away; it is
+ * GONE from the row itself, because a row-level `title` whose text is already
+ * in the row's accessible name is the same sentence twice to a screen reader.
+ *
+ * (The `manualOnlyTooltip` header above still closes with "These TWO are the
+ * only places the rule is enforced for Skills" — an under-count this branch
+ * left standing. NOT because a test pins that block: none does. No test reads
+ * this file's source text, and mutating `These TWO` to `These FOUR` reddens
+ * nothing (measured: 24/24 still green). What asked for byte-unchanged was
+ * `task02`'s acceptance line, and it asked it of `manualOnlyTooltip`'s shipped
+ * BEHAVIOUR — the two tooltip tests, which pin its rules and must pass
+ * unedited. So the count correction lives in `skills.ts`'s "WHERE it is
+ * applied" paragraph and HERE instead: this row affordance is the third
+ * frontend site.)
+ */
+export const UNMENTIONABLE_ROW_REASON =
+  "This name can't be typed as a mention — rename the Skill to give it one";
+
+/** The row shell, shared by both arms (geometry only — nothing cursor- or
+ *  hover-shaped, so the arm below decides the entire affordance cue). */
+const SKILL_ROW_BASE =
+  "group flex min-w-0 flex-col gap-0.5 rounded-lg px-2.5 py-1";
+/** A row that inserts something: the pointer and the hover fill it has always had. */
+const SKILL_ROW_ACTIVE = "cursor-pointer hover:bg-surface-hover";
+/** A row that inserts NOTHING: not allowed, and dimmed. Deliberately the ONLY
+ *  cursor class on this arm — unlike `ModelPickerDialog`, which spells
+ *  `cursor-pointer` AND `cursor-not-allowed` in one tailwind-merge group and so
+ *  shows a POINTER on a disabled row (its own comment calls that a behaviour
+ *  nobody owns). Here, dropping `cursor-pointer` is the point. */
+const SKILL_ROW_INERT = "cursor-not-allowed opacity-50";
+
+/**
  * The shadowing report's heading — and the ONE place its wording is decided.
  *
  * The clause names the WINNER's scope (the CAUSE), never the excluded entry's.
@@ -76,8 +135,15 @@ function shadowHeading(winnerScope: "space" | "user", count: number): string {
  * cue may not promise every name).
  * Clicking a row inserts `$name ` into the composer via the
  * `archimedes:insert-skill` CustomEvent (the composer listens) and closes
- * the dialog — unconditionally, so the click is NOT the surface that tells the
- * truth about an untypeable name; the tooltip is (ADR 0036). The search filters
+ * the dialog — for a name the `$` mention grammar CAN carry. A row whose name
+ * it cannot carry is LISTED BUT INERT (issue #10, amending ADR 0036): the row
+ * is `disabled`, so click and Enter do nothing and the dialog stays open, and
+ * the row gains a line of its own — the `$`-free reason in VISIBLE text,
+ * because the inert row cannot be focused and a `title` alone is reachable with
+ * a mouse only (see `UNMENTIONABLE_ROW_REASON`). The row and its reason
+ * therefore finally agree;
+ * the catalog is still not filtered, because it stays total for model-facing
+ * discovery (ADR 0036). The search filters
  * by case-insensitive NAME substring (v1: name only — the same policy as the
  * composer's skill picker).
  *
@@ -149,8 +215,21 @@ export default function SkillsDialog({
    * CustomEvent — the composer lives in a different subtree) and close
    * the dialog. The name is LOWERCASED (the case policy: the inserted
    * token must be expandable, and the mention regex is lowercase-only).
+   *
+   * GUARDED, and deliberately so (issue #10). A name the `$` grammar cannot
+   * carry expands to NOTHING — `expandMentions` leaves an unmatched token
+   * VERBATIM — so inserting one records dead text in the SENT message. The
+   * guard is TWO deep: `RowButton` refuses a click/Enter on a `disabled` row,
+   * and this is the same check, kept because this function OWNS the side effect
+   * (the dispatch AND the `onClose()`) and must not depend on its only caller
+   * having filtered — the exact reason `ModelPickerDialog`'s `select` keeps its
+   * own `if (item.disabled) return`. Deleting either half is safe today and a
+   * trap the day a second caller appears. The early return skips `onClose()`
+   * too: an inert row leaves the dialog OPEN, because such a row is listed for
+   * discovery and not for action.
    */
   const insertSkill = (name: string) => {
+    if (!isMentionableSkillName(name)) return;
     window.dispatchEvent(
       new CustomEvent(IPC_EVENTS.insertSkill, {
         detail: "$" + name.toLowerCase() + " ",
@@ -176,36 +255,85 @@ export default function SkillsDialog({
             ? `No skills match "${query}".`
             : null
       }
-      renderRow={(skill) => (
-        <RowButton
-          onClick={() => insertSkill(skill.name)}
-          className="group flex min-w-0 cursor-pointer flex-col gap-0.5 rounded-lg px-2.5 py-1 hover:bg-surface-hover"
-        >
-          <div className="flex items-center gap-2">
-            {/* `min-w-0` lets the span shrink below its content
-                width so `truncate` clips it (without it the
-                min-width:auto floor would push the row past the
-                dialog's right edge). */}
-            <span className="min-w-0 flex-1 truncate text-ui-base">
-              {skill.name}
-            </span>
-            {skill.scope === "user" && <MutedCaption>global</MutedCaption>}
-            {skill.disableModelInvocation && (
-              <MutedCaption title={manualOnlyTooltip(skill.name)}>
-                manual only
-              </MutedCaption>
+      renderRow={(skill) => {
+        // The row's OWN mentionability, decided once and used twice: for the
+        // affordance (`RowButton`'s `disabled`, which emits
+        // `aria-disabled="true"` + `tabIndex={-1}` and makes click AND Enter
+        // inert) and for the reason tooltip. The row stays LISTED either way —
+        // the `$` catalog is deliberately total (ADR 0036: the same catalog
+        // feeds model-facing discovery), so the honest seam is the row's
+        // affordance, not its presence. Do not hand-write any of those three
+        // attributes here, and do not add a second `role="button"` anywhere in
+        // a row: the whole suite reaches rows through
+        // `.closest('[role="button"]')`.
+        const mentionable = isMentionableSkillName(skill.name);
+        return (
+          <RowButton
+            onClick={() => insertSkill(skill.name)}
+            disabled={!mentionable}
+            // NO `title` on the row: the reason is the visible line below, so a
+            // row-level tooltip would repeat it to AT (and it was the mouse-only
+            // channel this replaces). Inertness itself is `RowButton`'s
+            // `disabled` — `aria-disabled="true"` + `tabIndex={-1}`.
+            className={cn(
+              SKILL_ROW_BASE,
+              mentionable ? SKILL_ROW_ACTIVE : SKILL_ROW_INERT,
             )}
-          </div>
-          {skill.description !== "" && (
-            <span
-              className="min-w-0 truncate text-ui-sm text-foreground-subtle"
-              title={skill.description}
-            >
-              {skill.description}
-            </span>
-          )}
-        </RowButton>
-      )}
+          >
+            <div className="flex items-center gap-2">
+              {/* `min-w-0` lets the span shrink below its content
+                  width so `truncate` clips it (without it the
+                  min-width:auto floor would push the row past the
+                  dialog's right edge). */}
+              <span className="min-w-0 flex-1 truncate text-ui-base">
+                {skill.name}
+              </span>
+              {skill.scope === "user" && <MutedCaption>global</MutedCaption>}
+              {skill.disableModelInvocation && (
+                <MutedCaption title={manualOnlyTooltip(skill.name)}>
+                  manual only
+                </MutedCaption>
+              )}
+            </div>
+            {skill.description !== "" && (
+              <span
+                className="min-w-0 truncate text-ui-sm text-foreground-subtle"
+                title={skill.description}
+              >
+                {skill.description}
+              </span>
+            )}
+            {/* The reason this row inserts nothing, as VISIBLE text (see
+                `UNMENTIONABLE_ROW_REASON` for why a `title` alone was not
+                enough: the row is `tabIndex={-1}`, so a mouse is the only way
+                to reach a `title`). The row's OWN explanation line — the same
+                style the row already uses to explain a Skill — so every reader
+                gets it, including one that never focuses or hovers.
+                WHY THE DESCRIPTION'S TONE AND NOT A `MutedCaption`: the inert
+                arm dims the whole row with `opacity-50`, and
+                `MutedCaption`'s `text-foreground-subtlest` is the app's
+                quietest text token (foreground at 40% in `theme.css`) — the
+                two compose to text nobody can actually read, which is a poor
+                way to deliver the one sentence this row exists to say. The
+                description's tone (`text-foreground-subtle`, 60%) is the
+                row's own explanation weight and survives the dimming one step
+                better. NOT a second affordance: NO `role`, NO `tabIndex`, NO
+                click — a row carries exactly one (the `RowButton` above), and
+                the shadow report's non-row lines are pinned the same way.
+                `min-w-0 truncate` keeps the row's pinned truncation chain; the
+                `title` on THIS line carries the full sentence for the width at
+                which the line clips. */}
+            {!mentionable && (
+              <span
+                className="min-w-0 truncate text-ui-sm text-foreground-subtle"
+                title={UNMENTIONABLE_ROW_REASON}
+              >
+                {UNMENTIONABLE_ROW_REASON}
+              </span>
+            )}
+          </RowButton>
+        );
+      }}
     >
       {/* The shadowing report — a SIBLING of the three-branch ternary above,
           never inside the rows branch, and gated on its OWN non-empty
