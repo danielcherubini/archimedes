@@ -327,6 +327,12 @@ fn spaces_upsert_find_delete() {
     assert_eq!(spaces.len(), 1, "deleting a space leaves the other");
     assert_eq!(spaces[0].path, "/tmp/pa");
     let pa_before = spaces[0].clone();
+    // Load-bearing, not decoration: `Db::upsert_space` stamps `created_at` from
+    // `now_ms()`, which has millisecond resolution, so without a real gap the
+    // recreated row can tie `pa_before.created_at` and the `>` below fails
+    // intermittently. A gap is the honest tool — `tests/storage.rs` cannot reach
+    // `Db::conn` and must not gain a test-only clock hook for this.
+    std::thread::sleep(std::time::Duration::from_millis(5));
     db.upsert_space("/tmp/pb", false)
         .expect("upsert_space /tmp/pb again");
     let spaces = db.list_spaces().expect("list_spaces");
