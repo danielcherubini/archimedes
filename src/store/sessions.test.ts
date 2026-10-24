@@ -870,7 +870,9 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
       info("first", "/workspaces/alpha"),
       info("second", "/workspaces/alpha"),
     ];
-    expect(autoSelectActive(spaces, twoLive, historySessions)).toBe("second");
+    expect(
+      autoSelectActive(spaces, twoLive, historySessions, recencyEvidence()),
+    ).toBe("second");
   });
 
   it("a space with three or more live sessions orders them newest-first", () => {
@@ -961,8 +963,8 @@ describe("autoSelectActive (boot auto-select, pure)", () => {
   ];
 
   it("returns null when there is nothing at all", () => {
-    expect(autoSelectActive([], [], [])).toBeNull();
-    expect(autoSelectActive(spaces, [], [])).toBeNull();
+    expect(autoSelectActive([], [], [], recencyEvidence())).toBeNull();
+    expect(autoSelectActive(spaces, [], [], recencyEvidence())).toBeNull();
   });
 
   it("prefers the first space's live session", () => {
@@ -973,16 +975,9 @@ describe("autoSelectActive (boot auto-select, pure)", () => {
     ];
     // Even if the other space's stored session is older/newer, the live
     // session in the most recent space wins.
-    expect(autoSelectActive(spaces, live, stored)).toBe("live-1");
-  });
-
-  it("falls back to the head of the first space's stored subsequence", () => {
-    const stored = [
-      info("newest-1", "/a/space-one"),
-      info("older-1", "/a/space-one"),
-    ];
-    // `historySessions` is most-recently-active first (server order): the head wins.
-    expect(autoSelectActive(spaces, [], stored)).toBe("newest-1");
+    expect(
+      autoSelectActive(spaces, live, stored, recencyEvidence()),
+    ).toBe("live-1");
   });
 
   it("skips a space with no sessions and advances to the next", () => {
@@ -990,20 +985,140 @@ describe("autoSelectActive (boot auto-select, pure)", () => {
       info("newest-2", "/a/space-two"),
       info("older-2", "/a/space-two"),
     ];
-    expect(autoSelectActive(spaces, [], stored)).toBe("newest-2");
+    expect(
+      autoSelectActive(spaces, [], stored, recencyEvidence()),
+    ).toBe("newest-2");
   });
 
-  it("the first (most recent) space wins over a newer session in another", () => {
+  it("a stored Session in the FIRST Space still beats a LIVE one in a later Space", () => {
+    // The loop's subtle half, and after ADR 0075 nothing else pins it:
+    // `autoSelectActive` walks SPACES first and only then considers live vs
+    // stored, so Space precedence outranks the live-over-stored preference.
+    // The evidence favours nothing in Space one (both of its rows are
+    // unevidenced), so the answer comes from the Space walk and not from
+    // recency — `"…lands on the most recent stored Session of the first Space…"`
+    // owns the within-Space choice.
+    const stored = [
+      info("newest-1", "/a/space-one"),
+      info("older-1", "/a/space-one"),
+    ];
+    const live = [info("live-two", "/a/space-two")];
+    expect(
+      autoSelectActive(spaces, live, stored, recencyEvidence({ "live-two": 9_000_000_000_000 })),
+    ).toBe("newest-1");
+  });
+
+  it("the FIRST Space in manual order wins over a more recent session in a later Space", () => {
     const stored = [
       info("head-1", "/a/space-one"),
-      info("brand-new-2", "/a/space-two"), // delivered first in input order
+      info("brand-new-2", "/a/space-two"),
       info("older-2", "/a/space-two"),
     ];
-    // Input/recency order wins: the FIRST space's head, even though the
-    // second space's stored session was created more recently. (We cannot
-    // check timestamps — `SessionInfo` has no `createdAt` — so input order
-    // is THE ordering.)
-    expect(autoSelectActive(spaces, [], stored)).toBe("head-1");
+    // The evidence now FAVOURS the second Space's row — the recency map IS the
+    // timestamp now, so the assertion proves the SPACE-level precedence rather
+    // than input order. Expected id unchanged from the pre-ADR-0075 fixture,
+    // reason entirely different: boot lands in the LEFTMOST Space that has
+    // anything, however stale its rows are.
+    expect(
+      autoSelectActive(
+        spaces,
+        [],
+        stored,
+        recencyEvidence({ "brand-new-2": 9_000_000_000_000, "head-1": 1_000 }),
+      ),
+    ).toBe("head-1");
+  });
+});
+
+describe("Landing Session (ADR 0075: recency decides, position never does)", () => {
+  beforeEach(() => resetStores());
+  afterEach(() => resetStores());
+
+  const space = (path: string): SpaceRow => ({
+    path,
+    createdAt: 0,
+    lastOpenedAt: 0,
+    trusted: false,
+  });
+
+  it("selectSpace lands on the most RECENT stored Session even when it sits LAST in the Space's manual order", () => {
+    // TWO COMPETING ANSWERS: the head of the stored subsequence is `hist_first`;
+    // max `recencyOf` is `hist_last`. This is the exact conflation ADR 0075 was
+    // written to break, at the tab-click site.
+    useSessions.setState({
+      spaces: [space("/a"), space("/b")],
+      activeSpacePath: "/a",
+      historySessions: [
+        info("hist_first", "/b"),
+        info("hist_last", "/b"),
+      ],
+      sessionRecency: { hist_first: 1_000, hist_last: 9_000_000_000_000 },
+    });
+    useSessions.getState().selectSpace("/b");
+    expect(useSessions.getState().activeSessionId).toBe("hist_last");
+  });
+
+  it("autoSelectActive lands on the most recent stored Session of the first Space in manual order, not its head", () => {
+    // The within-Space choice at BOOT: the first Space's stored subsequence is
+    // ["head", "tail"] and `tail` carries the far-future stamp. Head-first
+    // answers "head", max recency answers "tail".
+    expect(
+      autoSelectActive(
+        [space("/a/space-one"), space("/a/space-two")],
+        [],
+        [info("head", "/a/space-one"), info("tail", "/a/space-one")],
+        recencyEvidence({ head: 1_000, tail: 9_000_000_000_000 }),
+      ),
+    ).toBe("tail");
+  });
+
+  it("a Session dragged to the BOTTOM of the manual order is still the Landing Session when it is the most recent", () => {
+    // THE test that would have caught the original bug (spec §9), and the pin
+    // that keeps the two boot maps from contaminating each other: `bottom` has
+    // the LARGEST order number (so it renders LAST) and the NEWEST stamp (so
+    // boot lands on it). Point the Landing Session at the order map and this
+    // goes red.
+    useSessions.getState().setHistorySessions([
+      { ...info("top", "/a"), archived: false },
+      { ...info("bottom", "/a"), archived: false },
+    ]);
+    useSessions.getState().setSessionRecency([
+      { sessionId: "top", lastActiveAt: 1_000, sortOrder: 0 },
+      { sessionId: "bottom", lastActiveAt: 9_000_000_000_000, sortOrder: 5 },
+    ]);
+    useSessions.getState().setSpaces([space("/a")]);
+    expect(useSessions.getState().activeSessionId).toBe("bottom");
+    // …and it still RENDERS last, which is the half that must not move.
+    const s = useSessions.getState();
+    expect(
+      spaceViewFor(
+        s.spaces[0],
+        s.sessions,
+        s.historySessions,
+        s.closeReasons,
+        s.archivedSessions,
+        { recency: s.sessionRecency },
+        s.sessionOrder,
+      ).sessionIds,
+    ).toEqual(["top", "bottom"]);
+  });
+
+  it("removeSpace lands on the LEFTMOST remaining tab even when another Space holds the most recent Session", async () => {
+    // THE PIN — this rule must NOT change. THREE Spaces so the two rules
+    // disagree: after `/a` goes, `/b` is the LEFTMOST tab while `/c` holds the
+    // by-far-newest Session. "Leftmost neighbour" answers "/b"; "the Space with
+    // the most recent Session" (or "max recency over the remaining Spaces")
+    // answers "/c". Closing a tab lands you on the tab to its left, which is
+    // what the first row of the manual order now means.
+    useSessions.setState({
+      spaces: [space("/a"), space("/b"), space("/c")],
+      activeSpacePath: "/a",
+      historySessions: [info("sess-b", "/b"), info("sess-c", "/c")],
+      sessionRecency: { "sess-b": 1_000, "sess-c": 9_000_000_000_000 },
+    });
+    const fallback = await useSessions.getState().removeSpace("/a");
+    expect(fallback).toBe("/b");
+    expect(useSessions.getState().activeSpacePath).toBe("/b");
   });
 });
 
@@ -3164,6 +3279,10 @@ describe("activeSpacePath (the selected Space — the top tabs' state)", () => {
       closeReasons: {},
       messages: {},
       configOptions: {},
+      // Both boot maps too: the tests below seed them, and this file resets by
+      // hand-written key lists — an unnamed key leaks into the next case.
+      sessionRecency: {},
+      sessionOrder: {},
     });
   });
 
@@ -3221,21 +3340,31 @@ describe("activeSpacePath (the selected Space — the top tabs' state)", () => {
     expect(useSessions.getState().activeSpacePath).toBe("/a");
   });
 
-  it("selectSpace: live session preferred, then the newest stored, then nothing", () => {
+  it("selectSpace: live session preferred, then the most RECENT stored, then nothing", () => {
     useSessions.setState({
       spaces: [space("/a"), space("/b")],
       activeSpacePath: "/a",
     });
-    // /b holds a live + a stored session: the live wins.
+    // /b holds a live + a stored session: the live wins (a Space with a Worker
+    // mid-turn shows that turn, whatever recency says).
     useSessions.getState().addSession(info("live-1", "/b"));
     useSessions.getState().setHistorySessions([
+      { ...info("hist-first", "/b"), archived: false },
       { ...info("hist-1", "/b"), archived: false },
+    ]);
+    // The recency map favours the SECOND stored row, so "most recent" is
+    // distinguishable from "first in the list" — the two rules this test used to
+    // be unable to tell apart.
+    useSessions.getState().setSessionRecency([
+      { sessionId: "hist-first", lastActiveAt: 1_000, sortOrder: 0 },
+      { sessionId: "hist-1", lastActiveAt: 9_000_000_000_000, sortOrder: 1 },
     ]);
     useSessions.getState().selectSpace("/b");
     expect(useSessions.getState().activeSpacePath).toBe("/b");
     expect(useSessions.getState().activeSessionId).toBe("live-1");
 
-    // No live in /b: the NEWEST stored (input order — first wins).
+    // No live in /b: the most RECENT stored row, which is the one sitting LAST
+    // in the manual order.
     useSessions.getState().handleSessionClosed("live-1", "user");
     useSessions.getState().selectSpace("/b");
     expect(useSessions.getState().activeSessionId).toBe("hist-1");

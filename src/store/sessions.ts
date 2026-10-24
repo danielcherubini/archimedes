@@ -152,18 +152,24 @@ export function autoSelectActive(
   spaces: SpaceRow[],
   sessions: SessionInfo[],
   historySessions: SessionInfo[],
+  evidence: RecencyEvidence,
 ): string | null {
+  // Spaces are in the user's MANUAL ORDER, so the FIRST Space that owns any
+  // session is the leftmost tab with something to show — that is the meaning
+  // boot wants, and it is unchanged. What changed is the WITHIN-Space choice:
+  // the most RECENT stored Session by `recencyOf`, not the head of the
+  // subsequence (ADR 0075).
   for (const space of spaces) {
     // A space may hold MORE than one live session (the one-live cap is
     // lifted): `mostRecentLiveInSpace` picks the
     // most-recently-started one (coherent with `activeSessionId`).
     const live = mostRecentLiveInSpace(sessions, space.path);
     if (live) return live;
-    // No re-sort: input order IS newest-first (see the ordering note).
     const stored = historySessions
       .filter((s) => s.cwd === space.path)
       .map((s) => s.sessionId);
-    if (stored.length > 0) return stored[0];
+    const recent = mostRecentByRecency(stored, evidence);
+    if (recent !== null) return recent;
   }
   return null;
 }
@@ -784,7 +790,10 @@ export const useSessions = create<SessionsState>((set, get) => ({
     const state = get();
     const selectedId =
       state.activeSessionId === null
-        ? autoSelectActive(rows, state.sessions, state.historySessions)
+        ? autoSelectActive(rows, state.sessions, state.historySessions, {
+            recency: state.sessionRecency,
+            messages: state.messages,
+          })
         : state.activeSessionId;
     // The selected session's space (matched by `cwd` — the session's `cwd`
     // IS the Space's folder); when nothing is selected, the most recent
@@ -841,11 +850,20 @@ export const useSessions = create<SessionsState>((set, get) => ({
     const state = get();
     if (!state.spaces.some((s) => s.path === path)) return;
     // Live first (the most-recently-started one — the one-live-cap-lifted
-    // rule), then the newest stored (input order — do NOT re-sort), then
-    // nothing (an empty space → the chat's empty state).
+    // rule), then the most RECENT stored Session (ADR 0075 — NOT the first row
+    // of the Space's manual order), then nothing (an empty space → the chat's
+    // empty state). Both maps go in because this action reads state
+    // imperatively: there is no subscription here, so none of the re-render
+    // cost that keeps `messages` out of the sidebar's call site applies.
     const live = mostRecentLiveInSpace(state.sessions, path);
-    const stored =
-      state.historySessions.find((s) => s.cwd === path)?.sessionId ?? null;
+    const evidence: RecencyEvidence = {
+      recency: state.sessionRecency,
+      messages: state.messages,
+    };
+    const stored = mostRecentByRecency(
+      state.historySessions.filter((s) => s.cwd === path).map((s) => s.sessionId),
+      evidence,
+    );
     const id = live ?? stored;
     set({ activeSpacePath: path, activeSessionId: id });
     // Load the opened session's transcript (a no-op when already loaded —
@@ -870,8 +888,9 @@ export const useSessions = create<SessionsState>((set, get) => ({
       fallback = wasSelected ? (remaining[0]?.path ?? null) : null;
       return {
         spaces: remaining,
-        // The removed space was the selected one: fall back to the first
-        // remaining space (input order — `lastOpenedAt` desc) or `null`.
+        // The removed space was the selected one: fall back to the LEFTMOST
+        // remaining tab — since ADR 0075 the first row is the user's left-most
+        // tab, which is what a neighbour tab means — or `null`.
         ...(wasSelected ? { activeSpacePath: fallback } : {}),
       };
     });
