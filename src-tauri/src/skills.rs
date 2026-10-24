@@ -662,9 +662,22 @@ pub(crate) fn is_mentionable_name(name: &str) -> bool {
 /// string `# internal`).
 ///
 /// A LEADING QUOTE is respected: the comment only starts after the CLOSING quote,
-/// so `"# keep"` survives and `"a # b" # note` is `a # b`. A double-quoted scalar
-/// escapes with a backslash (`\"`); a single-quoted one does not, so the escape is
-/// only consumed for `"`.
+/// so `"# keep"` survives and `"a # b" # note` is `a # b`. Each quote style then
+/// follows ITS OWN YAML escape rule, and they are different rules:
+/// - a DOUBLE-quoted scalar escapes with a BACKSLASH, so `\"` is content and does
+///   not close the scalar: `"a \" # b"` is one scalar to pi, and the `#` inside it
+///   is not a comment. (This scanner needs the escape only for SCANNING; the
+///   backslash itself is never un-escaped, so the value keeps `\"` where pi's
+///   `yaml` would report `"`. That gap predates the comment strip and is the same
+///   "the tolerant reader does not model every YAML shape" residual ADR 0036
+///   accepts — it is NOT silently widened here.)
+/// - a SINGLE-quoted scalar has no backslash escape at all — its escape is a
+///   DOUBLED `''`, so `''` is content and does not close the scalar either:
+///   `'it''s fine' # note` closes at the LAST `'`, and a scanner that closed on
+///   the second one would test the tail `s fine' # note`, find no space-then-`#`,
+///   and strip NOTHING — the silent no-op on exactly the shape this function
+///   exists for. The pair is then un-doubled by [`parse_value`], so the value the
+///   two keys share is `it's fine`, as pi's `yaml` reports it.
 ///
 /// TOTAL, like every other reader here: every offset it slices at is either the
 /// byte index of an ASCII `#` or a boundary advanced by `char::len_utf8()`, so it
@@ -676,7 +689,8 @@ fn strip_trailing_comment(inline: &str) -> &str {
         let mut skip_next = false;
         // `.skip(1)` starts the scan AFTER the opening quote (`skip` counts
         // items, not bytes, and both quote chars are one byte).
-        for (i, c) in inline.char_indices().skip(1) {
+        let mut chars = inline.char_indices().skip(1).peekable();
+        while let Some((i, c)) = chars.next() {
             if skip_next {
                 skip_next = false;
                 continue;
@@ -686,6 +700,14 @@ fn strip_trailing_comment(inline: &str) -> &str {
                 continue;
             }
             if c == quote {
+                // The `''` rule above: consume the SECOND quote of the pair and
+                // keep scanning for the real close. (`peek`/`next` on the same
+                // peekable iterator — the pair is advanced one `char` at a time,
+                // so every slice offset below stays a `char_indices` boundary.)
+                if quote == '\'' && chars.peek().is_some_and(|(_, p)| *p == '\'') {
+                    chars.next();
+                    continue;
+                }
                 let close = i + c.len_utf8();
                 let tail = &inline[close..];
                 return if tail.starts_with([' ', '\t'])
@@ -716,7 +738,9 @@ fn strip_trailing_comment(inline: &str) -> &str {
 /// - inline: the rest of the line, trimmed; a trailing `#` comment introduced
 ///   by an ASCII space or tab is stripped first, and a `#` that opens the value
 ///   makes the whole value empty — see [`strip_trailing_comment`]; strip one
-///   pair of matching surrounding quotes; an empty inline value means "no value".
+///   pair of matching surrounding quotes (a SINGLE-quoted scalar additionally
+///   un-doubles its `''` escapes, which is what its escape rule means — see
+///   below); an empty inline value means "no value".
 /// - block: the inline value is exactly `|` or `>` (optionally followed
 ///   by ONE chomping/indent indicator — `-` or `+ — with any further
 ///   trailing whitespace: the value is the following indented lines
@@ -787,7 +811,34 @@ fn parse_value(fm: &[&str], idx: usize, rest: &str) -> Option<String> {
     let first = inline.chars().next().unwrap();
     let last = inline.chars().next_back().unwrap();
     if (first == '"' || first == '\'') && first == last && inline.len() >= 2 {
-        return Some(inline[1..inline.len() - 1].to_string());
+        let inner = &inline[1..inline.len() - 1];
+        // A SINGLE-quoted scalar's `''` is an ESCAPE, not content: YAML resolves
+        // the pair to one `'`, so `'it''s fine'` is `it's fine` to pi and NOT
+        // `it''s fine`. This belongs to the strip above and is not optional
+        // decoration — `strip_trailing_comment` now scans PAST a `''` pair to
+        // find the real close, so a strip that left the pair intact would hand
+        // back doubled quotes pi never produces.
+        //
+        // SINGLE QUOTES ONLY, deliberately: inside a DOUBLE-quoted scalar `''`
+        // is two literal apostrophes (its escape is the backslash), so
+        // `"it''s"` stays `it''s` for pi and stays untouched here.
+        //
+        // DIVERGENCE from `agents.rs`'s copy of this function, and the "apply
+        // shape bugs to BOTH copies" rule it states: that copy mirrors pi's
+        // SUBAGENT reader (`pi-subagents/src/agents/frontmatter.ts`), a
+        // hand-rolled regex reader that slices one quote pair off and NOTHING
+        // ELSE — measured against it, `description: 'it''s'` is `it''s`, quotes
+        // stripped, pair left doubled. Un-doubling there would move the desktop
+        // away from its only pi-side parity target, exactly as the trailing-`#`
+        // strip does (that carve-out's doc names the same reason). So this
+        // clause is a SECOND, named exception to the "both copies" rule: the
+        // rule binds for the guards both readers share (the NBSP/dedent
+        // byte-offset guard, the `: ` guard), and NOT for either of the two
+        // places where the two upstream readers genuinely differ.
+        if first == '\'' {
+            return Some(inner.replace("''", "'"));
+        }
+        return Some(inner.to_string());
     }
     // Unquoted inline containing `: ` (a YAML mapping ambiguity) → no
     // value (tolerant, no crash).
@@ -1434,5 +1485,49 @@ mod tests {
             Some("# keep")
         );
         assert_eq!(parse_value(&[], 0, " # note").as_deref(), None);
+    }
+
+    /// The two quote-escape rules, pinned at the value level (the comment-strip
+    /// side is pinned end-to-end by `tests/skills.rs`'s
+    /// `inline_values_strip_the_comment_pi_strips`).
+    ///
+    /// Expected values were measured against pi's own `yaml@2.9.0`, the parity
+    /// target this reader mirrors. The LAST case is the accepted residual: the
+    /// reader strips the comment correctly but never un-escapes `\"`, so the
+    /// value keeps the backslashes pi would drop. Pinning the divergence here
+    /// keeps the doc's claim honest and reddens if the gap is ever closed (in
+    /// which case this row moves, and the doc sentence with it).
+    #[test]
+    fn each_quote_style_follows_its_own_yaml_escape_rule() {
+        // Single-quoted: `''` is the escape — it does not close the scalar, and
+        // the pair un-doubles in the value.
+        assert_eq!(
+            parse_value(&[], 0, " 'it''s fine' # note").as_deref(),
+            Some("it's fine")
+        );
+        assert_eq!(
+            parse_value(&[], 0, " 'don''t # say' # note").as_deref(),
+            Some("don't # say"),
+            "a `#` INSIDE the scalar is content; only the comment after the real \
+             closing quote is stripped"
+        );
+        assert_eq!(parse_value(&[], 0, " 'it''s'").as_deref(), Some("it's"));
+        assert_eq!(parse_value(&[], 0, " '''").as_deref(), Some("'"));
+        // Double-quoted: the BACKSLASH is the escape (the `#` after it is inside
+        // the scalar), and a `''` pair inside a double-quoted scalar is TWO LITERAL
+        // apostrophes — YAML has no doubling rule there, so nothing un-doubles.
+        assert_eq!(
+            parse_value(&[], 0, " \"a \\\" # b\"").as_deref(),
+            Some("a \\\" # b"),
+            "the escaped quote does not close the scalar, so the `#` is scalar text"
+        );
+        assert_eq!(parse_value(&[], 0, " \"it''s\"").as_deref(), Some("it''s"));
+        // The accepted residual: `\"` is never un-escaped (pi gives `a " b`).
+        assert_eq!(
+            parse_value(&[], 0, " \"a \\\" b\" # note").as_deref(),
+            Some("a \\\" b"),
+            "the comment is stripped and the quotes removed, but the backslash \
+             escape is NOT resolved — the documented fail-open gap"
+        );
     }
 }

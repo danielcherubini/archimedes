@@ -443,6 +443,19 @@ fn parse_tools(raw: &str) -> Option<Vec<String>> {
 /// strip. Should that scoping ever be revisited, it needs its own parity target
 /// decided first, plus a truth table here — issue #11 is about Skills only.
 ///
+/// A SECOND exception sits in the quote pair itself, and it narrows the
+/// "the quote pair" clause above rather than contradicting it: `skills.rs` now
+/// additionally UN-DOUBLES a SINGLE-quoted scalar's `''` escapes, because YAML's
+/// single-quote escape IS the doubled pair and `yaml` resolves it to one `'`
+/// (`'it''s fine'` → `it's fine`). This copy must NOT do that. The same
+/// `frontmatter.ts` reader slices one quote pair off and stops
+/// (`value = value.slice(1, -1)`) — measured against it, `description: 'it''s'`
+/// is `it''s`, pair still doubled. So the shared part of the quote pair is what
+/// both readers actually do (remove one matching surrounding pair); the
+/// un-doubling belongs to the `yaml`-backed reader alone, for the same reason as
+/// the comment strip above: a second divergence in the same direction, against
+/// the same target, manufactured for free. Each side names the other.
+///
 /// - inline: the rest of the line, trimmed; strip one pair of matching
 ///   surrounding quotes; an empty inline value means "no value".
 /// - block: the inline value is exactly `|` or `>` (optionally followed
@@ -639,6 +652,65 @@ mod tests {
         let s2 = out.iter().find(|d| d.name == "s2").unwrap();
         assert_eq!(s1.tools, Some(vec!["read".to_string(), "bash".to_string()]));
         assert_eq!(s2.tools, Some(vec!["read".to_string(), "bash".to_string()]));
+    }
+
+    /// The two `parse_value` copies are DOCUMENTED to diverge on exactly two
+    /// shapes (see this fn's doc: the trailing `#` strip and the single-quoted
+    /// `''` un-doubling), and the doc is only worth anything if a change that
+    /// re-unifies them is caught. So this pins the DIVERGENCE at the discovery
+    /// level — both public readers, one frontmatter text, two expected values —
+    /// rather than asserting equality (which would be the wrong invariant) or
+    /// reading a private fn (which would need the visibility change ADR 0020
+    /// forbids).
+    ///
+    /// Both expected values were measured against the parity target each copy
+    /// names: pi's `yaml@2.9.0` (`'it''s fine' # note` → `it's fine`) and
+    /// `pi-subagents/src/agents/frontmatter.ts` (`'it''s fine' # note` →
+    /// `'it''s fine' # note`). That reader has NO comment rule at all, and its
+    /// quote slice needs the value to START and END with the same quote — this
+    /// one ends in `note`, so neither rule fires and the value is verbatim.
+    #[test]
+    fn the_two_parse_value_copies_diverge_where_their_parity_targets_differ() {
+        let root = scratch();
+        // The agent side (this module's copy).
+        write_file(
+            &root.join("quote.md"),
+            "---\nname: quote\ndescription: 'it''s fine' # note\n---\nB.\n",
+        );
+        // The skill side (`skills.rs`'s copy) — the SAME frontmatter text, in a
+        // `SKILL.md` under its own dir.
+        write_file(
+            &root.join("skills/quote/SKILL.md"),
+            "---\nname: quote\ndescription: 'it''s fine' # note\n---\nB.\n",
+        );
+
+        let agents = discover_in_roots(&[(root.clone(), AgentScope::Space)]);
+        assert_eq!(
+            agents.len(),
+            1,
+            "the agent must still be discovered: {agents:?}"
+        );
+        assert_eq!(
+            agents[0].description, "'it''s fine' # note",
+            "this copy mirrors `frontmatter.ts`, which has no comment rule at all \
+             and whose quote slice needs the value to start AND end with the same \
+             quote (this one ends in `note`, so it does not fire) — the value is \
+             verbatim. Un-doubling or stripping here would manufacture the \
+             divergence ADR 0036 exists to prevent"
+        );
+
+        let skills =
+            crate::skills::discover_in_roots(&[(root.clone(), crate::skills::SkillScope::User)]);
+        assert_eq!(
+            skills.len(),
+            1,
+            "the skill must still be discovered: {skills:?}"
+        );
+        assert_eq!(
+            skills[0].description, "it's fine",
+            "`skills.rs` mirrors pi's `yaml`, which strips the comment and \
+             resolves the `''` escape to one `'`"
+        );
     }
 
     // 6

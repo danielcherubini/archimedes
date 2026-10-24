@@ -186,6 +186,29 @@ fn inline_values_strip_the_comment_pi_strips() {
         ),
         ("name: alpha\ndescription: \"text\" # note", "alpha", "text"),
         ("name: \"a b\" # note\ndescription: d", "a b", "d"),
+        // THE SINGLE-QUOTED SHAPE, where YAML's own escape is a DOUBLED `''`
+        // and NOT a backslash. The pair is what makes these rows the interesting
+        // ones: a scanner that treats every `'` as a closer ends the scalar at
+        // the SECOND quote of `''`, and the tail it then tests (`s fine' # note`)
+        // starts with no space-then-`#`, so the strip silently does NOTHING and
+        // both quotes plus the comment reach the description. pi's
+        // `yaml@2.9.0` un-doubles the pair and closes at the LAST `'`, giving
+        // `it's fine`.
+        (
+            "name: x\ndescription: 'it''s fine' # note",
+            "x",
+            "it's fine",
+        ),
+        // …the same scalar with NO comment after it (the pair still un-doubles
+        // rather than reading as a closed scalar plus junk).
+        ("name: alpha\ndescription: 'it''s'", "alpha", "it's"),
+        // a `#` INSIDE the doubled-quote scalar is scalar text; the comment is
+        // the one that follows the REAL closing quote.
+        (
+            "name: alpha\ndescription: 'don''t # say' # note",
+            "alpha",
+            "don't # say",
+        ),
         // no ASCII space/tab before the `#` ⇒ scalar text, NOT a comment
         (
             "name: alpha\ndescription: has#nospace",
