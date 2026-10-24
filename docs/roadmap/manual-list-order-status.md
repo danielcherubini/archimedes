@@ -71,7 +71,7 @@ never share a wave. Wave 6 is the only parallel wave.
 |---|------|-----------|------|------------------------------|--------|
 | T01 | SQLite `sort_order` on `spaces` + `sessions`: schema, pragma-gated migration seeded `0..n` in today's order, `MAX+1` on insert, `ORDER BY` swap on `list_spaces`/`list_sessions`, `reorder_spaces`/`reorder_sessions` in one transaction | `docs/roadmap/manual-list-order-task01-sort-order-columns.md` | 1 | `src-tauri/src/storage/db.rs` (owned outright) + `src-tauri/tests/storage.rs` | `done` `221d306` |
 | T02 | IPC surface: `last_active_at` SELECTed from the existing `COALESCE` expression (characterisation test first), the two reorder commands exposed + registered, TS mirrors in `lib/tauri/` | `docs/roadmap/manual-list-order-task02-ipc-last-active-at.md` | 2 | `src-tauri/src/storage/db.rs` (SessionRecency + Db::session_recency — DEVIATION: not types.rs, see Decisions), `src-tauri/src/commands/{history,spaces}.rs`, `src-tauri/src/lib.rs`, `src/lib/tauri/types.ts`, `src/lib/tauri/commands/*`, `src-tauri/tests/ipc.rs` | `done` `3386975` |
-| T03 | Store derivation: `recencyOf` (new module beside `sessionTitle.ts`), `SpaceView.sessionIds` replaces the live/stored pair, the four position-reading landing rules switch to recency, Archived sorts explicitly | `docs/roadmap/manual-list-order-task03-store-derivation.md` | 3 | `src/store/sessions.ts`, `src/lib/sessionRecency.ts` (new), `src/store/sessions.test.ts` | `todo` |
+| T03 | Store derivation: `recencyOf` (new module beside `sessionTitle.ts`), `SpaceView.sessionIds` replaces the live/stored pair, the four position-reading landing rules switch to recency, Archived sorts explicitly | `docs/roadmap/manual-list-order-task03-store-derivation.md` | 3 | `src/store/sessions.ts`, `src/lib/sessionRecency.ts` (new), `src/store/sessions.test.ts` + GRANTED: `src/components/SpacesList.tsx` (call-sites only), `src/App.tsx` + `src/App.test.tsx` (boot wiring), `src-tauri/src/storage/db.rs`, `src/lib/tauri/types.ts`, `commands/history.rs` (wire-key literal test) | `done` `cc6ecd2` |
 | T04 | Sidebar renders one list: delete `sortByActivity` memos + the activity subscription, `railIds = sessionIds`, DELETE `src/lib/sessionActivity.ts` and its test, delete the 3 ordering tests, reword the rail pin | `docs/roadmap/manual-list-order-task04-sidebar-one-list.md` | 4 | `src/components/SpacesList.tsx`, delete `src/lib/sessionActivity.ts` + `.test.ts` | `todo` |
 | T05 | The drag gesture: `useDragReorder` hook (dragProps, before/after by pointer half, indicator state) + the store's optimistic reorder actions over one IPC call | `docs/roadmap/manual-list-order-task05-drag-reorder-hook.md` | 5 | `src/hooks/useDragReorder.ts` (new) + test; `src/store/sessions.ts` (reorder actions only) | `todo` |
 | T06 | Wire the sidebar rows: `draggable` on `SessionListRow`, a drop-edge indicator prop, hover actions `draggable={false}` | `docs/roadmap/manual-list-order-task06-wire-sidebar-rows.md` | 6 | `src/components/SpacesList.tsx`, `src/components/SessionListRow.tsx` + `SessionListRow.test.tsx` | `todo` |
@@ -230,6 +230,30 @@ deliberately left undone.
   cause); `src-tauri/src/storage/db.rs`, `src/lib/tauri/types.ts` and
   `commands/history.rs` (a pinned wire-key literal test) join T03's seam for the
   payload field — temporal overlap with the already-merged T02, not concurrent.
+
+- 2026-10-24 — **T03 DONE** (`88bc242` `76288c2` `90d4621` `b51cf57` `cc6ecd2`).
+  Gates measured by the orchestrator: `pnpm test` **3086 / 150 files** (was
+  3066/149) · `pnpm build` green · `cargo test` **1463 / 0 failed** · clippy **0
+  warnings** · fmt clean. Successor proof verified: `sort_order` → **0** hits in
+  `src/`, `sortOrder` → **0** hits in `src/components/**`; `SpacesList.test.tsx`
+  has **zero** diff (the seam grant held).
+- 2026-10-24 — **MUTATION-TESTED BY THE ORCHESTRATOR (the strongest proof on
+  this branch so far):** `mergeSessionOrder`'s body was replaced with the OLD
+  live-first concatenation and `a Session RESUMED this boot keeps the MIDDLE
+  slot the database holds for it` went RED, then green again on restore. So the
+  user's core complaint — rows moving on their own — is pinned by a test that
+  actually fails when the behaviour regresses. Recorded here because the
+  child's "competing answers" claims are otherwise taken on trust; two earlier
+  tasks on this branch shipped tests that passed vacuously.
+- 2026-10-24 — **THE CHILD FOUND AND FIXED A VACUOUS TEST the plan itself
+  specified** (`…falls back to the most recent ARCHIVED Session only when…`: the
+  plan's own fixture gave the same answer under the old head-of-list rule and
+  the new max-recency rule). Rebuilt to discriminate three rules. It also
+  correctly refused to claim reds for two plan items whose fixtures could not be
+  red, keeping them as pins with the changed REASON stated in-test. Plan
+  red-count predictions were therefore wrong twice (10 not 9; 4 not 5–6) —
+  **the plan's predicted red counts are not trustworthy on this feature; measure
+  them.**
 
 ## Changelog
 
