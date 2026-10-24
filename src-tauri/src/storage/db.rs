@@ -572,6 +572,36 @@ impl Db {
         Ok(n > 0)
     }
 
+    /// Rewrite the manual order of the given session ids in ONE transaction:
+    /// the slice index becomes `sort_order` (ADR 0075 — only a drag calls this).
+    ///
+    /// Keyed by the stored id RAW, as `session`/`set_session_archived` are: the
+    /// ids come from a `list_sessions()` result and are already the stored key.
+    /// An id that matches no row is a no-op.
+    ///
+    /// The slice is the sidebar's VISIBLE list of ONE Space, but the numbering is
+    /// GLOBAL, so this renumbers hidden `is_subagent = 1` rows too whenever the
+    /// caller hands one back (hazard H1: a hidden row consumes a number) and
+    /// leaves every other Space's rows on their old numbers — which therefore
+    /// COLLIDE with the freshly written ones. That is the intended steady state,
+    /// not corruption: `ORDER BY sort_order ASC, id DESC` is total, so reads stay
+    /// deterministic, and display is per-Space, so no surface ever renders two
+    /// Spaces' rows side by side by `sort_order` alone. Renumbering the untouched
+    /// rows to keep the column globally unique would move rows the user did not
+    /// drag, in Spaces they are not looking at.
+    pub fn reorder_sessions(&self, ids: &[String]) -> Result<(), DbError> {
+        let mut guard = self.conn.lock().expect("db mutex poisoned");
+        let tx = guard.transaction()?;
+        for (index, id) in ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE sessions SET sort_order = ?2 WHERE id = ?1",
+                params![id, index as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Set a session's title ONLY when it has none (`title IS NULL`), so a
     /// title that already exists — a generated one from an earlier turn, or
     /// one a future rename affordance wrote — is never overwritten. The
@@ -876,6 +906,30 @@ impl Db {
             .lock()
             .expect("db mutex poisoned")
             .execute("DELETE FROM spaces WHERE path = ?1", params![path])?;
+        Ok(())
+    }
+
+    /// Rewrite the manual order of the given space paths in ONE transaction:
+    /// the slice index becomes `sort_order` (ADR 0075 — only a drag calls this).
+    ///
+    /// Keyed by the stored path RAW, as `find_space`/`delete_space` do: the ids
+    /// come from a `list_spaces()` result and are already the stored key, and
+    /// re-canonicalizing would silently skip a row whose folder is gone and
+    /// leave a PARTIAL renumber behind. An id that matches no row is a no-op.
+    ///
+    /// Unlike `reorder_sessions` this always renumbers the WHOLE table: the
+    /// sidebar's tab strip passes every Space it shows, so a space reorder cannot
+    /// leave numbers colliding with rows it never saw.
+    pub fn reorder_spaces(&self, paths: &[String]) -> Result<(), DbError> {
+        let mut guard = self.conn.lock().expect("db mutex poisoned");
+        let tx = guard.transaction()?;
+        for (index, path) in paths.iter().enumerate() {
+            tx.execute(
+                "UPDATE spaces SET sort_order = ?2 WHERE path = ?1",
+                params![path, index as i64],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 }
@@ -3090,6 +3144,272 @@ mod tests {
         assert_eq!(
             at_zero, 1,
             "exactly one row sits at 0 — not every backfilled row tied there"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// `reorder_spaces` writes the given slice as `sort_order`, in one call:
+    /// the slice INDEX becomes the value, so the list comes back exactly as
+    /// handed and the numbers are the dense `0..n` the caller implied.
+    #[test]
+    fn reorder_spaces_writes_the_given_order() {
+        let dir = std::env::temp_dir().join(format!("db-reordersp-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).expect("db should open");
+        let keys = ["aaa", "mmm", "zzz"].map(|n| {
+            let d = dir.join(n);
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        });
+        for d in &keys {
+            db.upsert_space(d.to_str().unwrap(), false)
+                .expect("upsert_space should succeed");
+        }
+        // The canonical keys — exactly the strings `list_spaces()` returns, which
+        // is where the frontend's ids come from.
+        let paths: Vec<String> = keys
+            .iter()
+            .map(|d| std::fs::canonicalize(d).unwrap().display().to_string())
+            .collect();
+        let (a, b, c) = (paths[0].clone(), paths[1].clone(), paths[2].clone());
+        // The dragged order the plan names: `[c, a, b]`.
+        let wanted = vec![c.clone(), a.clone(), b.clone()];
+
+        db.reorder_spaces(&wanted)
+            .expect("reorder_spaces should succeed");
+
+        let listed: Vec<String> = db
+            .list_spaces()
+            .expect("list_spaces should succeed")
+            .into_iter()
+            .map(|s| s.path)
+            .collect();
+        assert_eq!(
+            listed, wanted,
+            "the list comes back in the order the caller passed"
+        );
+        assert_eq!(
+            raw_i64s(&db, "SELECT sort_order FROM spaces ORDER BY sort_order ASC"),
+            vec![0, 1, 2],
+            "the slice index became the value, densely from 0"
+        );
+        assert_eq!(sort_order_of(&db, "spaces", "path", &c), 0);
+        assert_eq!(sort_order_of(&db, "spaces", "path", &a), 1);
+        assert_eq!(sort_order_of(&db, "spaces", "path", &b), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reorder is PERSISTED work, not a view: it survives a close + re-open,
+    /// i.e. the one-time seed gate stays closed and does not clobber the order.
+    #[test]
+    fn reorder_spaces_survives_a_reopen() {
+        let dir = std::env::temp_dir().join(format!("db-reopentest-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let db = Db::open(&path).expect("db should open");
+        let keys: Vec<String> = ["aaa", "mmm", "zzz"]
+            .iter()
+            .map(|n| {
+                let d = dir.join(n);
+                std::fs::create_dir_all(&d).unwrap();
+                std::fs::canonicalize(d).unwrap().display().to_string()
+            })
+            .collect();
+        for k in &keys {
+            db.upsert_space(k, false)
+                .expect("upsert_space should succeed");
+        }
+        let wanted = vec![keys[2].clone(), keys[0].clone(), keys[1].clone()];
+        db.reorder_spaces(&wanted)
+            .expect("reorder_spaces should succeed");
+        drop(db);
+
+        let db = Db::open(&path).expect("re-open must succeed");
+        let listed: Vec<String> = db
+            .list_spaces()
+            .expect("list_spaces should succeed")
+            .into_iter()
+            .map(|s| s.path)
+            .collect();
+        assert_eq!(
+            listed, wanted,
+            "the reorder survives the re-open — the seed gate did not fire and did not renumber"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An id the caller never heard of is a NO-OP, not an error, and it still
+    /// occupies its slot: the slice index is the value, so the two known rows
+    /// land at 1 and 2. This pins the documented semantics rather than leaving
+    /// them undefined.
+    #[test]
+    fn reorder_spaces_with_an_unknown_path_is_not_an_error() {
+        let dir =
+            std::env::temp_dir().join(format!("db-reordernope-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).expect("db should open");
+        let keys: Vec<String> = ["aaa", "mmm"]
+            .iter()
+            .map(|n| {
+                let d = dir.join(n);
+                std::fs::create_dir_all(&d).unwrap();
+                std::fs::canonicalize(d).unwrap().display().to_string()
+            })
+            .collect();
+        for k in &keys {
+            db.upsert_space(k, false)
+                .expect("upsert_space should succeed");
+        }
+
+        let unknown = format!("/nope-{}", uuid::Uuid::new_v4());
+        let slice = vec![unknown, keys[0].clone(), keys[1].clone()];
+        assert!(
+            db.reorder_spaces(&slice).is_ok(),
+            "an id matching no row updates nothing and is not an error"
+        );
+        assert_eq!(
+            sort_order_of(&db, "spaces", "path", &keys[0]),
+            1,
+            "the unknown id occupied slot 0, so the first known row is at 1"
+        );
+        assert_eq!(
+            sort_order_of(&db, "spaces", "path", &keys[1]),
+            2,
+            "and the second known row at 2"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `reorder_sessions` writes the visible slice's order AND renumbers hidden
+    /// subagent rows too (hazard H1's consequence: the bottom-join `MAX + 1` is
+    /// global, so a hidden row occupies a number and the caller may legitimately
+    /// hand one back). `list_sessions` filters `is_subagent = 0`, so the hidden
+    /// row never appears in ANY `list_*` result and the ONLY witness that its
+    /// number moved is raw SQL against the connection.
+    #[test]
+    fn reorder_sessions_writes_the_given_order() {
+        let dir = std::env::temp_dir().join(format!("db-reorderses-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let db = Db::open(&path).expect("db should open");
+        let cwd = Path::new("/tmp/proj");
+        for id in ["s_0", "s_1", "s_2"] {
+            db.record_session(&session_on(id, cwd, false))
+                .expect("record_session should succeed");
+        }
+        db.record_session(&session_on("s_hidden", cwd, true))
+            .expect("record the subagent row");
+        assert_eq!(
+            sort_order_of(&db, "sessions", "id", "s_hidden"),
+            3,
+            "the hidden row consumed the next global number"
+        );
+
+        // The hidden row goes to the FRONT, so its number provably moves 3 → 0;
+        // the visible three keep the relative order the plan names.
+        let slice: Vec<String> = ["s_hidden", "s_2", "s_0", "s_1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        db.reorder_sessions(&slice)
+            .expect("reorder_sessions should succeed");
+
+        let ids: Vec<String> = db
+            .list_sessions(false)
+            .expect("list_sessions should succeed")
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["s_2", "s_0", "s_1"],
+            "the visible rows come back in the order the caller passed"
+        );
+        assert_eq!(
+            sort_order_of(&db, "sessions", "id", "s_hidden"),
+            0,
+            "the hidden subagent row was renumbered by id like any other"
+        );
+        drop(db);
+
+        let db = Db::open(&path).expect("re-open must succeed");
+        let ids: Vec<String> = db
+            .list_sessions(false)
+            .expect("list_sessions should succeed")
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["s_2", "s_0", "s_1"],
+            "the reorder survives the re-open"
+        );
+        assert_eq!(
+            sort_order_of(&db, "sessions", "id", "s_hidden"),
+            0,
+            "and the hidden row's new number survives it too"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reorder renumbers ONLY the slice it was handed. The sidebar passes the
+    /// visible sessions of ONE Space, so another Space's rows keep their old
+    /// numbers and therefore COLLIDE with the freshly written ones — the expected
+    /// steady state of a global numbering with per-Space drags, not corruption
+    /// this call should have repaired.
+    ///
+    /// The fixture records a1, b1, b2, a2 so Space A's two rows STRADDLE B's;
+    /// record them a1, a2, b1, b2 and no collision is possible at all.
+    #[test]
+    fn reorder_sessions_is_per_space_even_when_numbers_collide_across_spaces() {
+        let dir = std::env::temp_dir().join(format!("db-reorderps-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).expect("db should open");
+        // Canonical cwds, so the `cwd` string the rows store is the string we filter on.
+        let dir_a = dir.join("space_a");
+        let dir_b = dir.join("space_b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        let a = std::fs::canonicalize(&dir_a).unwrap();
+        let b = std::fs::canonicalize(&dir_b).unwrap();
+        for id in ["a1", "b1", "b2", "a2"] {
+            let cwd = if id.starts_with('a') { &a } else { &b };
+            db.record_session(&session_on(id, cwd, false))
+                .expect("record_session should succeed");
+        }
+
+        // Drag Space A's two visible rows only — B's rows are never passed.
+        let slice: Vec<String> = ["a2", "a1"].iter().map(|s| s.to_string()).collect();
+        db.reorder_sessions(&slice)
+            .expect("reorder_sessions should succeed");
+
+        let listed = db
+            .list_sessions(false)
+            .expect("list_sessions should succeed");
+        let of = |root: &Path| -> Vec<String> {
+            listed
+                .iter()
+                .filter(|r| r.cwd == root.display().to_string())
+                .map(|r| r.id.clone())
+                .collect()
+        };
+        assert_eq!(
+            of(&a),
+            vec!["a2", "a1"],
+            "the dragged Space reads in the dragged order"
+        );
+        assert_eq!(
+            of(&b),
+            vec!["b1", "b2"],
+            "the untouched Space keeps its own order, whatever the numbers now say"
+        );
+        let total = raw_scalar(&db, "SELECT COUNT(*) FROM sessions");
+        let distinct = raw_scalar(&db, "SELECT COUNT(DISTINCT sort_order) FROM sessions");
+        assert_eq!(
+            (total, distinct),
+            (4, 3),
+            "`a1` now sits exactly where `b1` already was — a duplicate number \
+             across Spaces is expected, and `ORDER BY sort_order ASC, id DESC` is \
+             still total so every read stays deterministic"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
