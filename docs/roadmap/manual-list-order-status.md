@@ -70,7 +70,7 @@ never share a wave. Wave 6 is the only parallel wave.
 | # | Task | Plan file | Wave | Seam (disjointness evidence) | Status |
 |---|------|-----------|------|------------------------------|--------|
 | T01 | SQLite `sort_order` on `spaces` + `sessions`: schema, pragma-gated migration seeded `0..n` in today's order, `MAX+1` on insert, `ORDER BY` swap on `list_spaces`/`list_sessions`, `reorder_spaces`/`reorder_sessions` in one transaction | `docs/roadmap/manual-list-order-task01-sort-order-columns.md` | 1 | `src-tauri/src/storage/db.rs` (owned outright) + `src-tauri/tests/storage.rs` | `done` `221d306` |
-| T02 | IPC surface: `last_active_at` SELECTed from the existing `COALESCE` expression (characterisation test first), the two reorder commands exposed + registered, TS mirrors in `lib/tauri/` | `docs/roadmap/manual-list-order-task02-ipc-last-active-at.md` | 2 | `src-tauri/src/types.rs`, `src-tauri/src/commands/{history,spaces}.rs`, `src-tauri/src/lib.rs`, `src/lib/tauri/types.ts`, `src/lib/tauri/commands/*` | `todo` |
+| T02 | IPC surface: `last_active_at` SELECTed from the existing `COALESCE` expression (characterisation test first), the two reorder commands exposed + registered, TS mirrors in `lib/tauri/` | `docs/roadmap/manual-list-order-task02-ipc-last-active-at.md` | 2 | `src-tauri/src/storage/db.rs` (SessionRecency + Db::session_recency — DEVIATION: not types.rs, see Decisions), `src-tauri/src/commands/{history,spaces}.rs`, `src-tauri/src/lib.rs`, `src/lib/tauri/types.ts`, `src/lib/tauri/commands/*`, `src-tauri/tests/ipc.rs` | `todo` |
 | T03 | Store derivation: `recencyOf` (new module beside `sessionTitle.ts`), `SpaceView.sessionIds` replaces the live/stored pair, the four position-reading landing rules switch to recency, Archived sorts explicitly | `docs/roadmap/manual-list-order-task03-store-derivation.md` | 3 | `src/store/sessions.ts`, `src/lib/sessionRecency.ts` (new), `src/store/sessions.test.ts` | `todo` |
 | T04 | Sidebar renders one list: delete `sortByActivity` memos + the activity subscription, `railIds = sessionIds`, DELETE `src/lib/sessionActivity.ts` and its test, delete the 3 ordering tests, reword the rail pin | `docs/roadmap/manual-list-order-task04-sidebar-one-list.md` | 4 | `src/components/SpacesList.tsx`, delete `src/lib/sessionActivity.ts` + `.test.ts` | `todo` |
 | T05 | The drag gesture: `useDragReorder` hook (dragProps, before/after by pointer half, indicator state) + the store's optimistic reorder actions over one IPC call | `docs/roadmap/manual-list-order-task05-drag-reorder-hook.md` | 5 | `src/hooks/useDragReorder.ts` (new) + test; `src/store/sessions.ts` (reorder actions only) | `todo` |
@@ -151,6 +151,21 @@ deliberately left undone.
   against the tree — that is where the 40-site count comes from. The plan child
   still cannot ground or vet itself, so the specify + reviewer dispatches for
   T02 remain.
+
+- 2026-10-24 — **T02 reviewer returned EMPTY (3rd empty reviewer/researcher
+  return this run).** The orchestrator performed the review directly against the
+  tree across all 7 judging items rather than burn a 4th dispatch; all 7 passed.
+  Two items were MEASURED not read: (a) the plan's tooling claim is TRUE —
+  `pnpm test -- <path>` runs all 149 files (does NOT scope) while
+  `npx vitest run <path>` scopes to 1; (b) the characterisation test is
+  non-vacuous because its `s_msg_old` fixture inserts the SMALLER stamp LAST, so
+  an impl reading "last message by id" instead of `MAX()` gives a different
+  answer. The self-flagged deviations were ACCEPTED: `SessionRecency` in db.rs
+  (consistent with SessionRow/SpaceRow both living in db.rs; types.rs holds only
+  the ADR-0064 struct) and `tests/ipc.rs` added to the seam (it is the only
+  harness driving a command NAME through the real dispatcher; its
+  `#![cfg(target_os = "linux")]` gate is recorded as a limit, not hidden).
+  Scope discipline confirmed: no task touches src/store/ or any component.
 
 ## Changelog
 
