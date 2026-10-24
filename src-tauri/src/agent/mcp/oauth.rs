@@ -103,9 +103,13 @@ pub fn now_epoch_secs() -> i64 {
         .as_secs() as i64
 }
 
-/// The `mcp-auth.json` path (`~/.local/data_dir/archimedes/mcp-auth.json` —
-/// the `dirs` data dir the rest of the desktop uses, joined with a bare
-/// `archimedes` (NOT the bundle identifier)).
+/// The `mcp-auth.json` path: the platform data dir the rest of the desktop
+/// uses (`dirs::data_dir()` — `$XDG_DATA_HOME` or `~/.local/share` on Linux,
+/// `~/Library/Application Support` on macOS, `%APPDATA%` on Windows), joined
+/// with a bare `archimedes` (NOT the bundle identifier), so the real path is
+/// `~/.local/share/archimedes/mcp-auth.json` on Linux,
+/// `~/Library/Application Support/archimedes/mcp-auth.json` on macOS and
+/// `%APPDATA%\archimedes\mcp-auth.json` on Windows.
 pub fn auth_file_path() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -669,37 +673,201 @@ pub fn load_credentials(path: &Path) -> BTreeMap<String, StoredAuth> {
 ///   reader's next save would persist an empty file and lose every token. A
 ///   rename is atomic w.r.t. readers: they see the old document or the new one,
 ///   never a prefix of either.
-/// - the temp name is UNIQUE PER WRITE (a pid + a process-global counter), not
-///   the fixed name the review suggested — two writers choosing
-///   `mcp-auth.json.tmp` would write each other's bytes into the same file and
-///   each rename a document containing the other's half.
+/// - the staging name is UNIQUE PER WRITE (a pid + a process-global counter)
+///   AND opened with `create_new`, not the fixed name the review suggested — two
+///   writers choosing `mcp-auth.json.tmp` would write each other's bytes into
+///   the same file and each rename a document containing the other's half. A
+///   taken name is refused and another is taken (see [`stage_with_retry`]), so
+///   the refusal never costs a save.
 ///
-/// `0600` is applied to the temp file BEFORE the rename, so there is no window
-/// in which the published document is world-readable (and, on a fresh install,
-/// the file never exists with the process umask's mode at all). A rename failure
-/// is an `Err` (and the temp file is removed, so a failed save leaves no litter).
+/// `0600` is applied to the staging file BEFORE the rename, so there is no
+/// window in which the published document is world-readable. It is applied AT
+/// CREATION (`create_new` + `mode(0o600)`, see [`open_private`]) rather than by
+/// a chmod after the bytes are on disk: measured under umask 0022, the old
+/// `fs::write` + `set_permissions` shape created the staging file at `0644` and
+/// the secret sat world-readable between those two syscalls. So neither the
+/// staging file nor the published file ever exists at the process umask's mode,
+/// on a fresh install or any other (and the dir this creates for them is `0700`
+/// — see [`create_credentials_dir`]).
+///
+/// A failure is an `Err`, and the staging file is removed on EVERY path that
+/// does not rename it (the [`Staging`] `Drop`), so a failed save leaves no
+/// secret-bearing litter.
 pub fn save_credentials(path: &Path, map: &BTreeMap<String, StoredAuth>) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
+        create_credentials_dir(parent)
             .map_err(|e| format!("creating the credentials dir failed: {e}"))?;
     }
     let contents =
         serde_json::to_string_pretty(map).map_err(|e| format!("serializing failed: {e}"))?;
-    let tmp = unique_tmp_path(path);
-    std::fs::write(&tmp, contents).map_err(|e| format!("writing failed: {e}"))?;
-    // `0600` on unix (the file holds a token — not world-readable), BEFORE the
-    // rename makes the document visible.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("chmod 0600 failed: {e}"))?;
+    stage_with_retry(&contents, || unique_tmp_path(path))?.publish(path)
+}
+
+/// Create the staging file, retrying ONLY on the one failure a fresh name can
+/// cure: the staging name being taken. `create_new` REFUSES a taken name (that
+/// is the point — see [`open_private`]), so a coincidence has to be survivable
+/// rather than fatal: a file a killed process left behind, or a pid recycled
+/// onto a counter that restarted at zero. Each attempt asks the `next_name`
+/// closure for another name, so the retry can never land on the same one twice,
+/// and a second writer mid-save is simply stepped over. Every other error — the
+/// dir, the write, the chmod — returns immediately, because a new name cannot
+/// cure it.
+///
+/// The name comes from a closure so the retry is testable: inside this process
+/// the real counter is shared by every test thread, so no test can predict which
+/// name the next save will choose.
+fn stage_with_retry(
+    contents: &str,
+    mut next_name: impl FnMut() -> PathBuf,
+) -> Result<Staging, String> {
+    let mut last: Option<String> = None;
+    for _ in 0..3 {
+        match Staging::create(&next_name(), contents) {
+            Ok(staging) => return Ok(staging),
+            Err(e) if is_name_taken(&e) => last = Some(e),
+            Err(e) => return Err(e),
+        }
     }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("renaming into place failed: {e}"));
+    Err(last.expect("the loop only ends by exhausting the attempts it recorded"))
+}
+
+/// Is this `save_credentials` error the staging NAME being taken (the one
+/// failure worth another attempt — see [`stage_with_retry`])? Carried as text
+/// because that is the error type this module returns. Both spellings are
+/// matched because they differ by platform: `EEXIST` renders as
+/// "File exists (os error 17)" on unix and as Windows'
+/// "Cannot create a file when that file already exists. (os error 183)" —
+/// matching only the unix wording would silently disable the retry on Windows.
+fn is_name_taken(error: &str) -> bool {
+    let e = error.to_lowercase();
+    e.contains("file exists") || e.contains("already exists") || e.contains("os error 17")
+}
+
+/// The credentials' file mode (the file holds a token — not group- or
+/// other-readable).
+#[cfg(unix)]
+const CREDENTIALS_MODE: u32 = 0o600;
+
+/// Create the credentials dir, `0700` on unix when THIS call created it (the
+/// dir holds the token file; `0755` from the umask would let anyone list the
+/// names inside it).
+///
+/// An existing dir keeps the mode its owner gave it: re-chmod-ing a directory
+/// we did not create would step on the user's choice (and the failure tests
+/// make the parent dir read-only to force a failed staging OPEN, which a
+/// re-chmod would defeat the moment it ran on a dir that already existed).
+/// Only the leaf gets the mode — the intermediates of a nested path stay at the
+/// umask, which is why the real path's parent (`~/.local/share`) is already
+/// `0700` on the platforms that matter.
+fn create_credentials_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    let existed = path.is_dir();
+    std::fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    if !existed {
+        use std::os::unix::fs::PermissionsExt;
+        return std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
     }
     Ok(())
+}
+
+/// Open the staging file for one `save_credentials`, PRIVATE from the first
+/// instant it exists: `create_new` (it is refused if the name is taken) with
+/// mode `0600` on unix, so no bytes are ever written to a file another user
+/// could read.
+///
+/// Both halves matter. The mode is what makes the "never exists at the umask
+/// mode" claim true — `fs::write` creates at the umask mode (measured `0644`
+/// under umask 0022) and a chmod afterwards is one syscall too late.
+/// `create_new` is what makes the pid+counter name load-bearing rather than
+/// merely probable: a collision (a recycled pid, a counter reset by a fork)
+/// becomes an `Err` instead of writing a second writer's bytes into the same
+/// file and renaming half of someone else's document into place.
+fn open_private(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(CREDENTIALS_MODE);
+    }
+    options.open(path)
+}
+
+/// The staging file of one `save_credentials`, and the reason a failed publish
+/// leaves nothing behind: it is created private and removed on EVERY exit that
+/// did not rename it into place — a failed write, a failed chmod, a failed
+/// rename, or a panic on the way (the previous shape returned with `?` and left
+/// a secret-bearing file at the umask mode).
+#[derive(Debug)]
+struct Staging {
+    path: PathBuf,
+}
+
+impl Staging {
+    /// Create the staging file (see [`open_private`]) and write `contents`
+    /// into it. The guard is built on the line AFTER the file comes to exist,
+    /// so there is no error path that can return while the file is alive.
+    fn create(path: &Path, contents: &str) -> Result<Self, String> {
+        let file =
+            open_private(path).map_err(|e| format!("creating the staging file failed: {e}"))?;
+        // The guard exists from THIS line onward: every later exit — an `Err`
+        // return or a panic — removes the file. Building it before the open
+        // would be worse than the litter it prevents: a `create_new` refusal
+        // (AlreadyExists) would have the guard delete the OTHER writer's file.
+        let staging = Self {
+            path: path.to_path_buf(),
+        };
+        // `file` MOVES into `write_and_close`, so its handle is closed by the
+        // time this returns — which matters for the guard: `Drop` runs here, and
+        // a `remove_file` against a still-open handle is an error on Windows
+        // (a sharing violation), which would put the litter right back.
+        write_and_close(file, contents)?;
+        // Belt-and-braces on unix: the mode came with the creation (see
+        // [`open_private`]), but a filesystem that ignores the create mode (some
+        // FUSE / SMB mounts impose their own) would otherwise publish a readable
+        // document. Cheap next to the rename, and the only thing making the mode
+        // exactly `0600` under an exotic umask.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(CREDENTIALS_MODE))
+                .map_err(|e| format!("chmod 0600 failed: {e}"))?;
+        }
+        Ok(staging)
+    }
+
+    /// The atomic publish: rename the staging file onto the target. This
+    /// consumes the guard — on success the staging path is already gone (the
+    /// rename MOVED it, so the `Drop`'s `remove_file` is a harmless `ENOENT`)
+    /// and on failure the `Drop` removes the secret-bearing litter.
+    fn publish(self, target: &Path) -> Result<(), String> {
+        std::fs::rename(&self.path, target).map_err(|e| format!("renaming into place failed: {e}"))
+    }
+}
+
+/// Write the document into the freshly-created staging file and CLOSE the
+/// handle. It takes the handle BY VALUE so the close happens here — before any
+/// [`Staging`] `Drop` can try to remove the path (Windows refuses that against
+/// an open handle, which would leave the litter the guard exists to remove).
+fn write_and_close(mut file: std::fs::File, contents: &str) -> Result<(), String> {
+    use std::io::Write;
+    if let Err(e) = file
+        .write_all(contents.as_bytes())
+        .and_then(|()| file.flush())
+    {
+        return Err(format!("writing failed: {e}"));
+    }
+    drop(file);
+    Ok(())
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        // Best-effort: there is nothing else to do with a file nobody else can
+        // read, and the next save picks a fresh unique name.
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 /// A unique temp path next to `path` for one `save_credentials` write (the
@@ -956,6 +1124,36 @@ mod tests {
         }
     }
 
+    /// The target's inode (`0` for a path that does not exist — no real inode
+    /// is ever `0`).
+    #[cfg(unix)]
+    fn inode_of(path: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).map_or(0, |m| m.ino())
+    }
+
+    /// Every `*.tmp` path in `dir` (the staging files alive right now).
+    fn staging_files(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .expect("the dir is readable")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s == "tmp")
+            })
+            .collect()
+    }
+
+    /// A one-entry map (the fixture every storage test saves).
+    fn one_entry() -> BTreeMap<String, StoredAuth> {
+        let mut map = BTreeMap::new();
+        map.insert("s".to_string(), entry("s"));
+        map
+    }
+
+    #[cfg(unix)]
     #[test]
     fn a_save_publishes_atomically_and_leaves_no_temp_file() {
         // The failure this guards: `std::fs::write` truncates the target before
@@ -963,60 +1161,371 @@ mod tests {
         // own `McpManager`) that reads during the write gets a torn document —
         // and `load_credentials` answers a parse failure with an EMPTY map, so
         // that reader's next save would persist an empty file: every token lost.
-        // Provable without a crash harness: (1) the published file is always a
-        // COMPLETE document — a reader thread that reads raw bytes while a
-        // writer re-saves a large map never sees a prefix of one, and (2) the
-        // staging file is gone once the save returns.
+        //
+        // WHAT THIS TEST DELIBERATELY DOES NOT ASSERT. The earlier round's
+        // detector — a reader thread spinning on a 400-entry document and
+        // counting torn reads — was a COIN-FLIP, not a proof. `std::fs::write`
+        // issues ONE `write(2)` for a `Vec<u8>` (verified under strace:
+        // `write(4, "xxx…"…, 78800) = 78800`), and that copy happens under the
+        // inode's lock, so a concurrent reader essentially never sees a prefix.
+        // Restoring the truncate-in-place write left that assertion red only 14
+        // of 20 runs: it measured timing, not the mechanism. What follows is
+        // DETERMINISTIC — both assertions below are false for a truncate-in-place
+        // write on EVERY run, with no thread and no sleep in sight.
         let dir = tempfile::tempdir().expect("a temp dir");
         let path = dir.path().join("mcp-auth.json");
         let mut base = BTreeMap::new();
-        // Big enough that a truncate-in-place write would span several `write`s
-        // (a torn read is then a matter of timing, not of luck).
         for i in 0..400 {
             base.insert(format!("server-{i:03}"), entry("x"));
         }
         save_credentials(&path, &base).expect("the first save works");
-
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let reader_stop = stop.clone();
-        let reader_path = path.clone();
-        let reader = std::thread::spawn(move || {
-            let mut torn = 0usize;
-            while !reader_stop.load(std::sync::atomic::Ordering::Relaxed) {
-                if let Ok(contents) = std::fs::read_to_string(&reader_path) {
-                    if contents.is_empty() {
-                        // A zero-length read of a file mid-rename: not a torn
-                        // document, but not a usable one either — count it.
-                        torn += 1;
-                        continue;
-                    }
-                    if serde_json::from_str::<BTreeMap<String, StoredAuth>>(&contents).is_err() {
-                        torn += 1;
-                    }
-                }
-            }
-            torn
-        });
-
         let mut next = base.clone();
         next.insert("late-arrival".to_string(), entry("y"));
-        for _ in 0..50 {
-            save_credentials(&path, &next).expect("a save works");
-        }
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        let torn = reader.join().expect("the reader thread ends");
-        assert_eq!(torn, 0, "a reader never sees a half-written document");
 
-        // The full document is what landed.
-        assert_eq!(load_credentials(&path), next);
+        // (1) THE MECHANISM: a save publishes by moving a NEW INODE into the
+        // target's name. Truncate-in-place rewrites the target's OWN inode, so
+        // this one comparison is the discriminator. The inode cannot be reused
+        // here either: the new one is allocated while the old one is still
+        // linked, so no allocator can hand out the same number.
+        for i in 0..100 {
+            let before = inode_of(&path);
+            assert_ne!(before, 0, "the target exists before save #{i}");
+            save_credentials(&path, &next).expect("a save works");
+            let after = inode_of(&path);
+            assert_ne!(
+                before, after,
+                "save #{i} replaced the target's inode ({before}) — the new document \
+                 arrived on its own inode and was renamed into place, so no reader can \
+                 be looking at the inode a save is writing. A truncate-in-place write \
+                 keeps the inode and fails here"
+            );
+        }
+
+        // (2) WHAT THAT BUYS THE READER, still race-free: a reader that opened
+        // the file BEFORE the save and reads AFTER it sees the COMPLETE OLD
+        // document — the publish never touches the inode its fd refers to.
+        // Truncate-in-place rewrites exactly that inode, so the same fd reads
+        // the NEW document (or, under a slower write, a prefix) and this
+        // assertion fails.
+        let held_doc = load_credentials(&path);
+        assert_eq!(held_doc, next, "the document the fd is about to read");
+        let mut third = next.clone();
+        third.insert("another-worker".to_string(), entry("z"));
+        let mut fd = std::fs::File::open(&path).expect("the fd opens before the save");
+        let held_inode = {
+            use std::os::unix::fs::MetadataExt;
+            fd.metadata().expect("the fd's metadata").ino()
+        };
+        save_credentials(&path, &third).expect("the save runs while the fd is open");
+        let mut seen = String::new();
+        use std::io::Read;
+        fd.read_to_string(&mut seen)
+            .expect("reading the fd we already hold works");
+        let parsed: BTreeMap<String, StoredAuth> =
+            serde_json::from_str(&seen).expect("the held fd still parses — no torn bytes");
+        assert_eq!(
+            parsed,
+            held_doc,
+            "a reader holding an fd opened BEFORE the save sees the complete OLD document \
+             ({} of {} entries survived)",
+            parsed.len(),
+            held_doc.len()
+        );
+        assert_ne!(
+            held_inode,
+            inode_of(&path),
+            "and the name now points at a DIFFERENT inode than the one this fd holds — \
+             which is exactly why the read above could not have been torn"
+        );
+
+        // The full new document is what a FRESH reader sees.
+        assert_eq!(load_credentials(&path), third);
         // No staging litter beside the file.
-        let litter: Vec<String> = std::fs::read_dir(dir.path())
-            .expect("the dir is readable")
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .filter(|n| n.ends_with(".tmp"))
-            .collect();
+        let litter = staging_files(dir.path());
         assert!(litter.is_empty(), "no temp file left behind: {litter:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_staging_file_is_private_the_instant_it_exists() {
+        // The doc claims the credentials never exist at the process umask's
+        // mode — and the code used to make that claim FALSE: `fs::write` creates
+        // at the umask mode (measured `0644` under umask 0022) and the
+        // `set_permissions` came after, so a token sat world-readable at
+        // `mcp-auth.<pid>.<n>.json.tmp` for one syscall pair.
+        //
+        // That window is one instruction wide, so it is not observable from
+        // OUTSIDE `Staging::create` without a race — but `open_private` IS the
+        // seam the claim lives in: it is the call that brings the file into
+        // existence, and nothing between it returning and the assertion below
+        // touches the mode. So asserting here is asserting the real thing, at
+        // the moment the file first exists.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let staged = dir.path().join("mcp-auth.1.0.json.tmp");
+        use std::os::unix::fs::PermissionsExt;
+        let file = open_private(&staged).expect("the staging file opens");
+        let mode = file
+            .metadata()
+            .expect("the fd's metadata")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "the staging file is 0600 at creation — no chmod has run yet, so this is \
+             the mode the CREATION gave it"
+        );
+        drop(file);
+        assert_eq!(
+            std::fs::metadata(&staged)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "and the path agrees"
+        );
+
+        // POSITIVE CONTROL, so the assertion above cannot pass vacuously: if
+        // this process's umask already masked group/other read, `0600` would
+        // follow from the umask alone and prove nothing about `options.mode(..)`.
+        // The plain `fs::write` on a sibling path is what the fix replaced, so
+        // its mode is the honest reading of "what a create gives here".
+        let control = dir.path().join("umask-shape.json");
+        std::fs::write(&control, "secret").expect("the control write works");
+        let control_mode = std::fs::metadata(&control)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_ne!(
+            control_mode & 0o044,
+            0,
+            "the control is BLIND: a plain create here comes out at {control_mode:o}, which \
+             already has no group/other read — so the `0600` asserted above could be the \
+             umask's doing rather than `OpenOptions::mode`'s. Run the suite under a umask \
+             that does not mask group/other read (022 is the usual default) for this test to \
+             have teeth"
+        );
+
+        // `create_new` is the other half of `open_private`: a taken name is
+        // REFUSED, so a pid+counter collision (a recycled pid, a fork that reset
+        // the counter) can never make two writers share a staging file and each
+        // rename a document that is half someone else's.
+        let again = open_private(&staged);
+        assert!(
+            again.is_err(),
+            "a second `open_private` on the same name is refused, not truncated onto"
+        );
+        assert_eq!(
+            std::fs::metadata(&staged)
+                .expect("the first file is still there")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "refusing the collision did not disturb the existing file"
+        );
+    }
+
+    #[test]
+    fn a_failed_save_removes_the_staging_file_it_wrote() {
+        // G4: every exit that does not rename must clean up. The old shape
+        // returned with `?` from the write / chmod and left a SECRET-BEARING
+        // staging file behind at the umask mode; the unique name meant nothing
+        // collided, which is not the same as nothing leaking.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join("mcp-auth.json");
+        let map = one_entry();
+
+        // (a) The Drop runs on UNWIND too, not only on an `Err` return: create a
+        // `Staging` and panic with it alive.
+        let staged = unique_tmp_path(&path);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // `_held` lives to the end of this scope, which the panic skips
+            // past — that unwind is the case the `Drop` exists for.
+            let _held = Staging::create(&staged, "{\"leak\":true}").expect("staging opens");
+            panic!("with a live staging file");
+        }));
+        assert!(panicked.is_err(), "the closure panicked as arranged");
+        assert!(
+            !staged.exists(),
+            "a panic between creating the staging file and publishing it still removes it"
+        );
+
+        // (b) The real error path: the parent dir goes out of the writer's
+        // hands, so the staging open fails and the save reports it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500))
+                .expect("the dir goes read-only");
+            let r = save_credentials(&path, &map);
+            // Restore the mode BEFORE any assertion can bail (a failing test
+            // must not leave a dir the temp-dir cleanup cannot remove).
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("the dir comes back");
+            match r {
+                // A root run (or a mount that ignores the dir mode) has nothing
+                // to prove here — say so instead of passing vacuously.
+                Ok(()) => eprintln!("skipping (b): this filesystem accepted a read-only-dir write"),
+                Err(e) => {
+                    assert!(
+                        e.contains("creating the staging file failed"),
+                        "with `create_new` the failure is the OPEN, not a later write: {e}"
+                    );
+                    assert!(
+                        staging_files(dir.path()).is_empty(),
+                        "a save that could not even stage leaves no litter"
+                    );
+                }
+            }
+        }
+
+        // (c) The rename failure — the only path the old code cleaned up by
+        // hand — still leaves nothing behind, now through the `Staging` guard:
+        // the target is an existing DIRECTORY, so `rename` refuses it (EISDIR)
+        // while a real secret-bearing staging file exists beside it.
+        let blocked = dir.path().join("blocked");
+        std::fs::create_dir(&blocked).expect("the blocker dir exists");
+        let staged = unique_tmp_path(&blocked);
+        let staging = Staging::create(&staged, "{}").expect("staging opens beside the dir");
+        assert!(
+            staged.exists(),
+            "the staging file really exists before the publish is attempted"
+        );
+        let rename = staging.publish(&blocked);
+        assert!(
+            rename.is_err(),
+            "renaming a FILE onto an existing directory is refused (EISDIR) — that is the \
+             forced rename failure this path needs"
+        );
+        assert!(
+            !staged.exists(),
+            "a refused rename removes the staging file that holds the secret"
+        );
+        // (d) And the happy path, cross-platform: a SUCCESSFUL save leaves none
+        // either (this is the litter half of
+        // `a_save_publishes_atomically_and_leaves_no_temp_file`, which is
+        // `#[cfg(unix)]` because it reads inodes).
+        let clean = dir.path().join("clean.json");
+        save_credentials(&clean, &map).expect("a save works");
+        assert_eq!(load_credentials(&clean), map, "and the document is there");
+        assert!(
+            staging_files(dir.path()).is_empty(),
+            "a successful save publishes by rename, so no staging file survives"
+        );
+    }
+
+    #[test]
+    fn a_taken_staging_name_costs_a_retry_and_not_a_lost_save() {
+        // `create_new` turns a staging-name collision into an `Err` — the right
+        // refusal (never truncate onto another writer's file), but it must not
+        // make the SAVE fail: a file a killed process left behind, or a pid
+        // recycled onto a counter that restarted at zero, would otherwise wedge
+        // every future save of the user's tokens. So: refuse the name, take
+        // another one. Driven through the name seam (this process's real counter
+        // is shared by every test thread, so no test can predict the next name).
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let target = dir.path().join("mcp-auth.json");
+        let taken = dir.path().join("mcp-auth.9.9.json.tmp");
+        std::fs::write(&taken, "another writer is mid-save in this file")
+            .expect("the taken name exists");
+
+        let mut names = vec![taken.clone(), dir.path().join("mcp-auth.9.10.json.tmp")];
+        let staging = stage_with_retry("{}", || names.remove(0))
+            .expect("the second name is free, so the save proceeds");
+        assert_ne!(
+            staging.path, taken,
+            "the retry did not reuse the taken name"
+        );
+        staging.publish(&target).expect("the save publishes");
+
+        assert_eq!(
+            load_credentials(&target),
+            BTreeMap::new(),
+            "the document landed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&taken).expect("the other writer's file is intact"),
+            "another writer is mid-save in this file",
+            "refusing a taken name must never touch the file that holds it"
+        );
+        // The only `.tmp` left is the pre-existing one we refused to touch — the
+        // retry's own staging file was renamed away, so it added no litter.
+        assert_eq!(
+            staging_files(dir.path()),
+            vec![taken.clone()],
+            "the retry left no litter of its own (and never deleted the file it refused)"
+        );
+
+        // Exhausted: every candidate taken is an `Err` (a save cannot be forced
+        // onto a name someone else holds), and the message is the collision's.
+        let mut all_taken = vec![taken.clone(), taken.clone(), taken.clone()];
+        let r = stage_with_retry("{}", || all_taken.remove(0));
+        let err = r.expect_err("three taken names cannot stage anything");
+        assert!(
+            is_name_taken(&err),
+            "the error is the name collision, not something the retry swallowed: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&taken).expect("still intact"),
+            "another writer is mid-save in this file",
+            "and the exhausted retry never wrote over it either"
+        );
+
+        // The classifier knows the REAL message (an `open_private` collision on
+        // this platform), not a string I invented.
+        let real = open_private(&taken).expect_err("the name is still taken");
+        assert!(
+            is_name_taken(&format!("creating the staging file failed: {real}")),
+            "the classifier must recognise this platform's EEXIST text: {real}"
+        );
+        assert!(
+            !is_name_taken("creating the credentials dir failed: permission denied"),
+            "a permission failure is not a name collision — retrying it 3x would only delay \
+             the error the user needs to see"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_credentials_dir_is_created_private() {
+        // The token file is 0600, but the DIR that holds it used to come out at
+        // the umask mode (measured `0755`), which lets anyone list the server
+        // names inside it and probe for the file. `0700` is the intent.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join("archimedes/mcp-auth.json");
+        use std::os::unix::fs::PermissionsExt;
+        save_credentials(&path, &one_entry()).expect("the save creates the leaf dir");
+        let created = path.parent().expect("the parent dir");
+        let mode = std::fs::metadata(created)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o700,
+            "the dir THIS save created is 0700 (it holds the token file)"
+        );
+
+        // An existing dir keeps the mode its OWNER gave it — re-chmod-ing a
+        // directory we did not create would overwrite the user's choice (and the
+        // failure tests depend on a read-only dir staying read-only).
+        let kept = dir.path().join("kept");
+        std::fs::create_dir(&kept).expect("the dir exists");
+        std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o755))
+            .expect("the owner's mode is set");
+        save_credentials(&kept.join("mcp-auth.json"), &one_entry()).expect("a save works");
+        assert_eq!(
+            std::fs::metadata(&kept)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755,
+            "a dir that already existed is left as its owner set it"
+        );
     }
 
     #[cfg(unix)]
@@ -1049,8 +1558,9 @@ mod tests {
             Ok(()) => eprintln!("skipping: this filesystem accepted a read-only-dir write"),
             Err(e) => {
                 assert!(
-                    e.contains("writing failed"),
-                    "the staging write is what failed: {e}"
+                    e.contains("creating the staging file failed"),
+                    "the staging OPEN is what failed (`create_new` refuses it before a byte \
+                     is written, so the failure is earlier than the write it used to be): {e}"
                 );
                 assert_eq!(
                     load_credentials(&path),

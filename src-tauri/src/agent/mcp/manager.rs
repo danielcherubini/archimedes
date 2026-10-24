@@ -403,15 +403,28 @@ async fn usable_token_provider(server_name: &str, auth_file: &Path) -> Option<To
 /// entry is last-writer-wins, so the worst case is one server holding the older
 /// of two valid tokens — which costs a refresh (or, if the auth server revoked
 /// it, one `auth`), never a torn file and never another server's credentials.
+///
+/// And because the task is detached, its FAILURE is invisible by construction:
+/// nobody else holds the handle, so `refresh_and_persist` is the one place that
+/// can notice the task died, and it reports every way that can happen (see
+/// [`refresh_failure_note`]) — a silent `None` here is exactly the "lost a
+/// rotation without anyone knowing" the detach was meant to end.
 async fn refresh_and_persist(
     stored: oauth::StoredAuth,
     server_name: String,
     auth_file: PathBuf,
 ) -> Option<String> {
-    let client = reqwest::Client::builder()
+    let Ok(client) = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
-        .ok()?;
+    else {
+        // Not a lost rotation (nothing was spent yet), but it is why this
+        // session will not refresh, and that is worth one line.
+        eprintln!("mcp: {server_name}: building the refresh client failed — the stored token stays as it is");
+        return None;
+    };
+    // `server_name` moves into the task, so the report gets its own copy.
+    let reported_name = server_name.clone();
     let task = tokio::spawn(async move {
         let refreshed = oauth::refresh(&stored, &client).await?;
         let token = refreshed.token.clone();
@@ -424,7 +437,58 @@ async fn refresh_and_persist(
         }
         Some(token)
     });
-    task.await.ok().flatten()
+    report_refresh_join(&reported_name, task.await)
+}
+
+/// Await the detached refresh task and return its token, printing the reason
+/// when there is none. Split from [`refresh_and_persist`] so the three ways an
+/// awaited detached task can end are testable without a network round trip.
+fn report_refresh_join(
+    server_name: &str,
+    outcome: Result<Option<String>, tokio::task::JoinError>,
+) -> Option<String> {
+    if let Some(note) = refresh_failure_note(server_name, &outcome) {
+        eprintln!("{note}");
+    }
+    // The value contract with the caller is unchanged: a token, or `None`.
+    // `unwrap_or_default` is that `None` — including for `Err`, where the task
+    // died (panicked, or the runtime went away before it finished) and there is
+    // nothing to hand back. The REPORT of why is the whole point of this
+    // function and is already printed above; `refresh_failure_note` names each
+    // arm separately, which is what `ok().flatten()` never did.
+    outcome.unwrap_or_default()
+}
+
+/// The line explaining a detached refresh that produced no token, or `None`
+/// when it produced one (a success is silent).
+///
+/// Every arm is named separately on purpose. `task.await.ok().flatten()` — the
+/// shape this replaced — mapped BOTH the panic and the plain failed refresh to
+/// `None` and printed nothing, so a panic in the detached task (the one place
+/// the code runs a third party's JSON through `parse_token_response`) was
+/// indistinguishable from "the auth server said no", from a log that said
+/// nothing at all.
+fn refresh_failure_note(
+    server_name: &str,
+    outcome: &Result<Option<String>, tokio::task::JoinError>,
+) -> Option<String> {
+    match outcome {
+        Ok(Some(_)) => None,
+        Ok(None) => Some(format!(
+            "mcp: {server_name}'s refresh returned no token (the ADR 0015 public-client \
+             guard, or a failed grant) — connecting unauthenticated, so a 401 will mark the \
+             server as needing auth"
+        )),
+        Err(e) if e.is_panic() => Some(format!(
+            "mcp: {server_name}'s detached refresh task DIED (a panic — the rotation it may \
+             already have earned was not persisted); the stored token is unchanged and the \
+             next connect retries"
+        )),
+        Err(e) => Some(format!(
+            "mcp: {server_name}'s detached refresh task never completed ({e}) — the runtime \
+             went away before it finished, so nothing was persisted"
+        )),
+    }
 }
 
 /// A one-shot test of a server definition (the Settings page's Test
@@ -1409,6 +1473,130 @@ mod tests {
         );
 
         auth_server.abort();
+    }
+
+    /// A `JoinError` from a task that really panicked (the runtime reports a
+    /// panic; `JoinError` has no public constructor, so this is the only honest
+    /// way to obtain one).
+    async fn a_panicked_task() -> tokio::task::JoinError {
+        let task = tokio::spawn(async move {
+            panic!("the detached refresh blew up");
+            #[allow(unreachable_code)]
+            Some("never".to_string())
+        });
+        task.await.expect_err("a panicking task yields a JoinError")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_died_refresh_task_is_named_rather_than_silently_none() {
+        // Finding: `task.await.ok().flatten()` mapped a PANIC in the detached
+        // refresh task to `None` — identical to "the auth server said no" — and
+        // printed nothing. The detach's whole justification is that a rotation
+        // is never lost silently, so a task that dies has to say so.
+        //
+        // Driven with REAL `JoinError`s rather than a mock: `is_panic()` /
+        // `is_cancelled()` are what the code branches on, and only a real error
+        // proves the branch is reached.
+        let panicked = a_panicked_task().await;
+        assert!(panicked.is_panic(), "the fixture is a panic");
+        let note = refresh_failure_note("linear", &Err(panicked))
+            .expect("a dead task is reported, not swallowed");
+        assert!(
+            note.contains("linear"),
+            "the line names the server it belongs to: {note}"
+        );
+        assert!(
+            note.to_lowercase().contains("panic"),
+            "the line says the task DIED rather than failing a grant: {note}"
+        );
+
+        // The other way a detached task ends without a token: the runtime went
+        // away (an aborted task yields the cancelled `JoinError`).
+        let task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            Some("never".to_string())
+        });
+        task.abort();
+        let aborted = task.await.expect_err("an aborted task yields a JoinError");
+        assert!(aborted.is_cancelled(), "the fixture is a cancellation");
+        let note = refresh_failure_note("linear", &Err(aborted))
+            .expect("a cancelled task is reported too");
+        assert!(note.contains("linear"), "the line names the server: {note}");
+
+        // A refresh that simply returned `None` (the ADR 0015 public-client
+        // guard, or a rejected grant) is logged ONCE as well — the caller's
+        // `None` is otherwise indistinguishable from all of the above.
+        let note =
+            refresh_failure_note("linear", &Ok(None)).expect("a no-token refresh is reported");
+        assert!(note.contains("linear"), "the line names the server: {note}");
+        assert!(
+            note.contains("unauthenticated") || note.contains("NeedsAuth"),
+            "the line says what happens next: {note}"
+        );
+
+        // A SUCCESS stays silent (this runs on the routine connect path).
+        assert!(
+            refresh_failure_note("linear", &Ok(Some("tok".to_string()))).is_none(),
+            "a refresh that produced a token prints nothing"
+        );
+
+        // And `report_refresh_join` (the function the spawn site actually calls)
+        // returns the token on success and `None` on every failure — the value
+        // contract the caller depends on is unchanged by the added logging.
+        assert_eq!(
+            report_refresh_join("linear", Ok(Some("tok".to_string()))).as_deref(),
+            Some("tok")
+        );
+        let quiet = a_panicked_task().await;
+        assert!(report_refresh_join("whisper", Ok(None)).is_none());
+        assert!(report_refresh_join("whisper", Err(quiet)).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_spawn_site_reports_through_the_shared_helper() {
+        // The WIRING pin. `refresh_failure_note` is only worth anything if the
+        // detached task's join goes through it, and that is exactly the line a
+        // later "simplification" would restore to `task.await.ok().flatten()` —
+        // the tests above would stay green while the panic went back to being
+        // silent. So: read the spawn site's own source and require the call.
+        //
+        // Scoped to `refresh_and_persist`'s body (not the file), because the
+        // file legitimately awaits other tasks. A source scan is a blunt
+        // instrument: it catches the revert, it does not prove the call is
+        // reached at runtime — which is what the real-`JoinError` test above is
+        // for. Both halves are here on purpose.
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/agent/mcp/manager.rs"
+        ))
+        .expect("the manager source is readable from a test");
+        let start = src
+            .find("async fn refresh_and_persist(")
+            .expect("refresh_and_persist exists");
+        // The function ends at the first `\n}` (column 0) after its head.
+        let end = src[start..]
+            .find("\n}")
+            .expect("refresh_and_persist has a closing brace");
+        let body = &src[start..start + end];
+        // Vacuity guard: finding the `tokio::spawn` proves the captured region
+        // really is the function with the detached task (and reaches its join),
+        // rather than an empty or mis-sliced slice that would pass any `!`
+        // assertion for free.
+        assert!(
+            body.contains("tokio::spawn"),
+            "the scanned region of `refresh_and_persist` ({end} bytes) does not contain the \
+             detached task — the slice is wrong, so the checks below would prove nothing"
+        );
+        assert!(
+            body.contains("report_refresh_join"),
+            "`refresh_and_persist` must join through `report_refresh_join`, which is where \
+             the dead-task line is printed"
+        );
+        assert!(
+            !body.contains("ok().flatten()"),
+            "`ok().flatten()` is the shape that discarded the JoinError — if the body still \
+             contains it, a panic in the detached task is silent again"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
