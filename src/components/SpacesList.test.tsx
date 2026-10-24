@@ -606,130 +606,119 @@ describe("SpacesList", () => {
     expect(row!.querySelector('[role="status"]')).toBeNull();
   });
 
-  it("orders the LIVE group by last activity, above the STORED group", () => {
-    const now = Date.now();
-    const s1 = makeSessionRow({ sessionId: "s1", cwd: "/tmp/alpha" });
-    const s2 = makeSessionRow({ sessionId: "s2", cwd: "/tmp/alpha" });
-    useSessions.setState({
-      sessions: [s1, s2],
-      activeSpacePath: "/tmp/alpha",
-      activeSessionId: "s2",
-      messages: {
-        s1: [makeMessage("user", { text: "Task 1", at: now - 20_000 })],
-        s2: [makeMessage("user", { text: "Task 2", at: now - 10_000 })],
-        h1: [makeMessage("user", { text: "Refactor the parser", at: now - 3_600_000 })],
-      },
-    });
-
-    render(<SpacesList />);
-
-    const task2El = screen.getByText("Task 2");
-    const task1El = screen.getByText("Task 1");
-    const storedEl = screen.getByText("Refactor the parser");
-
-    expect(task2El).toBeTruthy();
-    expect(task1El).toBeTruthy();
-    expect(storedEl).toBeTruthy();
-
-    // Check DOM order: Task 2 above Task 1, Task 1 above stored row
-    expect(
-      task2El.compareDocumentPosition(task1El) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-    expect(
-      task1El.compareDocumentPosition(storedEl) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-
-    // Clicking Task 1 switches activeSessionId to s1
-    fireEvent.click(task1El);
-    expect(useSessions.getState().activeSessionId).toBe("s1");
-  });
-
-  it("ranks a live session by ITS ACTIVITY, not by which was started last", () => {
-    // The old live order was reverse-INSERTION (`liveSessionsInSpace` reverses
-    // the store's array), so the session started last sat on top even when it
-    // had been idle for an hour and its sibling had just answered. `s1` was
-    // started FIRST and is the one with the recent message — under the old rule
-    // this assertion is red.
-    const now = Date.now();
+  it("renders its rows in the store's ONE sessionIds sequence, so a STORED row above a LIVE one in the manual order renders FIRST", () => {
+    // THE manual order reaching the DOM. The store's ONE sequence (`sessionIds`)
+    // answers `[h_stored, s_live]` for these numbers; the deleted display sort
+    // answers `[s_live, h_stored]`, because the live block was rendered first
+    // regardless of any number. This is the store-level case that
+    // `sessions.test.ts`'s "groups a space with a live session and a stored
+    // session" pins, shown in the DOM.
+    //
+    // The seed is overridden COMPLETELY — a row the seed leaves behind silently
+    // joins the list and can satisfy an order assertion by accident. Both rows
+    // carry a generated `title` so the labels are queryable with no transcript
+    // (the trick "labels a titled STORED row by its title…" uses).
     useSessions.setState({
       sessions: [
-        makeSessionRow({ sessionId: "s1", cwd: "/tmp/alpha" }),
-        makeSessionRow({ sessionId: "s2", cwd: "/tmp/alpha" }),
+        makeSessionRow({ sessionId: "s_live", cwd: "/tmp/alpha", title: "Live row" }),
       ],
+      historySessions: [
+        makeSessionRow({ sessionId: "h_stored", cwd: "/tmp/alpha", title: "Stored row" }),
+      ],
+      messages: {},
       activeSpacePath: "/tmp/alpha",
-      activeSessionId: "s2",
-      messages: {
-        s1: [makeMessage("user", { text: "Busy moments ago", at: now - 5_000 })],
-        s2: [makeMessage("user", { text: "Started later, idle for hours", at: now - 7_200_000 })],
-      },
+      // The STORED row holds the SMALLER number, i.e. the HIGHER row — the one
+      // arrangement the old live-block-first render could never produce.
+      sessionOrder: { h_stored: 2, s_live: 5 },
     });
     render(<SpacesList />);
-    const busy = screen.getByText("Busy moments ago");
-    const idle = screen.getByText("Started later, idle for hours");
+    const storedRow = screen.getByText("Stored row");
+    const liveRow = screen.getByText("Live row");
     expect(
-      busy.compareDocumentPosition(idle) & Node.DOCUMENT_POSITION_FOLLOWING,
+      storedRow.compareDocumentPosition(liveRow) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 
-  it("keeps a brand-new live session (no transcript yet) at the TOP of the live group", () => {
-    // `addSession` gives a fresh session an EMPTY transcript, so "no loaded
-    // messages" in the live group means JUST CREATED — the most recent activity
-    // there. Sinking it below a session idle for an hour would hide the session
-    // the user just made ⌘N.
-    // A generated `title` labels the row, because with no messages the title
-    // would otherwise fall back to the Space's name — which the fixture's
-    // stored sessions also answer to.
-    const now = Date.now();
+  it("renders a Session started after the boot fetch at the BOTTOM of the list (the new-row rule, not the live block)", () => {
+    // The rule ADR 0075 chose: a NEW row joins at the BOTTOM. The order map only
+    // knows what the boot fetch returned, so `s-new` has NO entry and
+    // `sortByManualOrder` sinks it — while the deleted live block put a fresh
+    // row FIRST (this replaces the deleted "keeps a brand-new live session … at
+    // the TOP of the live group", which asserted the opposite).
+    //
+    // The seed's live `s1` is DROPPED, not kept: it would join the list and could
+    // satisfy the assertion by accident. `h1`'s seed entry stays (its seed
+    // transcript is what labels the row "Refactor the parser"); `h2` lives in
+    // `/tmp/beta` and renders nowhere here.
     useSessions.setState({
       sessions: [
-        makeSessionRow({ sessionId: "s1", cwd: "/tmp/alpha" }),
         makeSessionRow({ sessionId: "s-new", cwd: "/tmp/alpha", title: "Just created" }),
       ],
-      activeSpacePath: "/tmp/alpha",
-      activeSessionId: "s-new",
-      messages: {
-        s1: [makeMessage("user", { text: "Idle for an hour", at: now - 3_600_000 })],
-        "s-new": [],
-      },
+      // The empty array is what `addSession` gives a fresh session.
+      messages: { ...useSessions.getState().messages, "s-new": [] },
+      sessionOrder: { h1: 0 },
     });
     render(<SpacesList />);
-    const freshRow = screen
-      .getByText("Just created")
-      .closest('[role="button"]');
-    const idleRow = screen
-      .getByText("Idle for an hour")
-      .closest('[role="button"]');
-    expect(freshRow).toBeTruthy();
-    expect(idleRow).toBeTruthy();
+    const storedRow = screen.getByText("Refactor the parser");
+    const freshRow = screen.getByText("Just created");
     expect(
-      freshRow!.compareDocumentPosition(idleRow!) & Node.DOCUMENT_POSITION_FOLLOWING,
+      storedRow.compareDocumentPosition(freshRow) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 
-  it("sorts a session that CLOSED this boot to the top of the stored group", () => {
-    // `handleSessionClosed` APPENDS the closed session to `historySessions`, so
-    // the array's own order files the most recently used stored session LAST —
-    // the exact inversion the ordering removes.
+  it("updates a row's relative time while its POSITION stays frozen", () => {
+    // The user-visible promise this whole branch exists for: a row's LABEL stays
+    // live (its own per-row `messages` subscription) while its SLOT never moves.
+    // Red at HEAD for exactly the reason it exists to forbid: after the append,
+    // `sortByActivity(…, "last")` floated the newly-active row to the top of the
+    // stored group, so the SECOND position comparison failed.
     const now = Date.now();
     useSessions.setState({
       sessions: [],
       historySessions: [
-        makeSessionRow({ sessionId: "h1", cwd: "/tmp/alpha" }),
-        makeSessionRow({ sessionId: "h9", cwd: "/tmp/alpha" }),
+        makeSessionRow({ sessionId: "h_first", cwd: "/tmp/alpha", title: "Row A" }),
+        makeSessionRow({ sessionId: "h_second", cwd: "/tmp/alpha", title: "Row B" }),
       ],
       activeSpacePath: "/tmp/alpha",
-      activeSessionId: "h9",
+      sessionOrder: { h_first: 0, h_second: 1 },
       messages: {
-        h1: [makeMessage("user", { text: "Used an hour ago", at: now - 3_600_000 })],
-        h9: [makeMessage("user", { text: "Used a second ago", at: now - 1_000 })],
+        h_first: [makeMessage("user", { text: "Row A asked", at: now - 10_000 })],
+        h_second: [makeMessage("user", { text: "Row B asked", at: now - 3_600_000 })],
       },
     });
     render(<SpacesList />);
-    const recent = screen.getByText("Used a second ago");
-    const older = screen.getByText("Used an hour ago");
+    const rowOf = (text: string): HTMLElement =>
+      screen.getByText(text).closest('[role="button"]') as HTMLElement;
+    const a = screen.getByText("Row A");
+    const b = screen.getByText("Row B");
     expect(
-      recent.compareDocumentPosition(older) & Node.DOCUMENT_POSITION_FOLLOWING,
+      a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+    expect(within(rowOf("Row B")).getByText("1h")).toBeTruthy();
+
+    // A future stamp → `now - at` is negative → the `< 60_000` bucket → "now".
+    // Deterministic label change with no fake timers, and the position must not
+    // move an inch.
+    act(() => {
+      useSessions.setState({
+        messages: {
+          ...useSessions.getState().messages,
+          h_second: [
+            makeMessage("user", {
+              text: "Row B answered",
+              at: Date.now() + 9_000_000_000,
+            }),
+          ],
+        },
+      });
+    });
+    expect(
+      screen.getByText("Row A").compareDocumentPosition(screen.getByText("Row B")) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(within(rowOf("Row B")).getByText("now")).toBeTruthy();
   });
 
   it("truncates a long title on a single line (the fade mask is the sole cue)", () => {
@@ -2380,12 +2369,21 @@ describe("SpacesList (archive, ADR 0016)", () => {
     expect(screen.queryByTestId("session-rail")).toBeNull();
   });
 
-  it("keeps the rail's marks POSITIONALLY equal to the rows after the activity sort", () => {
-    // The rail's whole meaning is "the Nth mark is the Nth row". The sort is the
-    // new thing that could break that silently, by giving the rail one order and
-    // the list another. `s2` is the most-recently-STARTED live session and the
-    // least-recently-ACTIVE one, so the two orders differ and the assertion can
-    // tell them apart.
+  it("keeps the rail's marks POSITIONALLY equal to the rows, because both come from the store's ONE sequence", () => {
+    // The rail's whole meaning is "the Nth mark is the Nth row". That equality
+    // is now STRUCTURAL — the rows and the rail read the same array
+    // (`activeView.sessionIds`) — and this test is the pin that keeps it that way
+    // if someone re-derives one of the two and lets them drift.
+    //
+    // The fixture is what makes it non-vacuous, so the numbers are stated:
+    // `sessionOrder: { s2: 0, s1: 1, h1: 2 }` says the live row `s2` is the FIRST
+    // row while `s1` is the row with the most recent message. The store's
+    // sequence therefore answers rows two/one/three → marks
+    // running/waiting/stored; the deleted display sort answers one/two/three
+    // (`s1`'s message is newer, so it led the live group) → marks
+    // waiting/running/stored. Seed the "obvious" ascending
+    // `{ s1: 0, s2: 1, h1: 2 }` instead and BOTH rules answer identically, so the
+    // test would pass while certifying nothing.
     const now = Date.now();
     useSessions.setState({
       sessions: [
@@ -2395,15 +2393,15 @@ describe("SpacesList (archive, ADR 0016)", () => {
       activeSpacePath: "/tmp/alpha",
       activeSessionId: "s2",
       // `s1` is the most recently ACTIVE live session and the one WAITING; `s2`
-      // was started later (so the old reverse-insertion order put it first) and
-      // is RUNNING. The marks therefore differ BY POSITION between the two
-      // orders — a rail that sorted itself differently shows `running` first.
+      // is the one in a turn. The marks therefore differ BY POSITION between the
+      // two orders — a rail that sorted itself differently shows `waiting` first.
       inTurn: { s2: true },
       messages: {
         s1: [makeMessage("user", { text: "Row one", at: now - 5_000 })],
         s2: [makeMessage("user", { text: "Row two", at: now - 90_000 })],
         h1: [makeMessage("user", { text: "Row three", at: now - 3_600_000 })],
       },
+      sessionOrder: { s2: 0, s1: 1, h1: 2 },
     });
     usePermissions.setState({
       prompts: { s1: [{ requestId: "r1", toolTitle: "bash", options: [] }] },
@@ -2412,12 +2410,12 @@ describe("SpacesList (archive, ADR 0016)", () => {
     const one = screen.getByText("Row one");
     const two = screen.getByText("Row two");
     const three = screen.getByText("Row three");
-    // Activity order (one, two, three) — NOT insertion order (two would lead).
+    // The MAP's order (two, one, three) — NOT the activity order (one would lead).
     expect(
-      one.compareDocumentPosition(two) & Node.DOCUMENT_POSITION_FOLLOWING,
+      two.compareDocumentPosition(one) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(
-      two.compareDocumentPosition(three) & Node.DOCUMENT_POSITION_FOLLOWING,
+      one.compareDocumentPosition(three) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     unmount();
 
@@ -2431,11 +2429,11 @@ describe("SpacesList (archive, ADR 0016)", () => {
       ),
     ];
     // Same COUNT as the rows, and per position the SAME GLYPH the row above it
-    // wears: `?`, spinner, stored. A rail that ordered itself a second way would
-    // lead with the spinner.
+    // wears: spinner, `?`, stored. A rail that ordered itself a second way would
+    // lead with the `?`.
     expect(marks.map((m) => m.getAttribute("data-dot") ?? "running")).toEqual([
-      "waiting",
       "running",
+      "waiting",
       "stored",
     ]);
   });

@@ -26,11 +26,6 @@ import {
 } from "../lib/tauri";
 import { basenameOfPath } from "../lib/paths";
 import { sessionFieldOf } from "../lib/sessionLookup";
-import {
-  activityFromKey,
-  activityKeyOf,
-  sortByActivity,
-} from "../lib/sessionActivity";
 import { titleFor } from "../lib/sessionTitle";
 import { relativeTimeFor } from "../lib/sessionTime";
 import {
@@ -236,6 +231,11 @@ const ROW_HOVER_ACTION = "border-0 transition-none shrink";
 const SESSION_ROW_ACTION_ROW =
   "hidden size-6 items-center justify-center rounded-md group-hover:flex hover:bg-surface-hover";
 
+/** The rail's ids while NO **Space** is selected. A module-level constant rather
+ *  than an inline `?? []`, so the array's IDENTITY is stable across renders in
+ *  that case — see `railIds`. */
+const NO_SESSION_IDS: string[] = [];
+
 
 export default function SpacesList() {
   // No `onOpenSettings` prop any more: the Settings gear moved to the chrome
@@ -278,25 +278,29 @@ export default function SpacesList() {
   // only place that owns a write path, the hook is where that path now lives.
   const [agentsOpen, setAgentsOpen] = useState(false);
 
-  // Keep the `spaces` list order (`lastOpenedAt` desc from `list_spaces`):
-  // groups follow the server's recent-first order.
+  // The `spaces` arrive in the MANUAL order (`list_spaces` reads the stored
+  // order column), and `views = spaces.map(spaceViewFor)` INHERITS it — so the
+  // tab strip and the sidebar's group order cannot disagree (spec §4). Nothing
+  // here sorts, and no database column name belongs in this file.
   const views = useMemo(
     () =>
       spaces.map((s) =>
-        // `{ recency }` only, on purpose: subscribing this pane to `messages`
-        // would re-render the whole list on every streamed token — the exact
-        // hazard `activityKeyOf` exists to dodge. The boot recency map is the
-        // same SQL expression, so the close-reason banner's Landing Session is
-        // decided on the same number, just read at boot.
+        // `{ recency }` only, on purpose: subscribing this pane to the whole
+        // `messages` map would re-render the entire list on every streamed token
+        // (the hazard this call site has always avoided, and still does — a ROW
+        // subscribes to its own transcript, the LIST subscribes to none). The
+        // boot recency map is the same SQL expression, so the close-reason
+        // banner's Landing Session is decided on the same number, just read at
+        // boot.
         spaceViewFor(s, sessions, historySessions, closeReasons, archivedSessions, {
           recency: sessionRecency,
         }, sessionOrder),
       ),
     [spaces, sessions, historySessions, closeReasons, archivedSessions, sessionRecency, sessionOrder],
   );
-  // The ACTIVE SPACE's view — the ROW LIST's source (`viewIds`, `liveIds` /
-  // `storedIds`, the rows themselves and every row's Space name), NOT a
-  // new-session input any more. `⌘N` used to branch on it (`undefined` → the
+  // The ACTIVE SPACE's view — the ROW LIST's source (`sessionIds`, the rows
+  // themselves and every row's Space name), NOT a new-session input any more.
+  // `⌘N` used to branch on it (`undefined` → the
   // Open Space dialog); the store's `startSessionInActiveSpace` owns that
   // routing now, so this is pure derivation for the list.
   // `undefined` while no Space is selected (no Spaces yet, or the last one was
@@ -307,57 +311,23 @@ export default function SpacesList() {
   // deleted `useStartNewConversation` hook's local `error` state: the command
   // lives in the store now, so its failure has to be readable from the store too.
   const newSessionError = useSessions((s) => s.newSessionError);
-  // The active space's sessions in the list's own order (live then stored) —
-  // the ids whose activity and status are read below, so the subscription and
-  // the rail are derived from the SAME membership the rows render.
-  const viewIds = useMemo(
-    () =>
-      activeView
-        ? [...activeView.liveSessionIds, ...activeView.storedSessionIds]
-        : [],
-    [activeView],
-  );
-  // LAST ACTIVITY per session, subscribed as ONE primitive key (see
-  // `activityKeyOf`): the session's own relative time is already
-  // `messages[id]`'s last stamp, and the ORDER now reads the same field — so
-  // a row's time and its position in the list can never disagree. The key (and
-  // not the `messages` map) is what keeps a streaming turn from re-sorting the
-  // list on every token: growing a message replaces the array without moving
-  // its stamp.
-  const activityKey = useSessions((s) => activityKeyOf(viewIds, s.messages));
-  const activity = useMemo(() => activityFromKey(activityKey), [activityKey]);
-  // Most recently active first, WITHIN each group. The two groups need
-  // OPPOSITE rules for "no evidence" (a session with no transcript loaded this
-  // boot), and getting that wrong is exactly the annoyance being fixed:
-  //
-  // - LIVE, `unknowns: "first"` (the default): no transcript means the session
-  //   was JUST started (`addSession` gives it an empty array) — the newest
-  //   activity there.
-  // - STORED, `unknowns: "last"`: no transcript means it has not been opened
-  //   since boot, i.e. nothing says it is recent, so it must not outrank a
-  //   session we can PROVE was used. `Db::list_sessions` already returns this
-  //   group most-recently-active-first, so the unknowns keep that order among
-  //   themselves; the sort's only real work here is a session that CLOSED this
-  //   boot — `handleSessionClosed` appends it to the tail of the array, which
-  //   would otherwise file the most recently used session at the BOTTOM.
-  const liveIds = useMemo(
-    () => sortByActivity(activeView?.liveSessionIds ?? [], activity),
-    [activeView, activity],
-  );
-  const storedIds = useMemo(
-    () => sortByActivity(activeView?.storedSessionIds ?? [], activity, "last"),
-    [activeView, activity],
-  );
+  // NO ordering subscription here, on purpose (ADR 0075): the pane used to
+  // subscribe to each row's last message stamp — as a primitive key, so
+  // streaming would not re-sort it — purely so it could re-rank the rows for
+  // display. The order now comes from the store (`sessionIds`) already settled,
+  // so the pane reads NOTHING about activity for position. A ROW still
+  // subscribes to its own transcript for its time label; that is per-row and
+  // does not move a slot.
+  // The rail's ids are the ROWS' ids — the same array, not a second
+  // construction of the same order (ADR 0075; the rail's contract is "the Nth
+  // mark is the Nth row", and two derivations of one order is two things that
+  // can drift). No `useMemo`: this is a field read, and the module-level empty
+  // array keeps the input identity stable while no Space is selected.
+  const railIds = activeView?.sessionIds ?? NO_SESSION_IDS;
   // The rail's statuses, derived by the SAME rule the rows use (one
   // subscription for the whole list — see `useSessionStatuses`). Read
   // unconditionally: the rail only paints while collapsed, but the ids are the
-  // active view's either way and a hook cannot be conditional. ORDER IS THE
-  // RAIL'S CONTRACT (the Nth mark is the Nth row), so it takes the ORDERED
-  // lists, never the membership list above.
-  const railIds = useMemo(
-    () => [...liveIds, ...storedIds],
-    [liveIds, storedIds],
-  );
+  // active view's either way and a hook cannot be conditional.
   const statuses = useSessionStatuses(railIds);
 
   // The active space's path for the skill catalog (a Session's `cwd` IS
@@ -608,21 +578,16 @@ export default function SpacesList() {
         {/* The ACTIVE space's sessions (the Spaces are the top TABS —
             the sidebar is sessions-only: no group headers, no folder
             icons, no `+`, no trust shield, no collapse chevrons — the
-            list just scrolls). Live sessions first, then stored; within each
-            group, MOST RECENTLY ACTIVE FIRST (`sortByActivity` — the same last
-            message the row's time prints, so the order and the label agree). */}
+            list just scrolls). The rows render the MANUAL order: ONE
+            sequence spanning live and stored (`activeView.sessionIds`),
+            with no group headers — a row's live-ness stays visible as its
+            `SessionStatusMark`, never as its position. The row's time is
+            still its last message, and it is now deliberately DECOUPLED
+            from its slot (pinned by "updates a row's relative time while
+            its POSITION stays frozen"). */}
         {activeView && (
           <div className="flex flex-col gap-0.5">
-            {liveIds.map((id) => (
-              <SessionRow
-                key={id}
-                sessionId={id}
-                spaceName={activeView.title !== "" ? activeView.title : activeView.path}
-                active={activeSessionId === id}
-                onOpen={openSession}
-              />
-            ))}
-            {storedIds.map((id) => (
+            {activeView.sessionIds.map((id) => (
               <SessionRow
                 key={id}
                 sessionId={id}
@@ -647,11 +612,11 @@ export default function SpacesList() {
       </div>
       {/* The collapsed rail's session overview: marks only, because a 40px
           sliver can hold the SHAPE of a list and nothing else. It mirrors the
-          list it replaces (the ACTIVE space's sessions, in the list's own
-          order — live first, then stored, which is why the ids come from the
-          SAME `railIds` memo the statuses are derived from: two constructions
-          of that order is two things that can drift, and a rail whose Nth mark
-          is not the Nth row is worse than no rail).
+          list it replaces (the ACTIVE space's sessions, in the SAME order —
+          the marks and the rows read ONE array, `activeView.sessionIds`, which
+          is why `railIds` is a field read and not a second derivation: two
+          constructions of that order is two things that can drift, and a rail
+          whose Nth mark is not the Nth row is worse than no rail).
           Rendered only while collapsed. No mark for the Space itself: the tabs
           are the space list, and the active one is lit directly above this
           column (the strip's `pl-1` aligns them). */}
@@ -755,7 +720,7 @@ function SessionRow({
   const isLive = useSessions((s) => s.sessions.some((x) => x.sessionId === sessionId));
   const archiveSession = useSessions((s) => s.archiveSession);
   // The row's generated title, read by id: `SessionRow` is given an id (by
-  // design — its parent holds `liveSessionIds` / `storedSessionIds`, never the
+  // design — its parent holds `sessionIds`, the id sequence, never the
   // rows), so no `SessionInfo` is threaded through `SpaceView` for it. The
   // selector returns a PRIMITIVE via the ONE three-list walk
   // (`lib/sessionLookup.ts` — live / history / archived, live first): zustand
