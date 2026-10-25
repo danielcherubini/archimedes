@@ -131,6 +131,11 @@ pub fn is_app_url(url: &Url, dev_host: Option<&str>) -> bool {
     }
 }
 
+/// The label prefix that marks a webview as a designated render webview.
+/// This prefix carries two guarantees, not one: it is what exempts a webview
+/// from the app's own navigation rules (ADR 0058) AND what
+/// [`should_track_label`] keys the window-state exclusion on. Changing it
+/// silently changes the scope of both.
 pub const RENDER_WEBVIEW_PREFIX: &str = "web-fetch-";
 
 /// Is this webview one of ours — a designated render webview, which may
@@ -142,16 +147,21 @@ pub fn is_render_webview(label: &str) -> bool {
     label.starts_with(RENDER_WEBVIEW_PREFIX)
 }
 
-/// Does `tauri-plugin-window-state` get to remember this window? `false` for
-/// the designated render webviews: the plugin's default flags include
-/// `StateFlags::VISIBLE`, and its `on_window_ready` restore calls `show()` +
-/// `set_focus()` for any label with no saved state — which is EVERY render
-/// webview, because its label carries a fresh uuid (`web-fetch-render-<uuid>`,
-/// `agent/worker/core.rs`). A hidden window that the plugin reveals is issue
-/// #91. The same filter also keeps `web-fetch-*` out of `.window-state.json`:
-/// the filter check returns before the plugin inserts the label into its
-/// state cache, and the save writes that whole cache without consulting the
-/// filter, so an unfiltered per-fetch label would accumulate forever.
+/// Does `tauri-plugin-window-state` get to remember this window? Note the
+/// polarity is the inverse of [`is_render_webview`]'s: `true` here means "the
+/// plugin MAY track it". `false` for the designated render webviews — the
+/// plugin's default flags include `StateFlags::VISIBLE`, and its
+/// `on_window_ready` restore calls `show()` + `set_focus()` for any label with
+/// no saved state, which is EVERY render webview because its label carries a
+/// fresh uuid (`web-fetch-render-<uuid>`, `agent/worker/core.rs`). A hidden
+/// window that the plugin reveals is issue #91.
+///
+/// The same filter keeps `web-fetch-*` out of `.window-state.json` — in
+/// `2.4.0`, the version `Cargo.lock` resolves, the filter check returns before
+/// the plugin inserts the label into its state cache, and the save writes that
+/// whole cache without consulting the filter, so an unfiltered per-fetch label
+/// accumulates forever. **A plugin bump must re-check that ordering**; the
+/// accumulation argument dies with it, the reveal argument does not.
 pub fn should_track_label(label: &str) -> bool {
     !is_render_webview(label)
 }

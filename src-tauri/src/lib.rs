@@ -381,9 +381,9 @@ pub fn run() {
             // with NO saved state. Every render label embeds a fresh uuid, so
             // it never has one: the plugin was revealing a window the app
             // deliberately hid, and stealing focus. The filter (a prefix test,
-            // not `with_denylist`'s exact labels — `web-fetch-<uuid>` is
-            // unbounded) also keeps those labels from permanently growing
-            // `.window-state.json`. `main` stays tracked: `tauri.conf.json`
+            // not `with_denylist`'s exact labels — the render label set is not
+            // enumerable in advance) also keeps those labels from permanently
+            // growing `.window-state.json`. `main` stays tracked: `tauri.conf.json`
             // ships `"visible": false` and ADR 0021 relies on this plugin to
             // reveal it, so no `with_state_flags` change here.
             tauri_plugin_window_state::Builder::default()
@@ -798,15 +798,25 @@ mod tests {
         // navigation guard), `tauri::Builder` (the app) and
         // `tokio::runtime::Builder` — and matching the wrong one reddens this
         // test while the registration is perfectly fine.
+        //
+        // `find` takes the FIRST occurrence, which is the registration itself.
+        // If someone deletes that registration, the next occurrence is this
+        // test's own prose, ~600 bytes before the `assert!` below — outside any
+        // sane window — so the test goes RED rather than finding the filter
+        // string a few lines away and passing on the strength of its own text.
         let anchor = "tauri_plugin_window_state::Builder";
         let idx = src
             .find(anchor)
             .expect("the window-state plugin is registered by its qualified Builder");
 
         // A BOUNDED window after the anchor, so the check cannot drift onto an
-        // unrelated later `.plugin(...)` call. Generous, and deliberately
-        // whitespace-blind: the registration is spread over several lines by
-        // `rustfmt`, and reformatting it must not redden this test.
+        // unrelated later `.plugin(...)` call. It is whitespace-blind — the
+        // registration is spread over several lines by `rustfmt` and
+        // reformatting must not redden this test — but NOT length-blind: adding
+        // another method or a comment line inside the registration can push the
+        // filter past this window, and that reddens the test BY DESIGN, as a
+        // prompt to re-read what this registration now does. Widening `WINDOW`
+        // is the correct response to that red, not deleting the assertion.
         const WINDOW: usize = 200;
         let statement = &src[idx..idx + WINDOW.min(src.len() - idx)];
         assert!(
