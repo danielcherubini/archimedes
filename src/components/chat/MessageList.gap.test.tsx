@@ -5,7 +5,17 @@ import MessageList from "./MessageList";
 import type { RenderUnit } from "../../lib/toolGroups";
 import type { Message } from "../../store/sessions";
 import type { ChildGate } from "../../hooks/useChildGates";
+import type { InteractiveRequestData } from "../../store/interactive";
 import { useInteractive } from "../../store/interactive";
+import { useSessions } from "../../store/sessions";
+import { resetStores } from "../../test/resetStores";
+
+// NO `vi.mock("../../lib/tauri")` here, on purpose (see the same note in
+// `MessageList.test.tsx`): the anchored ask card's self-cancelling effect
+// swallows its own `invoke` failure (`.catch(() => {})`,
+// `AskQuestionCard.tsx:315`), so the blank row renders identically without the
+// seam — and `src/lib/tauriBarrel.test.ts:390` pins HOW MANY test files mock
+// that barrel, a count this diagnostic task may not move.
 
 /**
  * The transcript's VERTICAL RHYTHM (ZCode's model: rows carry no padding and
@@ -46,6 +56,7 @@ const single = (message: Message): RenderUnit => ({ kind: "single", message });
 function renderMessageList(
   units: RenderUnit[],
   childGates: ChildGate[] = [],
+  askRequests: InteractiveRequestData[] = [],
 ): HTMLElement {
   const { container } = render(
     createElement(MessageList, {
@@ -53,7 +64,7 @@ function renderMessageList(
       messageCount: units.length,
       activeSessionId: "s1",
       inTurn: false,
-      askRequests: [],
+      askRequests,
       prompts: [],
       stackedAskRequests: [],
       // The child-gate list defaults to `[]` because the rhythm tests below
@@ -228,5 +239,101 @@ describe("the transcript's vertical rhythm", () => {
     const gateRow = withGate[withGate.length - 1]!;
     expect(gateRow.textContent).toContain("Which color?");
     expect(extra(gateRow)).toEqual([]);
+  });
+
+  /**
+   * THE AMPLIFIER, disarmed (issue #86 — "empty/blank instead of hidden").
+   *
+   * `wrap()` pads whatever its child renders, so when the child was an
+   * `AskQuestionCard` whose request had left the store the row kept the FULL
+   * rhythm (`px-4` + the `pt-7` breathing gap) while holding no element at all.
+   * FIXED: the anchored branch evaluates the card's own emptiness predicate
+   * (`isAskRowRenderable`) at the CALL SITE and returns `null` for the whole
+   * row, so a unit with nothing to draw contributes no row — the padded
+   * wrapper is never emitted.
+   *
+   * Asserts row ABSENCE (never "no text content": an icon-only row also has
+   * `textContent === ""` while showing a visible glyph), and pins the two
+   * things the fix must NOT disturb — the surviving sibling row's rhythm, and
+   * the class list of a row that DOES render (the flex column is load-bearing:
+   * a block wrapper re-adds the line box's descender space).
+   */
+  describe("a dismissed ask row is not rendered at all (issue #86)", () => {
+    afterEach(() => resetStores());
+
+    it("the anchored unit contributes no row: no padded empty div survives", () => {
+      resetStores();
+      // The anchor: the tool-call message survives in the transcript...
+      useSessions.setState({ messages: { s1: [tool("t1"), tool("call_ask")] } });
+      // ...and the ask prop still lists the request the store no longer holds
+      // (the durable version of the blank row — `removeRequest` cleared it).
+      const stale: InteractiveRequestData = {
+        requestId: "req-blank",
+        method: "ask",
+        source: "main",
+        toolCallId: "call_ask",
+        params: {
+          questions: [{ id: "q1", question: "Which color?", options: [{ label: "Red" }] }],
+        },
+      };
+
+      const scroll = renderMessageList(
+        [single(tool("t1")), single(tool("call_ask"))],
+        [],
+        [stale],
+      );
+      const allRows = [
+        ...(scroll.querySelectorAll('[data-testid="message-row"]') as NodeListOf<HTMLElement>),
+      ];
+
+      // NOT ONE row is padded-and-empty — the blank row is gone rather than
+      // merely losing its padding.
+      expect(allRows.filter((r) => r.childElementCount === 0)).toHaveLength(0);
+      // And the anchored unit is simply absent: two units in, ONE row out.
+      expect(allRows).toHaveLength(1);
+      // The surviving row is the sibling tool row (unit 0 → no breathing gap),
+      // so the fix removed a row rather than re-skinning the wrong one.
+      const [sibling] = allRows;
+      expect(sibling!.className.split(/\s+/)).toContain("px-4");
+      expect(extra(sibling!)).toEqual([]);
+      expect(sibling!.textContent).toContain("Ran");
+    });
+
+    it("a well-formed anchored ask still renders its card in a fully-rhythmed row", () => {
+      resetStores();
+      // The same two units, but the store HOLDS the request and it carries a
+      // question — so the guard stays out of the way and the ask row keeps the
+      // `pt-7` breathing gap the rhythm tests above pin for a tool pair.
+      useSessions.setState({ messages: { s1: [tool("t1"), tool("call_ask")] } });
+      const live: InteractiveRequestData = {
+        requestId: "req-live",
+        method: "ask",
+        source: "main",
+        toolCallId: "call_ask",
+        params: {
+          questions: [{ id: "q1", question: "Which color?", options: [{ label: "Red" }] }],
+        },
+      };
+      useInteractive.getState().addRequest("s1", live);
+
+      const scroll = renderMessageList(
+        [single(tool("t1")), single(tool("call_ask"))],
+        [],
+        [live],
+      );
+      const allRows = [
+        ...(scroll.querySelectorAll('[data-testid="message-row"]') as NodeListOf<HTMLElement>),
+      ];
+
+      expect(allRows).toHaveLength(2);
+      const askRow = allRows[1]!;
+      expect(askRow.textContent).toContain("Which color?");
+      // Tool → tool, so the row that DOES draw keeps the breathing gap, and it
+      // is still the flex column every other row is.
+      expect(extra(askRow)).toEqual(["pt-7"]);
+      expect(askRow.className.split(/\s+/)).toEqual(
+        expect.arrayContaining(["flex", "flex-col", "min-w-0", "max-w-full", "px-4"]),
+      );
+    });
   });
 });

@@ -757,3 +757,108 @@ describe("ToolCallCard (External open)", () => {
     expect(svg.getAttribute("width")).toBe("24");
   });
 });
+
+/**
+ * CHARACTERISATION (issue #86 — "just empty/blank instead of hidden").
+ *
+ * The reporter's blank row is a ROW, and a row is `MessageList`'s wrapper
+ * (`MessageList.tsx:276-290`), which pads whatever its child renders. So the
+ * question this block answers is narrow: for which inputs does a COLLAPSED card
+ * render nothing the user can see? Each case asserts what ACTUALLY renders today
+ * — a glyph, a title, a verb — rather than asserting the fix. Task 2 inverts
+ * whichever one turns out to be the culprit.
+ *
+ * Three distinct outcomes are kept deliberately distinct, because conflating
+ * them is how the wrong fix gets written:
+ *   - a TRULY EMPTY row (no element at all) — the symptom;
+ *   - an ICON-ONLY row (`textContent === ""` but a visible glyph) — degenerate,
+ *     and NOT the symptom;
+ *   - a row with TEXT — fine.
+ * Hence: never assert `textContent === ""` alone; always pair it with the
+ * element count that says WHY it is empty.
+ */
+describe("a collapsed card renders no blank row", () => {
+  /** The collapsed header row — the only thing a collapsed card draws. */
+  function renderCollapsed(props: {
+    title: string;
+    status: "completed" | "pending" | "failed";
+    rawInput?: unknown;
+  }) {
+    const { container } = render(<ToolCallCard {...props} />);
+    const header = container.querySelector("button");
+    return { container, header };
+  }
+
+  it("`title=\"\"` renders an ICON-ONLY row (a glyph, no text) — degenerate, but not a truly empty row", () => {
+    // `toolVerb("")` is `undefined` (`toolOutput.ts:537-541`, verbs keyed by
+    // exact title) so `ToolCallCardHeader.tsx:186-190`'s `{verb ?? title}`
+    // prints the empty title, and every summary arm is closed
+    // (`rawInput === undefined` → `summarizeToolCall` returns `undefined` at
+    // `toolOutput.ts:35`; `fileSummaries` returns `[]`). What is left is the
+    // row glyph + the hover chevron — an empty `textContent` that still shows a
+    // glyph.
+    //
+    // NOT the suspected cause: `normalize.rs:63-65` refuses to synthesise a
+    // `tool-call` message from a title-less frame, so production never hands the
+    // card `title === ""`. This case pins the guard's behaviour only.
+    const { header } = renderCollapsed({ title: "", status: "completed", rawInput: undefined });
+    expect(header).not.toBeNull();
+    const row = header!;
+    // The distinguishing pair: no TEXT, but ELEMENTS — so this is icon-only,
+    // not the blank row.
+    expect(row.textContent).toBe("");
+    expect(row.querySelectorAll("svg").length).toBeGreaterThan(0);
+    expect(row.childElementCount).toBeGreaterThan(0);
+  });
+
+  it("`title=\"unknown_tool\"` renders the TITLE as text (the `verb ?? title` fallback)", () => {
+    // An unrecognised verb is not an empty row: `{verb ?? title}` prints the
+    // title, so the row has visible text even with no input at all.
+    const { header } = renderCollapsed({
+      title: "unknown_tool",
+      status: "completed",
+      rawInput: undefined,
+    });
+    expect(header!.textContent).toContain("unknown_tool");
+    expect(header!.childElementCount).toBeGreaterThan(0);
+  });
+
+  it("`title=\"read\"` with `rawInput={}` renders the VERB even though the file chip arm is closed", () => {
+    // `fileSummaries` returns `[]` when `path` is missing (`toolOutput.ts:579-586`)
+    // and `summarizeToolCall("read", {})` is `undefined` — but `read` is a known
+    // tool, so the verb prints.
+    const { header } = renderCollapsed({ title: "read", status: "completed", rawInput: {} });
+    expect(header!.textContent).toContain("Read");
+    expect(header!.childElementCount).toBeGreaterThan(0);
+  });
+
+  it("`title=\"edit\"` with `edits: []` renders the verb + chip and NO change stat", () => {
+    // `editChangeStat` is `undefined` for an empty `edits` array, so the
+    // `+N -M` arm closes; `fileSummaries` still has a `path`, so the chip keeps
+    // the row textual.
+    const { container, header } = renderCollapsed({
+      title: "edit",
+      status: "completed",
+      rawInput: { path: "/a/b", edits: [] },
+    });
+    expect(header!.textContent).toContain("Edited");
+    expect(header!.textContent).toContain("b");
+    // No `+`/`-` stat was rendered anywhere in the collapsed card.
+    expect(container.textContent).not.toContain("+");
+    expect(container.textContent).not.toContain("-");
+  });
+
+  it("`title=\"bash\"` with `command: \"\"` renders the verb and NO empty command span", () => {
+    // Both command arms guard on `command !== ""`
+    // (`ToolCallCard.tsx:99`, `ToolCallCardHeader.tsx:193-197`), and the summary
+    // arm's `summary ?` is false for `""` — so an empty command prints nothing
+    // extra rather than a blank span. The verb keeps the row textual.
+    const { header } = renderCollapsed({
+      title: "bash",
+      status: "completed",
+      rawInput: { command: "" },
+    });
+    expect(header!.textContent).toBe("Ran");
+    expect(header!.childElementCount).toBeGreaterThan(0);
+  });
+});

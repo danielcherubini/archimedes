@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import AskQuestionCard from "./AskQuestionCard";
+import AskQuestionCard, { isAskRowRenderable } from "./AskQuestionCard";
+import type { InteractiveRequestData } from "../store/interactive";
 import { useInteractive } from "../store/interactive";
 import { useSubagents } from "../store/subagents";
 import { resetStores } from "../test/resetStores";
@@ -527,5 +528,51 @@ describe("AskQuestionCard", () => {
     useInteractive.getState().addRequest("s1", singleRequest);
     render(<AskQuestionCard sessionId="s1" requestId="r1" />);
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+/**
+ * `isAskRowRenderable` — the ONE emptiness rule shared by this card and
+ * `MessageList`'s anchored row (issue #86: a row whose ask had nothing to draw
+ * was emitted padded and empty instead of not at all).
+ *
+ * Tested here, in the component's own file, because the predicate lives in
+ * `AskQuestionCard.tsx`. A separate file would have had to mock `../lib/tauri`,
+ * and `src/lib/tauriBarrel.test.ts:390` pins how many test files may do that.
+ */
+describe("isAskRowRenderable", () => {
+  const request = (params: Record<string, unknown>): InteractiveRequestData => ({
+    requestId: "r1",
+    method: "ask",
+    source: "main",
+    toolCallId: "call_ask",
+    params,
+  });
+
+  it("is true for a request carrying at least one question", () => {
+    expect(isAskRowRenderable(request({ questions: singleRequest.params.questions }))).toBe(
+      true,
+    );
+  });
+
+  it("is false for a request with `questions: []` — the card renders nothing", () => {
+    expect(isAskRowRenderable(request({ questions: [] }))).toBe(false);
+  });
+
+  it("is false for a request whose params carry no `questions` at all", () => {
+    expect(isAskRowRenderable(request({}))).toBe(false);
+  });
+
+  it("is false for `undefined` — the dismissed request the anchor still points at", () => {
+    expect(isAskRowRenderable(undefined)).toBe(false);
+  });
+
+  it("agrees with the card: a request it calls unrenderable renders no DOM", () => {
+    // The pairing that matters — card and row must never disagree, which is why
+    // both call this function instead of re-spelling the condition.
+    useInteractive.getState().addRequest("s1", request({ questions: [] }));
+    const { container } = render(<AskQuestionCard sessionId="s1" requestId="r1" />);
+    expect(isAskRowRenderable(useInteractive.getState().requests["s1"]?.[0])).toBe(false);
+    expect(container.firstChild).toBeNull();
   });
 });

@@ -5,6 +5,7 @@ import {
   type AskResponsePayload,
 } from "../lib/tauri";
 import { useInteractive } from "../store/interactive";
+import type { InteractiveRequestData } from "../store/interactive";
 import { useAsyncAction } from "../hooks/useAsyncAction";
 import { useSessions } from "../store/sessions";
 import { useSubagents } from "../store/subagents";
@@ -134,6 +135,44 @@ function draftHasAnswer(draft: QuestionDraft): boolean {
   return (
     draft.selected.length > 0 || (draft.other && draft.otherText.trim() !== "")
   );
+}
+
+/**
+ * The questions an `ask` request carries — ONE derivation, because two places
+ * ask the question and they MUST agree: this card (its render, its
+ * self-cancelling effect) and `MessageList`'s anchored row (issue #86 — see
+ * `isAskRowRenderable`). The cast is the wire shape: `params` is a
+ * `Record<string, unknown>` on the store type, and the `ask` method's payload
+ * is the `questions` array.
+ */
+function askQuestionsOf(
+  request: InteractiveRequestData | undefined,
+): AskQuestionDto[] {
+  return (request?.params as { questions?: AskQuestionDto[] } | undefined)
+    ?.questions ?? [];
+}
+
+/**
+ * Whether an `ask` request has anything to DRAW — the single rule behind both
+ * the card (`if (!isAskRowRenderable(request)) return null`) and the anchored
+ * transcript row in `MessageList`, which must not emit a padded `message-row`
+ * for a card that would render `null`.
+ *
+ * It exists as an EXPORTED PREDICATE rather than an inline condition because
+ * the row cannot observe the card's own `return null` (`wrap()` receives a JSX
+ * element, and the child's decision happens later, during render). The row
+ * therefore evaluates this on the same data, and if the two ever disagreed the
+ * blank row of issue #86 would be back — which is why neither side is allowed
+ * to hand-write `!request || questions.length === 0` again.
+ *
+ * False for a request that has left the store (dismissed / answered — the
+ * anchor's `tool-call` message outlives it) and for one carrying zero
+ * questions.
+ */
+export function isAskRowRenderable(
+  request: InteractiveRequestData | undefined,
+): boolean {
+  return !!request && askQuestionsOf(request).length > 0;
 }
 
 /**
@@ -267,9 +306,7 @@ export default function AskQuestionCard({
     }
   }, [queued, anchored, autoFocus]);
 
-  const questions =
-    (request?.params as { questions?: AskQuestionDto[] } | undefined)
-      ?.questions ?? [];
+  const questions = askQuestionsOf(request);
   const hasSelection = questions.some((q) => {
     const d = drafts[q.id];
     return !!d && (d.selected.length > 0 || d.other);
@@ -316,7 +353,7 @@ export default function AskQuestionCard({
       .finally(() => removeRequest(sessionId, requestId));
   }, [unrenderable, sessionId, requestId, removeRequest]);
 
-  if (!request || questions.length === 0) return null;
+  if (!isAskRowRenderable(request)) return null;
 
   const draft = (id: string): QuestionDraft => drafts[id] ?? EMPTY_DRAFT;
   const updateDraft = (id: string, fn: (d: QuestionDraft) => QuestionDraft) =>
