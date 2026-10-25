@@ -373,7 +373,23 @@ pub fn run() {
         .plugin(navigation_guard)
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            // issue #91: the render webview for a `fetch_content` escalation
+            // is built `visible(false)`, but this plugin's default flags are
+            // `StateFlags::all()` — including `VISIBLE` — and its
+            // `on_window_ready` restore `show()`s + `set_focus()`es any label
+            // with NO saved state. Every render label embeds a fresh uuid, so
+            // it never has one: the plugin was revealing a window the app
+            // deliberately hid, and stealing focus. The filter (a prefix test,
+            // not `with_denylist`'s exact labels — `web-fetch-<uuid>` is
+            // unbounded) also keeps those labels from permanently growing
+            // `.window-state.json`. `main` stays tracked: `tauri.conf.json`
+            // ships `"visible": false` and ADR 0021 relies on this plugin to
+            // reveal it, so no `with_state_flags` change here.
+            tauri_plugin_window_state::Builder::default()
+                .with_filter(crate::navigation_guard::should_track_label)
+                .build(),
+        )
         // The OS notification for an attention alert (ADR 0038) — called from
         // Rust only, so no capability entry and no npm package (the plugin's
         // `request_permission` is a documented no-op on desktop).

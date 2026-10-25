@@ -142,6 +142,20 @@ pub fn is_render_webview(label: &str) -> bool {
     label.starts_with(RENDER_WEBVIEW_PREFIX)
 }
 
+/// Does `tauri-plugin-window-state` get to remember this window? `false` for
+/// the designated render webviews: the plugin's default flags include
+/// `StateFlags::VISIBLE`, and its `on_window_ready` restore calls `show()` +
+/// `set_focus()` for any label with no saved state — which is EVERY render
+/// webview, because its label carries a fresh uuid (`web-fetch-render-<uuid>`,
+/// `agent/worker/core.rs`). A hidden window that the plugin reveals is issue
+/// #91. The same filter also keeps `web-fetch-*` out of `.window-state.json`:
+/// the filter check returns before the plugin inserts the label into its
+/// state cache, and the save writes that whole cache without consulting the
+/// filter, so an unfiltered per-fetch label would accumulate forever.
+pub fn should_track_label(label: &str) -> bool {
+    !is_render_webview(label)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,5 +328,17 @@ mod tests {
         assert!(!is_render_webview("main"));
         assert!(!is_render_webview("webfetch-1"));
         assert!(!is_render_webview(""));
+    }
+
+    #[test]
+    fn window_state_never_tracks_a_render_webview() {
+        // issue #91: the plugin's default StateFlags include VISIBLE, and it
+        // show()s + set_focus()es any label with no saved state.
+        assert!(!should_track_label("web-fetch-render-0f2a"));
+        assert!(!should_track_label(RENDER_WEBVIEW_PREFIX));
+        // The app's own window MUST stay tracked — ADR 0021 reveals the
+        // `visible: false` main window through this very plugin.
+        assert!(should_track_label("main"));
+        assert!(should_track_label("anything-else"));
     }
 }
