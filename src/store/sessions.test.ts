@@ -1560,17 +1560,24 @@ describe("compacting (the working indicator's compaction state)", () => {
   });
 
   /**
-   * The weld the Rust side avoids by REPLACING the transcript line (ADR 0045).
+   * The reducer's weld rule, still load-bearing — and now a rule a compaction
+   * does NOT participate in.
    *
-   * Every `system_chunk` carries `messageId: "system"`, and this reducer
-   * APPENDS same-`messageId` chunks with NO separator — so if `compaction_end`
-   * emitted BOTH `"Compaction finished"` and `"Compaction failed: …"`, one
-   * batch would render a single bubble reading
-   * `Compaction finishedCompaction failed: …`. The frame-level Rust test cannot
-   * see that (it inspects each frame on its own), so it is pinned HERE, at the
-   * level the user actually reads.
+   * Every `system_chunk` carries `messageId: "system"`, and this reducer APPENDS
+   * same-`messageId` chunks with NO separator, so two one-liners in one batch
+   * render as a single bubble. That is why `normalize` has never emitted a pair
+   * of them for one event; it is pinned HERE because the frame-level Rust test
+   * inspects each frame alone and cannot see the weld.
+   *
+   * It used to be pinned with the compaction's own two lines. Issue #90 turned a
+   * compaction into a tool card, so those lines are gone — and with them the
+   * repeated-compaction weld they could not prevent: every compaction of a
+   * session shared the `system` key, so a real database read
+   * `Compacting context…Compaction finishedCompacting context…Compaction
+   * finishedCompaction failed: …` as ONE bubble. The rule below still governs the
+   * one-liners that remain (the retry line, the retraction line).
    */
-  it("a failed compaction lands as ONE unwelded agent-text line", () => {
+  it("same-messageId one-liners weld, which is why a compaction no longer emits them", () => {
     const failure =
       "Context overflow: not enough older context to compact — try a larger-context model.";
     const systemLine = (text: string): AcpSessionUpdate => ({
@@ -1579,34 +1586,55 @@ describe("compacting (the working indicator's compaction state)", () => {
       content: { type: "text", text },
     });
 
-    // The two frames `compaction_end` emits when it carries an `error_message`.
-    useSessions.getState().applySessionUpdates([
-      { sessionId: "s1", update: systemLine(`Compaction failed: ${failure}`) },
-      { sessionId: "s1", update: settled("overflow") },
-    ]);
-    const messages = useSessions.getState().messages["s1"] ?? [];
-    const texts = messages.filter(
-      (m): m is Extract<Message, { kind: "agent-text" }> => m.kind === "agent-text",
-    );
-    expect(texts).toHaveLength(1);
-    expect(texts[0].text).toBe(`Compaction failed: ${failure}`);
-    expect(texts[0].text).not.toContain("finishedCompaction");
-    expect(texts[0].text).not.toContain("Compaction finished");
-    // The state frame added no message of its own.
-    expect(messages).toHaveLength(1);
-
-    // The hazard itself, spelled out: the two lines in ONE batch DO weld (which
-    // is exactly why `normalize` replaces the success line instead of adding to
-    // it).
+    // The hazard, spelled out on the one-liners that DO still ship (the retry
+    // line and a result line share the `system` key): two of them in ONE batch
+    // weld into one bubble. This is the shape `normalize` must never emit.
     const welded = applySessionUpdate(
-      applySessionUpdate([], systemLine("Compaction finished"), 1),
+      applySessionUpdate([], systemLine("Retrying (attempt 1/3…)"), 1),
       systemLine(`Compaction failed: ${failure}`),
       1,
     );
     expect(welded).toHaveLength(1);
     expect((welded[0] as Extract<Message, { kind: "agent-text" }>).text).toContain(
-      "finishedCompaction",
+      "…)Compaction failed",
     );
+
+    // And the reason the compaction stopped taking part in it: its frames are a
+    // card, so a failed compaction lands as ONE tool-call message and never
+    // touches the `system` key at all.
+    useSessions.getState().applySessionUpdates([
+      {
+        sessionId: "s1",
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: "t:compact:1",
+          title: "compaction",
+          status: "in_progress",
+          rawInput: { reason: "overflow" },
+        },
+      },
+      {
+        sessionId: "s1",
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "t:compact:1",
+          status: "failed",
+          rawOutput: { content: [{ type: "text", text: failure }], details: { error: failure } },
+        },
+      },
+      { sessionId: "s1", update: settled("overflow") },
+    ]);
+    const messages = useSessions.getState().messages["s1"] ?? [];
+    const cards = messages.filter(
+      (m): m is Extract<Message, { kind: "tool-call" }> => m.kind === "tool-call",
+    );
+    expect(cards).toHaveLength(1);
+    expect(cards[0].status).toBe("failed");
+    expect(cards[0].title).toBe("compaction");
+    // The failure text survives on the card's output (what the expanded body shows).
+    expect(JSON.stringify(cards[0].rawOutput)).toContain(failure);
+    // No agent-text bubble was created, and the state frame added nothing.
+    expect(messages).toHaveLength(1);
   });
 
   it("markStalled clears it (a stalled session can no longer end its own compaction)", () => {

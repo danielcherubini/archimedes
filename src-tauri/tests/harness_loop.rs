@@ -688,29 +688,37 @@ async fn context_threshold_triggers_compaction() {
     };
     assert!(text.contains("SUMMARY"), "the summary, got {text:?}");
 
-    // (ADR 0049) The LOOP-level pin for the shared `system` key — the one id
-    // family with NO counter, so a design that only seeded the message counter
-    // would have left these one-liners unstamped and SHARED between two
-    // incarnations. Every compaction line the loop puts on the wire (the
-    // "Compacting context…" announce and the "Compaction finished" /
-    // "Compaction failed: …" result) carries the loop's own stamp (`"t"` — the
-    // `AgentLoop::new` arg).
+    // (ADR 0049) The LOOP-level pin for the compaction's id family. This used to
+    // read the shared `system` key, because the compaction's only transcript
+    // trace was a `system_chunk`; issue #90 turned that trace into a tool card,
+    // so the same invariant is now pinned on the CARD id — which is minted by
+    // the same `TurnState::id` and therefore carries the same stamp (`"t"` — the
+    // `AgentLoop::new` arg). The point is unchanged: an id family with no
+    // per-incarnation seed would let a resumed Worker overwrite its
+    // predecessor's row.
     let frames = drain_sink(&mut h.sink_rx);
-    let system_lines: Vec<(&str, &str)> = frames
+    let card_ids: Vec<&str> = frames
         .iter()
-        .filter(|(_, p)| p["update"]["sessionUpdate"] == "agent_message_chunk")
-        .map(|(_, p)| {
-            (
-                p["update"]["content"]["text"].as_str().unwrap_or_default(),
-                p["update"]["messageId"].as_str().unwrap_or_default(),
-            )
+        .filter(|(_, p)| {
+            p["update"]["sessionUpdate"] == "tool_call" && p["update"]["title"] == "compaction"
         })
-        .filter(|(text, _)| text.starts_with("Compact"))
+        .map(|(_, p)| p["update"]["toolCallId"].as_str().unwrap_or_default())
         .collect();
     assert!(
-        !system_lines.is_empty() && system_lines.iter().all(|(_, id)| *id == "t:system"),
-        "every compaction one-liner rides the stamped shared key `t:system`, \
-         got {system_lines:?}"
+        !card_ids.is_empty() && card_ids.iter().all(|id| id.starts_with("t:compact:")),
+        "every compaction card id is stamped with the loop's incarnation, got {card_ids:?}"
+    );
+    // And no compaction writes a `system_chunk` any more — the one-liners whose
+    // shared key this pin used to guard are gone.
+    let system_compaction_lines: Vec<&str> = frames
+        .iter()
+        .filter(|(_, p)| p["update"]["sessionUpdate"] == "agent_message_chunk")
+        .map(|(_, p)| p["update"]["content"]["text"].as_str().unwrap_or_default())
+        .filter(|text| text.starts_with("Compact"))
+        .collect();
+    assert!(
+        system_compaction_lines.is_empty(),
+        "a compaction emits no system one-liner, got {system_compaction_lines:?}"
     );
     task.abort();
 }

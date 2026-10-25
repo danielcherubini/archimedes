@@ -18,6 +18,7 @@ import {
   PlugIcon,
   WrenchIcon,
   ArchiveIcon,
+  Minimize2Icon,
 } from "lucide-react";
 
 /** Truncate to `max` chars, appending an ellipsis when cut. */
@@ -107,6 +108,20 @@ export function summarizeToolCall(title: string, rawInput: unknown): string | un
     }
     case "manage_todo_list":
       return str("operation");
+    // The harness's compaction card (issue #90): the trigger is the only thing
+    // worth the header, and the raw reason string is not prose.
+    case "compaction": {
+      switch (str("reason")) {
+        case "manual":
+          return "requested with /compact";
+        case "threshold":
+          return "context over threshold";
+        case "overflow":
+          return "provider context overflow";
+        default:
+          return undefined;
+      }
+    }
     case "subagent": {
       const task = str("task");
       if (task) return truncate(task, 60);
@@ -524,6 +539,10 @@ const VERBS: Record<string, { completed: string; running: string }> = {
   read_skill: { completed: "Skill", running: "Loading skill" },
   subagent: { completed: "Delegated", running: "Delegating" },
   mcp: { completed: "MCP", running: "MCP" },
+  // Not a dispatched tool — the harness names this card when it compacts the
+  // context (issue #90). The verb pair matches the transcript's voice; the
+  // trigger reason rides in the summary slot (see `summarizeToolCall`).
+  compaction: { completed: "Compacted", running: "Compacting" },
 };
 
 /**
@@ -559,6 +578,8 @@ const TOOL_ICONS: Record<string, LucideIcon> = {
   read_skill: WandSparklesIcon,
   subagent: BotIcon,
   mcp: PlugIcon,
+  // The context is folded smaller and kept as a summary — the shrink glyph.
+  compaction: Minimize2Icon,
 };
 
 /** The header icon for a tool call (always static — no spinner). */

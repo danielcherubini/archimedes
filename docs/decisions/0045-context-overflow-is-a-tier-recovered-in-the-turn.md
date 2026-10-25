@@ -61,3 +61,35 @@ mechanisms fight over the turn.
 - **`reason` is now a real contract**, not the hardcoded `"context_limit"` it was, and the
   renderer keys a visible state off it (ADR 0044's spec: the `compaction_update` frame). A new
   compaction entry point must pick a reason or the indicator lies.
+
+## Amendment (2026-10-25) — "no doomed second call" was applied to a case it does not describe
+
+**AMENDED 2026-10-25 — the "No doomed second call" consequence below, and nothing else.** What
+stands unchanged: `ContextOverflow` is its own tier and is deliberately never retryable; the dead
+attempt is retracted and the SAME model call re-issued inside the SAME turn; the per-episode
+`overflow_recovered` guard resets only when a model call succeeds; the pattern table ships with pi's
+exclusions; `reason` is a UI contract. **This ADR is NOT superseded** and its `status` is unchanged.
+The full decision, its measurements, and the rejected options are in
+[ADR 0077](0077-compaction-continues-the-turn-and-shows-its-summary.md).
+
+**What was wrong.** The consequence below treats "`Skipped`" and "`Failed`" as one outcome —
+*shrunk nothing* — and settles the turn for both. They are not one fact. `Skipped` is reached by
+proving the kept tail alone is over the window, so the turn's request is known-doomed and the
+sentence "a request that cannot succeed costs a round trip" applies. `Failed` means the **summary
+call** errored, which says nothing about the turn's request, and leaves the transcript intact — so
+the request that follows is not doomed by anything this ADR established. Settling it reproduced this
+ADR's own stated symptom (a dead transcript the user has to nudge with "continue"), which is why
+issue #90 reads as a bug rather than a feature request.
+
+**The flag made it worse than a UX gap.** `compaction_end.will_retry` — documented as "the turn
+continues on the other side of this compaction" — was echoed from the trigger and never reconciled,
+so the failing path emitted `will_retry: true` and then settled the turn. Measured on this tree with
+a throwaway probe (overflow → summary returns `Done(Length)`): `turn_start, compaction_start,
+compaction_end, turn_end, agent_settled`, `will_retry = true`, two model calls, no retry. A contract
+violated, not merely a rough edge.
+
+**What replaced it.** `run_compaction` returns `CompactionRan { Compacted, Skipped, Failed }` rather
+than the `bool` that made the two indistinguishable; `compact_if_due` settles only on
+`overflow && Skipped`; and `will_retry` is computed at the one site that sees both the trigger and
+the outcome. The retry after a `Failed` is bounded by the per-episode guard this ADR already had —
+measured worst case: three model calls, then `turn_end` + `agent_settled`, no new counter.

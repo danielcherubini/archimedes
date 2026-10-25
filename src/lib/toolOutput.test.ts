@@ -56,6 +56,14 @@ describe("toolVerb", () => {
   it("returns undefined for unknown tools", () => {
     expect(toolVerb("mystery_tool", "completed")).toBeUndefined();
   });
+  // The harness's compaction card (issue #90) is not a dispatched tool, but the
+  // header renders `verb ?? title` — without these two entries the row would
+  // read the raw title `compaction` instead of the transcript's voice.
+  it("verbs the compaction card like a tool", () => {
+    expect(toolVerb("compaction", "pending")).toBe("Compacting");
+    expect(toolVerb("compaction", "completed")).toBe("Compacted");
+    expect(toolVerb("compaction", "failed")).toBe("Compacted");
+  });
 });
 
 describe("toolIcon", () => {
@@ -70,6 +78,9 @@ describe("toolIcon", () => {
   });
   it("falls back to the wrench icon for unknown tools", () => {
     expect(toolIcon("mystery_tool")).toBe(WrenchIcon);
+  });
+  it("gives the compaction card an icon (not the unknown-tool wrench)", () => {
+    expect(toolIcon("compaction")).not.toBe(WrenchIcon);
   });
 });
 
@@ -465,6 +476,23 @@ describe("summarizeToolCall", () => {
     expect(summarizeToolCall("grep", { pattern: "foo", path: "/bar" })).toBe(
       "foo in /bar",
     );
+  });
+  // The compaction card (issue #90): the trigger reason is the only thing the
+  // header has to show, and the raw wire value must not reach the user.
+  it("shows the compaction trigger as prose, never the raw reason", () => {
+    expect(summarizeToolCall("compaction", { reason: "manual" })).toBe(
+      "requested with /compact",
+    );
+    expect(summarizeToolCall("compaction", { reason: "threshold" })).toBe(
+      "context over threshold",
+    );
+    expect(summarizeToolCall("compaction", { reason: "overflow" })).toBe(
+      "provider context overflow",
+    );
+    // An unknown/absent reason shows nothing rather than a JSON dump — the
+    // default branch would otherwise print `{"reason":"…"}`.
+    expect(summarizeToolCall("compaction", {})).toBeUndefined();
+    expect(summarizeToolCall("compaction", { reason: "weird" })).toBeUndefined();
   });
   it("shows the web_search query and fetch_content url", () => {
     expect(summarizeToolCall("web_search", { query: "archimedes" })).toBe("archimedes");
