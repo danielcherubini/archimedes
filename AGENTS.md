@@ -286,6 +286,15 @@ These are properties of the repo, not of any branch:
   and there is no wine here, so `#[cfg(windows)]` code type-checks locally and
   only RUNS on CI's `windows-latest` leg — never describe Windows behaviour as
   behaviourally verified from this machine.
+- **`TMPDIR` is not a usable workaround for temp-dir pressure in the Rust
+  suite.** Two `commands::files` tests (`completion.rs`, `space_walk.rs`, via
+  `assert_readdir_disagrees_with_sorted_order`) PANIC on unix unless the temp
+  dir's `readdir` is unsorted — i.e. a tmpfs — because their "the survivors are
+  the alphabetically first" assertion needs raw order to disagree with the sort.
+  Two `sandbox` tests shell out to `TMPDIR=/tmp mktemp`, pinning `/tmp`
+  explicitly. So pointing `TMPDIR` at a real disk fixes most tests and breaks
+  those four. (Both halves re-measured, not copied from the plan that recorded
+  them.)
 - **`grep -c '#\[cfg(unix)\]'` counts LINES, including prose that names the
   attribute.** A census count needs the anchored `^#\[cfg(unix)\]$` or it
   false-reports high.
