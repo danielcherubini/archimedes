@@ -8,6 +8,7 @@ import {
   getSettings,
   listAgentConfig,
   listSkills,
+  reorderSessions,
   saveSettings,
   setSessionArchived,
   startSession,
@@ -37,6 +38,7 @@ import {
 } from "../test/fixtures";
 import { resetModuleFlags, resetStores } from "../test/resetStores";
 import SpacesList from "./SpacesList";
+import { SessionListRow } from "./SessionListRow";
 
 /**
  * The settings document the STORE is seeded with (see the `beforeEach` below).
@@ -112,6 +114,12 @@ vi.mock("../lib/tauri", async () => {
       },
     ]),
     setSessionArchived: vi.fn().mockResolvedValue(true),
+    // The sidebar drag's ONE write (ADR 0075). The store's `reorderSessions`
+    // action calls through this same module, and this file's mock replaces the
+    // module — so without this arm the store's drag write would call a `vi.fn()`
+    // returning `undefined`, and `reorderChain.sessions.then(…)` would throw
+    // (`undefined` has no `.then`) inside the store's link.
+    reorderSessions: vi.fn().mockResolvedValue(undefined),
     deleteSession: vi.fn().mockResolvedValue(undefined),
     // The row's Stop button: cancel a turn, or close the Session.
     closeSession: vi.fn().mockResolvedValue(undefined),
@@ -2733,5 +2741,559 @@ describe("SpacesList (the generated session title)", () => {
     const dialog = screen.getByRole("dialog");
     expect(within(dialog).getByText("Delete session?")).toBeTruthy();
     expect(within(dialog).getByText("Rotating the archived logs")).toBeTruthy();
+  });
+});
+
+/**
+ * T06 — the sidebar's rows are DRAGGABLE (ADR 0075, spec §Drag mechanics).
+ *
+ * `useDragReorder` (T05) owns the gesture and the store's `reorderSessions`
+ * (T05) owns the write; what THIS block pins is the WIRING between them and the
+ * rows: the hook's six spread keys reaching the row element through
+ * `RowButton`'s `...rest`, the pointer's half deciding above-or-below in the
+ * RENDERED list, the drop edge drawn on the target row and nowhere else, and the
+ * hover actions refusing to start a drag.
+ *
+ * TWO jsdom FACTS every drag here is built on, both inherited verbatim from
+ * `useDragReorder.test.tsx` — reach for the obvious idiom instead and these
+ * tests pass VACUOUSLY:
+ *  1. `fireEvent.dragOver(el, { clientY })` does NOT deliver `clientY` (a plain
+ *     `Event` swallows the unknown init member and it arrives `undefined`), so
+ *     `dragOver` below hand-builds the event and assigns the property.
+ *  2. `getBoundingClientRect()` is all zeros in jsdom, so the midpoint is `0`
+ *     and EVERY pointer answers "after" — hence `layOut`, which makes the half a
+ *     fact the test chooses rather than one the environment decides.
+ */
+describe("SpacesList (dragging the session rows, ADR 0075)", () => {
+  const ROW_TITLES = ["Row 1", "Row 2", "Row 3", "Row 4", "Row 5"];
+  const ROW_IDS = ["r1", "r2", "r3", "r4", "r5"];
+
+  /** Five STORED rows in the active Space, in the Manual order `r1…r5`. All
+   *  five carry a generated `title` so the label never depends on a transcript
+   *  (`messages: {}` — a leftover seed row would silently join the list and
+   *  could satisfy an order assertion by accident). */
+  function seedFiveRows(): void {
+    useSessions.setState({
+      sessions: [],
+      historySessions: ROW_IDS.map((id, i) =>
+        makeSessionRow({ sessionId: id, cwd: "/tmp/alpha", title: `Row ${i + 1}` }),
+      ),
+      archivedSessions: [],
+      messages: {},
+      inTurn: {},
+      activeSessionId: null,
+      activeSpacePath: "/tmp/alpha",
+      sessionOrder: { r1: 0, r2: 1, r3: 2, r4: 3, r5: 4 },
+    });
+  }
+
+  /** jsdom has no layout: override the rect so the pointer's half is chosen
+   *  here. (Same helper, same reason, as `useDragReorder.test.tsx`'s `layOut`.) */
+  const layOut = (el: HTMLElement, top: number, height = 40) => {
+    el.getBoundingClientRect = () =>
+      ({
+        top,
+        bottom: top + height,
+        height,
+        width: 200,
+        left: 0,
+        right: 200,
+        x: 0,
+        y: top,
+        toJSON: () => ({}),
+      }) as DOMRect;
+  };
+
+  /** `fireEvent.dragOver(el, { clientY })` does NOT deliver `clientY` (measured
+   *  `undefined`) — build the event and assign it. The return value is `false`
+   *  iff a handler called `preventDefault`, i.e. "this row accepted the drop". */
+  const dragOver = (el: Element, clientY: number) => {
+    const ev = new Event("dragover", {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    Object.assign(ev, { clientY });
+    return fireEvent(el, ev);
+  };
+
+  const buildDrop = () =>
+    new Event("drop", { bubbles: true, cancelable: true, composed: true });
+
+  /** A row's `role="button"` element, by its title. */
+  const rowEl = (title: string): HTMLElement =>
+    screen.getByText(title).closest('[role="button"]') as HTMLElement;
+
+  /** The five rows' RENDER order, derived from the DOM rather than from the
+   *  store — the whole point is to assert what the user is shown. `before`
+   *  counts how many siblings precede a row, so the sort is a real positional
+   *  read rather than a comparator that happens to be consistent. */
+  const renderedOrder = (): string[] => {
+    const nodes = ROW_TITLES.map((t) => screen.getByText(t));
+    return nodes
+      .map((node, i) => ({
+        id: ROW_IDS[i]!,
+        before: nodes.filter(
+          (other) =>
+            other !== node &&
+            (other.compareDocumentPosition(node) &
+              Node.DOCUMENT_POSITION_FOLLOWING) !==
+              0,
+        ).length,
+      }))
+      .sort((a, b) => a.before - b.before)
+      .map((x) => x.id);
+  };
+
+  /** Press-and-hold on `dragTitle`, hover `overTitle` at `clientY`, release.
+   *  Returns the `drop` event so a test can read `defaultPrevented`. */
+  function drag(dragTitle: string, overTitle: string, clientY: number): Event {
+    const from = rowEl(dragTitle);
+    const to = rowEl(overTitle);
+    layOut(from, 0);
+    layOut(to, 100); // 100..140, midpoint 120
+    fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
+    dragOver(to, clientY);
+    const ev = buildDrop();
+    fireEvent(to, ev);
+    return ev;
+  }
+
+  beforeEach(() => {
+    seedFiveRows();
+    // The file's documented hygiene: `clearAllMocks` clears call records but
+    // NEVER an armed implementation, so a `mockRejectedValueOnce` left
+    // unconsumed by a failed assertion would be handed to the next test's drag.
+    vi.mocked(reorderSessions)
+      .mockReset()
+      .mockResolvedValue(undefined);
+  });
+
+  it("every session row is draggable, and the ONLY rows that are are the session rows", () => {
+    // THE WIRING PIN. `dragProps(id)` reaches the DOM through `RowButton`'s
+    // `...rest` — the intended route, which is why `RowButton.tsx` needs no
+    // change. TWO COMPETING ANSWERS: `draggable="true"` on all five rows (the
+    // spread landed) vs the attribute absent (the prop was dropped at the call
+    // site or by the row, and NO drag is possible in the app while every other
+    // test in this block still passes, because they drive the handlers).
+    render(<SpacesList />);
+    for (const title of ROW_TITLES) {
+      expect(rowEl(title).getAttribute("draggable")).toBe("true");
+    }
+    // And the drag prop is not sprayed over the pane: the Archived section
+    // HEADER is a `RowButton` too, and it is not a row — it keeps following
+    // recency (spec §Archived section), so nothing here may be dragged.
+    expect(rowEl("Archived").hasAttribute("draggable")).toBe(false);
+  });
+
+  it("dragging row 5 onto row 2's TOP half reorders the rendered rows to 1,5,2,3,4", async () => {
+    // Spec §5 test #13, in the DOM. TWO COMPETING ANSWERS: "before" means
+    // DIRECTLY ABOVE the target → [r1,r5,r2,r3,r4]; an off-by-one reading
+    // "before" as one slot earlier answers [r5,r1,r2,r3,r4], i.e. the row lands
+    // above Row 1 while the indicator was promising Row 2. A display sort is a
+    // THIRD answer, and the one this branch exists to delete.
+    render(<SpacesList />);
+    expect(renderedOrder()).toEqual(ROW_IDS);
+    drag("Row 5", "Row 2", 110); // 110 < midpoint 120 → top half
+    expect(renderedOrder()).toEqual(["r1", "r5", "r2", "r3", "r4"]);
+    // The write is the WHOLE visible slice, not the moved id (the Rust side
+    // writes each index as the row's stored number, so a partial list is a
+    // half-moved list). `waitFor` because the store LINKS its command behind the
+    // previous reorder's promise, so the IPC call lands a microtask after the
+    // optimistic write the DOM above already reflects.
+    await waitFor(() => expect(reorderSessions).toHaveBeenCalledTimes(1));
+    expect(reorderSessions).toHaveBeenCalledWith(["r1", "r5", "r2", "r3", "r4"]);
+  });
+
+  it("dragging row 5 onto row 2's BOTTOM half reorders to 1,2,5,3,4 — the other answer", async () => {
+    // The same gesture with the pointer 20px lower. Without BOTH halves
+    // asserted, a call site that ignores `overEdge` (or a hook that always
+    // inserts after) passes the top-half test by accident.
+    render(<SpacesList />);
+    drag("Row 5", "Row 2", 130); // 130 > midpoint 120 → bottom half
+    expect(renderedOrder()).toEqual(["r1", "r2", "r5", "r3", "r4"]);
+    await waitFor(() =>
+      expect(reorderSessions).toHaveBeenCalledWith(["r1", "r2", "r5", "r3", "r4"]),
+    );
+  });
+
+  it("the drop edge shows on the TARGET row only, on the edge the pointer is nearest", () => {
+    // The indicator is a class on the real row (spec §Indicator) — this asserts
+    // it lands on the row under the pointer and on NO other row. TWO COMPETING
+    // ANSWERS at the call site: `dropEdge={overId === id ? overEdge : null}` (the
+    // hook's edge, gated on the hook's target) vs `dropEdge={overEdge}` — which
+    // paints the edge on EVERY row and would read as the whole list lifting.
+    render(<SpacesList />);
+    const from = rowEl("Row 5");
+    const to = rowEl("Row 2");
+    layOut(from, 0);
+    layOut(to, 100);
+    fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
+    dragOver(to, 110);
+    expect(to.className).toContain("border-t-2");
+    expect(to.className).not.toContain("border-b-2");
+    for (const title of ["Row 1", "Row 3", "Row 4", "Row 5"]) {
+      const el = rowEl(title);
+      expect(el.className, title).not.toContain("border-t-2");
+      expect(el.className, title).not.toContain("border-b-2");
+    }
+    // The pointer crossing to the bottom half flips the edge, and the top edge
+    // goes away — an indicator that only ever paints one edge is the bug the
+    // hook's `overEdge` exists to prevent.
+    dragOver(to, 130);
+    expect(to.className).toContain("border-b-2");
+    expect(to.className).not.toContain("border-t-2");
+  });
+
+  it("no edge is painted before the gesture and none after it ends", () => {
+    // A lingering indicator reads as "drop here" on a list that is no longer
+    // being dragged at, so the class must ride the gesture's lifetime exactly.
+    // THE POSITIVE CONTROL is the middle assertion: without proving the edge
+    // APPEARS mid-gesture, this whole test is a statement about a class that
+    // nothing in the tree can ever paint — the "certifying the absence of the
+    // mechanism" shape this branch has been bitten by twice.
+    render(<SpacesList />);
+    const edge = (el: HTMLElement) =>
+      el.className.includes("border-t-2") || el.className.includes("border-b-2");
+    for (const title of ROW_TITLES) expect(edge(rowEl(title))).toBe(false);
+    const from = rowEl("Row 5");
+    const to = rowEl("Row 2");
+    layOut(from, 0);
+    layOut(to, 100);
+    fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
+    dragOver(to, 130);
+    expect(edge(to)).toBe(true);
+    // Release (which clears the gesture) — no edge survives it.
+    fireEvent(to, buildDrop());
+    for (const title of ROW_TITLES) expect(edge(rowEl(title))).toBe(false);
+  });
+
+  it("dragging a row onto itself is a no-op: no reorder, no IPC, no indicator, no move", () => {
+    // TWO COMPETING ANSWERS: a call site that lets a row target itself fires an
+    // IPC with an unchanged slice (a pointless write that still bumps every
+    // row's stored number) and paints an edge on the row the user is holding.
+    // The hook refuses the target — and this pins that the refusal reaches the
+    // RENDERED list, not just the hook's own state.
+    render(<SpacesList />);
+    const self = rowEl("Row 3");
+    // THE POSITIVE CONTROL, and the reason it sits here rather than only in the
+    // test above: with no drag mounted at all, every assertion below passes on
+    // an inert row — `dragOver` returns `true` because NOTHING handled it. This
+    // one line is what makes the rest of the test falsifiable.
+    expect(self.getAttribute("draggable")).toBe("true");
+    layOut(self, 100);
+    fireEvent.dragStart(self, { dataTransfer: { setData: vi.fn() } });
+    // `true` === nothing prevented === the browser's no-drop cursor, and the
+    // window backstop is what swallows the release (spec hazard 2).
+    expect(dragOver(self, 130)).toBe(true);
+    expect(self.className).not.toContain("border-b-2");
+    fireEvent(self, buildDrop());
+    expect(reorderSessions).not.toHaveBeenCalled();
+    expect(renderedOrder()).toEqual(ROW_IDS);
+  });
+
+  it("a row's drop wins without stopping propagation, and a release outside any row is left to the backstop", async () => {
+    // Spec hazard 2 at the CALL SITE. `useWindowDropBackstop` listens on
+    // `window` and the row's handler fires first during bubbling, so the row
+    // wins the drop on its own — but only if it does not take propagation away
+    // on the way out, because the backstop is the one thing standing between a
+    // stray drop and the webview NAVIGATING to it. (The backstop's own swallow
+    // is pinned in `useDragReorder.test.tsx`, which mounts it alongside its
+    // probe; `SpacesList.test.tsx` renders the pane alone, so what is provable
+    // HERE is the row's half.)
+    //
+    // TWO COMPETING ANSWERS to "did the row claim the event?": a row that calls
+    // `stopPropagation` reorders correctly AND leaves the backstop deaf (the
+    // reorder tests stay green, the app navigates away on a stray drop); the
+    // correct row prevents and propagates.
+    render(<SpacesList />);
+    const from = rowEl("Row 5");
+    const to = rowEl("Row 2");
+    layOut(from, 0);
+    layOut(to, 100);
+    fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
+    // THE POSITIVE CONTROL: the row has to have CLAIMED the gesture for the
+    // release below to mean anything. Without this line the assertions pass on a
+    // list with no drag wiring at all — the vacuity this branch has been bitten
+    // by four times. (`preventDefault` on `dragover` is what makes `dragOver`
+    // return `false`.)
+    expect(dragOver(to, 110)).toBe(false);
+
+    // Half one — released ON the row: prevented, reordered, and NOT stopped.
+    const onRow = buildDrop();
+    const stopped = vi.spyOn(onRow, "stopPropagation");
+    fireEvent(to, onRow);
+    expect(onRow.defaultPrevented).toBe(true);
+    expect(stopped).toHaveBeenCalledTimes(0);
+    await waitFor(() => expect(reorderSessions).toHaveBeenCalledTimes(1));
+
+    // Half two — released OUTSIDE every row: the row never claims it, so the
+    // event arrives at `window` un-prevented and un-stopped for the backstop to
+    // swallow, and no list moves.
+    vi.mocked(reorderSessions).mockClear();
+    const stray = buildDrop();
+    const strayStopped = vi.spyOn(stray, "stopPropagation");
+    fireEvent(document.body, stray);
+    expect(stray.defaultPrevented).toBe(false);
+    expect(strayStopped).toHaveBeenCalledTimes(0);
+    expect(reorderSessions).not.toHaveBeenCalled();
+  });
+
+  it("a drop on a row writes the store's order map, so the row HOLDS its slot through a re-derivation", () => {
+    // The hazard T03 handed T05 and T06: `sessionOrder` is a BOOT SNAPSHOT, so a
+    // drag that wrote only the derived array would snap back the moment the view
+    // re-derived. Forcing a re-derivation is the only way to tell the two writes
+    // apart — TWO COMPETING ANSWERS: writing the map (the row holds) vs writing
+    // the array alone (the row returns to `r1…r5`).
+    render(<SpacesList />);
+    drag("Row 5", "Row 2", 110);
+    expect(renderedOrder()).toEqual(["r1", "r5", "r2", "r3", "r4"]);
+    // Force a re-derivation: a NEW stored row in ANOTHER Space changes a `views`
+    // dependency (so `spaceViewFor` re-runs for every Space and `sessionIds` is
+    // rebuilt from the order map) while rendering no row here — the only way to
+    // tell a map write from an array-only write apart.
+    act(() => {
+      useSessions.setState({
+        historySessions: [
+          ...useSessions.getState().historySessions,
+          makeSessionRow({ sessionId: "beta-1", cwd: "/tmp/beta", title: "Other space" }),
+        ],
+      });
+    });
+    expect(screen.queryByText("Other space")).toBeNull();
+    expect(renderedOrder()).toEqual(["r1", "r5", "r2", "r3", "r4"]);
+    expect(useSessions.getState().sessionOrder.r5).toBe(1);
+  });
+
+  it("the hover actions carry draggable={false}, so a press on a destructive control starts no drag", () => {
+    // Spec §Handle. The row is `draggable=true` and these buttons are its
+    // CHILDREN, so an inherited/absent value makes a press on Delete begin a
+    // drag of the row instead of acting. TWO COMPETING ANSWERS: `"false"` (the
+    // opt-out landed) vs `null` (absent → the browser lets the parent drag).
+    useSessions.setState({
+      sessions: [makeSessionRow({ sessionId: "r1", cwd: "/tmp/alpha", title: "Row 1" })],
+      historySessions: [
+        makeSessionRow({ sessionId: "r2", cwd: "/tmp/alpha", title: "Row 2" }),
+      ],
+      sessionOrder: { r1: 0, r2: 1 },
+    });
+    render(<SpacesList />);
+    const live = rowEl("Row 1");
+    const stored = rowEl("Row 2");
+    expect(live.getAttribute("draggable")).toBe("true");
+    // Stop + Archive on the live row, Archive on the stored one.
+    const actions = [
+      within(live).getByRole("button", { name: "Stop Row 1" }),
+      within(live).getByRole("button", { name: "Archive Row 1" }),
+      within(stored).getByRole("button", { name: "Archive Row 2" }),
+    ];
+    for (const action of actions) {
+      expect(action.getAttribute("draggable"), action.getAttribute("aria-label") ?? "").toBe(
+        "false",
+      );
+    }
+  });
+
+  it("the Archived rows' Unarchive and Delete carry draggable={false} too", () => {
+    // The spec names all FOUR hover actions. The archived rows are not
+    // draggable themselves (that section keeps following recency), so a
+    // `draggable={false}` here is not inherited from a draggable parent — it is
+    // the same explicit opt-out, and the Delete confirm dialog is the one thing
+    // in the sidebar that must never be reachable only by accident.
+    useSessions.setState({
+      sessions: [],
+      historySessions: [],
+      archivedSessions: [
+        makeSessionRow({
+          sessionId: "a1",
+          cwd: "/tmp/alpha",
+          archived: true,
+          title: "Archived row",
+        }),
+      ],
+      messages: {},
+    });
+    render(<SpacesList />);
+    fireEvent.click(screen.getByText("Archived"));
+    const row = rowEl("Archived row");
+    // The row is NOT draggable (recency, not Manual order)…
+    expect(row.hasAttribute("draggable")).toBe(false);
+    // …and its two controls say so explicitly.
+    for (const name of ["Unarchive Archived row", "Delete Archived row"]) {
+      expect(within(row).getByRole("button", { name }).getAttribute("draggable")).toBe(
+        "false",
+      );
+    }
+  });
+
+  it("the collapsed rail's marks stay POSITIONALLY equal to the rows after a drag", () => {
+    // The rail's contract is "the Nth mark is the Nth row", and it now has to
+    // survive a user-initiated reorder. The fixture gives the three rows three
+    // DIFFERENT glyphs, so a mark sequence is a readable order. TWO COMPETING
+    // ANSWERS after dragging `Row three` above `Row two`: the rail reads the
+    // same array the rows do → [stored, running, waiting]; a rail that kept the
+    // old live-then-stored construction (or a pre-drag snapshot) answers
+    // [running, waiting, stored].
+    useSessions.setState({
+      sessions: [
+        makeSessionRow({ sessionId: "s1", cwd: "/tmp/alpha", title: "Row one" }),
+        makeSessionRow({ sessionId: "s2", cwd: "/tmp/alpha", title: "Row two" }),
+      ],
+      historySessions: [
+        makeSessionRow({ sessionId: "h1", cwd: "/tmp/alpha", title: "Row three" }),
+      ],
+      messages: {},
+      inTurn: { s2: true },
+      activeSessionId: "s2",
+      activeSpacePath: "/tmp/alpha",
+      sessionOrder: { s2: 0, s1: 1, h1: 2 },
+    });
+    usePermissions.setState({
+      prompts: { s1: [{ requestId: "r1", toolTitle: "bash", options: [] }] },
+    });
+    render(<SpacesList />);
+    // Rows two, one, three → drag the STORED row (three) above the running one.
+    const from = rowEl("Row three");
+    const to = rowEl("Row two");
+    layOut(from, 0);
+    layOut(to, 100);
+    fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
+    dragOver(to, 110);
+    fireEvent(to, buildDrop());
+    const rows = screen.getByText("Row three");
+    expect(
+      rows.compareDocumentPosition(screen.getByText("Row two")) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    act(() => {
+      setLeftPaneCollapsed(true);
+    });
+    // The rows stay MOUNTED while collapsed (clipped, not unmounted), so both
+    // orders are readable from this one render — no re-render to re-derive them.
+    const marks = [
+      ...screen.getByTestId("session-rail-marks").querySelectorAll(
+        "[data-testid='session-mark']",
+      ),
+    ];
+    expect(marks.map((m) => m.getAttribute("data-dot") ?? "running")).toEqual([
+      "stored",
+      "running",
+      "waiting",
+    ]);
+  });
+
+  it("a dragged row's relative time keeps updating while its new slot holds", () => {
+
+    // The user-visible promise of ADR 0075, tested AFTER a drag rather than on a
+    // pristine list: the row's LABEL is its own per-row subscription and the
+    // row's SLOT is the Manual order, and the two must stay independent in both
+    // directions. TWO COMPETING ANSWERS: the label updates and the slot holds
+    // (correct) vs the newly-active row floating back to the top (the deleted
+    // display sort) or the label freezing (a slot-owned label).
+    const now = Date.now();
+    useSessions.setState({
+      sessions: [],
+      historySessions: [
+        makeSessionRow({ sessionId: "r1", cwd: "/tmp/alpha", title: "Row 1" }),
+        makeSessionRow({ sessionId: "r2", cwd: "/tmp/alpha", title: "Row 2" }),
+      ],
+      archivedSessions: [],
+      messages: {
+        r1: [makeMessage("user", { text: "first", at: now - 10_000 })],
+        r2: [makeMessage("user", { text: "second", at: now - 3_600_000 })],
+      },
+      inTurn: {},
+      activeSessionId: null,
+      activeSpacePath: "/tmp/alpha",
+      sessionOrder: { r1: 0, r2: 1 },
+    });
+    render(<SpacesList />);
+    expect(within(rowEl("Row 2")).getByText("1h")).toBeTruthy();
+    // Drag `Row 2` ABOVE `Row 1` — it now holds slot 0.
+    const from = rowEl("Row 2");
+    const to = rowEl("Row 1");
+    layOut(from, 100);
+    layOut(to, 0);
+    fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
+    dragOver(to, 10); // top half → before
+    fireEvent(to, buildDrop());
+    expect(
+      screen.getByText("Row 2").compareDocumentPosition(screen.getByText("Row 1")) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // A future stamp → `now - at` is negative → the `< 60_000` bucket → "now":
+    // a deterministic label change with no fake timers.
+    act(() => {
+      useSessions.setState({
+        messages: {
+          ...useSessions.getState().messages,
+          r2: [makeMessage("user", { text: "second", at: Date.now() + 9_000_000_000 })],
+        },
+      });
+    });
+    expect(within(rowEl("Row 2")).getByText("now")).toBeTruthy();
+    expect(
+      screen.getByText("Row 2").compareDocumentPosition(screen.getByText("Row 1")) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("a sidebar row and a standalone SessionListRow wear the SAME drag surface", () => {
+    // The row component is shared (the sidebar's rows and the Archived section
+    // are one component, drawn twice), so the drag surface must be identical
+    // wherever it is worn — a row that gains an extra attribute at ONE call site
+    // is the drift the shared-component extraction exists to prevent, and
+    // `RowButton`'s header pins attribute ORDER for the same reason.
+    //
+    // TWO COMPETING ANSWERS for "what does the drag contribute to the element?":
+    // exactly the one attribute `draggable` (the hook's other five keys are
+    // handlers, which emit nothing) vs a spread that also lands `data-*` /
+    // `aria-*` / a second `class`. The set difference below is what catches the
+    // second answer at either site.
+    const { unmount } = render(<SpacesList />);
+    const sidebarRow = rowEl("Row 2");
+    const sidebarAttrs = [...sidebarRow.attributes]
+      .map((a) => a.name)
+      .sort()
+      .join(",");
+    // Unmount the PANE before rendering the standalone rows: RTL cleans up
+    // between TESTS, not between two `render()` calls in one test, so a second
+    // mount would leave a second sidebar in the tree and `rowEl` would throw on
+    // a multiple match — the failure at least announces itself.
+    unmount();
+
+    // The same row, standalone, wearing a hook-shaped spread and one edge.
+    const handlers = {
+      draggable: true as const,
+      onDragStart: () => {},
+      onDragEnd: () => {},
+      onDragOver: () => {},
+      onDragLeave: () => {},
+      onDrop: () => {},
+    };
+    render(
+      <div>
+        <SessionListRow title="plain" onOpen={() => {}} drag={handlers} />
+        <SessionListRow
+          title="target"
+          onOpen={() => {}}
+          drag={handlers}
+          dropEdge="before"
+        />
+      </div>,
+    );
+    const plainRow = rowEl("plain");
+    const targetRow = rowEl("target");
+    // Same attribute NAMES as the sidebar's row (same base props: a stored row
+    // carries no leading mark either, so the two shells are the same shape).
+    expect([...plainRow.attributes].map((a) => a.name).sort().join(",")).toBe(
+      sidebarAttrs,
+    );
+    // And the indicator contributes ONE class token pair to the row's own class,
+    // in the same position relative to the base string, at both sites.
+    const base = plainRow.className.split(/\s+/);
+    const withEdge = targetRow.className.split(/\s+/);
+    expect(withEdge.slice(0, base.length)).toEqual(base);
+    expect(withEdge.slice(base.length)).toEqual(["border-t-2", "border-brand"]);
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { SessionListRow } from "./SessionListRow";
+import { useDragReorder } from "../hooks/useDragReorder";
 
 /**
  * `SessionListRow` — the sidebar's session row, ONCE (finding 3, Task C4).
@@ -319,3 +320,184 @@ describe("SessionListRow — what it must NOT grow", () => {
     }
   });
 });
+
+describe("SessionListRow — the drop edge (T06, ADR 0075)", () => {
+  // The indicator is a CLASS ON THE REAL ROW, never a node. `SessionListRow`'s
+  // own header states the NO-DOM-LEVEL contract and the eight
+  // `.closest('[role="button"]')` sites plus `rowOf()` resolve through ancestry,
+  // so a portal-drawn ghost or an inserted placeholder breaks them all at once.
+  // These tests therefore assert BOTH halves: which class lands, and that
+  // NOTHING ELSE about the row changed.
+
+  /** The row's class tokens, read the way the file's other pins read them. */
+  const tokens = (): string[] =>
+    screen
+      .getByText("alpha")
+      .closest('[role="button"]')!
+      .className.split(/\s+/);
+
+  it("dropEdge=\"before\" adds border-t-2 and NOT border-b-2 — the two edges are different answers", () => {
+    render(<SessionListRow title="alpha" onOpen={noop()} dropEdge="before" />);
+    const t = tokens();
+    // TWO COMPETING ANSWERS: `border-t-2` (the dragged row lands ABOVE this one)
+    // vs `border-b-2` (BELOW it). A component that ignores which edge it was
+    // handed — or that always paints the top — answers the wrong one here, and
+    // the pointer's half is exactly what the user is reading the line to mean.
+    expect(t).toContain("border-t-2");
+    expect(t).not.toContain("border-b-2");
+  });
+
+  it("dropEdge=\"after\" adds border-b-2 and NOT border-t-2", () => {
+    render(<SessionListRow title="alpha" onOpen={noop()} dropEdge="after" />);
+    const t = tokens();
+    // The OTHER answer, so the pair above cannot be satisfied by a component
+    // that paints one fixed edge whatever it is handed.
+    expect(t).toContain("border-b-2");
+    expect(t).not.toContain("border-t-2");
+  });
+
+  it("no dropEdge (and dropEdge={null}) serialises EXACTLY the untouched row", () => {
+    // The byte-compare half. `SessionListRow.test.tsx:61` pins the class token
+    // list of a plain row and `SpacesList.test.tsx` reads `row.className`; the
+    // indicator may only appear while a drag is actually over the row, so with
+    // no edge — and with the explicit `null` the sidebar passes to every
+    // non-target row — the serialisation must be IDENTICAL.
+    const before =
+      "group flex cursor-pointer items-center gap-2 rounded-lg pl-2.5 pr-1 py-1 hover:bg-surface-hover";
+    for (const edge of [undefined, null] as const) {
+      const { unmount } = render(
+        <SessionListRow title="alpha" onOpen={noop()} dropEdge={edge} />,
+      );
+      expect(tokens()).toEqual(before.split(" "));
+      unmount();
+    }
+  });
+
+  it("the indicator costs NO node: same children, same textContent, same single role=button", () => {
+    // THE ANTI-PLACEHOLDER PIN. A drop indicator drawn as an inserted element
+    // (the obvious shape) would keep the class assertions above green and break
+    // `adds NO DOM level between the row and its children` — which asserts the
+    // row has EXACTLY four children — plus every positional read in
+    // `SpacesList.test.tsx`. So this asserts the row is UNCHANGED apart from the
+    // class, with the indicator ON.
+    render(
+      <SessionListRow
+        title="alpha"
+        time="1h"
+        onOpen={noop()}
+        leading={<span data-testid="leading" />}
+        actions={<Action label="Archive alpha" />}
+        dropEdge="after"
+      />,
+    );
+    const row = screen.getByText("alpha").closest('[role="button"]')!;
+    expect(row.children).toHaveLength(4);
+    expect(row.textContent).toBe("alpha1h");
+    expect(row.parentElement?.querySelectorAll('[role="button"]')).toHaveLength(1);
+    expect(screen.getByTestId("leading").parentElement).toBe(row);
+    // …and the edge class is on THAT node, the `role="button"` row itself — not
+    // on a wrapper the component added above or below it.
+    expect(row.className).toContain("border-b-2");
+  });
+
+  it("the row stays ONE role=button and keeps opening on click/Enter while an edge is showing", () => {
+    // A drop indicator must not turn the row into a second control, and it must
+    // not swallow the affordance it decorates: the row is still the one
+    // `role="button"` and click/Enter still open it.
+    const onOpen = vi.fn();
+    render(<SessionListRow title="alpha" onOpen={onOpen} dropEdge="before" />);
+    const row = screen.getByText("alpha").closest('[role="button"]')!;
+    expect(document.querySelectorAll('[role="button"]')).toHaveLength(1);
+    fireEvent.click(row);
+    fireEvent.keyDown(row, { key: "Enter" });
+    expect(onOpen).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("SessionListRow — the drag spread (T06, ADR 0075)", () => {
+  // The gesture itself is `useDragReorder`'s (T05, finished). What this row owns
+  // is the ROUTE: the hook's six keys reach the DOM through `RowButton`'s
+  // existing `...rest`, which is the intended path — `RowButton.tsx` needs no
+  // change, and `useDragReorder.test.tsx` pins that the spread surface is
+  // EXACTLY six keys so nothing extra can ride in with it.
+
+  /** A row wearing a real hook's `dragProps`, i.e. exactly how `SpacesList`
+   *  wears it — a hand-written prop object here would test the fixture, not the
+   *  route. */
+  function DraggableRow(props: { ids: readonly string[]; dragged: string[] }) {
+    const drag = useDragReorder({
+      ids: props.ids,
+      onReorder: (next) => props.dragged.push(next.join(",")),
+    });
+    return (
+      <>
+        {props.ids.map((id) => (
+          <SessionListRow
+            key={id}
+            title={id}
+            onOpen={noop()}
+            drag={drag.dragProps(id)}
+            dropEdge={drag.overId === id ? drag.overEdge : null}
+          />
+        ))}
+      </>
+    );
+  }
+
+  /** The same rect override `useDragReorder.test.tsx` needs: jsdom returns all
+   *  zeros, so the midpoint is 0 and BOTH pointer halves answer "after". */
+  const layOut = (el: HTMLElement, top: number, height = 40) => {
+    el.getBoundingClientRect = () =>
+      ({
+        top,
+        bottom: top + height,
+        height,
+        width: 200,
+        left: 0,
+        right: 200,
+        x: 0,
+        y: top,
+        toJSON: () => ({}),
+      }) as DOMRect;
+  };
+  /** …and the hand-built `dragover`: `fireEvent.dragOver(el, { clientY })` does
+   *  NOT deliver `clientY` in jsdom (measured `undefined`). */
+  const dragOver = (el: Element, clientY: number) => {
+    const ev = new Event("dragover", {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    Object.assign(ev, { clientY });
+    return fireEvent(el, ev);
+  };
+
+  it("the drag prop reaches the DOM: the row div is draggable=true and its handlers fire", () => {
+    const dragged: string[] = [];
+    render(<DraggableRow ids={["one", "two"]} dragged={dragged} />);
+    const row = screen.getByText("one").closest('[role="button"]') as HTMLElement;
+    // TWO COMPETING ANSWERS: `"true"` (the spread reached the element) vs `null`
+    // (the component dropped the prop, so nothing in the list can be dragged at
+    // all and every drag test above the call site would still pass, because they
+    // drive the handlers directly).
+    expect(row.getAttribute("draggable")).toBe("true");
+    layOut(row, 0);
+    const two = screen.getByText("two").closest('[role="button"]') as HTMLElement;
+    layOut(two, 100);
+    fireEvent.dragStart(row, { dataTransfer: { setData: vi.fn() } });
+    dragOver(two, 130); // bottom half → AFTER
+    fireEvent(two, new Event("drop", { bubbles: true, cancelable: true }));
+    expect(dragged).toEqual(["two,one"]);
+  });
+
+  it("a row with NO drag prop (an archived row) is not draggable and carries no handler", () => {
+    // Archived rows keep following recency (spec §Archived section), so they are
+    // deliberately NOT draggable. TWO COMPETING ANSWERS: `null` (no attribute —
+    // the browser's default for a `div` is inert) vs `"false"` (an explicit
+    // opt-out, which is a different answer and one no test asked for).
+    render(<SessionListRow title="alpha" onOpen={noop()} />);
+    const row = screen.getByText("alpha").closest('[role="button"]')!;
+    expect(row.hasAttribute("draggable")).toBe(false);
+  });
+});
+

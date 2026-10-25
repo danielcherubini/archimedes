@@ -36,6 +36,11 @@ import {
 } from "../lib/leftPaneState";
 import { openNewSpaceDialog } from "../lib/newSpaceDialogState";
 import { archivedInSpace, useSessions, spaceViewFor } from "../store/sessions";
+import {
+  useDragReorder,
+  type DragReorderHandlers,
+  type DropEdge,
+} from "../hooks/useDragReorder";
 import { useSessionStatus } from "../hooks/useSessionStatus";
 import { useSessionStatuses } from "../hooks/useSessionStatus";
 import { useSkillCatalog } from "../hooks/useSkillCatalog";
@@ -324,6 +329,20 @@ export default function SpacesList() {
   // can drift). No `useMemo`: this is a field read, and the module-level empty
   // array keeps the input identity stable while no Space is selected.
   const railIds = activeView?.sessionIds ?? NO_SESSION_IDS;
+  // THE DRAG, over that SAME array. `railIds` IS `activeView.sessionIds` (one
+  // construction of the Manual order — see the note above), so the gesture, the
+  // rows and the collapsed rail all read ONE sequence and cannot disagree about
+  // which row is which. The pane holds NO order state of its own: the write is
+  // the store's optimistic `reorderSessions`, whose own rollback restores the
+  // slice it captured before the write (ADR 0075's Write path), and the gesture
+  // is T05's hook, which already answers the before/after question so nothing
+  // here computes an index.
+  const reorderSessions = useSessions((s) => s.reorderSessions);
+  const handleReorder = useCallback(
+    (ids: string[]) => void reorderSessions(ids),
+    [reorderSessions],
+  );
+  const drag = useDragReorder({ ids: railIds, onReorder: handleReorder });
   // The rail's statuses, derived by the SAME rule the rows use (one
   // subscription for the whole list — see `useSessionStatuses`). Read
   // unconditionally: the rail only paints while collapsed, but the ids are the
@@ -584,7 +603,15 @@ export default function SpacesList() {
             `SessionStatusMark`, never as its position. The row's time is
             still its last message, and it is now deliberately DECOUPLED
             from its slot (pinned by "updates a row's relative time while
-            its POSITION stays frozen"). */}
+            its POSITION stays frozen").
+
+            A ROW IS THE DROP TARGET (spec §Drag mechanics): `drag.dragProps(id)`
+            rides through `SessionListRow` into `RowButton`'s `...rest`, and the
+            row under the pointer wears the ONE edge class the hook's `overEdge`
+            names. The target test is `drag.overId === id`, NOT `overEdge` alone —
+            the hook keeps the two as separate answers precisely so a call site
+            cannot paint the current edge on every row. Nothing here computes an
+            index, and nothing here sorts. */}
         {activeView && (
           <div className="flex flex-col gap-0.5">
             {activeView.sessionIds.map((id) => (
@@ -594,6 +621,8 @@ export default function SpacesList() {
                 spaceName={activeView.title !== "" ? activeView.title : activeView.path}
                 active={activeSessionId === id}
                 onOpen={openSession}
+                drag={drag.dragProps(id)}
+                dropEdge={drag.overId === id ? drag.overEdge : null}
               />
             ))}
           </div>
@@ -710,11 +739,17 @@ function SessionRow({
   spaceName,
   active,
   onOpen,
+  drag,
+  dropEdge,
 }: {
   sessionId: string;
   spaceName: string;
   active: boolean;
   onOpen: (sessionId: string) => void;
+  /** This row's `useDragReorder` spread, from the pane's one hook instance. */
+  drag?: DragReorderHandlers;
+  /** Which edge of this row to mark, or `null` when it is not the target. */
+  dropEdge?: DropEdge | null;
 }) {
   const messages = useSessions((s) => s.messages[sessionId]);
   const isLive = useSessions((s) => s.sessions.some((x) => x.sessionId === sessionId));
@@ -751,11 +786,19 @@ function SessionRow({
   // the row would resolve every `.closest('[role="button"]')` read in
   // `SpacesList.test.tsx` to the button instead of the row, and would turn each
   // `rowOf(…).getByRole("button", …)` into a multiple-match throw.
+  //
+  // EACH CARRIES `draggable={false}` (spec §Handle). The row itself is
+  // `draggable`, and these buttons are its CHILDREN, so a press that begins on
+  // Stop or Archive would otherwise start a drag of the row instead of acting —
+  // the worst possible failure on the two controls that end a turn and put a
+  // Session away. It is spelled on every one rather than inherited: an absent
+  // attribute is not the same answer as an explicit opt-out.
   const actions = (
     <>
       {isLive && (
         <Button
           type="button"
+          draggable={false}
           variant="ghost"
           size="icon-sm"
           title={inTurn ? "Stop this turn" : "Stop this session"}
@@ -773,6 +816,7 @@ function SessionRow({
       )}
       <Button
         type="button"
+        draggable={false}
         variant="ghost"
         size="icon-sm"
         title="Archive"
@@ -809,6 +853,8 @@ function SessionRow({
       active={active}
       time={time}
       onOpen={() => onOpen(sessionId)}
+      drag={drag}
+      dropEdge={dropEdge}
       leading={
         <SessionStatusMark status={status} active={active} size={16} dotSize={8} />
       }
@@ -963,6 +1009,7 @@ function ArchivedSessionRow({
         <>
           <Button
             type="button"
+            draggable={false}
             variant="ghost"
             size="icon-sm"
             title="Unarchive"
@@ -979,6 +1026,7 @@ function ArchivedSessionRow({
           </Button>
           <Button
             type="button"
+            draggable={false}
             variant="ghost"
             size="icon-sm"
             title="Delete"
