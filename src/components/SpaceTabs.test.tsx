@@ -42,8 +42,11 @@ const info = (sessionId: string, cwd: string) => makeSessionRow({ sessionId, cwd
 
 beforeEach(() => {
   // Every store back to its own initial state — the hand-written version named
-  // nine `useSessions` keys + `usePermissions.prompts`, and the store has
-  // sixteen data fields (see `src/test/resetStores.ts`).
+  // nine `useSessions` keys + `usePermissions.prompts` and nothing else, so
+  // every data field the store has gained or that list never reached was left
+  // dirty for the next case (see `src/test/resetStores.ts`, which deliberately
+  // quotes no field count: the store's shape moves and a copied number goes
+  // stale in every copy).
   resetStores();
   // The Open-Space-dialog flag is module-scoped and the `+` raises it: a
   // leaked `true` would auto-mount a real Radix modal in every later render

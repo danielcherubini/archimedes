@@ -53,9 +53,11 @@ const space = (path: string) => makeSpaceRow({ path });
 
 beforeEach(() => {
   // Every store back to its initial state (the hand-written version of this
-  // named nine `useSessions` keys; the store has sixteen data fields, and the
-  // seven it skipped — `contextUsage`, `compacting`, `inTurn`, `stopReasons`,
-  // `stalled`, `history`, `newSessionError` — leaked between cases).
+  // named nine `useSessions` keys and skipped everything else the store carries —
+  // `contextUsage`, `compacting`, `inTurn`, `stopReasons`, `stalled`, `history`,
+  // `newSessionError` among them — and those leaked between cases). No field
+  // count is quoted here: the store's shape moves, and a copied number goes
+  // stale in every copy that repeats it.
   resetStores();
   // The Open-Space-dialog flag is module-scoped: a leaked `true` would auto-mount
   // a real Radix modal (`aria-hidden`ing the rest of the document) in every later

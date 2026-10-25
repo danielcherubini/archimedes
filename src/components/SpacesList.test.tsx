@@ -296,10 +296,10 @@ function seed(): void {
   // This file used to hand-list the keys it happened to remember —
   // `archivedSessions: []`, `closeReasons: {}`, `stopReasons: {}`, plus a whole
   // `setState` on each of the permissions and interactive stores — and
-  // `useSessions` has SIXTEEN data fields, so the ten a hand-written reset omits
-  // leak from one test to the next. `resetStores()` installs the WHOLE captured
-  // state (with `replace = true`, so nothing shallow-merges over it), which
-  // includes the archived list the comment below used to guard by hand.
+  // `useSessions` has more data fields than that list named, so whatever it
+  // omitted leaked from one test to the next. `resetStores()` installs the WHOLE
+  // captured state (with `replace = true`, so nothing shallow-merges over it),
+  // which includes the archived list the comment below used to guard by hand.
   // What stays below is therefore the FIXTURE, not the hygiene.
   resetStores();
   // Seed via `setState` directly — NOT `getState().setSpaces(…)` (that
