@@ -28,6 +28,8 @@ src-tauri/target
 # by the same command, and never a file anyone wants to commit.
 vitest-results.xml
 
+docs/roadmap/
+
 # local scratch
 .research/
 # The review workflow's scratch dir (`$PWD/.tmp`: test scratch, Tailwind probes).
