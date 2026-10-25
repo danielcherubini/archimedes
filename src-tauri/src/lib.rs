@@ -757,4 +757,65 @@ mod tests {
         assert!(line.starts_with("focus:"), "the greppable prefix: {line}");
         assert!(line.contains("grabbed"), "and says the lever fired: {line}");
     }
+
+    // ── The window-state registration (`tauri_plugin_window_state`) ─────────
+    //
+    // issue #91: the `fetch_content` render webview is built `visible(false)`,
+    // but this plugin's DEFAULT flags are `StateFlags::all()` — `VISIBLE`
+    // included — and its `on_window_ready` restore answers a label with no
+    // saved state by calling `show()` + `set_focus()`. Every render label
+    // carries a fresh uuid, so it NEVER has saved state: the plugin revealed a
+    // window the app deliberately hid, and stole focus to do it.
+    // `navigation_guard::should_track_label` is the predicate that excludes it,
+    // and its own unit test proves the predicate answers correctly — but nothing
+    // about whether this registration CONSULTS it. Deleting the `.with_filter`
+    // line below leaves every other test in this binary green and reintroduces
+    // the bug whole, so the configuration itself has to be pinned at its site of
+    // use.
+    //
+    // The assertion is TEXTUAL because no headless form of it exists: the mock
+    // runtime has no widget (see the note above), and a real `App` cannot be
+    // built in this binary at all — a second `generate_context!()` duplicates
+    // `embed_plist`'s `_EMBED_INFO_PLIST`, a link error on macOS. Reading our
+    // own source is the same trade the frontend already makes with `readFileSync`
+    // in `src/components/chromeButton.test.ts` and
+    // `src/components/settings/primitives.test.tsx`: pin the convention a
+    // behavioural test cannot reach.
+
+    /// The window-state plugin must be registered WITH the render-webview
+    /// filter. Two conditions, both on the same statement: the qualified
+    /// `Builder` token exists, and `with_filter(should_track_label)` follows it
+    /// closely.
+    #[test]
+    fn window_state_plugin_is_registered_with_the_render_webview_filter() {
+        // Cargo runs the test binary with cwd at the crate root (`src-tauri/`),
+        // so a repo-relative path would miss; anchor on the manifest dir.
+        let src = std::fs::read_to_string(format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR")))
+            .expect("lib.rs readable");
+
+        // Anchor on the FULLY QUALIFIED token. A bare `Builder` is ambiguous
+        // here — this file also holds `tauri::plugin::Builder::<Wry>` (the
+        // navigation guard), `tauri::Builder` (the app) and
+        // `tokio::runtime::Builder` — and matching the wrong one reddens this
+        // test while the registration is perfectly fine.
+        let anchor = "tauri_plugin_window_state::Builder";
+        let idx = src
+            .find(anchor)
+            .expect("the window-state plugin is registered by its qualified Builder");
+
+        // A BOUNDED window after the anchor, so the check cannot drift onto an
+        // unrelated later `.plugin(...)` call. Generous, and deliberately
+        // whitespace-blind: the registration is spread over several lines by
+        // `rustfmt`, and reformatting it must not redden this test.
+        const WINDOW: usize = 200;
+        let statement = &src[idx..idx + WINDOW.min(src.len() - idx)];
+        assert!(
+            statement.contains("with_filter(crate::navigation_guard::should_track_label)"),
+            "the window-state registration must carry the filter that keeps the \
+             `fetch_content` render webview hidden and out of `.window-state.json` \
+             (issue #91) — `with_filter(crate::navigation_guard::should_track_label)` \
+             is missing from the {} bytes after `{anchor}`",
+            statement.len(),
+        );
+    }
 }
