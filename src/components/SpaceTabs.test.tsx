@@ -861,15 +861,27 @@ describe("the tab label and the `+` route through <Button> (C7)", () => {
  * nowhere else, the ✕ refusing to start a drag, and the two hazards the spec
  * names as "pin in tests, not discover later".
  *
- * TWO jsdom FACTS every drag here is built on, both inherited verbatim from
+ * THREE jsdom FACTS every drag here is built on, all inherited from
  * `useDragReorder.test.tsx` (and from T06's block in `SpacesList.test.tsx`) —
  * reach for the obvious idiom instead and these tests pass VACUOUSLY:
  *  1. `fireEvent.dragOver(el, { clientY })` does NOT deliver `clientY` (a plain
- *     `Event` swallows the unknown init member and it arrives `undefined`), so
- *     `dragOver` below hand-builds the event and assigns the property.
+ *     `Event` swallows the unknown init member and it arrives `undefined`), and
+ *     the same is true of `clientX` — so `dragOver` below hand-builds the event
+ *     and assigns BOTH.
  *  2. `getBoundingClientRect()` is all zeros in jsdom, so the midpoint is `0`
  *     and EVERY pointer answers "after" — hence `layOut`, which makes the half a
  *     fact the test chooses rather than one the environment decides.
+ *  3. AND THE RECT MUST BE NON-DEGENERATE ON THE AXIS THE TEST IS NOT ABOUT.
+ *     This is the fact this block originally got wrong, and it is why the strip
+ *     shipped broken with every test below green: the fixtures placed the pills
+ *     along Y and every pointer was a `clientY`, so X was never exercised at all.
+ *     An unset `clientX` compares `undefined < midpoint` → `false` → "after",
+ *     which is the SAME answer a zero-width rect gives — so a hook reading the
+ *     wrong axis agreed with every assertion. `layOut` now gives each pill a real
+ *     x range AND a real y range, `dragOver` always sends both coordinates, and
+ *     the strip's pointers are stated in X with `clientY` pinned to the pills'
+ *     shared vertical midpoint. That combination is what makes an axis mistake
+ *     here fail loudly instead of quietly.
  *
  * WHY FOUR TABS AND WHY ALL FOUR ARE NAMED BY THE SLICE. The store's
  * `reorderSpaces` keeps a Space the slice does not name at the BOTTOM of the
@@ -883,10 +895,13 @@ describe("the tab label and the `+` route through <Button> (C7)", () => {
  */
 describe("SpaceTabs (dragging the tabs, ADR 0075)", () => {
   // FOUR tabs, not three. With three, dragging the last tab onto the middle
-  // one's BOTTOM half answers `alpha, beta, gamma` — the order the strip already
-  // has — so the hook correctly writes nothing and the bottom-half test would
+  // one's RIGHT half answers `alpha, beta, gamma` — the order the strip already
+  // has — so the hook correctly writes nothing and the right-half test would
   // have to assert an absence. Four is the smallest strip where before, after
-  // and the off-by-one are three DIFFERENT arrays.
+  // and the off-by-one are three DIFFERENT arrays. (The two AXIS tests near the
+  // end seed THREE tabs on purpose: the rightward one drags onto the LEFT half,
+  // which moves even in a three-tab strip, and it is the unchanged-strip answer
+  // that IS its bug — asserted as a failure, not dodged.)
   const TAB_NAMES = ["alpha", "beta", "gamma", "delta"];
   const TAB_PATHS = ["/w/alpha", "/w/beta", "/w/gamma", "/w/delta"];
 
@@ -911,48 +926,88 @@ describe("SpaceTabs (dragging the tabs, ADR 0075)", () => {
   const pillOf = (name: string): HTMLElement =>
     screen.getByRole("tab", { name }).parentElement!;
 
-  /** jsdom has no layout: override the rect so the pointer's half is chosen
-   *  here. (Same helper, same reason, as `useDragReorder.test.tsx`'s `layOut`.) */
-  const layOut = (el: HTMLElement, top: number, height = 40) => {
+  /** jsdom has no layout, so the rect is a fact the TEST chooses.
+   *
+   *  HORIZONTAL, because THIS strip is horizontal: every pill spans the SAME y
+   *  range (100..132) and differs only in x, exactly as the real strip lays out.
+   *  That is deliberate and it is the point — with `clientY` fixed at the pills'
+   *  shared vertical midpoint (116) the Y rule answers "after" for EVERY pointer
+   *  in EVERY test below, so no assertion here can be satisfied by a hook that
+   *  reads Y. Only `clientX` can move the edge.
+   *
+   *  THE FIXTURE THAT HID THE BUG: this block used to place pills on the Y axis
+   *  (`top`, `bottom`) and drive them with `clientY`, so the X axis was never
+   *  exercised at all — a rect with no width, or an unset `clientX` (which
+   *  compares `undefined < midpoint` → `false` → "after"), makes the two axes
+   *  agree and the feature ship broken with every test green. Both axes are
+   *  non-degenerate here and the pointers are stated in X. */
+  const layOut = (el: HTMLElement, left: number, width = 120) => {
     el.getBoundingClientRect = () =>
       ({
-        top,
-        bottom: top + height,
-        height,
-        width: 200,
-        left: 0,
-        right: 200,
-        x: 0,
-        y: top,
+        top: 100,
+        bottom: 132,
+        height: 32,
+        width,
+        left,
+        right: left + width,
+        x: left,
+        y: 100,
         toJSON: () => ({}),
       }) as DOMRect;
   };
 
-  /** `fireEvent.dragOver(el, { clientY })` does NOT deliver `clientY` (measured
-   *  `undefined`) — build the event and assign it. The return value is `false`
-   *  iff a handler called `preventDefault`, i.e. "this pill accepted the drop". */
-  const dragOver = (el: Element, clientY: number) => {
+  /** Hand-built `dragover` carrying BOTH coordinates.
+   *  `fireEvent.dragOver(el, { clientY })` does NOT deliver `clientY` (measured
+   *  `undefined`) — nor `clientX`, the same jsdom fact — so both are assigned
+   *  after construction. `clientY` is ALWAYS 116, the shared vertical midpoint:
+   *  the grab a user actually makes, and the coordinate that made the old
+   *  Y-only rule a no-op machine. The return value is `false` iff a handler
+   *  called `preventDefault`, i.e. "this pill accepted the drop". */
+  const dragOver = (el: Element, clientX: number) => {
     const ev = new Event("dragover", {
       bubbles: true,
       cancelable: true,
       composed: true,
     });
-    Object.assign(ev, { clientY });
+    Object.assign(ev, { clientX, clientY: 116 });
     return fireEvent(el, ev);
   };
 
   const buildDrop = () =>
     new Event("drop", { bubbles: true, cancelable: true, composed: true });
 
-  /** The strip's RENDER order, derived from the DOM rather than from the store —
-   *  the whole point is to assert what the user is shown. `before` counts how
-   *  many sibling tabs precede a tab, so the sort is a real positional read
-   *  rather than a comparator that happens to be consistent. */
-  const renderedStrip = (): string[] => {
-    const nodes = TAB_NAMES.map((n) => screen.getByRole("tab", { name: n }));
+  /** A hand-built drag event carrying BOTH coordinates. `fireEvent.dragOver(el,
+   *  { clientY })` delivers neither `clientY` nor `clientX` (a plain `Event`
+   *  swallows unknown init members — jsdom fact 1 above), so both are assigned
+   *  after construction. `dataTransfer` is the full three-member stub the real
+   *  gesture offers, since `dragstart` needs `setData`. Used by the two AXIS
+   *  tests below, which state the geometry the bug was measured with: a 32px pill
+   *  spanning y 100..132, grabbed at its vertical CENTRE (116). */
+  const mkDrag = (type: string, x: number, y: number) => {
+    const ev = new Event(type, { bubbles: true, cancelable: true });
+    Object.assign(ev, {
+      clientX: x,
+      clientY: y,
+      dataTransfer: {
+        setData: () => {},
+        getData: () => "",
+        setDragImage: () => {},
+      },
+    });
+    return ev;
+  };
+
+  /** A tab's pill `div` for a set of names, in RENDER order, derived from the DOM
+   *  rather than from the store — the whole point is to assert what the user is
+   *  shown. `before` counts how many sibling tabs precede a tab, so the sort is a
+   *  real positional read rather than a comparator that happens to be consistent.
+   *  Takes the names so a test can seed a strip of its own size (the axis tests
+   *  below use three tabs; the block's default strip has four). */
+  const renderedOrderOf = (names: string[]): string[] => {
+    const nodes = names.map((n) => screen.getByRole("tab", { name: n }));
     return nodes
       .map((node, i) => ({
-        path: TAB_PATHS[i]!,
+        path: `/w/${names[i]}`,
         before: nodes.filter(
           (other) =>
             other !== node &&
@@ -965,15 +1020,22 @@ describe("SpaceTabs (dragging the tabs, ADR 0075)", () => {
       .map((x) => x.path);
   };
 
-  /** Press-and-hold on `fromName`, hover `overName` at `clientY`, release.
-   *  Returns the `drop` event so a test can read `defaultPrevented`. */
-  function drag(fromName: string, overName: string, clientY: number): Event {
+  /** The strip's RENDER order for the block's four default tabs. */
+  const renderedStrip = (): string[] => renderedOrderOf(TAB_NAMES);
+
+  /** Press-and-hold on `fromName`, hover `overName` at `clientX` (with `clientY`
+   *  pinned to the pills' shared vertical midpoint, see `dragOver`), release.
+   *  Returns the `drop` event so a test can read `defaultPrevented`.
+   *  The target pill spans x 100..220, so its midpoint is 160: the two pointers
+   *  the tests below use are 110 (LEFT half → before) and 210 (RIGHT half →
+   *  after). */
+  function drag(fromName: string, overName: string, clientX: number): Event {
     const from = pillOf(fromName);
     const to = pillOf(overName);
     layOut(from, 0);
-    layOut(to, 100); // 100..140, midpoint 120
+    layOut(to, 100); // 100..220, midpoint 160
     fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
-    dragOver(to, clientY);
+    dragOver(to, clientX);
     const ev = buildDrop();
     fireEvent(to, ev);
     return ev;
@@ -998,15 +1060,18 @@ describe("SpaceTabs (dragging the tabs, ADR 0075)", () => {
     }
   });
 
-  it("dragging a tab onto another tab's TOP half reorders the strip to alpha, delta, beta, gamma", async () => {
+  it("dragging a tab onto another tab's LEFT half reorders the strip to alpha, delta, beta, gamma", async () => {
     // Spec §5 test #13, in the tab strip. TWO COMPETING ANSWERS: "before" means
     // DIRECTLY LEFT of the target → [alpha, delta, beta, gamma]; an off-by-one
     // reading "before" as one slot earlier answers [delta, alpha, beta, gamma],
     // i.e. the tab lands left of alpha while the indicator was promising beta.
+    // The pointer is 110, in the target's LEFT half (100..220, midpoint 160),
+    // with `clientY` pinned to the pills' shared vertical midpoint — so ONLY an
+    // X reading can produce this array.
     // A display sort is the THIRD answer, and the one ADR 0075 exists to delete.
     render(<SpaceTabs />);
     expect(renderedStrip()).toEqual(TAB_PATHS);
-    drag("delta", "beta", 110); // 110 < midpoint 120 → top half
+    drag("delta", "beta", 110); // 110 < midpoint 160 → LEFT half → before
     expect(renderedStrip()).toEqual([
       "/w/alpha",
       "/w/delta",
@@ -1028,12 +1093,12 @@ describe("SpaceTabs (dragging the tabs, ADR 0075)", () => {
     ]);
   });
 
-  it("dragging a tab onto another tab's BOTTOM half reorders to alpha, beta, delta, gamma — the other answer", async () => {
-    // The same gesture with the pointer 20px lower. Without BOTH halves
+  it("dragging a tab onto another tab's RIGHT half reorders to alpha, beta, delta, gamma — the other answer", async () => {
+    // The same gesture with the pointer 100px further RIGHT. Without BOTH halves
     // asserted, a call site that ignores `overEdge` (or a hook that always
-    // inserts after) passes the top-half test by accident.
+    // inserts after) passes the left-half test by accident.
     render(<SpaceTabs />);
-    drag("delta", "beta", 130); // 130 > midpoint 120 → bottom half
+    drag("delta", "beta", 210); // 210 > midpoint 160 → RIGHT half → after
     expect(renderedStrip()).toEqual([
       "/w/alpha",
       "/w/beta",
@@ -1056,26 +1121,37 @@ describe("SpaceTabs (dragging the tabs, ADR 0075)", () => {
     // the call site: `border-*` gated on `drag.overId === path` (the hook's edge,
     // gated on the hook's target) vs gated on `overEdge` alone — which paints the
     // edge on EVERY pill and would read as the whole strip lifting.
+    //
+    // LEFT AND RIGHT, not top and bottom: this strip is horizontal, so "earlier"
+    // is the pill's left edge. The sidebar keeps `border-t-2`/`border-b-2` — the
+    // pair the call site chooses is part of its contract, so asserting the
+    // horizontal pair HERE and the vertical pair in `SpacesList.test.tsx` is what
+    // pins that the two call sites did not collapse onto one another.
     render(<SpaceTabs />);
     const from = pillOf("delta");
     const to = pillOf("beta");
     layOut(from, 0);
     layOut(to, 100);
     fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
-    dragOver(to, 110);
-    expect(to.className).toContain("border-t-2");
+    dragOver(to, 110); // LEFT half of 100..220 → "before"
+    expect(to.className).toContain("border-l-2");
+    expect(to.className).not.toContain("border-r-2");
+    // And NOT the vertical pair the sidebar paints — a call site that kept the
+    // top/bottom edges while the hook switched to X would paint a line the user
+    // cannot connect to their left/right intent.
+    expect(to.className).not.toContain("border-t-2");
     expect(to.className).not.toContain("border-b-2");
     for (const name of ["alpha", "gamma", "delta"]) {
       const el = pillOf(name);
-      expect(el.className, name).not.toContain("border-t-2");
-      expect(el.className, name).not.toContain("border-b-2");
+      expect(el.className, name).not.toContain("border-l-2");
+      expect(el.className, name).not.toContain("border-r-2");
     }
-    // The pointer crossing to the bottom half flips the edge, and the top edge
+    // The pointer crossing to the RIGHT half flips the edge, and the left edge
     // goes away — an indicator that only ever paints one edge is the bug the
     // hook's `overEdge` exists to prevent.
-    dragOver(to, 130);
-    expect(to.className).toContain("border-b-2");
-    expect(to.className).not.toContain("border-t-2");
+    dragOver(to, 210);
+    expect(to.className).toContain("border-r-2");
+    expect(to.className).not.toContain("border-l-2");
   });
 
   it("no edge is painted before the gesture and none after it ends", () => {
@@ -1086,14 +1162,14 @@ describe("SpaceTabs (dragging the tabs, ADR 0075)", () => {
     // the mechanism" shape this branch has been bitten by twice.
     render(<SpaceTabs />);
     const edge = (el: HTMLElement) =>
-      el.className.includes("border-t-2") || el.className.includes("border-b-2");
+      el.className.includes("border-l-2") || el.className.includes("border-r-2");
     for (const name of TAB_NAMES) expect(edge(pillOf(name))).toBe(false);
     const from = pillOf("delta");
     const to = pillOf("beta");
     layOut(from, 0);
     layOut(to, 100);
     fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
-    dragOver(to, 130);
+    dragOver(to, 210);
     expect(edge(to)).toBe(true);
     // Release (which clears the gesture) — no edge survives it.
     fireEvent(to, buildDrop());
@@ -1116,18 +1192,18 @@ describe("SpaceTabs (dragging the tabs, ADR 0075)", () => {
     fireEvent.dragStart(self, { dataTransfer: { setData: vi.fn() } });
     // `true` === nothing prevented === the browser's no-drop cursor, and the
     // window backstop is what swallows the release (spec hazard 2).
-    expect(dragOver(self, 130)).toBe(true);
-    expect(self.className).not.toContain("border-b-2");
+    expect(dragOver(self, 210)).toBe(true);
+    expect(self.className).not.toContain("border-r-2");
     fireEvent(self, buildDrop());
     expect(reorderSpaces).not.toHaveBeenCalled();
     expect(renderedStrip()).toEqual(TAB_PATHS);
     // THE CONTROL THAT MAKES THE SILENCE MEAN SOMETHING: the same tab, dropped on
     // a NEIGHBOUR in a way that actually changes the order, does fire the write —
     // so the two assertions above are the self-target refusal talking, not dead
-    // wiring. (It has to be the BOTTOM half: dropping `beta` on `gamma`'s TOP half
+    // wiring. (It has to be the RIGHT half: dropping `beta` on `gamma`'s LEFT half
     // is the order the strip already has, and the hook correctly refuses to write
     // a no-op — so that gesture would leave this control as green as the bug.)
-    drag("beta", "gamma", 130);
+    drag("beta", "gamma", 210);
     await waitFor(() => expect(reorderSpaces).toHaveBeenCalledTimes(1));
   });
 
@@ -1165,7 +1241,7 @@ describe("SpaceTabs (dragging the tabs, ADR 0075)", () => {
         ],
       });
     });
-    dragOver(to, 110); // top half → before
+    dragOver(to, 110); // LEFT half → before
     fireEvent(to, buildDrop());
     expect(
       useSessions.getState().spaces.map((s) => s.path),
@@ -1275,6 +1351,105 @@ describe("SpaceTabs (dragging the tabs, ADR 0075)", () => {
         name,
       ).toBe("false");
     }
+  });
+
+  it("RIGHTWARD: dragging gamma rightward onto beta's LEFT half reorders to alpha, gamma, beta (the axis bug)", async () => {
+    // THE BUG THIS TEST EXISTS TO CATCH, and the reason the two tests above
+    // passed while the feature was broken: the strip is HORIZONTAL, so a tab
+    // drag holds `clientY` essentially constant and the landing side must be
+    // read off `clientX`. The hook read `clientY` for both lists, so a grab at
+    // the pill's vertical CENTRE — the most natural grab, and the one this
+    // fixture spells — answered "after" no matter where the pointer was
+    // horizontally.
+    //
+    // TWO COMPETING ANSWERS, and they are the two halves of the bug:
+    //   - the BUG: edge "after" → moveId(gamma, beta, after) →
+    //     [alpha, beta, gamma] → identical to the current order → the hook's
+    //     "nothing moved" guard fires → **no reorder at all, no IPC, the strip
+    //     does not move**;
+    //   - the FIX: clientX 20 is in beta's LEFT half → "before" →
+    //     [alpha, gamma, beta].
+    // The LEFTWARD sibling below ([beta, alpha, gamma] from an alpha-onto-beta
+    // drag) is GREEN under the bug — it lands on "after" by accident — which is
+    // exactly why the pair had to include the RIGHTWARD case to have any
+    // detection value at all. That asymmetry is the whole shape of the bug:
+    // "leftward drags work, rightward drags silently do nothing".
+    //
+    // `clientY` sits EXACTLY on the rect's vertical midpoint (116 of 100..132),
+    // so no Y-based rule can be what satisfies this test, and the pill's rect is
+    // 120px WIDE (the degenerate-axis fixture this block shipped with is what
+    // hid the bug).
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta"), space("/w/gamma")],
+      activeSpacePath: "/w/alpha",
+    });
+    render(<SpaceTabs />);
+    const three = ["alpha", "beta", "gamma"];
+    expect(renderedOrderOf(three)).toEqual([
+      "/w/alpha",
+      "/w/beta",
+      "/w/gamma",
+    ]);
+
+    const from = pillOf("gamma");
+    const to = pillOf("beta");
+    // Both pills at x 0..120, y 100..132 — BOTH axes non-degenerate.
+    // The TARGET pill sits at x 0..120 (midpoint 60), so x 20 is unambiguously
+    // its LEFT half. Both pills share y 100..132 — BOTH axes non-degenerate.
+    layOut(from, 0);
+    layOut(to, 0);
+    fireEvent(from, mkDrag("dragstart", 60, 116));
+    // The grab is at the pill's vertical CENTRE (116) and in beta's LEFT third
+    // (x 20 of 0..120) — a rightward intent stated entirely in X.
+    fireEvent(to, mkDrag("dragover", 20, 116));
+    fireEvent(to, mkDrag("drop", 20, 116));
+
+    expect(
+      renderedOrderOf(three),
+      "no reorder happened: the horizontal drag was decided by clientY",
+    ).toEqual(["/w/alpha", "/w/gamma", "/w/beta"]);
+    await waitFor(() => expect(reorderSpaces).toHaveBeenCalledTimes(1));
+    expect(reorderSpaces).toHaveBeenCalledWith([
+      "/w/alpha",
+      "/w/gamma",
+      "/w/beta",
+    ]);
+  });
+
+  it("a LEFTWARD tab drag works too (the direction the bug got right by accident)", async () => {
+    // The other half of the pair. A horizontal drag onto a target to the LEFT
+    // landed on "after" under the buggy Y rule as well, so this direction was
+    // never visibly broken — the bug's user-visible shape was asymmetric.
+    // TWO COMPETING ANSWERS: [beta, alpha, gamma] (x 100 is RIGHT of the pill's
+    // midpoint 60 → "after") vs NO REORDER at all (an X comparison inverted to
+    // `>` would answer "before", and `alpha` dropped before `beta` is the order
+    // the strip already has, so the guard fires and nothing moves).
+    // It is deliberately GREEN under the old hook too, and it exists for the
+    // mutation the RIGHTWARD test cannot see: a "fix" that flips the comparison
+    // instead of the axis reddens THIS one while leaving the rightward case
+    // looking right. Without it, the pair above could be satisfied by an inverted
+    // rule and the strip would break leftward instead.
+    useSessions.setState({
+      spaces: [space("/w/alpha"), space("/w/beta"), space("/w/gamma")],
+      activeSpacePath: "/w/alpha",
+    });
+    render(<SpaceTabs />);
+    const three = ["alpha", "beta", "gamma"];
+    const from = pillOf("alpha");
+    const to = pillOf("beta");
+    layOut(from, 0);
+    layOut(to, 0); // the target spans x 0..120, midpoint 60
+    fireEvent(from, mkDrag("dragstart", 60, 116));
+    // Grab at beta's vertical CENTRE again (so Y answers nothing), on its RIGHT
+    // half (x 100 > midpoint 60) → "after".
+    fireEvent(to, mkDrag("dragover", 100, 116));
+    fireEvent(to, mkDrag("drop", 100, 116));
+    expect(renderedOrderOf(three)).toEqual([
+      "/w/beta",
+      "/w/alpha",
+      "/w/gamma",
+    ]);
+    await waitFor(() => expect(reorderSpaces).toHaveBeenCalledTimes(1));
   });
 
   it("a tab's drop wins without stopping propagation, so a release outside any pill is left to the backstop", async () => {

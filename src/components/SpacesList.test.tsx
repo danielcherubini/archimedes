@@ -2763,6 +2763,18 @@ describe("SpacesList (the generated session title)", () => {
  *  2. `getBoundingClientRect()` is all zeros in jsdom, so the midpoint is `0`
  *     and EVERY pointer answers "after" — hence `layOut`, which makes the half a
  *     fact the test chooses rather than one the environment decides.
+ *  3. AND THE RECT MUST BE NON-DEGENERATE ON THE AXIS THIS LIST IS NOT ON. The
+ *     tab strip shipped as a silent no-op with every drag test in this repo green,
+ *     because nothing here or in `SpaceTabs.test.tsx` ever delivered a `clientX`:
+ *     an omitted one compares `undefined < midpoint` → `false` → "after", the same
+ *     answer a zero-width rect gives. So `layOut` now gives every row a real x
+ *     range AS WELL as a real y range, and `dragOver` demands both coordinates —
+ *     with the X always answering the OPPOSITE edge from the Y, so a hook on the
+ *     wrong axis reddens this block rather than agreeing by accident. The sidebar
+ *     itself is unchanged (default `axis: "y"`); see
+ *     "the SIDEBAR stays on the Y axis" below, which is the version of the axis
+ *     test this file can construct — `SpacesList` renders no tab strip, so the
+ *     horizontal-strip case lives in `SpaceTabs.test.tsx`.
  */
 describe("SpacesList (dragging the session rows, ADR 0075)", () => {
   const ROW_TITLES = ["Row 1", "Row 2", "Row 3", "Row 4", "Row 5"];
@@ -2788,7 +2800,16 @@ describe("SpacesList (dragging the session rows, ADR 0075)", () => {
   }
 
   /** jsdom has no layout: override the rect so the pointer's half is chosen
-   *  here. (Same helper, same reason, as `useDragReorder.test.tsx`'s `layOut`.) */
+   *  here. (Same helper, same reason, as `useDragReorder.test.tsx`'s `layOut`.)
+   *
+   *  BOTH AXES NON-DEGENERATE, and that is the fixture fix this block needed: a
+   *  row spans x 0..200 AND y `top`..`top`+40, so its two midpoints (100 and
+   *  `top`+20) are different numbers. The pointers below always state BOTH, and
+   *  the X always answers the OPPOSITE edge from the Y — so a hook reading the
+   *  wrong axis reddens this block instead of agreeing by accident. (The tab
+   *  strip shipped broken with every test green because nothing here or there
+   *  ever delivered a `clientX`: `undefined < 100` is `false`, i.e. "after", the
+   *  same answer a zero-width rect gives.) */
   const layOut = (el: HTMLElement, top: number, height = 40) => {
     el.getBoundingClientRect = () =>
       ({
@@ -2805,15 +2826,20 @@ describe("SpacesList (dragging the session rows, ADR 0075)", () => {
   };
 
   /** `fireEvent.dragOver(el, { clientY })` does NOT deliver `clientY` (measured
-   *  `undefined`) — build the event and assign it. The return value is `false`
-   *  iff a handler called `preventDefault`, i.e. "this row accepted the drop". */
-  const dragOver = (el: Element, clientY: number) => {
+   *  `undefined`) — nor `clientX` — so both are assigned. The return value is
+   *  `false` iff a handler called `preventDefault`, i.e. "this row accepted the
+   *  drop".
+   *
+   *  BOTH COORDINATES ARE MANDATORY: every call below passes an x that answers
+   *  the opposite edge from the y, which is what keeps this VERTICAL list honest
+   *  about the axis it is on. See `layOut`. */
+  const dragOver = (el: Element, clientY: number, clientX: number) => {
     const ev = new Event("dragover", {
       bubbles: true,
       cancelable: true,
       composed: true,
     });
-    Object.assign(ev, { clientY });
+    Object.assign(ev, { clientY, clientX });
     return fireEvent(el, ev);
   };
 
@@ -2846,14 +2872,22 @@ describe("SpacesList (dragging the session rows, ADR 0075)", () => {
   };
 
   /** Press-and-hold on `dragTitle`, hover `overTitle` at `clientY`, release.
-   *  Returns the `drop` event so a test can read `defaultPrevented`. */
-  function drag(dragTitle: string, overTitle: string, clientY: number): Event {
+   *  Returns the `drop` event so a test can read `defaultPrevented`.
+   *  `clientX` is supplied by the caller (see the note on `dragOver`) and always
+   *  contradicts `clientY`, so the array each test asserts can only come from the
+   *  Y answer. */
+  function drag(
+    dragTitle: string,
+    overTitle: string,
+    clientY: number,
+    clientX: number,
+  ): Event {
     const from = rowEl(dragTitle);
     const to = rowEl(overTitle);
     layOut(from, 0);
-    layOut(to, 100); // 100..140, midpoint 120
+    layOut(to, 100); // y 100..140 (midpoint 120), x 0..200 (midpoint 100)
     fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
-    dragOver(to, clientY);
+    dragOver(to, clientY, clientX);
     const ev = buildDrop();
     fireEvent(to, ev);
     return ev;
@@ -2894,7 +2928,7 @@ describe("SpacesList (dragging the session rows, ADR 0075)", () => {
     // THIRD answer, and the one this branch exists to delete.
     render(<SpacesList />);
     expect(renderedOrder()).toEqual(ROW_IDS);
-    drag("Row 5", "Row 2", 110); // 110 < midpoint 120 → top half
+    drag("Row 5", "Row 2", 110, 150); // 110 < midpoint 120 → top half (x 150 would say AFTER)
     expect(renderedOrder()).toEqual(["r1", "r5", "r2", "r3", "r4"]);
     // The write is the WHOLE visible slice, not the moved id (the Rust side
     // writes each index as the row's stored number, so a partial list is a
@@ -2910,7 +2944,7 @@ describe("SpacesList (dragging the session rows, ADR 0075)", () => {
     // asserted, a call site that ignores `overEdge` (or a hook that always
     // inserts after) passes the top-half test by accident.
     render(<SpacesList />);
-    drag("Row 5", "Row 2", 130); // 130 > midpoint 120 → bottom half
+    drag("Row 5", "Row 2", 130, 50); // 130 > midpoint 120 → bottom half (x 50 would say BEFORE)
     expect(renderedOrder()).toEqual(["r1", "r2", "r5", "r3", "r4"]);
     await waitFor(() =>
       expect(reorderSessions).toHaveBeenCalledWith(["r1", "r2", "r5", "r3", "r4"]),
@@ -2929,7 +2963,7 @@ describe("SpacesList (dragging the session rows, ADR 0075)", () => {
     layOut(from, 0);
     layOut(to, 100);
     fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
-    dragOver(to, 110);
+    dragOver(to, 110, 150);
     expect(to.className).toContain("border-t-2");
     expect(to.className).not.toContain("border-b-2");
     for (const title of ["Row 1", "Row 3", "Row 4", "Row 5"]) {
@@ -2940,7 +2974,7 @@ describe("SpacesList (dragging the session rows, ADR 0075)", () => {
     // The pointer crossing to the bottom half flips the edge, and the top edge
     // goes away — an indicator that only ever paints one edge is the bug the
     // hook's `overEdge` exists to prevent.
-    dragOver(to, 130);
+    dragOver(to, 130, 50);
     expect(to.className).toContain("border-b-2");
     expect(to.className).not.toContain("border-t-2");
   });
@@ -2961,11 +2995,40 @@ describe("SpacesList (dragging the session rows, ADR 0075)", () => {
     layOut(from, 0);
     layOut(to, 100);
     fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
-    dragOver(to, 130);
+    dragOver(to, 130, 50);
     expect(edge(to)).toBe(true);
     // Release (which clears the gesture) — no edge survives it.
     fireEvent(to, buildDrop());
     for (const title of ROW_TITLES) expect(edge(rowEl(title))).toBe(false);
+  });
+
+  it("the SIDEBAR stays on the Y axis: a pointer whose X says the opposite edge still moves the row up", () => {
+    // THE OTHER HALF OF THE AXIS BUG'S TEST-BLINDNESS, and the reason this block
+    // had to change its fixtures. `SpacesList` renders no tab strip, so a
+    // horizontal-strip drag cannot be constructed HERE (that one lives in
+    // `SpaceTabs.test.tsx`); what this file can and must pin is the direction the
+    // fix could have gone wrong: a hook that GUESSED the axis from the rect's
+    // proportions would flip this list onto X, because a sidebar row is 200px wide
+    // and 40px tall.
+    // TWO COMPETING ANSWERS: [r1,r5,r2,r3,r4] — the pointer's Y (110, above the
+    // row's midpoint 120) answers "before" and the sidebar behaves exactly as it
+    // did before the `axis` option existed — vs [r1,r2,r5,r3,r4], which is what a
+    // hook reading this pointer's X (150, right of the midpoint 100) would do, and
+    // also what the old Y rule would answer if a future edit swapped the axes.
+    // The row's edges are asserted as TOP/BOTTOM too: the sidebar's indicator must
+    // not become the tab strip's left/right pair.
+    render(<SpacesList />);
+    const from = rowEl("Row 5");
+    const to = rowEl("Row 2");
+    layOut(from, 0);
+    layOut(to, 100); // y 100..140 (midpoint 120), x 0..200 (midpoint 100)
+    fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
+    dragOver(to, 110, 150);
+    expect(to.className).toContain("border-t-2");
+    expect(to.className).not.toContain("border-l-2");
+    expect(to.className).not.toContain("border-r-2");
+    fireEvent(to, buildDrop());
+    expect(renderedOrder()).toEqual(["r1", "r5", "r2", "r3", "r4"]);
   });
 
   it("dragging a row onto itself is a no-op: no reorder, no IPC, no indicator, no move", () => {
@@ -2985,7 +3048,7 @@ describe("SpacesList (dragging the session rows, ADR 0075)", () => {
     fireEvent.dragStart(self, { dataTransfer: { setData: vi.fn() } });
     // `true` === nothing prevented === the browser's no-drop cursor, and the
     // window backstop is what swallows the release (spec hazard 2).
-    expect(dragOver(self, 130)).toBe(true);
+    expect(dragOver(self, 130, 50)).toBe(true);
     expect(self.className).not.toContain("border-b-2");
     fireEvent(self, buildDrop());
     expect(reorderSessions).not.toHaveBeenCalled();
@@ -3017,7 +3080,7 @@ describe("SpacesList (dragging the session rows, ADR 0075)", () => {
     // list with no drag wiring at all — the vacuity this branch has been bitten
     // by four times. (`preventDefault` on `dragover` is what makes `dragOver`
     // return `false`.)
-    expect(dragOver(to, 110)).toBe(false);
+    expect(dragOver(to, 110, 150)).toBe(false);
 
     // Half one — released ON the row: prevented, reordered, and NOT stopped.
     const onRow = buildDrop();
@@ -3046,7 +3109,7 @@ describe("SpacesList (dragging the session rows, ADR 0075)", () => {
     // apart — TWO COMPETING ANSWERS: writing the map (the row holds) vs writing
     // the array alone (the row returns to `r1…r5`).
     render(<SpacesList />);
-    drag("Row 5", "Row 2", 110);
+    drag("Row 5", "Row 2", 110, 150);
     expect(renderedOrder()).toEqual(["r1", "r5", "r2", "r3", "r4"]);
     // Force a re-derivation: a NEW stored row in ANOTHER Space changes a `views`
     // dependency (so `spaceViewFor` re-runs for every Space and `sessionIds` is
@@ -3158,7 +3221,7 @@ describe("SpacesList (dragging the session rows, ADR 0075)", () => {
     layOut(from, 0);
     layOut(to, 100);
     fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
-    dragOver(to, 110);
+    dragOver(to, 110, 150);
     fireEvent(to, buildDrop());
     const rows = screen.getByText("Row three");
     expect(
@@ -3215,7 +3278,7 @@ describe("SpacesList (dragging the session rows, ADR 0075)", () => {
     layOut(from, 100);
     layOut(to, 0);
     fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
-    dragOver(to, 10); // top half → before
+    dragOver(to, 10, 150); // top half → before (x 150 would say AFTER)
     fireEvent(to, buildDrop());
     expect(
       screen.getByText("Row 2").compareDocumentPosition(screen.getByText("Row 1")) &

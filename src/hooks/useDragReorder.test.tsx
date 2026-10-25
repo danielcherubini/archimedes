@@ -33,13 +33,26 @@ import { useWindowDropBackstop } from "./useWindowDropBackstop";
 const stubDataTransfer = () => ({ setData: vi.fn() });
 
 /** `fireEvent.dragOver(el, { clientY })` does NOT deliver clientY (measured:
- *  undefined) — build the event and assign it. The return value is `false` iff a
- *  handler called `preventDefault`, which is how cancelability is asserted.
- *  `cancelable: true` is what makes that mean anything (the same reason
- *  `useWindowDropBackstop.test.ts`'s helpers say so). */
-const dragOver = (el: Element, clientY: number) => {
+ *  undefined) — and not `clientX` either — so both are assigned. The return
+ *  value is `false` iff a handler called `preventDefault`, which is how
+ *  cancelability is asserted. `cancelable: true` is what makes that mean anything
+ *  (the same reason `useWindowDropBackstop.test.ts`'s helpers say so).
+ *
+ *  BOTH COORDINATES ARE MANDATORY, and that is deliberate. Every row this file
+ *  lays out spans x 0..200, so its X midpoint is 100; the vertical tests below
+ *  each pass an x that answers the OPPOSITE edge from the y they pass. A hook
+ *  that read the wrong axis therefore reddens all of them rather than agreeing by
+ *  accident — which is precisely the blindness that let the horizontal strip ship
+ *  broken. Omit `clientX` and it compares `undefined < 100` → `false` → "after",
+ *  the same answer a zero-width rect gives.
+ *
+ *  `dragOver(el, clientY, clientX)` keeps Y FIRST so the vertical list's calls
+ *  read in the order that list's axis matters; the two `axis: "x"` tests below
+ *  name both numbers in their comments rather than trading in a second,
+ *  near-identical helper. */
+const dragOver = (el: Element, clientY: number, clientX: number) => {
   const ev = new Event("dragover", { bubbles: true, cancelable: true, composed: true });
-  Object.assign(ev, { clientY });
+  Object.assign(ev, { clientY, clientX });
   return fireEvent(el, ev);
 };
 
@@ -50,7 +63,15 @@ const buildDrop = () =>
 
 /** jsdom has no layout: the default rect is all zeros → midpoint 0 → every
  *  pointer "after" (measured). Override it so the half is a fact the TEST
- *  chooses. Without this the before/after assertions agree by accident. */
+ *  chooses. Without this the before/after assertions agree by accident.
+ *
+ *  BOTH AXES ARE NON-DEGENERATE, and they have to be: a rect with no width (or
+ *  no height) collapses the opposite axis's midpoint onto 0, so a hook reading
+ *  the WRONG axis can still answer what the test expects and the test passes
+ *  while the feature is broken. That is exactly how the horizontal tab strip
+ *  shipped as a silent no-op. Here the row spans x 0..200 and y `top`..`top`+40,
+ *  so the two midpoints (100 and `top`+20) are different numbers and a pointer
+ *  must state BOTH to be unambiguous. */
 const layOut = (el: HTMLElement, top: number, height = 40) => {
   el.getBoundingClientRect = () =>
     ({
@@ -73,6 +94,9 @@ const layOut = (el: HTMLElement, top: number, height = 40) => {
 function Probe(props: {
   ids: readonly string[];
   onReorder: (ids: string[]) => void;
+  /** Passed to the HOOK as an argument. It must never reach `dragProps` — the
+   *  first test below pins that spread surface at exactly six keys. */
+  axis?: "x" | "y";
 }) {
   const hook = useDragReorder(props);
   captured = hook;
@@ -155,9 +179,9 @@ describe("useDragReorder (the gesture both lists share)", () => {
     // midpoint is 0 and BOTH pointers below answer "after" — which is how a hook
     // that never reads the rect and a test that never overrides the rect agree.
     layOut(row("r2"), 100);
-    expect(dragOver(row("r2"), 110)).toBe(false); // false === prevented === accepts drops
+    expect(dragOver(row("r2"), 110, 150)).toBe(false); // false === prevented === accepts drops
     expect(gesture()).toEqual({ draggingId: "r5", overId: "r2", overEdge: "before" });
-    expect(dragOver(row("r2"), 130)).toBe(false);
+    expect(dragOver(row("r2"), 130, 50)).toBe(false);
     expect(gesture()).toEqual({ draggingId: "r5", overId: "r2", overEdge: "after" });
   });
 
@@ -168,7 +192,7 @@ describe("useDragReorder (the gesture both lists share)", () => {
     layOut(row("r2"), 100);
 
     fireEvent.dragStart(row("r5"), { dataTransfer: stubDataTransfer() });
-    dragOver(row("r2"), 110); // top half → BEFORE
+    dragOver(row("r2"), 110, 150); // top half → BEFORE (x 150 would say AFTER)
     fireEvent(row("r2"), buildDrop());
     // THE ROW IS THE TARGET, so "before" means DIRECTLY ABOVE r2. TWO COMPETING
     // ANSWERS: an off-by-one that reads "before" as one slot earlier answers
@@ -184,7 +208,7 @@ describe("useDragReorder (the gesture both lists share)", () => {
     // stops a hook that always inserts after from passing.
     onReorder.mockClear();
     fireEvent.dragStart(row("r5"), { dataTransfer: stubDataTransfer() });
-    dragOver(row("r2"), 130); // bottom half → AFTER
+    dragOver(row("r2"), 130, 50); // bottom half → AFTER (x 50 would say BEFORE)
     fireEvent(row("r2"), buildDrop());
     expect(onReorder).toHaveBeenCalledTimes(1);
     expect(onReorder).toHaveBeenLastCalledWith(["r1", "r2", "r5", "r3", "r4"]);
@@ -199,7 +223,7 @@ describe("useDragReorder (the gesture both lists share)", () => {
     // no-drop cursor and the window backstop is what swallows the release.
     // TWO COMPETING ANSWERS: a hook treating self-drop as a normal target
     // answers `overId === "r3"` and prevented.
-    expect(dragOver(row("r3"), 130)).toBe(true);
+    expect(dragOver(row("r3"), 130, 50)).toBe(true);
     expect(gesture().overId).toBeNull();
     fireEvent(row("r3"), buildDrop());
     expect(onReorder).not.toHaveBeenCalled();
@@ -220,7 +244,7 @@ describe("useDragReorder (the gesture both lists share)", () => {
 
     // Act two — a completed drop clears the same three.
     fireEvent.dragStart(row("r5"), { dataTransfer: stubDataTransfer() });
-    dragOver(row("r2"), 130);
+    dragOver(row("r2"), 130, 50);
     fireEvent(row("r2"), buildDrop());
     expect(onReorder).toHaveBeenCalledTimes(1);
     expect(gesture()).toEqual(cleared);
@@ -230,7 +254,7 @@ describe("useDragReorder (the gesture both lists share)", () => {
     render(<Probe ids={IDS} onReorder={vi.fn()} />);
     layOut(row("r3"), 100);
     fireEvent.dragStart(row("r1"), { dataTransfer: stubDataTransfer() });
-    dragOver(row("r3"), 130);
+    dragOver(row("r3"), 130, 50);
     expect(gesture().overId).toBe("r3");
     // The browser really does fire `dragleave` on the row the pointer CAME
     // FROM, after the `dragover` on the one it arrived at. TWO COMPETING
@@ -249,7 +273,7 @@ describe("useDragReorder (the gesture both lists share)", () => {
     render(<ProbeWithBackstop ids={IDS} onReorder={onReorder} />);
     layOut(row("r3"), 100);
     fireEvent.dragStart(row("r1"), { dataTransfer: stubDataTransfer() });
-    dragOver(row("r3"), 130);
+    dragOver(row("r3"), 130, 50);
 
     const ev = buildDrop();
     const spy = vi.spyOn(ev, "stopPropagation");
@@ -268,7 +292,7 @@ describe("useDragReorder (the gesture both lists share)", () => {
     render(<ProbeWithBackstop ids={IDS} onReorder={onReorder} />);
     layOut(row("r3"), 100);
     fireEvent.dragStart(row("r1"), { dataTransfer: stubDataTransfer() });
-    dragOver(row("r3"), 130);
+    dragOver(row("r3"), 130, 50);
     // Released on `document.body` — outside every row. The window listener still
     // swallows it, and no list moves.
     const ev = buildDrop();
@@ -284,11 +308,89 @@ describe("useDragReorder (the gesture both lists share)", () => {
     fireEvent.dragStart(row("r1"), { dataTransfer: stubDataTransfer() });
     // The row closes mid-drag: the next render has no `r1` at all.
     rerender(<Probe ids={["r2", "r3", "r4", "r5"]} onReorder={onReorder} />);
-    dragOver(row("r2"), 110);
+    dragOver(row("r2"), 110, 150);
     fireEvent(row("r2"), buildDrop());
     // TWO COMPETING ANSWERS: an unguarded move would splice `undefined` into the
     // slice, or insert nothing and STILL fire the IPC — and a fired IPC carrying
     // a stale slice is exactly the half-moved list.
     expect(onReorder).not.toHaveBeenCalled();
+  });
+
+  // -- The axis (the horizontal tab strip's bug, pinned at the hook) ---------
+
+  it("axis: \"x\" reads the half off clientX: a pointer LEFT of the row's midpoint is BEFORE, right of it is AFTER", () => {
+    // TWO COMPETING ANSWERS, and both are the answer to a drag whose `clientY`
+    // sits EXACTLY on the rect's vertical midpoint (120 of 100..140), so the Y
+    // rule has nothing to contribute:
+    //   - the FIX (read X): x 40 < 100 → "before" → overEdge "before";
+    //   - the BUG (read Y): `120 < 120` is false → "after" → overEdge "after".
+    // The second gesture flips to the other half (x 160 → "after"), which is what
+    // stops a hook that hard-codes one edge from passing.
+    render(<Probe ids={IDS} onReorder={vi.fn()} axis="x" />);
+    layOut(row("r2"), 100); // y 100..140 (midpoint 120), x 0..200 (midpoint 100)
+    fireEvent.dragStart(row("r5"), { dataTransfer: stubDataTransfer() });
+    expect(dragOver(row("r2"), 120, 40)).toBe(false);
+    expect(gesture()).toEqual({ draggingId: "r5", overId: "r2", overEdge: "before" });
+    expect(dragOver(row("r2"), 120, 160)).toBe(false);
+    expect(gesture()).toEqual({ draggingId: "r5", overId: "r2", overEdge: "after" });
+  });
+
+  it("axis: \"x\" moves the id LEFT/RIGHT: a rightward drag onto the target's LEFT half lands it directly BEFORE the target", () => {
+    // THE BUG AT THE HOOK LEVEL, as an ORDER rather than as a state read. Drag r5
+    // onto r2 with the pointer in r2's LEFT half (x 40) and `clientY` exactly on
+    // r2's vertical midpoint (120) — the grab a horizontal drag actually makes.
+    // TWO COMPETING ANSWERS:
+    //   - the FIX: "before" → ["r1","r5","r2","r3","r4"];
+    //   - the BUG: Y says "after" → ["r1","r2","r5","r3","r4"] — a DIFFERENT
+    //     array, so this gesture does write; it writes the row one slot too LOW
+    //     while the indicator promised it above the target.
+    // The SILENT-NO-OP signature comes from the same rule one step further: when
+    // the target is the dragged id's immediate RIGHT neighbour the "after" array
+    // equals the current order, the hook's "nothing moved" guard fires, and
+    // `onReorder` never runs at all. That is the shape the user hit, and
+    // `SpaceTabs.test.tsx`'s RIGHTWARD test pins it in the rendered strip; this
+    // one pins the arithmetic that produces it.
+    const onReorder = vi.fn();
+    render(<Probe ids={IDS} onReorder={onReorder} axis="x" />);
+    layOut(row("r2"), 100);
+    fireEvent.dragStart(row("r5"), { dataTransfer: stubDataTransfer() });
+    dragOver(row("r2"), 120, 40);
+    fireEvent(row("r2"), buildDrop());
+    expect(onReorder).toHaveBeenCalledTimes(1);
+    expect(onReorder).toHaveBeenLastCalledWith(["r1", "r5", "r2", "r3", "r4"]);
+  });
+
+  it("the axis is an ARGUMENT and never a spread key: axis: \"x\" still yields exactly six dragProps keys", () => {
+    // The six-key contract is `RowButton`'s (it spreads `...rest` verbatim onto a
+    // byte-compared row), so an `axis` key leaking into `dragProps` would be an
+    // unknown DOM attribute AND a changed attribute order on every sidebar row.
+    // TWO COMPETING ANSWERS: six keys with `axis` living on the hook's arguments
+    // (correct) vs a hook that threads the axis through the spread surface.
+    render(<Probe ids={IDS} onReorder={vi.fn()} axis="x" />);
+    expect(Object.keys(captured!.dragProps("r1")).sort()).toEqual([
+      "draggable",
+      "onDragEnd",
+      "onDragLeave",
+      "onDragOver",
+      "onDragStart",
+      "onDrop",
+    ]);
+    expect(captured!.dragProps("r1")).not.toHaveProperty("axis");
+  });
+
+  it("with no axis the hook reads Y, so a vertical list is unaffected by the option existing", () => {
+    // THE SIDEBAR'S BYTE-IDENTITY, at the hook level. The row spans x 0..200 and
+    // y 100..140, and the pointer is deliberately contradictory: x 160 (an X rule
+    // would say AFTER) with y 110 (the truth the sidebar needs: BEFORE).
+    // TWO COMPETING ANSWERS: "before" (default `"y"`, sidebar unchanged) vs
+    // "after" — which is what a hook that GUESSED the axis from the rect's
+    // proportions would answer here, because this row is wider than it is tall.
+    // That is the heuristic this option's doc comment refuses, and this is the
+    // test that refuses it too.
+    render(<Probe ids={IDS} onReorder={vi.fn()} />);
+    layOut(row("r2"), 100);
+    fireEvent.dragStart(row("r5"), { dataTransfer: stubDataTransfer() });
+    dragOver(row("r2"), 110, 160);
+    expect(gesture().overEdge).toBe("before");
   });
 });

@@ -282,7 +282,19 @@ export default function SpaceTabs() {
     (paths: string[]) => void reorderSpaces(paths),
     [reorderSpaces],
   );
-  const drag = useDragReorder({ ids: spacePaths, onReorder: handleReorder });
+  const drag = useDragReorder({
+    ids: spacePaths,
+    onReorder: handleReorder,
+    // THE STRIP IS HORIZONTAL, so the pointer's half is read off X. This one
+    // argument is the whole difference between this call site and the sidebar's:
+    // a tab drag holds `clientY` constant, so with the default `"y"` the landing
+    // side was decided by where in the pill the user grabbed — and a grab at the
+    // pill's vertical centre answered "after" for every target, which turns every
+    // RIGHTWARD tab drag into the order the strip already had and therefore a
+    // SILENT NO-OP (the hook's "nothing moved" guard fires and no write happens).
+    // Leftward drags landed on "after" too, and so looked fine.
+    axis: "x",
+  });
 
   // A tab close, from either gesture: ask when the Space still holds open
   // Sessions, otherwise just do it.
@@ -434,17 +446,20 @@ export default function SpaceTabs() {
               // `preflight`'s `box-sizing: border-box` means the 2px insets the
               // label rather than growing the `h-8` pill.
               //
+              // LEFT AND RIGHT, because this strip is horizontal. The hook's
+              // `DropEdge` means EARLIER/LATER in the array — axis-neutral — and
+              // the CALL SITE chooses the physical border that means "earlier" in
+              // its own layout: here "before" is the pill's LEFT edge and "after"
+              // its RIGHT one. The sidebar, a vertical list, keeps top/bottom.
+              // That choice lives here and not in the hook precisely so the hook
+              // keeps one copy of the ordering arithmetic and zero opinions about
+              // markup.
+              //
               // The target test is `drag.overId === s.path`, NOT `overEdge`
               // alone — the hook keeps the two as separate answers precisely so
-              // a call site cannot paint the current edge on every tab. And the
-              // half is the hook's VERTICAL rule, unchanged for a horizontal
-              // strip: `useDragReorder` compares `clientY` to the rect midpoint
-              // for both lists, so "top half inserts before, bottom half after"
-              // reads the same here as in the sidebar. A strip-specific
-              // left/right rule would be the second implementation of that
-              // arithmetic the hook exists to prevent.
-              drag.overId === s.path && drag.overEdge === "before" && "border-t-2 border-brand",
-              drag.overId === s.path && drag.overEdge === "after" && "border-b-2 border-brand",
+              // a call site cannot paint the current edge on every tab.
+              drag.overId === s.path && drag.overEdge === "before" && "border-l-2 border-brand",
+              drag.overId === s.path && drag.overEdge === "after" && "border-r-2 border-brand",
             )}
             // THE DRAG SURFACE (ADR 0075, spec §Handle: "the whole row / pill is
             // draggable"). The hook's six keys — `draggable: true` plus the five

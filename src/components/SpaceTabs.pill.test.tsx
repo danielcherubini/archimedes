@@ -293,10 +293,15 @@ describe("the space tabs, as rendered (active and inactive are one kind of objec
     // tokens on one element.
     //
     // TWO COMPETING ANSWERS: the target pill's token set gains EXACTLY
-    // `border-t-2` + `border-brand` and the strip's element count is unchanged
+    // `border-l-2` + `border-brand` and the strip's element count is unchanged
     // (correct), vs a call site that smuggles in height/shadow utilities, or a
     // placeholder element inserted beside the pills (the count moves, and every
     // ancestry-resolving query in the repo's tab tests starts lying).
+    // (`border-l-2`, not the sidebar's `border-t-2`: this strip is horizontal, so
+    // the call site paints "earlier" on the pill's LEFT edge. The token pair is
+    // the call site's own choice — see `SpaceTabs.test.tsx`, which asserts the
+    // left/right pair here and the sidebar's top/bottom pair in
+    // `SpacesList.test.tsx`.)
     useSessions.setState({
       spaces: [space(ALPHA), space(BETA)],
       activeSpacePath: ALPHA,
@@ -313,29 +318,41 @@ describe("the space tabs, as rendered (active and inactive are one kind of objec
     const otherWas = tokens(pill("alpha"));
     const countWas = elementCount();
 
-    // A drag in flight: `alpha` held, pointer over the TOP half of `beta`. The
+    // A drag in flight: `alpha` held, pointer over the LEFT half of `beta`. The
     // rect override + hand-built event are the two jsdom idioms the drag tests
     // in `SpaceTabs.test.tsx` document — without them the half is not a fact the
     // test chooses.
+    //
+    // THE GEOMETRY IS HORIZONTAL, and that is the whole point of the override
+    // below: the strip is a row, so the pills share a y range and differ in x,
+    // and the pointer travels in X with `clientY` sitting exactly on their shared
+    // vertical midpoint (116 of 100..132). Under the pre-fix hook — which read
+    // `clientY` for both lists — that pointer answered "after" and this drag was
+    // a NO-OP, so the assertion below would have seen NO new tokens at all.
+    const pillRect = (left: number) => () =>
+      ({ top: 100, bottom: 132, height: 32, width: 120, left, right: left + 120, x: left, y: 100, toJSON: () => ({}) }) as DOMRect;
     const from = pill("alpha");
     const to = pill("beta");
-    from.getBoundingClientRect = () =>
-      ({ top: 0, bottom: 40, height: 40, width: 200, left: 0, right: 200, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
-    to.getBoundingClientRect = () =>
-      ({ top: 100, bottom: 140, height: 40, width: 200, left: 0, right: 200, x: 0, y: 100, toJSON: () => ({}) }) as DOMRect;
-    fireEvent.dragStart(from, { dataTransfer: { setData: () => {} } });
-    const over = new Event("dragover", {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-    });
-    Object.assign(over, { clientY: 110 });
-    fireEvent(to, over);
+    from.getBoundingClientRect = pillRect(0);
+    to.getBoundingClientRect = pillRect(100); // 100..220, midpoint 160
+    const mk = (type: string, x: number, y: number) => {
+      const ev = new Event(type, { bubbles: true, cancelable: true });
+      Object.assign(ev, {
+        clientX: x,
+        clientY: y,
+        dataTransfer: { setData: () => {}, getData: () => "", setDragImage: () => {} },
+      });
+      return ev;
+    };
+    fireEvent(from, mk("dragstart", 60, 116));
+    // The vertical CENTRE (116) and the target's LEFT half (x 110 < 160): a
+    // rightward intent stated entirely in X.
+    fireEvent(to, mk("dragover", 110, 116));
 
     expect(
       tokens(to).filter((t) => !targetWas.includes(t)),
       "the drop indicator is not the two pinned tokens",
-    ).toEqual(["border-brand", "border-t-2"]);
+    ).toEqual(["border-brand", "border-l-2"]);
     // The pill the pointer is NOT over is untouched — no second answer to "which
     // pill is the target".
     expect(tokens(pill("alpha"))).toEqual(otherWas);

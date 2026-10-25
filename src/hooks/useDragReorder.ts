@@ -18,6 +18,12 @@ import type { DragEventHandler } from "react";
  * level (the row components' no-DOM-level rule, and the eight ancestry-resolving
  * test sites that depend on it).
  *
+ * WHICH HALF IS READ OFF THE LIST'S OWN AXIS, and the list's axis is TOLD to the
+ * hook (`axis`, default `"y"`), never inferred from the rect: see `DragAxis`.
+ * Both lists share this one gesture and its arithmetic; they differ in exactly
+ * one input, which axis the pointer travels along, and that is a fact about the
+ * call site's layout rather than about the drag.
+ *
  * It renders nothing, touches no DOM beyond `getBoundingClientRect()`, mutates no
  * class, and does not know what a list of ids MEANS — it takes `ids` and an
  * `onReorder`. That is also why it imports nothing but `react`: a `hooks/` module
@@ -32,8 +38,30 @@ import type { DragEventHandler } from "react";
  * between a stray drop and the webview NAVIGATING to it.
  */
 
-/** Which half of the target row the pointer is in — the answer that decides ABOVE or BELOW. */
+/** Which half of the target row the pointer is in — the answer that decides
+ *  EARLIER or LATER in the list.
+ *
+ *  AXIS-NEUTRAL ON PURPOSE. "before" means EARLIER in the ids array, which in a
+ *  VERTICAL list is ABOVE and in a HORIZONTAL strip is to the LEFT. The hook
+ *  answers the ordering question only; which physical border paints it is the
+ *  CALL SITE's choice, because only the call site knows how its list is laid
+ *  out (the sidebar draws `border-t-2`/`border-b-2`, the tab strip
+ *  `border-l-2`/`border-r-2`). Moving that choice in here would give the hook an
+ *  opinion about markup, which is the same category error as it computing a
+ *  class. */
 export type DropEdge = "before" | "after";
+
+/** The axis the pointer's half is read off. `"y"` for a VERTICAL list (the
+ *  sidebar's rows), `"x"` for a HORIZONTAL one (the tab strip).
+ *
+ *  EXPLICIT, NEVER INFERRED. The tempting implementation — compare the rect's
+ *  `width` to its `height` and guess — is wrong and fails SILENTLY in the
+ *  direction that matters: a sidebar row is wider than it is tall (measured: the
+ *  rows fill a 260px pane at ~40px high), so a proportion heuristic would flip
+ *  the SIDEBAR onto the X axis and break the list that has always worked. Only
+ *  the call site knows how its own list is laid out, so only the call site says
+ *  which axis it is on. */
+export type DragAxis = "x" | "y";
 
 /** THE spread surface. `RowButton` emits `...rest` verbatim and its header pins
  *  attribute order as part of its contract, so this is EXACTLY six keys and no
@@ -82,8 +110,18 @@ export function useDragReorder(args: {
    *  writes the slice index as each row's stored order number, so a partial list is a
    *  half-moved list. */
   onReorder: (ids: string[]) => void;
+  /** The axis the drop edge is read off. DEFAULTS TO `"y"`, so a vertical list
+   *  passes nothing and keeps the exact behaviour it had before this option
+   *  existed; the horizontal tab strip passes `axis: "x"`.
+   *
+   *  AN ARGUMENT, NEVER A SPREAD KEY. `dragProps` returns exactly six keys
+   *  (`draggable` + five handlers) and its consumer spreads them VERBATIM onto a
+   *  byte-compared row, so an axis key in there would be an unknown DOM
+   *  attribute and would break `RowButton`'s attribute-order contract. Pinned by
+   *  the first test in `useDragReorder.test.tsx`. */
+  axis?: DragAxis;
 }): UseDragReorder {
-  const { ids, onReorder } = args;
+  const { ids, onReorder, axis = "y" } = args;
   // `useState`, not refs: the call site RENDERS the drop indicator from
   // `overId`/`overEdge`, so a ref would be invisible exactly where it is needed.
   // Handlers are rebuilt per render and close over THAT render's `ids` /
@@ -131,8 +169,24 @@ export function useDragReorder(args: {
         // release. With no drag on, the same reasoning applies.
         if (draggingId === null || draggingId === id) return;
         const rect = e.currentTarget.getBoundingClientRect();
+        // THE AXIS, and the whole reason this option exists. A horizontal strip
+        // holds `clientY` essentially constant across a drag, so reading the Y
+        // midpoint there answers the side from WHERE IN THE PILL THE USER GRABBED
+        // rather than from their left/right intent: a grab at the pill's vertical
+        // centre answers "after" for every target, and a rightward drag onto its
+        // left neighbour then produces the order the list already had — the
+        // hook's "nothing moved" guard fires and the drag is a SILENT NO-OP.
+        // (Leftward drags worked, by accident, which is how this survived review.)
+        //
+        // The `"y"` expression below is UNTOUCHED — same operands, same order,
+        // same comparison — because the sidebar's rows must behave byte-forably
+        // as they did before the option existed.
         const edge: DropEdge =
-          e.clientY < (rect.top + rect.bottom) / 2 ? "before" : "after";
+          (axis === "x"
+            ? e.clientX < (rect.left + rect.right) / 2
+            : e.clientY < (rect.top + rect.bottom) / 2)
+            ? "before"
+            : "after";
         // The line that makes this row a drop target at all.
         e.preventDefault();
         if (overId !== id) setOverId(id);
@@ -161,7 +215,7 @@ export function useDragReorder(args: {
         if (next.join("\u0000") !== ids.join("\u0000")) onReorder(next);
       },
     }),
-    [draggingId, overId, overEdge, ids, onReorder],
+    [draggingId, overId, overEdge, ids, onReorder, axis],
   );
 
   return { dragProps, draggingId, overId, overEdge };
