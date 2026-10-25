@@ -89,7 +89,10 @@ function seedPendingPrompt(): void {
 beforeEach(() => {
   // Every store back to its own initial state — the hand-written version named
   // `useSessions.{sessions,activeSessionId}` + `usePermissions.prompts` and
-  // left the store's other fourteen data fields to leak between cases.
+  // left every other data field the store carries to leak between cases. No
+  // comment here quotes HOW MANY fields that is — the next field added to a
+  // store would stale every copy of the number, and a stale count in a
+  // comment reads as evidence.
   resetStores();
   // The two pane flags are module-scope (and persist to localStorage), so they
   // are `resetModuleFlags`' job, not the store's.
