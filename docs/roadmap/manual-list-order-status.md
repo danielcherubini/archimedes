@@ -368,6 +368,39 @@ deliberately left undone.
   store's `reorderChain.sessions.then(...)` throws on `undefined` and every drag
   test reddens with an unrelated-looking cause.
 
+- 2026-10-25 — **T07 DONE** (`86c7378`). Gates measured by the orchestrator:
+  `pnpm test` **3137 / 151** (+12) · `pnpm build` green · `cargo test` 1468/0 ·
+  clippy 0 · fmt clean. Seam = exactly 3 `SpaceTabs` files; 0 Rust, 0 sidebar.
+  **ORCHESTRATOR MUTATION-KILLED INDEPENDENTLY:** weakening the middle-click
+  guard (`e.button !== 1` → `e.button === 2`) reddens
+  `a LEFT-drag started on the tab pill does not close the tab`.
+- 2026-10-25 — **HAZARD 1'S MECHANISM READ FROM SOURCE, not assumed:** T07 read
+  the actual injected Tauri script (`tauri-2.12.2/src/window/scripts/drag.js`,
+  matching `Cargo.lock`): `isDragRegion()` walks the composed path, returns
+  `false` on `attr === 'false'`, and the `mousedown` listener fires only for
+  `e.button === 0` then calls `stopImmediatePropagation()` + `start_dragging`.
+  So the pill's `data-tauri-drag-region="false"` is load-bearing for dragging
+  AND the walk stops at the pill before reaching the chrome bar's `"deep"` —
+  which is why no ancestor can re-claim the mousedown.
+- 2026-10-25 — **A MUTATION FOUND A WEAK TEST AND THE CHILD FIXED IT (the
+  pattern this loop wants):** the left-drag pin initially died four assertions
+  late, because `closeSpace → removeSpace → deleteSpace` resolves through a
+  promise chain, so a synchronous `not.toHaveBeenCalled()` is green UNDER THE
+  BUG. A macrotask flush before the assertion moved the failure onto the line
+  that names the hazard. Same class as T05's finding: an assertion about an
+  ASYNC effect needs a flush first or it certifies nothing.
+- 2026-10-25 — **PRE-EXISTING FLAKE REPORTED, ADJUDICATED, NOT FIXED HERE:**
+  `MessageBubble.codeblock.test.tsx > renders a JSON fence genuinely
+  highlighted` failed once during T07's run. This branch touches 0
+  MessageBubble/shiki/markdown files (proven by diff), the test passes 25/25 in
+  isolation, and two subsequent full runs were 3137/151 exit 0. Pre-existing
+  async/shiki flake, outside every seam in this feature → goes to T08's
+  follow-ups list, not to a drive-by fix.
+- 2026-10-25 — **`pnpm test`'s summary line is hard to grep:** it carries ANSI
+  codes and the file emits heavy `act()` stderr, so `grep -E "Tests |FAIL"`
+  matches stderr before the summary and can look like silence. Redirect to a
+  file and `grep -a` for a reliable count.
+
 ## Changelog
 
 One line per task: hash, what shipped, gate numbers at that moment.
