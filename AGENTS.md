@@ -327,6 +327,13 @@ These are properties of the repo, not of any branch:
   — it intermittently renders the unhighlighted fallback through shiki's async
   path. Pre-existing, unrelated to whatever you just changed: if it fails once,
   re-run before investigating. It needs an owner, not a drive-by fix.
+- **`Reasoning.test.tsx`'s `is O(last line), not O(whole text)` is a wall-clock
+  assertion and flakes under full-suite load.** It measures
+  `performance.now()` for a big input vs a small one and requires the ratio to be
+  under 50, so a loaded machine or a GC pause can tip it — it passes in isolation
+  and failed once on `main` right after an unrelated merge. Same advice: re-run
+  before investigating, and do not "fix" it by tightening or loosening the
+  threshold, which only moves the flake.
 - **Plans carry stale baselines within hours** on a busy branch: re-measure test
   counts at your own HEAD rather than trusting the plan's.
 
