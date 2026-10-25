@@ -131,6 +131,11 @@ pub fn is_app_url(url: &Url, dev_host: Option<&str>) -> bool {
     }
 }
 
+/// The label prefix that marks a webview as a designated render webview.
+/// This prefix carries two guarantees, not one: it is what exempts a webview
+/// from the app's own navigation rules (ADR 0058) AND what
+/// [`should_track_label`] keys the window-state exclusion on. Changing it
+/// silently changes the scope of both.
 pub const RENDER_WEBVIEW_PREFIX: &str = "web-fetch-";
 
 /// Is this webview one of ours — a designated render webview, which may
@@ -140,6 +145,25 @@ pub const RENDER_WEBVIEW_PREFIX: &str = "web-fetch-";
 /// structurally impossible (ADR 0051).
 pub fn is_render_webview(label: &str) -> bool {
     label.starts_with(RENDER_WEBVIEW_PREFIX)
+}
+
+/// Does `tauri-plugin-window-state` get to remember this window? Note the
+/// polarity is the inverse of [`is_render_webview`]'s: `true` here means "the
+/// plugin MAY track it". `false` for the designated render webviews — the
+/// plugin's default flags include `StateFlags::VISIBLE`, and its
+/// `on_window_ready` restore calls `show()` + `set_focus()` for any label with
+/// no saved state, which is EVERY render webview because its label carries a
+/// fresh uuid (`web-fetch-render-<uuid>`, `agent/worker/core.rs`). A hidden
+/// window that the plugin reveals is issue #91.
+///
+/// The same filter keeps `web-fetch-*` out of `.window-state.json` — in
+/// `2.4.0`, the version `Cargo.lock` resolves, the filter check returns before
+/// the plugin inserts the label into its state cache, and the save writes that
+/// whole cache without consulting the filter, so an unfiltered per-fetch label
+/// accumulates forever. **A plugin bump must re-check that ordering**; the
+/// accumulation argument dies with it, the reveal argument does not.
+pub fn should_track_label(label: &str) -> bool {
+    !is_render_webview(label)
 }
 
 #[cfg(test)]
@@ -314,5 +338,17 @@ mod tests {
         assert!(!is_render_webview("main"));
         assert!(!is_render_webview("webfetch-1"));
         assert!(!is_render_webview(""));
+    }
+
+    #[test]
+    fn window_state_never_tracks_a_render_webview() {
+        // issue #91: the plugin's default StateFlags include VISIBLE, and it
+        // show()s + set_focus()es any label with no saved state.
+        assert!(!should_track_label("web-fetch-render-0f2a"));
+        assert!(!should_track_label(RENDER_WEBVIEW_PREFIX));
+        // The app's own window MUST stay tracked — ADR 0021 reveals the
+        // `visible: false` main window through this very plugin.
+        assert!(should_track_label("main"));
+        assert!(should_track_label("anything-else"));
     }
 }

@@ -373,7 +373,23 @@ pub fn run() {
         .plugin(navigation_guard)
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            // issue #91: the render webview for a `fetch_content` escalation
+            // is built `visible(false)`, but this plugin's default flags are
+            // `StateFlags::all()` — including `VISIBLE` — and its
+            // `on_window_ready` restore `show()`s + `set_focus()`es any label
+            // with NO saved state. Every render label embeds a fresh uuid, so
+            // it never has one: the plugin was revealing a window the app
+            // deliberately hid, and stealing focus. The filter (a prefix test,
+            // not `with_denylist`'s exact labels — the render label set is not
+            // enumerable in advance) also keeps those labels from permanently
+            // growing `.window-state.json`. `main` stays tracked: `tauri.conf.json`
+            // ships `"visible": false` and ADR 0021 relies on this plugin to
+            // reveal it, so no `with_state_flags` change here.
+            tauri_plugin_window_state::Builder::default()
+                .with_filter(crate::navigation_guard::should_track_label)
+                .build(),
+        )
         // The OS notification for an attention alert (ADR 0038) — called from
         // Rust only, so no capability entry and no npm package (the plugin's
         // `request_permission` is a documented no-op on desktop).
@@ -740,5 +756,76 @@ mod tests {
             .expect("a successful grab is narrated too — that line is the measurement's evidence");
         assert!(line.starts_with("focus:"), "the greppable prefix: {line}");
         assert!(line.contains("grabbed"), "and says the lever fired: {line}");
+    }
+
+    // ── The window-state registration (`tauri_plugin_window_state`) ─────────
+    //
+    // issue #91: the `fetch_content` render webview is built `visible(false)`,
+    // but this plugin's DEFAULT flags are `StateFlags::all()` — `VISIBLE`
+    // included — and its `on_window_ready` restore answers a label with no
+    // saved state by calling `show()` + `set_focus()`. Every render label
+    // carries a fresh uuid, so it NEVER has saved state: the plugin revealed a
+    // window the app deliberately hid, and stole focus to do it.
+    // `navigation_guard::should_track_label` is the predicate that excludes it,
+    // and its own unit test proves the predicate answers correctly — but nothing
+    // about whether this registration CONSULTS it. Deleting the `.with_filter`
+    // line below leaves every other test in this binary green and reintroduces
+    // the bug whole, so the configuration itself has to be pinned at its site of
+    // use.
+    //
+    // The assertion is TEXTUAL because no headless form of it exists: the mock
+    // runtime has no widget (see the note above), and a real `App` cannot be
+    // built in this binary at all — a second `generate_context!()` duplicates
+    // `embed_plist`'s `_EMBED_INFO_PLIST`, a link error on macOS. Reading our
+    // own source is the same trade the frontend already makes with `readFileSync`
+    // in `src/components/chromeButton.test.ts` and
+    // `src/components/settings/primitives.test.tsx`: pin the convention a
+    // behavioural test cannot reach.
+
+    /// The window-state plugin must be registered WITH the render-webview
+    /// filter. Two conditions, both on the same statement: the qualified
+    /// `Builder` token exists, and `with_filter(should_track_label)` follows it
+    /// closely.
+    #[test]
+    fn window_state_plugin_is_registered_with_the_render_webview_filter() {
+        // Cargo runs the test binary with cwd at the crate root (`src-tauri/`),
+        // so a repo-relative path would miss; anchor on the manifest dir.
+        let src = std::fs::read_to_string(format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR")))
+            .expect("lib.rs readable");
+
+        // Anchor on the FULLY QUALIFIED token. A bare `Builder` is ambiguous
+        // here — this file also holds `tauri::plugin::Builder::<Wry>` (the
+        // navigation guard), `tauri::Builder` (the app) and
+        // `tokio::runtime::Builder` — and matching the wrong one reddens this
+        // test while the registration is perfectly fine.
+        //
+        // `find` takes the FIRST occurrence, which is the registration itself.
+        // If someone deletes that registration, the next occurrence is this
+        // test's own prose, ~600 bytes before the `assert!` below — outside any
+        // sane window — so the test goes RED rather than finding the filter
+        // string a few lines away and passing on the strength of its own text.
+        let anchor = "tauri_plugin_window_state::Builder";
+        let idx = src
+            .find(anchor)
+            .expect("the window-state plugin is registered by its qualified Builder");
+
+        // A BOUNDED window after the anchor, so the check cannot drift onto an
+        // unrelated later `.plugin(...)` call. It is whitespace-blind — the
+        // registration is spread over several lines by `rustfmt` and
+        // reformatting must not redden this test — but NOT length-blind: adding
+        // another method or a comment line inside the registration can push the
+        // filter past this window, and that reddens the test BY DESIGN, as a
+        // prompt to re-read what this registration now does. Widening `WINDOW`
+        // is the correct response to that red, not deleting the assertion.
+        const WINDOW: usize = 200;
+        let statement = &src[idx..idx + WINDOW.min(src.len() - idx)];
+        assert!(
+            statement.contains("with_filter(crate::navigation_guard::should_track_label)"),
+            "the window-state registration must carry the filter that keeps the \
+             `fetch_content` render webview hidden and out of `.window-state.json` \
+             (issue #91) — `with_filter(crate::navigation_guard::should_track_label)` \
+             is missing from the {} bytes after `{anchor}`",
+            statement.len(),
+        );
     }
 }
