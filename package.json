@@ -2,7 +2,7 @@
   "name": "archimedes",
   "packageManager": "pnpm@11.7.0",
   "private": true,
-  "version": "0.7.0",
+  "version": "0.7.1",
   "type": "module",
   "//three": "three + @types/three are pinned EXACT and must move together. three ships no .d.ts, so a floated @types/three can describe an API the bundled runtime does not have — same reasoning AGENTS.md applies to @tauri-apps/cli: a floated pin changes shipped output that no local build reproduces. The pair is SKewed by one patch line on purpose: DefinitelyTyped publishes one types bump per three MINOR, so 0.186.0 is the only 0.186.x of @types/three that exists and three@0.186.1's patch changes ride along. ADOPTING A NEW three MINOR MEANS BUMPING BOTH LINES.",
   "scripts": {
