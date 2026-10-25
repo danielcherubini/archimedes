@@ -468,6 +468,46 @@ its content is already in `docs/features/manual-list-order.md` and `AGENTS.md`.
   Both halves re-measured first: 2 `assert_readdir_disagrees_with_sorted_order`
   call sites, 2 `TMPDIR=/tmp mktemp` sites.
 
+- 2026-10-25 — **FULL-BRANCH REVIEW (the `reviewer` agent returned empty for the
+  6th time on this branch, so the orchestrator reviewed it directly).** Five
+  questions. Migration safety VERIFIED: the `ALTER` and the seed share ONE
+  transaction (a crash rolls both back and retries), the two tables have
+  INDEPENDENT `pragma_table_info` gates so a mixed state self-heals, and the seed
+  order is byte-identical to the query it replaces — `main`'s `RECENT_FIRST` for
+  sessions, `last_opened_at DESC, path ASC` for spaces — so nobody's list
+  shuffles on upgrade. All THREE production `INSERT`s set `MAX + 1`; the column is
+  `NOT NULL DEFAULT 0`, so no path can land a new row at the top. Wire contract:
+  pinned keys match the TS mirror and `sortOrder` has **0** reads under
+  `src/components/**`. One-sequence: no live-then-stored concatenation survives,
+  and the only `[0]` on an id list is `liveSessionsInSpace`'s documented
+  live-start order, which the spec sanctions.
+- 2026-10-25 — **REVIEW FOUND A REAL DEFECT THE 3144 TESTS COULD NOT SEE, and
+  it is the same symptom class as the feature itself.** `reorderSessions` /
+  `reorderSpaces` captured their rollback snapshot from `get()` — the CURRENT
+  state — which may already hold an earlier drag's optimistic, never-committed
+  write. The publish-epoch guard then correctly discards the older drag's
+  rollback, so when BOTH commands reject the store restores the FIRST drag's
+  uncommitted order: reproduced as DB `{a:0,b:1,c:2}` vs store `{b:0,a:1,c:2}`,
+  self-healing only at restart. Fixed in `e9ccc64` with a module-scope
+  `committedReorder` baseline updated only by DB-backed writes and command
+  SUCCESSES, so an optimistic publish can never launder itself into the rollback
+  target. Orchestrator re-verified both branches independently: both-fail →
+  committed order; older-fails-newer-lands → newer survives.
+- 2026-10-25 — **TWO DISPATCHES RETURNED EMPTY AND WERE REDONE** (the review,
+  and the first attempt at the rollback fix). The retry that worked was the
+  SHORTER prompt — the failed ones were the two longest prompts of the run. The
+  empty review left NO trace in the tree, which is why it was detectable; the
+  empty fix-dispatch was verified the same way (`git status` clean, HEAD
+  unmoved) before re-dispatching. RULE: an empty child reply is a dispatch
+  failure, not a clean result — check the tree before assuming either.
+- 2026-10-25 — **A LATENT ORDER-DEPENDENCE FOUND BY RUNNING THE SUITE
+  SHUFFLED, proven pre-existing on `origin/main`** (identical `describe`, same
+  missing reset). Nothing runs shuffled, so `pnpm test` is green and has always
+  been; 27 of `sessions.test.ts`'s 37 `describe` blocks skip `resetStores()`, so
+  the suite's green depends on file order. Recorded as follow-up #7 with the
+  verification command, NOT fixed here — a 27-block refactor is unapproved scope,
+  and some blocks may be passing only because a neighbour dirtied the store.
+
 ## Changelog
 
 One line per task: hash, what shipped, gate numbers at that moment.

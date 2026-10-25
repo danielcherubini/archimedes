@@ -222,3 +222,35 @@ around is a refresh landing **between a drag's optimistic write and its command
 resolving**: it would replace a map the drag had just written and undo the user's
 drag on screen, so it needs to respect the same publish epoch the rollback already
 compares. That is the reason this is a follow-up and not a line.
+
+## 7. Three `describe` blocks assert store state without resetting it first
+
+Found in the full-branch review, by running the suite under
+`vitest --sequence.shuffle`. `src/store/sessions.test.ts`'s
+`it("(a) stores a user message with image attachments")` fails under any order
+that puts it after a test that wrote `messages.s1` — it asserts
+`toHaveLength(1)` on a map it never clears. Its `describe` has no `beforeEach`
+reset, and neither do two neighbours.
+
+**This is not this feature's.** `origin/main` has the identical structure,
+byte-identical in the same three blocks — verified by extracting the file at
+`origin/main` and reading the same `describe`. It is recorded here only because
+this loop's review is what found it, and the roadmap family dies on ship.
+
+**Latent, not live.** Nothing runs the suite shuffled — no `shuffle` in
+`vitest.config.*`, `package.json`, or `.github/workflows/` — so `pnpm test` is
+green and has been. The cost is real but unpaid: 27 of that file's 37 `describe`
+blocks do not call `resetStores()`, so today's green depends on file order, and
+the next test added to the wrong block inherits state and passes for a reason
+nobody intends. That is the exact failure class `src/test/resetStores.ts` exists
+to close, and its own header says a caller adding a partial reset re-introduces
+the hazard.
+
+**What it would cost.** Per-`describe` `resetStores()` in the ~27 blocks, then
+re-run green — mechanical, but it touches a large file at once and each block
+needs a look to confirm it was not *relying* on inherited state (the interesting
+case: if a block passes only because a neighbour dirtied the store, that block
+was never testing what it says). Worth doing as its own change, with the shuffle
+flag left OFF, so any ordering dependence it exposes is triaged rather than
+blindly reset. Verify with `npx vitest run src/store/sessions.test.ts
+--sequence.shuffle` at several `--seed` values, not one.
