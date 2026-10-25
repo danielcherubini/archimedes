@@ -73,15 +73,18 @@ never share a wave. Wave 6 is the only parallel wave.
 | T02 | IPC surface: `last_active_at` SELECTed from the existing `COALESCE` expression (characterisation test first), the two reorder commands exposed + registered, TS mirrors in `lib/tauri/` | `docs/roadmap/manual-list-order-task02-ipc-last-active-at.md` | 2 | `src-tauri/src/storage/db.rs` (SessionRecency + Db::session_recency — DEVIATION: not types.rs, see Decisions), `src-tauri/src/commands/{history,spaces}.rs`, `src-tauri/src/lib.rs`, `src/lib/tauri/types.ts`, `src/lib/tauri/commands/*`, `src-tauri/tests/ipc.rs` | `done` `3386975` |
 | T03 | Store derivation: `recencyOf` (new module beside `sessionTitle.ts`), `SpaceView.sessionIds` replaces the live/stored pair, the four position-reading landing rules switch to recency, Archived sorts explicitly | `docs/roadmap/manual-list-order-task03-store-derivation.md` | 3 | `src/store/sessions.ts`, `src/lib/sessionRecency.ts` (new), `src/store/sessions.test.ts` + GRANTED: `src/components/SpacesList.tsx` (call-sites only), `src/App.tsx` + `src/App.test.tsx` (boot wiring), `src-tauri/src/storage/db.rs`, `src/lib/tauri/types.ts`, `commands/history.rs` (wire-key literal test) | `done` `cc6ecd2` |
 | T04 | Sidebar renders one list: delete `sortByActivity` memos + the activity subscription, `railIds = sessionIds`, DELETE `src/lib/sessionActivity.ts` and its test, delete the 3 ordering tests, reword the rail pin | `docs/roadmap/manual-list-order-task04-sidebar-one-list.md` | 4 | `src/components/SpacesList.tsx`, delete `src/lib/sessionActivity.ts` + `.test.ts` | `done` `df73fc7` |
-| T05 | The drag gesture: `useDragReorder` hook (dragProps, before/after by pointer half, indicator state) + the store's optimistic reorder actions over one IPC call | `docs/roadmap/manual-list-order-task05-drag-reorder-hook.md` | 5 | `src/hooks/useDragReorder.ts` (new) + test; `src/store/sessions.ts` (reorder actions only) | `todo` |
-| T06 | Wire the sidebar rows: `draggable` on `SessionListRow`, a drop-edge indicator prop, hover actions `draggable={false}` | `docs/roadmap/manual-list-order-task06-wire-sidebar-rows.md` | 6 | `src/components/SpacesList.tsx`, `src/components/SessionListRow.tsx` + `SessionListRow.test.tsx` | `todo` |
-| T07 | Wire the tabs: `draggable` on the pill, indicator class, ✕ `draggable={false}`, pin `data-tauri-drag-region="false"` and the middle-click/drag non-interference | `docs/roadmap/manual-list-order-task07-wire-tabs.md` | 6 | `src/components/SpaceTabs.tsx` + `SpaceTabs*.test.tsx` — disjoint from T06 | `todo` |
-| T08 | `docs/features/manual-list-order.md`: the shipped behaviour + the two accepted gaps (keyboard reordering; new rows join at the bottom) | `docs/roadmap/manual-list-order-task08-feature-doc.md` | 7 | `docs/features/` (owned outright) | `todo` |
+| T05 | The drag gesture: `useDragReorder` hook (dragProps, before/after by pointer half, indicator state) + the store's optimistic reorder actions over one IPC call | `docs/roadmap/manual-list-order-task05-drag-reorder-hook.md` | 5 | `src/hooks/useDragReorder.ts` (new) + test; `src/store/sessions.ts` (reorder actions only) | `done` `5665c22` `67fba8e` (+ `6ba7b6e` the deprecated pair, `39d229d` the hook) |
+| T06 | Wire the sidebar rows: `draggable` on `SessionListRow`, a drop-edge indicator prop, hover actions `draggable={false}` | `docs/roadmap/manual-list-order-task06-wire-sidebar-rows.md` | 6 | `src/components/SpacesList.tsx`, `src/components/SessionListRow.tsx` + `SessionListRow.test.tsx` + `SpacesList.test.tsx` | `done` `87eca16` |
+| T07 | Wire the tabs: `draggable` on the pill, indicator class, ✕ `draggable={false}`, pin `data-tauri-drag-region="false"` and the middle-click/drag non-interference | `docs/roadmap/manual-list-order-task07-wire-tabs.md` | 6 | `src/components/SpaceTabs.tsx` + `SpaceTabs*.test.tsx` — disjoint from T06 | `done` `86c7378` (+ `4afff6b` the axis fix) |
+| T08 | `docs/features/manual-list-order.md`: the shipped behaviour + the two accepted gaps (keyboard reordering; new rows join at the bottom) | — (spec §6 was test-level; no separate plan written) | 7 | `docs/features/` (owned outright) + comment-only: `src/test/resetStores.ts`, `ChromeControls/ChatStream/SpacesList/SpaceTabs(.pill)` tests, `AGENTS.md` | `done` `6eb2d99` `b24a242` `ef7bd5c` `5b18d1e` |
 
 ## Blockers / open questions
 
-Empty. See `docs/roadmap/manual-list-order-follow-ups.md` (written before the last task) for anything
-deliberately left undone.
+Empty at ship. `docs/roadmap/manual-list-order-follow-ups.md` holds everything
+deliberately left undone (keyboard reordering, the boot-snapshot staleness, the
+`App.test.tsx` mock trap and its hand-written resets, and the shiki flake that
+needs an owner). `finish` deletes it after this family ships; the durable half of
+its content is already in `docs/features/manual-list-order.md` and `AGENTS.md`.
 
 ## Decisions log
 
@@ -434,6 +437,36 @@ deliberately left undone.
   `border-r-2` CONFIRMED emitted in `dist/assets/*.css` (non-vacuity proven: HEAD's
   build lacks `.border-r-2`) · `cargo test` 1468/0 · clippy 0 · fmt clean. Seam
   = 6 files, no store/lib/Rust.
+
+- 2026-10-25 — **T08 DONE** (`6eb2d99` the two docs pages · `b24a242` five
+  count-free comments · `ef7bd5c` the sixth · `5b18d1e` the TMPDIR fact into
+  AGENTS.md). Gates: `pnpm test` 3144/151 · `cargo test` 1468/0 · clippy 0 ·
+  fmt clean · build green.
+- 2026-10-25 — **A SCOPING ERROR OF MINE, caught by the child and fixed by me.**
+  I authorised a sweep of the five comments claiming the store has "sixteen data
+  fields" — the count this feature made false by adding `sessionRecency` +
+  `sessionOrder` (16 → 18, independently re-counted from the `SessionsState`
+  interface on both this branch and `main`). A SIXTH file,
+  `ChromeControls.test.tsx`, carried the same defect with the number spelled
+  "fourteen"; it was outside the five I named, so it was MY list that was
+  incomplete, not the child's execution. The child found it, reported it, and
+  correctly did not fix outside its seam. Fixed in `ef7bd5c`. RULE: when
+  authorising a "find every X" sweep, authorise the SEARCH, not a list of files.
+- 2026-10-25 — **THE CHILD CORRECTED FOUR OF MY NUMBERS** (tree beat the status
+  file, as it must): the shiki test is an `it.each` case of
+  `renders a \`%s\` fence genuinely highlighted`, not a standalone `it(...)`;
+  `App.test.tsx` has 41 tests, not "~40"; its hand-written resets are ten
+  helpers, not nine; and the proportion-heuristic mutation reddens 11 tests
+  (4 hook + 7 sidebar), not "11 including 5". All four were claims I had written
+  into the status file from child reports without re-measuring.
+- 2026-10-25 — **`docs/features/manual-list-order.md` is durable and cites
+  nothing under `docs/roadmap/`**, so `finish` deleting the roadmap family cannot
+  strand it. The TMPDIR/readdir fact the loop had queued "to fold into
+  docs/features/" went to AGENTS.md instead — it is a property of the Rust
+  suite's temp-dir assumptions, not of this feature, and AGENTS.md's
+  "Working in this repo" section is where a future agent will actually hit it.
+  Both halves re-measured first: 2 `assert_readdir_disagrees_with_sorted_order`
+  call sites, 2 `TMPDIR=/tmp mktemp` sites.
 
 ## Changelog
 
