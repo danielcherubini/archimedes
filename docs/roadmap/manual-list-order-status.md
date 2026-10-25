@@ -301,6 +301,46 @@ deliberately left undone.
   captured slice. Accepted; the spec text is amended to match rather than left
   contradicting the code.
 
+- 2026-10-25 — **MERGED `origin/main` (#88 model-metadata refresh) before
+  T06/T07, and it was NOT a no-op.** main advanced by one commit while T01–T05
+  ran, touching 6 files this branch also touches. Resolved conflicts:
+  `src/store/sessions.ts` (main's `mergeRefreshedSessionRows` vs this branch's
+  `reorderSessions`/`reorderSpaces` — both added store actions at the same site,
+  keep-both) and `src-tauri/tests/ipc.rs` (both appended to
+  `generate_handler!` and both appended whole tests; the seam needed a closing
+  brace). Post-merge gates measured: `pnpm test` **3105 / 151 files** (3095 +
+  main's 10), `cargo test` **1468 / 0**, clippy 0, fmt clean, build green. Both
+  sides' conflict-adjacent tests were then run INDIVIDUALLY to prove the merge
+  did not silently drop one. LESSON: on a shared trunk, re-fetch before each
+  task boundary — the longer a feature branch lives, the more its store file
+  accrues other people's additions at the same line.
+- 2026-10-25 — **T05 INCIDENT, recorded because it nearly destroyed foreign
+  work:** the T05 child ran `git stash push <path>` on an already-clean path —
+  which SILENTLY CREATES NO STASH — then `git stash pop`, which consumed a
+  PRE-EXISTING stash entry belonging to a different branch
+  (`feature/75-ascii-film-empty-state`). It dropped 7 untracked files and
+  3-way-merged 5 tracked ones into the tree. The child recovered correctly:
+  backed everything to `/tmp`, re-registered with `git stash store` (restoring
+  the SAME commit hash `42d24c6`), byte-compared all 12 files, and restored the
+  tracked paths from HEAD. The orchestrator verified independently afterwards:
+  the stash entry is intact at its original hash, the tree is clean, and all
+  four T05 commits touch ONLY the four seam files. RULE for this repo: **never
+  `git stash` to inspect state — use `git show <ref>:<path>`**; a
+  `stash push <pathspec>` on a clean path is a no-op that leaves a later `pop`
+  free to consume someone else's entry.
+- 2026-10-25 — **T06/T07 INDEPENDENCE RE-CHECKED, not assumed.** The spec's §
+  "Tab strip" reads like it edits the sidebar, which would collide with T06. It
+  does not: `<SpaceTabs />` is rendered from `src/App.tsx`, NOT from
+  `SpacesList.tsx`, and `SpaceTabs` reads `spaces`/`selectSpace`/`closeSpace`
+  from the store directly. So T06 owns `SessionListRow.tsx` (+ the sidebar call
+  site) and T07 owns `SpaceTabs.tsx` — disjoint, safe to run concurrently.
+- 2026-10-25 — **T05 SHIPPED 3 TESTS BEYOND ITS PLAN, each because a plan-named
+  MUTATION SURVIVED the plan's own suite**: the "no chain" mutation passed
+  entirely, so drag-order serialization had no owner → `it("two drags in one
+  list reach the database in DRAG ORDER …")`, plus the same two gaps for spaces.
+  This is the right instinct — the plan's mutation table was not sufficient on
+  its own.
+
 ## Changelog
 
 One line per task: hash, what shipped, gate numbers at that moment.
