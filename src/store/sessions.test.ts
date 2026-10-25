@@ -5008,6 +5008,54 @@ describe("reorderSessions (the sidebar drag write path, ADR 0075)", () => {
     errSpy.mockRestore();
   });
 
+  it("two drags whose commands BOTH fail return the order the DATABASE holds, not the first drag's optimistic one", async () => {
+    // The sibling of the epoch test above, and the case the epoch guard does NOT
+    // solve on its own. TWO COMPETING ANSWERS:
+    //  - the bug answers `{b:0, a:1, c:2}`: the SECOND drag captures its rollback
+    //    snapshot from the store, which at that instant IS the first drag's
+    //    optimistic, never-committed map, and the guard correctly discards the
+    //    FIRST drag's own rollback — so the only write left restores a number the
+    //    database never held, and the rows re-arrange themselves at the next boot
+    //    into an order the user never asked for and was never told had failed;
+    //  - the committed baseline answers `{a:0, b:1, c:2}`, which is what
+    //    `list_sessions` still returns because BOTH commands failed.
+    // The baseline is seeded through `setSessionRecency` — the boot path that
+    // fills `sessionOrder` from the row's own `sortOrder`, i.e. from the database.
+    useSessions.getState().setSessionRecency([
+      { sessionId: "a", lastActiveAt: 1_000, sortOrder: 0 },
+      { sessionId: "b", lastActiveAt: 2_000, sortOrder: 1 },
+      { sessionId: "c", lastActiveAt: 3_000, sortOrder: 2 },
+    ]);
+    useSessions.setState({
+      spaces: [row("/w/a", 1000)],
+      sessions: [],
+      historySessions: [
+        info("a", "/w/a"),
+        info("b", "/w/a"),
+        info("c", "/w/a"),
+      ],
+      archivedSessions: [],
+      activeSpacePath: "/w/a",
+      closeReasons: {},
+      messages: {},
+    });
+    const errSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    // BOTH commands reject (every call, not just the first).
+    vi.mocked(reorderSessionsCommand).mockRejectedValue(new Error("boom"));
+    const first = useSessions.getState().reorderSessions(["b", "a"]);
+    const second = useSessions.getState().reorderSessions(["c", "b", "a"]);
+    await Promise.all([first, second]);
+    expect(useSessions.getState().sessionOrder).toEqual({ a: 0, b: 1, c: 2 });
+    // And the PAINT agrees with the database, which is the only thing the user can
+    // check: the rows sit exactly where they were before either drag.
+    expect(viewFor("/w/a").sessionIds).toEqual(["a", "b", "c"]);
+    // Both writes really were attempted, in drag order (the chain is intact).
+    expect(reorderSessionsCommand).toHaveBeenCalledTimes(2);
+    errSpy.mockRestore();
+  });
+
   it("reordering one Space leaves another Space's rows exactly where they were", async () => {
     // Space B's rows sit in the ARRAY in the OPPOSITE order to their numbers, on
     // purpose. TWO COMPETING ANSWERS: an implementation that rebuilds the map
@@ -5239,6 +5287,42 @@ describe("reorderSpaces (the tab-strip drag write path, ADR 0075)", () => {
     const second = useSessions.getState().reorderSpaces(["/c", "/b", "/a"]);
     await Promise.all([first, second]);
     expect(stripPaths()).toEqual(["/c", "/b", "/a"]);
+    errSpy.mockRestore();
+  });
+
+  it("two tab drags whose commands BOTH fail restore the strip the DATABASE holds, not the first drag's", async () => {
+    // The spaces half of the same defect, on the list whose rows carry their
+    // position IN THE ARRAY. TWO COMPETING ANSWERS:
+    //  - the bug answers ["/b","/a","/c"]: the SECOND drag snapshots the strip for
+    //    its rollback from the store, which then already holds the FIRST drag's
+    //    optimistic, never-committed order, and the epoch guard correctly discards
+    //    the first drag's own rollback — so the tab strip ends on an arrangement
+    //    `reorder_spaces` never wrote, and `removeSpace`'s leftmost-tab fallback
+    //    then lands on a tab the DB does not think is leftmost;
+    //  - the committed baseline answers ["/a","/b","/c"], what `list_spaces` still
+    //    returns, because BOTH commands failed.
+    // Seeded through `setSpaces` — the boot path that installs the DB's rows, i.e.
+    // the last thing the store knows the database said.
+    useSessions.getState().setSpaces([
+      row("/a", 3000),
+      row("/b", 2000),
+      row("/c", 1000),
+    ]);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // BOTH commands reject (every call, not just the first).
+    vi.mocked(reorderSpacesCommand).mockRejectedValue(new Error("boom"));
+    const first = useSessions.getState().reorderSpaces(["/b", "/a", "/c"]);
+    const second = useSessions.getState().reorderSpaces(["/c", "/b", "/a"]);
+    await Promise.all([first, second]);
+    expect(stripPaths()).toEqual(["/a", "/b", "/c"]);
+    // The rows themselves survived — the rollback restores the committed ARRAY, it
+    // does not rebuild rows out of the drag's slice.
+    expect(useSessions.getState().spaces).toEqual([
+      row("/a", 3000),
+      row("/b", 2000),
+      row("/c", 1000),
+    ]);
+    expect(reorderSpacesCommand).toHaveBeenCalledTimes(2);
     errSpy.mockRestore();
   });
 

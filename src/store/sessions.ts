@@ -661,8 +661,10 @@ interface SessionsState {
    * Rewrite the manual order of ONE Space's visible Session rows (the sidebar
    * drag's write path, ADR 0075). Optimistic — the ORDER MAP `sessionOrder` is
    * updated synchronously, then `reorder_sessions` fires with the WHOLE slice in
-   * its new order — and on rejection the previous map is restored and the failure
-   * logged. NEVER rejects: the call site `void`s it and a rejection would be an
+   * its new order — and on rejection the last COMMITTED map is restored (see
+   * `committedReorder`: the store's CURRENT map may be an earlier drag's
+   * uncommitted one) and the failure logged. NEVER rejects: the call site
+   * `void`s it and a rejection would be an
    * unhandled rejection in the webview (see `useAgentOverridesWrites` for why that
    * matters and where the epoch rule comes from).
    *
@@ -788,6 +790,150 @@ const reorderChain: { sessions: Promise<void>; spaces: Promise<void> } = {
 // epoch does not affect the success path at all.
 const reorderEpoch = { sessions: 0, spaces: 0 };
 
+// The last order each list is KNOWN to hold in the DATABASE — the rollback target
+// for a failed drag, and the reason a drag no longer captures
+// `get().sessionOrder` / `get().spaces` as its undo snapshot. The store's CURRENT
+// value is not the committed one: both actions publish optimistically, and the epoch
+// guard above deliberately DISCARDS an older drag's rollback — so with two drags
+// whose commands BOTH fail, a snapshot taken from the store restores the FIRST
+// drag's optimistic, never-committed order and the list settles on an arrangement
+// the database never held (it re-arranges at the next boot into something the user
+// never asked for and was never told had failed). The same argument as
+// `committedTrusted` above, one level up: a rollback target is what the database
+// says, never what the UI shows.
+//
+// WRITERS, and only these, because only they are DB-backed truth: `setSessionRecency`
+// (the boot map, filled from each row's `sort_order`) and `setSpaces` (the boot
+// array); a drag whose command SUCCEEDED, whose slice is APPLIED to the baseline
+// rather than copied out of the store; and the non-drag `spaces` writers
+// (`addSpace` / `removeSpace` / `setSpaceTrusted`) through `recordSpacesWrite`. An
+// optimistic publish NEVER writes it. That is the whole point.
+//
+// MODULE-SCOPE, so `resetStores()` cannot reach it (its own docs say so, and
+// `src/test/fixtures.test.ts` pins that). Neither `reorderChain` nor `reorderEpoch`
+// has a reset and none is added here; instead the snapshot is made HARMLESS when it
+// leaks: it is only trusted when the store's value cannot be an outstanding publish,
+// so ANY other writer — a boot fill, `resetStores()`, a test's `setState` — re-seeds
+// it from the store. Every test's boot path (`setSessionRecency` / `setSpaces`) also
+// reseeds it directly.
+const committedReorder: {
+  sessions: Record<string, number>;
+  spaces: SpaceRow[];
+} = { sessions: {}, spaces: [] };
+// What the LAST optimistic publish of each list installed, while its command may
+// still be in flight (`null` = nothing outstanding). The store holding THIS object is
+// the only way to tell "the user is looking at a drag the database has not agreed to"
+// from "the store is showing committed truth" — the publish destroys the evidence,
+// which is exactly why the baseline is recorded at publish time. Any OTHER value the
+// store holds is committed truth by elimination, and the resolvers below re-seed from
+// it rather than trusting a module value that no reset can reach.
+const uncommittedReorder: { sessions: unknown; spaces: unknown } = {
+  sessions: null,
+  spaces: null,
+};
+
+/** The Sessions list's COMMITTED order as of the store value handed in. Called at a
+ *  publish (to record what the optimistic write is about to overwrite), and again at
+ *  a rollback (so a DB-backed write that landed mid-drag is part of what comes back
+ *  instead of being erased by it). */
+function committedSessionsOrder(
+  current: Record<string, number>,
+): Record<string, number> {
+  if (current !== uncommittedReorder.sessions) {
+    committedReorder.sessions = current;
+  }
+  return committedReorder.sessions;
+}
+
+/** The Spaces half of the same rule, on the ARRAY (a Space carries its position in
+ *  the array, so the array IS the order there). */
+function committedSpacesArray(current: SpaceRow[]): SpaceRow[] {
+  if (current !== uncommittedReorder.spaces) {
+    committedReorder.spaces = current;
+  }
+  return committedReorder.spaces;
+}
+
+/** Re-point the "uncommitted order" marker at the array a NON-drag writer
+ *  (`addSpace` / `removeSpace` / a trust toggle) just built FROM the store, and
+ *  change NOTHING ELSE. Those writes replace the array with a fresh object, so the
+ *  object the marker named is gone — without this the resolver would read the store
+ *  as committed truth and LAUNDER a drag the database has not agreed to into the
+ *  baseline, which that drag's own rollback would then RESTORE. The baseline is left
+ *  alone because a value carried over from the store may BE that uncommitted order.
+ *  Handed the array as the store held it BEFORE the write. */
+function carrySpacesOrder(before: SpaceRow[], after: SpaceRow[]): void {
+  if (uncommittedReorder.spaces === before) {
+    uncommittedReorder.spaces = after;
+  }
+}
+
+/** A NON-drag write whose OWN change is committed in the database (`addSpace` and
+ *  `removeSpace`, both after their command; `setSpaceTrusted` on success, and on its
+ *  rollback, which restores the committed flag). The baseline takes that change and
+ *  NOT the store's order: it keeps its own committed sequence and applies `edit` to
+ *  its OWN rows — a flag flipped, a row's `lastOpenedAt`, nothing else moved — and
+ *  loses the rows this write dropped. The baseline never adopts a row object out of
+ *  the store, because with a drag in flight (or a toggle still optimistic) that object
+ *  may carry a value the database has not agreed to, and a rollback would then RESTORE
+ *  it. `edit` is the one exception because the caller knows its own write landed.
+ *  A row the baseline has never seen is NEW, and a new Space enters at the BOTTOM of
+ *  the strip — the same rule the optimistic publish uses, and what `upsert_space`'s
+ *  `MAX(sort_order) + 1` means. Handed the array as the store held it BEFORE the write. */
+function recordSpacesWrite(
+  before: SpaceRow[],
+  after: SpaceRow[],
+  edit: (row: SpaceRow) => SpaceRow,
+): void {
+  carrySpacesOrder(before, after);
+  // MEMBERSHIP is safe to read off the store and ORDER is not: a drag reorders rows,
+  // it never adds or drops one, so which paths exist is committed truth even while one
+  // is in flight — which is what lets a removal reach the baseline without an
+  // uncommitted sequence ever doing so.
+  const present = new Set(after.map((s) => s.path));
+  const committedPaths = new Set(committedReorder.spaces.map((s) => s.path));
+  committedReorder.spaces = [
+    ...committedReorder.spaces
+      .filter((s) => present.has(s.path))
+      .map(edit),
+    ...after.filter((s) => !committedPaths.has(s.path)).map(edit),
+  ];
+}
+
+/** The Sessions write itself, as a function of the order it is applied to: the slice
+ *  index becomes the new number and ids OUTSIDE the slice keep their entries (the
+ *  command updates only the ids it is given, so a wholesale map would sink every other
+ *  Space's rows to the bottom). ONE implementation for the optimistic publish and for
+ *  the success that confirms it — the two must agree exactly, which is the invariant
+ *  the field docs already claim about `Db::reorder_sessions`. */
+function appliedSessionOrder(
+  current: Record<string, number>,
+  ids: readonly string[],
+): Record<string, number> {
+  return {
+    ...current,
+    ...Object.fromEntries(ids.map((id, index) => [id, index])),
+  };
+}
+
+/** The Spaces write itself, the same rule for the same reason: a path the store has no
+ *  row for is skipped (it cannot be rendered, so inserting it would put `undefined` in
+ *  the strip) and a row the slice does not name goes to the BOTTOM (the approved
+ *  new-row rule, and the reason a tab opened mid-drag survives the write rather than
+ *  vanishing with it). */
+function appliedSpaceOrder(
+  current: SpaceRow[],
+  paths: readonly string[],
+): SpaceRow[] {
+  const byPath = new Map(current.map((s) => [s.path, s]));
+  const moved = paths.flatMap((p) => {
+    const found = byPath.get(p);
+    return found ? [found] : [];
+  });
+  const named = new Set(paths);
+  return [...moved, ...current.filter((s) => !named.has(s.path))];
+}
+
 // One new-session command at a time. APP-GLOBAL, not per-Space: there is one
 // selected Space and one new-session flow, and the thing it suppresses is two
 // entry points (the button and the `⌘N` chord, or a double-click) firing in the
@@ -897,6 +1043,10 @@ export const useSessions = create<SessionsState>((set, get) => ({
       activeSessionId: selectedId,
       activeSpacePath: owner ? owner.path : rows[0]?.path ?? null,
     });
+    // `list_spaces` IS the database's manual order (`ORDER BY sort_order`), so this
+    // array is the committed tab strip — the baseline a later drag rolls back to, and
+    // the reason a leaked module value cannot survive a boot.
+    committedReorder.spaces = rows;
     // Seed the committed-trusted baseline from the DB rows: every path
     // now has a known-committed value, so a rollback target is never
     // inferred from a possibly-optimistic UI value.
@@ -913,18 +1063,27 @@ export const useSessions = create<SessionsState>((set, get) => ({
     // a possibly-optimistic UI value. (A re-added space keeps its
     // existing baseline — `setSpaces` re-seeds it from the DB.)
     if (!committedTrusted.has(path)) committedTrusted.set(path, false);
+    const before = get().spaces;
+    const now = Date.now();
+    let written = before;
     set((state) => {
       const existing = state.spaces.find((s) => s.path === path);
-      const now = Date.now();
       const spaces = existing
         ? state.spaces.map((s) =>
             s.path === path ? { ...s, lastOpenedAt: now } : s,
           )
         : [...state.spaces, { path, createdAt: now, lastOpenedAt: now, trusted: false }];
+      written = spaces;
       // The start flow (the dialog / `⌘N`) lands on the new space: it
       // becomes the selected one (the tab bar highlights it).
       return { spaces, activeSpacePath: path };
     });
+    // The row this writes IS a DB row (`record_session`'s `upsert_space` hook ran
+    // before this), so the baseline takes it — at the BOTTOM, which is what
+    // `upsert_space`'s `MAX(sort_order) + 1` means. See `recordSpacesWrite`.
+    recordSpacesWrite(before, written, (row) =>
+      row.path === path ? { ...row, lastOpenedAt: now } : row,
+    );
   },
 
   selectSpace: (path) => {
@@ -963,10 +1122,13 @@ export const useSessions = create<SessionsState>((set, get) => ({
     // (so the two can never disagree) and handed back to the caller, which is
     // the only thing that knows what the view should show next.
     let fallback: string | null = null;
+    const before = get().spaces;
+    let written = before;
     set((state) => {
       const remaining = state.spaces.filter((s) => s.path !== path);
       const wasSelected = state.activeSpacePath === path;
       fallback = wasSelected ? (remaining[0]?.path ?? null) : null;
+      written = remaining;
       return {
         spaces: remaining,
         // The removed space was the selected one: fall back to the LEFTMOST
@@ -975,6 +1137,10 @@ export const useSessions = create<SessionsState>((set, get) => ({
         ...(wasSelected ? { activeSpacePath: fallback } : {}),
       };
     });
+    // The `deleteSpaceCommand` above has LANDED, so the row is gone from the
+    // database too: the baseline loses it and nothing else moves (`sort_order` is
+    // untouched by a delete). See `recordSpacesWrite`.
+    recordSpacesWrite(before, written, (row) => row);
     return fallback;
   },
 
@@ -1049,11 +1215,19 @@ export const useSessions = create<SessionsState>((set, get) => ({
       committedTrusted.get(path) ??
       get().spaces.find((s) => s.path === path)?.trusted ??
       false;
-    set((state) => ({
-      spaces: state.spaces.map((s) =>
+    const beforeToggle = get().spaces;
+    let toggled = beforeToggle;
+    set((state) => {
+      toggled = state.spaces.map((s) =>
         s.path === path ? { ...s, trusted } : s,
-      ),
-    }));
+      );
+      return { spaces: toggled };
+    });
+    // This flag is OPTIMISTIC — the command has not landed — so the baseline is NOT
+    // told about it, exactly as an optimistic reorder publish is not: a rollback must
+    // never restore a flag the database refused. The marker still has to follow the
+    // new object, or a drag in flight would look committed to the resolver.
+    carrySpacesOrder(beforeToggle, toggled);
     // Chain this command after the previous one for the path (the
     // per-path queue above) so the DB commits in click order. The stored
     // `done` promise never rejects (its errors are handled below), so a
@@ -1073,15 +1247,32 @@ export const useSessions = create<SessionsState>((set, get) => ({
         // a removed path — and never writes `committedTrusted`.)
         if (get().spaces.some((s) => s.path === path)) {
           committedTrusted.set(path, trusted);
+          // The flag is DB truth now, so the baseline takes THE FLAG and nothing
+          // else: the order it holds stays the order it had, because another drag may
+          // have published on top of the store since and those numbers are not
+          // committed just because this command landed. Without this a tab drag that
+          // lands after the toggle would roll back to a row whose flag is stale.
+          recordSpacesWrite(toggled, get().spaces, (row) =>
+            row.path === path ? { ...row, trusted } : row,
+          );
         }
       },
       (err) => {
         console.error(`Failed to set trusted for ${path}:`, err);
-        set((state) => ({
-          spaces: state.spaces.map((s) =>
+        const beforeRollback = get().spaces;
+        let restored = beforeRollback;
+        set((state) => {
+          restored = state.spaces.map((s) =>
             s.path === path ? { ...s, trusted: previous } : s,
-          ),
-        }));
+          );
+          return { spaces: restored };
+        });
+        // The flag rolled back to the COMMITTED value, so the baseline's row must
+        // carry it too — it may still be holding the flag this command just refused.
+        // Same rule as the success arm: the edit only, never the store's order.
+        recordSpacesWrite(beforeRollback, restored, (row) =>
+          row.path === path ? { ...row, trusted: previous } : row,
+        );
       },
     );
     inFlightToggles.set(path, done);
@@ -1092,7 +1283,10 @@ export const useSessions = create<SessionsState>((set, get) => ({
     // it guards only the one degenerate case it CAN see. The "nothing moved" case
     // is `useDragReorder`'s to refuse, where the list is visible.
     if (ids.length === 0) return Promise.resolve();
-    const previous = get().sessionOrder;
+    // Record the COMMITTED map BEFORE the optimistic publish below overwrites it —
+    // once the write has landed the store can no longer say which of its numbers the
+    // database holds. See `committedReorder`.
+    committedSessionsOrder(get().sessionOrder);
     reorderEpoch.sessions += 1;
     const epoch = reorderEpoch.sessions;
     // Optimistic, and the write is the MAP. Slice index = the new number, which is
@@ -1100,24 +1294,46 @@ export const useSessions = create<SessionsState>((set, get) => ({
     // round trip. Ids outside the slice keep their entries — the command updates
     // only the ids it is given, and a wholesale map would sink every other
     // Space's rows to the bottom.
-    set((state) => ({
-      sessionOrder: {
-        ...state.sessionOrder,
-        ...Object.fromEntries(ids.map((id, index) => [id, index])),
-      },
-    }));
+    let published: Record<string, number> = {};
+    set((state) => {
+      published = appliedSessionOrder(state.sessionOrder, ids);
+      return { sessionOrder: published };
+    });
+    // THIS map is the outstanding, not-yet-agreed-to order — the one value the next
+    // drag must not mistake for the database.
+    uncommittedReorder.sessions = published;
     const link = () =>
       reorderChain.sessions
         .catch(() => {})
         .then(() => reorderSessionsCommand(ids))
+        .then(() => {
+          // The command committed exactly THIS slice, so the baseline advances by
+          // exactly this slice. APPLIED, not copied out of the store: the store may
+          // be holding a newer drag's uncommitted numbers for the ids this command
+          // never named, and those are not truth whoever published them.
+          committedReorder.sessions = appliedSessionOrder(
+            committedReorder.sessions,
+            ids,
+          );
+          if (uncommittedReorder.sessions === published) {
+            uncommittedReorder.sessions = null;
+          }
+        })
         .catch((err) => {
           console.error("Failed to reorder sessions:", err);
           if (reorderEpoch.sessions !== epoch) return; // a newer drag owns the store
           // Restore, do NOT refetch: `setSessionRecency` replaces the recency map
           // too, so a refetch would be a WIDER mutation than the one being undone —
-          // and the command is one transaction, so the captured snapshot already IS
-          // the committed state.
-          set({ sessionOrder: previous });
+          // and the command is one transaction, so the committed order IS the state
+          // to go back to. Resolved NOW, not captured at publish, so a DB-backed
+          // write that landed while this command was in flight is part of what comes
+          // back instead of being erased by it. Read BEFORE the marker moves, which
+          // is what tells the resolver the store is not committed truth yet.
+          const restore = committedSessionsOrder(get().sessionOrder);
+          if (uncommittedReorder.sessions === published) {
+            uncommittedReorder.sessions = null;
+          }
+          set({ sessionOrder: restore });
         });
     const done = link();
     reorderChain.sessions = done;
@@ -1126,7 +1342,9 @@ export const useSessions = create<SessionsState>((set, get) => ({
 
   reorderSpaces: (paths) => {
     if (paths.length === 0) return Promise.resolve();
-    const previous = get().spaces;
+    // Record the COMMITTED strip BEFORE the publish destroys the evidence — see
+    // `committedReorder`, and the sessions half above for the whole argument.
+    committedSpacesArray(get().spaces);
     reorderEpoch.spaces += 1;
     const epoch = reorderEpoch.spaces;
     // Optimistic, and the write is the ARRAY — for Spaces that IS the order (ADR
@@ -1136,21 +1354,28 @@ export const useSessions = create<SessionsState>((set, get) => ({
     // the strip); a row the slice does not name goes to the BOTTOM (the approved
     // new-row rule, and the reason a tab opened mid-drag survives the write rather
     // than vanishing with it).
+    let published: SpaceRow[] = [];
     set((state) => {
-      const byPath = new Map(state.spaces.map((s) => [s.path, s]));
-      const moved = paths.flatMap((p) => {
-        const found = byPath.get(p);
-        return found ? [found] : [];
-      });
-      const named = new Set(paths);
-      return {
-        spaces: [...moved, ...state.spaces.filter((s) => !named.has(s.path))],
-      };
+      published = appliedSpaceOrder(state.spaces, paths);
+      return { spaces: published };
     });
+    uncommittedReorder.spaces = published;
     const link = () =>
       reorderChain.spaces
         .catch(() => {})
         .then(() => reorderSpacesCommand(paths))
+        .then(() => {
+          // The sessions half's rule: the baseline advances by this slice, applied
+          // to the committed strip rather than copied from a store that may be
+          // showing a newer drag's uncommitted order.
+          committedReorder.spaces = appliedSpaceOrder(
+            committedReorder.spaces,
+            paths,
+          );
+          if (uncommittedReorder.spaces === published) {
+            uncommittedReorder.spaces = null;
+          }
+        })
         .catch((err) => {
           console.error("Failed to reorder spaces:", err);
           if (reorderEpoch.spaces !== epoch) return; // a newer drag owns the store
@@ -1158,8 +1383,13 @@ export const useSessions = create<SessionsState>((set, get) => ({
           // `committedTrusted` and, with nothing selected, runs `autoSelectActive`
           // and `openSession`, so a mid-error refetch could move the selected tab
           // and fire a transcript load. And the command is one transaction, so the
-          // captured array already IS the committed state.
-          set({ spaces: previous });
+          // committed strip IS the state to go back to — resolved at commit, for the
+          // sessions half's reason, and read before the marker moves.
+          const restore = committedSpacesArray(get().spaces);
+          if (uncommittedReorder.spaces === published) {
+            uncommittedReorder.spaces = null;
+          }
+          set({ spaces: restore });
         });
     const done = link();
     reorderChain.spaces = done;
@@ -1214,17 +1444,22 @@ export const useSessions = create<SessionsState>((set, get) => ({
       return { historySessions: history, archivedSessions: archived };
     }),
 
-  setSessionRecency: (rows) =>
-    set(() => ({
-      // ONE payload, TWO readings: the recency a decision needs and the position
-      // the one sequence needs. Both replaced wholesale (see the field docs).
-      sessionRecency: Object.fromEntries(
-        rows.map((r) => [r.sessionId, r.lastActiveAt]),
-      ),
-      sessionOrder: Object.fromEntries(
-        rows.map((r) => [r.sessionId, r.sortOrder]),
-      ),
-    })),
+  setSessionRecency: (rows) => {
+    // ONE payload, TWO readings: the recency a decision needs and the position
+    // the one sequence needs. Both replaced wholesale (see the field docs).
+    const sessionRecency = Object.fromEntries(
+      rows.map((r) => [r.sessionId, r.lastActiveAt]),
+    );
+    // `sortOrder` is the `sessions.sort_order` column straight off `list_sessions`
+    // (`ORDER BY sort_order`), so this map IS the database's manual order — the
+    // baseline a later drag rolls back to (`committedReorder`), and the boot seed
+    // every test's boot path runs.
+    const sessionOrder = Object.fromEntries(
+      rows.map((r) => [r.sessionId, r.sortOrder]),
+    );
+    committedReorder.sessions = sessionOrder;
+    set({ sessionRecency, sessionOrder });
+  },
 
   archiveSession: async (sessionId) => {
     // No-op when the id is in NONE of the lists — a Session this app run has
