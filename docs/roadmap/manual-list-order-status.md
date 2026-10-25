@@ -341,6 +341,33 @@ deliberately left undone.
   This is the right instinct — the plan's mutation table was not sufficient on
   its own.
 
+- 2026-10-25 — **T06 DONE** (`87eca16`). Gates measured by the orchestrator:
+  `pnpm test` **3125 / 151** (+20) · `pnpm build` green (new Tailwind classes
+  confirmed present in `dist/assets/*.css`) · `cargo test` 1468/0 · clippy 0 ·
+  fmt clean. Seam = exactly 4 files; 0 Rust, 0 SpaceTabs/hooks/store.
+  **ORCHESTRATOR MUTATION-KILLED INDEPENDENTLY:** ungating the indicator
+  (`dropEdge={drag.overEdge}`) reddens
+  `the drop edge shows on the TARGET row only, on the edge the pointer is
+  nearest`.
+- 2026-10-25 — **AN ORCHESTRATOR GROUNDING CLAIM WAS WRONG, and the child
+  caught it.** I told T06 two tests existed — `"serialises every session row
+  identically in both panes"` and `"keeps every row on the ONE shared row
+  component"` — and warned they would go red once the sidebar passed drag
+  props. They exist NOWHERE: 0 hits in the tree, 0 across `git rev-list
+  --all`, 0 in the pre-existing stash. The child searched all of those BEFORE
+  concluding, reported the discrepancy instead of inventing a cause, and then
+  shipped the test the intent deserved: `it("a sidebar row and a standalone
+  SessionListRow wear the SAME drag surface")`. LESSON: a test name quoted from
+  memory is a hypothesis, not a fact — grep it before making it someone else's
+  constraint.
+- 2026-10-25 — **T06'S REAL CONSTRAINTS, for T07:** `RowButton`'s header pins
+  ATTRIBUTE ORDER (role, tabIndex, aria-disabled, handlers, className, then the
+  caller's spread) and its tests byte-compare row serialisation — T06 measured
+  the landed order as `role, tabindex, class, draggable`. The sidebar call site
+  needs `reorderSessions` armed in its `vi.mock("../lib/tauri")` factory or the
+  store's `reorderChain.sessions.then(...)` throws on `undefined` and every drag
+  test reddens with an unrelated-looking cause.
+
 ## Changelog
 
 One line per task: hash, what shipped, gate numbers at that moment.
