@@ -15,6 +15,76 @@ pub fn tmp_dir(tag: &str) -> std::path::PathBuf {
     dir
 }
 
+/// A fresh dir for the two cap fixtures, backed by a tmpfs where one exists and
+/// REMOVED on drop.
+///
+/// WHY A BASE AT ALL: those fixtures assert that `readdir` order DISAGREES with
+/// alphabetical order (see [`assert_readdir_disagrees_with_sorted_order`]), and
+/// that premise belongs to the FILESYSTEM, not to the filename set. Measured on
+/// one dev box, the same `f0.txt`..`f4.txt` layout enumerates UNSORTED on tmpfs
+/// and ALREADY SORTED on the btrfs under `$HOME` — so a fixture built on
+/// `std::env::temp_dir()` passes or fails depending on wherever `TMPDIR` happens
+/// to point. That is not hypothetical: the desktop app sets `TMPDIR` for its own
+/// scratch, every child it spawns inherits it (an agent running `make test-rust`
+/// included), and both cap fixtures then fail inside the guard for a reason that
+/// has nothing to do with the change under review.
+///
+/// So the fixtures ASK for a tmpfs instead of inferring one from the ambient
+/// environment. Candidate order:
+///
+/// - `/dev/shm` — tmpfs on Linux, and it satisfies the premise for BOTH fixture
+///   layouts (`f0..f4` and `a..l`, measured), independent of `TMPDIR`.
+/// - `std::env::temp_dir()` — macOS (no `/dev/shm`; APFS already disagrees with
+///   sorted order) and any box where `/dev/shm` is absent or unusable. Windows
+///   lands here too and the guard degrades there exactly as it does today.
+///
+/// The last candidate is attempted with `create_dir_all` rather than assumed: a
+/// present-but-unwritable `/dev/shm` must not panic a fixture.
+///
+/// `/dev/shm` is tmpfs — RAM, and it carries the SAME per-user quota as `/tmp`.
+/// A dir taken from there therefore has to be removed, or this helper would move
+/// the leak instead of fixing it; hence the `Drop`, following the same reasoning
+/// as `agent/tools/sandbox.rs`'s private `TmpDir`. Unifying the two guards into
+/// `test_support` is a recorded follow-up (#96).
+pub struct TmpfsDir(std::path::PathBuf);
+
+/// The candidate bases, best first: `/dev/shm` when it is a directory, then the
+/// ambient temp dir. `/dev/shm` is Linux-only, so macOS and Windows get a
+/// one-element list and behave as they do today.
+fn tmpfs_bases() -> impl Iterator<Item = std::path::PathBuf> {
+    let shm = std::path::Path::new("/dev/shm")
+        .is_dir()
+        .then(|| std::path::PathBuf::from("/dev/shm"));
+    shm.into_iter().chain(std::iter::once(std::env::temp_dir()))
+}
+
+/// A fresh [`TmpfsDir`] for one test. The last candidate is the same dir
+/// [`tmp_dir`] writes into, so falling back that far cannot fail for a reason
+/// `tmp_dir` would survive.
+pub fn tmpfs_dir(tag: &str) -> TmpfsDir {
+    let name = format!("files-cmd-test-{tag}-{}", uuid::Uuid::new_v4());
+    for base in tmpfs_bases() {
+        let dir = base.join(&name);
+        if std::fs::create_dir_all(&dir).is_ok() {
+            return TmpfsDir(dir);
+        }
+    }
+    unreachable!("`std::env::temp_dir()` is the final candidate, and `tmp_dir` already assumes it is writable")
+}
+
+impl std::ops::Deref for TmpfsDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for TmpfsDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 pub fn touch(dir: &std::path::Path, rel: &str) {
     let path = dir.join(rel);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();

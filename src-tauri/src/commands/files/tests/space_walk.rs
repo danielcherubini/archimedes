@@ -1,6 +1,6 @@
 use super::support::{
-    assert_readdir_disagrees_with_sorted_order, git_repo, tmp_dir, touch, ungrammatical_fixture,
-    write,
+    assert_readdir_disagrees_with_sorted_order, git_repo, tmp_dir, tmpfs_dir, touch,
+    ungrammatical_fixture, write,
 };
 use crate::commands::files::{collect_files, list_space_files};
 
@@ -359,7 +359,8 @@ fn collect_files_caps_and_reports_truncation() {
 
 #[test]
 fn collect_files_truncation_keeps_the_alphabetically_first_entries_not_readdir_order() {
-    let root = tmp_dir("cap-order");
+    // tmpfs-backed, same reason as `completion_dir_truncates_at_the_cap`.
+    let root = tmpfs_dir("cap-order");
     let names: Vec<String> = ('a'..='l').map(|c| format!("{c}.txt")).collect();
     for name in &names {
         touch(&root, name);
