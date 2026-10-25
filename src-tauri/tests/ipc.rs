@@ -155,6 +155,7 @@ fn build_app(dirs: TestDirs) -> TestApp {
             archimedes_lib::commands::spaces::reorder_spaces,
             archimedes_lib::commands::history::session_recency,
             archimedes_lib::commands::history::reorder_sessions,
+            archimedes_lib::commands::settings::list_models,
             archimedes_lib::commands::attention::attention_disarm,
         ])
         .setup(move |app| {
@@ -976,4 +977,203 @@ async fn the_list_order_commands_resolve_through_the_real_ipc_surface() {
         Value::Null,
         "`reorder_spaces` with an empty slice returns `Ok(())`"
     );
+}
+
+/// (#85) A provider refresh must reach LIVE sessions, not just new ones.
+///
+/// The bug this pins: the context window is copied into the `AgentLoop` at spawn
+/// (`loop.rs:290` — `Compactor::new(catalog.compaction, model.context_window)`)
+/// and the only other writer is `set_model`, reached solely from a config-option
+/// change. `list_models(force_refresh)` therefore refreshed the discovery cache
+/// (so a NEW session saw the corrected window) while every running session kept
+/// the stale one — and, because that same window is the compaction threshold's
+/// input (ADR 0028's "one number, two consumers"), it silently over-compacted at
+/// the stale window's percentage.
+///
+/// THE OBSERVATION POINT IS `config-ack`, not a `context_usage_update` frame: the
+/// `fake_worker` fixture is a protocol stub with no `AgentLoop`, so it never emits
+/// a usage frame. What this test can prove — and what the fix is responsible for —
+/// is that the corrected `Model` is DELIVERED to the running Worker over
+/// `Config { model }`. That the loop then applies it (rebuilt `Compactor`, re-emit,
+/// re-persist) is already pinned by
+/// `agent::harness::loop::tests::context_usage`'s `set_model` test; the two
+/// together cover the path end to end without this file re-testing the loop.
+#[tokio::test]
+async fn refreshing_a_provider_pushes_the_new_context_window_to_a_live_session() {
+    let dirs = TestDirs::new();
+    // The provider first reports a 256k window — the user's STALE starting state.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("the discovery listener binds");
+    let addr = listener.local_addr().unwrap();
+    let settings = json!({
+        "providers": [
+            { "id": "tama", "name": "tama", "baseUrl": format!("http://{addr}/v1"),
+              "apiKey": "k", "api": "openai-completions" }
+        ],
+        "defaultModel": "tama/m/1"
+    });
+    std::fs::write(
+        dirs.config_dir.join("settings.json"),
+        serde_json::to_string(&settings).unwrap(),
+    )
+    .expect("settings.json writes");
+    let _server = serve_models_then_corrected(listener).await;
+
+    let app = build_app(dirs.clone());
+    let webview = app.webview.clone();
+    let collector = EventCollector::new(&app, &["config-ack"]);
+
+    // A session starts on the STALE metadata — the reproduction.
+    let info: SessionInfo = value_to(
+        invoke_ok(
+            &webview,
+            "start_session",
+            json!({ "cwd": dirs.cwd().display().to_string() }),
+        )
+        .await,
+    );
+    let session_id = info.session_id.clone();
+    // Nothing may have pushed a `Config { model }` yet (a `start` carries the
+    // model in the envelope, not as a Config frame).
+    assert_eq!(
+        collector.find("config-ack").len(),
+        0,
+        "starting a session pushes no Config frame"
+    );
+
+    // The provider's metadata is CORRECTED to 1M (the stub's second response) and
+    // the user presses refresh in Settings — exactly `list_models(force_refresh)`.
+    invoke_ok(&webview, "list_models", json!({ "forceRefresh": "tama" })).await;
+
+    // THE ASSERTION: the LIVE session is handed the corrected window, without a
+    // restart, a resume, or a config-option change.
+    let ack = collector
+        .wait_for("config-ack", Duration::from_secs(15))
+        .await
+        .expect("the refresh pushes the corrected model to the live session");
+    assert_eq!(
+        ack["model"]["context_window"], 1000000,
+        "the live session's window follows the provider refresh — the bar AND the \
+         compaction threshold (ADR 0028's one number, two consumers); payload: {ack}"
+    );
+
+    let _ = invoke_ok(
+        &webview,
+        "close_session",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+}
+
+/// A `GET /v1/models` stub whose FIRST response reports a 256k context window and
+/// whose SECOND (and every later) response reports 1M — the "the provider's
+/// metadata was corrected" transition (#85), with no listener rebinding (which
+/// would race the previous server's `abort`: the port is still bound for a moment
+/// after the handle is dropped, so `AddrInUse` is the failure, not the bug under
+/// test).
+async fn serve_models_then_corrected(
+    listener: tokio::net::TcpListener,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut served = 0u32;
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let mut data = Vec::new();
+            while !data.windows(4).any(|w| w == b"\r\n\r\n") {
+                let Ok(n) = stream.read(&mut buf).await else {
+                    break;
+                };
+                if n == 0 {
+                    break;
+                }
+                data.extend_from_slice(&buf[..n]);
+            }
+            let body = if served == 0 {
+                r#"{"data":[{"id":"m/1","max_model_len":256000}]}"#
+            } else {
+                r#"{"data":[{"id":"m/1","max_model_len":1000000}]}"#
+            };
+            served += 1;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes()).await;
+        }
+    })
+}
+
+/// (#85) The other half of the refresh contract: a refresh that does NOT move the
+/// window must push NOTHING.
+///
+/// `set_model` is not free — it rebuilds the `Compactor`, re-estimates the
+/// context, emits a `context_usage_update` frame and writes the `sessions` row.
+/// Firing it unconditionally on every refresh would mean one frame plus one DB
+/// write per live session for no change at all, on the settings page's most-used
+/// button. This pins the guard so a later "simplification" to an unconditional
+/// push fails here rather than as a quiet write amplification.
+#[tokio::test]
+async fn refreshing_a_provider_with_unchanged_metadata_pushes_nothing() {
+    let dirs = TestDirs::new();
+    // The provider reports the SAME window on both reads (the steady state).
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("the discovery listener binds");
+    let addr = listener.local_addr().unwrap();
+    let settings = json!({
+        "providers": [
+            { "id": "tama", "name": "tama", "baseUrl": format!("http://{addr}/v1"),
+              "apiKey": "k", "api": "openai-completions" }
+        ],
+        "defaultModel": "tama/m/1"
+    });
+    std::fs::write(
+        dirs.config_dir.join("settings.json"),
+        serde_json::to_string(&settings).unwrap(),
+    )
+    .expect("settings.json writes");
+    let _server = archimedes_lib::test_support::raw_json_server(
+        listener,
+        200,
+        r#"{"data":[{"id":"m/1","max_model_len":256000}]}"#,
+        None,
+    )
+    .await;
+
+    let app = build_app(dirs.clone());
+    let webview = app.webview.clone();
+    let collector = EventCollector::new(&app, &["config-ack"]);
+
+    let info: SessionInfo = value_to(
+        invoke_ok(
+            &webview,
+            "start_session",
+            json!({ "cwd": dirs.cwd().display().to_string() }),
+        )
+        .await,
+    );
+    let session_id = info.session_id.clone();
+
+    // A refresh whose discovery returns the SAME window.
+    invoke_ok(&webview, "list_models", json!({ "forceRefresh": "tama" })).await;
+    // Give a spurious push time to land before asserting its absence — a bare
+    // "nothing arrived yet" check would pass even for a fix that pushes lazily.
+    tokio::time::sleep(Duration::from_millis(750)).await;
+    assert_eq!(
+        collector.find("config-ack").len(),
+        0,
+        "an unchanged window must not produce a Config push (no frame, no DB write)"
+    );
+
+    let _ = invoke_ok(
+        &webview,
+        "close_session",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
 }

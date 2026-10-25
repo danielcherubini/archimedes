@@ -18,6 +18,7 @@ import { createBatchedSessionUpdate } from "./lib/batchSessionUpdates";
 import { INTERACTIVE_EVENTS } from "./lib/ipc/events";
 import { onSessionClosed } from "./lib/sessionLifecycle";
 import { discardSessionMessages, useSessions } from "./store/sessions";
+import { useModelCatalog } from "./store/modelCatalog";
 import { usePermissions } from "./store/permissions";
 import { useInteractive } from "./store/interactive";
 import { useSubagents } from "./store/subagents";
@@ -366,6 +367,11 @@ function App() {
       .catch((err) =>
         console.error("failed to load stored sessions/spaces/recency", err),
       );
+    // (#85) The model catalog, for the surfaces that read model METADATA (the
+    // subagent card's context %). Boot loads it once, through the store so the
+    // sidebar and the settings page share one fetch rather than one each — and
+    // so a provider refresh has a single place to replace it.
+    void useModelCatalog.getState().loadModels();
   }, []);
 
   // The active **Session**'s `cwd` (= its **Space**'s folder), read through the

@@ -371,11 +371,21 @@ impl EffectiveCatalog {
             // shows `unreachable` + refresh, the stale base models stay
             // shadowed).
             let bypass = Some(provider.id.as_str()) == force_refresh;
-            if !entry.attempted || bypass {
-                entry.attempted = true;
+            // `succeeded` (not just `attempted`) gates the cache: a FAILED
+            // attempt is retried on the next read, because caching a negative
+            // answer for the process's life means one transient outage (a launch
+            // before the network is up) shows `unreachable` + 0 models until a
+            // restart. A success — including a legitimately EMPTY one — caches.
+            if !entry.succeeded || bypass {
                 match discover_models(&provider.base_url, &provider.api_key, &provider.api).await {
-                    Ok(models) => entry.models = models,
-                    Err(_) => entry.models.clear(),
+                    Ok(models) => {
+                        entry.models = models;
+                        entry.succeeded = true;
+                    }
+                    Err(_) => {
+                        entry.models.clear();
+                        entry.succeeded = false;
+                    }
                 }
             }
             // A discovered model becomes a `Model`: the provider's
@@ -631,10 +641,11 @@ impl SessionManager {
         let entry = cache
             .entry(model.provider.clone())
             .or_insert_with(ProviderDiscovery::default);
-        if !entry.attempted {
-            entry.attempted = true;
+        if !entry.succeeded {
             // Best-effort: a failure (unreachable endpoint, non-2xx) leaves
-            // `models` empty → the static metadata is kept (no retry).
+            // `models` empty → the static metadata is kept. `succeeded` stays
+            // false, so the NEXT session start retries rather than inheriting a
+            // permanent `unreachable` from one lost race.
             if let Ok(models) = discover_models(
                 &model.base_url,
                 &model.api_key,
@@ -648,6 +659,7 @@ impl SessionManager {
             .await
             {
                 entry.models = models;
+                entry.succeeded = true;
             }
         }
         let Some(meta) = entry.models.get(&model.id) else {
@@ -1289,10 +1301,35 @@ impl SessionManager {
                     // since the live store dropped it on close.
                     title: row.title,
                     is_subagent: row.is_subagent,
+                    // (#85) `used` is a real measurement of this session, so it
+                    // is replayed from the snapshot as-is. `window` is NOT: it is
+                    // a fact about the MODEL, frozen when the frame was written,
+                    // so a corrected provider would leave every closed session
+                    // showing a stale window forever.
+                    //
+                    // The derivation reads the stored `capabilities.model` — the
+                    // model this row ACTUALLY RAN — and not the `model` above,
+                    // which falls back to the resolution chain for its own
+                    // display purpose. That distinction is load-bearing: pairing
+                    // `used` (measured against the old model's window) with an
+                    // unrelated fallback model's window would report a
+                    // confidently wrong percentage. So an unresolvable stored key
+                    // keeps its snapshot, which is then the only window known.
                     context_usage: row
                         .context_usage_json
                         .as_deref()
-                        .and_then(|s| serde_json::from_str::<ContextUsage>(s).ok()),
+                        .and_then(|s| serde_json::from_str::<ContextUsage>(s).ok())
+                        .map(|usage| {
+                            let live_window = caps
+                                .get("model")
+                                .and_then(Value::as_str)
+                                .and_then(|key| resolve_composed_model(&catalog, key))
+                                .map(|m| u64::from(m.context_window));
+                            ContextUsage {
+                                window: live_window.unwrap_or(usage.window),
+                                ..usage
+                            }
+                        }),
                 }
             })
             .collect())
@@ -1737,6 +1774,79 @@ impl SessionManager {
             .map_err(|e| SessionError::Command {
                 error: format!("the session's Worker is not running; the config change could not be applied: {e}"),
             })
+    }
+
+    /// Push a freshly-discovered `Model` to every LIVE session running it (#85).
+    ///
+    /// Called after a provider refresh (`list_models(force_refresh)`), because
+    /// the context window is copied into the `AgentLoop` at spawn and nothing
+    /// else re-reads discovery for a running session. Without this a corrected
+    /// window reaches only NEW sessions: the live bar keeps painting the stale
+    /// one, and — because the loop's window is also the compaction threshold's
+    /// input (ADR 0028's "one number, two consumers") — the session silently
+    /// over-compacts at the stale window's percentage.
+    ///
+    /// Scoping is per MATCHED SESSION, not per provider: a session is pushed the
+    /// model only when its current model is the one that changed (same key, and
+    /// at least one metadata field differing). That is what keeps this from
+    /// being a spurious `set_model` per session per refresh — `set_model`
+    /// rebuilds the `Compactor`, re-estimates, emits a `context_usage_update`
+    /// AND writes the `sessions` row, so firing it on a no-op refresh would be
+    /// N frames and N DB writes for nothing.
+    ///
+    /// Dispatch goes through the existing `Config { model }` frame → the Worker's
+    /// `ControlCmd::SetModel` → `AgentLoop::set_model`, which already does the
+    /// whole right thing (rebuild the `Compactor`, re-estimate, emit, persist) and
+    /// is pinned by `agent::harness::loop::tests::context_usage`'s
+    /// `set_model` test — this method only supplies the trigger.
+    ///
+    /// Best-effort per session: a dead / closing Worker is skipped, never an
+    /// error (a refresh must not fail because one session is mid-teardown).
+    /// Returns the number of sessions actually pushed.
+    pub async fn refresh_live_models(&self, refreshed: &[Model]) -> usize {
+        let Some(wm) = self.worker_manager.get().cloned() else {
+            return 0;
+        };
+        // The candidates: each live session's CURRENT model (the `config_state`
+        // mirror — the same source `set_config_option` re-synthesizes from), and
+        // whether the refresh moved it. Collected BEFORE any send so the
+        // `config_state` lock is never held across one.
+        let pushes: Vec<(String, Model)> = {
+            let config_state = self.config_state.lock().unwrap_or_else(|p| p.into_inner());
+            config_state
+                .iter()
+                .filter_map(|(session_id, state)| {
+                    let fresh = refreshed
+                        .iter()
+                        .find(|m| m.provider == state.model.provider && m.id == state.model.id)?;
+                    // The metadata that matters for the bar and the threshold —
+                    // an unchanged window must not produce a frame.
+                    (fresh.context_window != state.model.context_window).then(|| {
+                        // Keep the session's OWN fields where the refresh is not
+                        // the authority (an empty `api_key` / `base_url` on a
+                        // discovery-derived model must not wipe a configured one).
+                        let mut next = state.model.clone();
+                        next.context_window = fresh.context_window;
+                        next.supports_thinking = fresh.supports_thinking;
+                        next.thinking_levels = fresh.thinking_levels.clone();
+                        (session_id.clone(), next)
+                    })
+                })
+                .collect()
+        };
+        let mut pushed = 0;
+        for (session_id, model) in pushes {
+            let Some(handle) = wm.handle_for(&session_id) else {
+                continue;
+            };
+            if handle.send_config(Some(&model), None, None).is_ok() {
+                // Mirror ONLY on a delivered frame (finding 12's rule — a failed
+                // send means the loop never applies it).
+                self.update_config_state(&session_id, |s| s.model = model.clone());
+                pushed += 1;
+            }
+        }
+        pushed
     }
 
     /// Update the session's `NativeConfigState` mirror (the `set_config_option`
@@ -2961,6 +3071,125 @@ mod session_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// (#85) A stored session's `context_usage.window` is DERIVED from the model
+    /// the row's `capabilities.model` resolves to, not replayed from the
+    /// `context_usage_json` snapshot.
+    ///
+    /// The snapshot's `window` is a fact about the MODEL, frozen when the frame
+    /// was written — so after a provider's metadata is corrected it is simply
+    /// wrong, and it stays wrong for every closed session. `used` is a genuine
+    /// measurement of that session and is replayed as-is.
+    ///
+    /// The fallback is load-bearing: a row whose model key no longer resolves
+    /// (the provider was removed, the model renamed) keeps its snapshot, because
+    /// the snapshot is then the only window anyone knows.
+    #[tokio::test]
+    async fn a_stored_sessions_context_window_follows_the_current_catalog() {
+        let catalog = ModelCatalog {
+            models: vec![level_test_model("tama", "m1", &[])],
+            default_model: Some("tama/m1".to_string()),
+            compaction: crate::agent::harness::catalog::CompactionConfig::default(),
+        };
+        let dir = temp_config_dir();
+        let db = open_db(&dir);
+        let mut manager = SessionManager::new(dir.clone());
+        manager.attach_db(db.clone());
+        manager.set_catalog(catalog);
+        // The row ran `tama/m1` when the catalog said 128k, so that is the
+        // snapshot written with the usage.
+        db.record_session(&SessionInfo {
+            session_id: "cu-derive-1".to_string(),
+            cwd: dir.clone(),
+            capabilities: json!({
+                "native": true,
+                "model": "tama/m1",
+                "loadSession": true,
+            }),
+            config_options: None,
+            archived: false,
+            title: None,
+            context_usage: None,
+            is_subagent: false,
+        })
+        .expect("record_session should succeed");
+        db.record_session_context_usage("cu-derive-1", 53_760, 128_000)
+            .expect("record_session_context_usage should succeed");
+        // The provider's metadata is CORRECTED: the model is now 1M.
+        manager.set_catalog(ModelCatalog {
+            models: vec![Model {
+                context_window: 1_000_000,
+                ..level_test_model("tama", "m1", &[])
+            }],
+            default_model: Some("tama/m1".to_string()),
+            compaction: crate::agent::harness::catalog::CompactionConfig::default(),
+        });
+        let rows = manager
+            .list_sessions(true)
+            .await
+            .expect("list_sessions works");
+        let usage = rows[0]
+            .context_usage
+            .as_ref()
+            .expect("context_usage is still carried");
+        assert_eq!(
+            usage.window, 1_000_000,
+            "the window is DERIVED from the resolved model (#85) — a closed \
+             session must not keep the stale window its snapshot froze"
+        );
+        assert_eq!(
+            usage.used, 53_760,
+            "`used` is a real measurement of the session — replayed, never re-derived"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// (#85) The fallback half: a row whose `capabilities.model` no longer
+    /// resolves keeps its snapshot window (the only window anyone knows).
+    #[tokio::test]
+    async fn a_stored_session_with_an_unresolvable_model_keeps_its_snapshot_window() {
+        let catalog = ModelCatalog {
+            models: vec![level_test_model("tama", "m1", &[])],
+            default_model: Some("tama/m1".to_string()),
+            compaction: crate::agent::harness::catalog::CompactionConfig::default(),
+        };
+        let dir = temp_config_dir();
+        let db = open_db(&dir);
+        let mut manager = SessionManager::new(dir.clone());
+        manager.attach_db(db.clone());
+        manager.set_catalog(catalog);
+        // A model key the catalog does not know (the provider was removed).
+        db.record_session(&SessionInfo {
+            session_id: "cu-derive-gone".to_string(),
+            cwd: dir.clone(),
+            capabilities: json!({
+                "native": true,
+                "model": "gone/model",
+                "loadSession": true,
+            }),
+            config_options: None,
+            archived: false,
+            title: None,
+            context_usage: None,
+            is_subagent: false,
+        })
+        .expect("record_session should succeed");
+        db.record_session_context_usage("cu-derive-gone", 1_000, 640_000)
+            .expect("record_session_context_usage should succeed");
+        let rows = manager
+            .list_sessions(true)
+            .await
+            .expect("list_sessions works");
+        let usage = rows[0]
+            .context_usage
+            .as_ref()
+            .expect("context_usage is carried");
+        assert_eq!(
+            usage.window, 640_000,
+            "an unresolvable model keeps the snapshot — it is the only window known"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `list_sessions` carries the stored `title` (the naming pass's
     /// generated label — the sidebar renders it), and a session with no
     /// title yet carries `None` (NOT the empty string: the frontend renders
@@ -3457,6 +3686,56 @@ mod session_tests {
         assert!(!refreshed.models.iter().any(|m| m.id == "v1"));
         server.abort();
         server2.abort();
+    }
+
+    /// (#85) A FAILED discovery must not latch for the process's life.
+    ///
+    /// The cache marks a provider `attempted` before the fetch, and the failure
+    /// arm used to leave it that way with `models` cleared — so a provider whose
+    /// endpoint was unreachable ONCE (the app launched before the network was up,
+    /// a gateway mid-restart) contributed 0 models for the rest of the run. The
+    /// provider row showed `unreachable`, the model picker was short its models,
+    /// and nothing short of a restart or that provider's own refresh recovered
+    /// it. A SUCCESS still caches (the whole point of the cache); only the
+    /// failure is retried.
+    ///
+    /// This is the same defect as #85's stale window one layer down: the cache
+    /// holding a wrong answer with no path to correction.
+    #[tokio::test]
+    async fn a_failed_discovery_does_not_latch_the_negative_result() {
+        let dir = temp_config_dir();
+        // Port 1 refuses instantly — a deterministic "unreachable" (no timeout
+        // to wait out), the same fixture the shadow test uses.
+        write_settings_provider(&dir, "tama", "http://127.0.0.1:1/v1");
+        let mut manager = SessionManager::new(dir.clone());
+        manager.set_catalog(ModelCatalog::default());
+        let failed = manager.effective_catalog(None).await;
+        assert!(
+            !failed.models.iter().any(|m| m.provider == "tama"),
+            "the first attempt genuinely failed"
+        );
+        // The endpoint comes good (the provider is re-pointed at a live server —
+        // the `settings.json` read is fresh, exactly as the force-refresh test
+        // relies on).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = crate::test_support::raw_json_server(
+            listener,
+            200,
+            r#"{"data":[{"id":"recovered"}]}"#,
+            None,
+        )
+        .await;
+        write_settings_provider(&dir, "tama", &format!("http://{addr}/v1"));
+        // NO `force_refresh`: an ordinary read must retry a provider whose last
+        // attempt FAILED.
+        let retried = manager.effective_catalog(None).await;
+        assert!(
+            retried.models.iter().any(|m| m.id == "recovered"),
+            "a plain read must retry a previously-FAILED provider — a transient \
+             failure must not blacklist it for the process's life"
+        );
+        server.abort();
     }
 
     /// ADR 0044: `/compact` on a session that is NOT live (a stored session)

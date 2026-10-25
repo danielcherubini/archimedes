@@ -196,7 +196,44 @@ export function extractThinkingFromModel(model?: string): string | undefined {
   return i >= 0 ? model.slice(i + 1) : undefined;
 }
 
-export function getModelContextWindow(model?: string): number {
+/** The minimum a catalog entry has to carry to answer a window lookup — the
+ * `ModelDto` fields that matter, structurally, so a caller can pass the real
+ * catalog (or a test's two-field stub) without importing `ModelDto`. */
+export type ContextWindowCatalogEntry = {
+  id: string;
+  provider: string;
+  contextWindow: number;
+};
+
+/**
+ * The model's context window, preferring the LIVE catalog over any guess.
+ *
+ * The hardcoded table below is a LAST RESORT and it is knowably wrong in the
+ * direction that matters: it answers from the model NAME, so every deepseek
+ * model read 64k — a 1M-window model was scored at 6% of its real window, and
+ * the subagent card's context percentage (its only consumer) was off by the
+ * same factor (#85). The catalog is the authority the providers themselves
+ * declare, so it wins whenever it knows the model.
+ *
+ * The composed key is matched the way `ModelKey::parse` splits it — the provider
+ * id never contains `/`, the MODEL id may, so the FIRST `/` is the boundary. A
+ * substring match would let another provider's model answer for this one, which
+ * is why the match is on the exact `provider` / `id` pair and not on `includes`.
+ *
+ * An entry the catalog does not carry (a model that was never discovered, or a
+ * bare id with no provider prefix) falls through to the table, unchanged.
+ */
+export function getModelContextWindow(
+  model?: string,
+  catalog?: readonly ContextWindowCatalogEntry[],
+): number {
+  if (model && catalog && catalog.length > 0) {
+    const slash = model.indexOf("/");
+    const provider = slash > 0 ? model.slice(0, slash) : "";
+    const id = slash > 0 ? model.slice(slash + 1) : model;
+    const hit = catalog.find((m) => m.provider === provider && m.id === id);
+    if (hit) return hit.contextWindow;
+  }
   if (!model) return 200_000;
   const lower = model.toLowerCase();
   if (lower.includes("gemini")) return 1_000_000;

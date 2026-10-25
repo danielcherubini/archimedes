@@ -2898,6 +2898,72 @@ describe("archivedSessions (sticky, ADR 0016)", () => {
     expect(st.archivedSessions.map((s) => s.sessionId)).toEqual(["arch-1"]);
   });
 
+  it("mergeRefreshedSessionRows updates contextUsage/configOptions WITHOUT re-splitting the lists (#85)", () => {
+    // The boot-time lists, including a sticky live+archived pair — the exact
+    // state `setHistorySessions`'s "boot-only, do NOT re-run mid-run" comment
+    // forbids re-deriving. The merge must leave membership untouched.
+    useSessions.setState({
+      sessions: [info("live-arch", "/x")],
+      historySessions: [info("hist-1", "/x")],
+      archivedSessions: [
+        { ...info("live-arch", "/x"), archived: true },
+        { ...info("arch-1", "/x"), archived: true },
+      ],
+      contextUsage: {},
+      configOptions: {},
+    });
+    // A refresh reports a corrected window for the stored session (#85).
+    useSessions.getState().mergeRefreshedSessionRows([
+      {
+        ...info("hist-1", "/x"),
+        contextUsage: { used: 53_760, window: 1_000_000 },
+      },
+      {
+        ...info("arch-1", "/x"),
+        archived: true,
+        contextUsage: { used: 1_000, window: 640_000 },
+      },
+    ]);
+    const st = useSessions.getState();
+    // The VALUES arrive.
+    expect(st.contextUsage["hist-1"]).toEqual({
+      used: 53_760,
+      window: 1_000_000,
+    });
+    expect(st.contextUsage["arch-1"]).toEqual({ used: 1_000, window: 640_000 });
+    // Membership is UNTOUCHED — no row moved lists, no sticky entry dropped.
+    expect(st.sessions.map((s) => s.sessionId)).toEqual(["live-arch"]);
+    expect(st.historySessions.map((s) => s.sessionId)).toEqual(["hist-1"]);
+    expect(st.archivedSessions.map((s) => s.sessionId)).toEqual([
+      "live-arch",
+      "arch-1",
+    ]);
+  });
+
+  it("mergeRefreshedSessionRows leaves a session that a live frame already updated alone (#85)", () => {
+    // The live frame is FRESHER than the `list_sessions` read the refresh ran
+    // alongside: the store's map wins over the row (the `contextUsageOf`
+    // precedence), so the merge must not clobber a live session's number with a
+    // possibly-earlier snapshot.
+    useSessions.setState({
+      sessions: [info("live-1", "/x")],
+      historySessions: [],
+      archivedSessions: [],
+      contextUsage: { "live-1": { used: 9_000, window: 1_000_000 } },
+      configOptions: {},
+    });
+    useSessions.getState().mergeRefreshedSessionRows([
+      {
+        ...info("live-1", "/x"),
+        contextUsage: { used: 8_000, window: 1_000_000 },
+      },
+    ]);
+    expect(useSessions.getState().contextUsage["live-1"]).toEqual({
+      used: 9_000,
+      window: 1_000_000,
+    });
+  });
+
   it("archiveSession moves the entry historySessions → archivedSessions and calls the backend", async () => {
     useSessions.setState({
       historySessions: [info("h1", "/x")],

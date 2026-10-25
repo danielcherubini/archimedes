@@ -697,6 +697,25 @@ interface SessionsState {
   /** Populate the history list from `list_sessions` (boot). */
   setHistorySessions: (rows: SessionInfo[]) => void;
   /**
+   * Merge refreshed stored-session rows into the per-id maps (#85) — the
+   * post-refresh path, so a corrected context window reaches a STORED session
+   * without a restart.
+   *
+   * Why not `setHistorySessions`: that function re-SPLITS the lists by the
+   * archived flag, and its own comment forbids running it mid-run ("do NOT
+   * re-run this mid-run — re-splitting would drop sticky live+archived entries
+   * and silently un-archive on the next close"). So this touches the two
+   * per-id maps and NOTHING about membership: a row only contributes values
+   * for a session the store already knows, and an unknown id is ignored.
+   *
+   * The store's map WINS over the row for a LIVE session (`contextUsageOf` /
+   * `sessionConfigOptionsOf` read the map first), so this skips any id already
+   * present in `sessions`: a live frame is fresher than the `list_sessions`
+   * read the refresh ran alongside, and clobbering it with a snapshot would
+   * move the bar BACKWARDS.
+   */
+  mergeRefreshedSessionRows: (rows: SessionInfo[]) => void;
+  /**
    * Open a session (live or stored). For a stored session whose transcript
    * is not loaded yet, fetch its history first.
    */
@@ -1146,6 +1165,38 @@ export const useSessions = create<SessionsState>((set, get) => ({
     reorderChain.spaces = done;
     return done;
   },
+  mergeRefreshedSessionRows: (rows) =>
+    set((state) => {
+      // Live ids are SKIPPED: the store's map wins over the row, and a live
+      // session's own frames are fresher than the read this merge came with
+      // (#85).
+      const liveIds = new Set(state.sessions.map((s) => s.sessionId));
+      const known = new Set([
+        ...state.historySessions.map((s) => s.sessionId),
+        ...state.archivedSessions.map((s) => s.sessionId),
+      ]);
+      let contextUsage = state.contextUsage;
+      let configOptions = state.configOptions;
+      let changed = false;
+      for (const row of rows) {
+        if (liveIds.has(row.sessionId)) continue;
+        // An id this store has never heard of gets no entry: the merge is a
+        // REFRESH of known rows, not a list population (that is boot's job).
+        if (!known.has(row.sessionId)) continue;
+        if (row.contextUsage) {
+          contextUsage = { ...contextUsage, [row.sessionId]: row.contextUsage };
+          changed = true;
+        }
+        if (row.configOptions) {
+          configOptions = {
+            ...configOptions,
+            [row.sessionId]: row.configOptions,
+          };
+          changed = true;
+        }
+      }
+      return changed ? { contextUsage, configOptions } : state;
+    }),
 
   setHistorySessions: (rows) =>
     set((state) => {
