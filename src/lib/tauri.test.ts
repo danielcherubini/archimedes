@@ -29,6 +29,9 @@ import {
   listCompletionEntries,
   listSpaceFiles,
   loadHistory,
+  reorderSessions,
+  reorderSpaces,
+  sessionRecency,
   type AgentConfigDto,
   type WindowFrameState,
 } from "./tauri";
@@ -459,3 +462,68 @@ describe("listAgentConfig (the sidebar Agents modal's IPC boundary, ADR 0068)", 
   });
 });
 
+
+describe("sessionRecency (the ADR 0075 recency IPC boundary)", () => {
+  beforeEach(() => {
+    mockedInvoke.mockReset();
+  });
+
+  it("invokes `session_recency` with no payload", async () => {
+    // Same trap as `list_space_files` above: the Rust command is
+    // `commands::history::session_recency` and NOTHING in this repo drives it
+    // over IPC in a test (the Rust tests call `Db::session_recency` directly),
+    // so a renamed command or a stray argument object is a runtime-only failure
+    // in the desktop app. Pinned to the ZERO-arg call, as `attention_disarm` is:
+    // the command takes only `State<Arc<Db>>`, so `{}` would be a different call
+    // to `invoke` and this is the one place that drift can be caught.
+    const payload = [{ sessionId: "s1", lastActiveAt: 9_999_999_999_999 }];
+    mockedInvoke.mockResolvedValue(payload);
+    await expect(sessionRecency()).resolves.toEqual(payload);
+    // The rows come back UNCHANGED (the store keys them by `sessionId` itself).
+    // The stamp is the far-future one, per the fixture rule: a mocked payload
+    // must not be able to look like a `now_ms()` value, so a wrapper that
+    // invented or defaulted `lastActiveAt` cannot pass this green.
+    expect(mockedInvoke).toHaveBeenCalledWith("session_recency");
+    expect(mockedInvoke).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("reorderSessions (the sidebar drag write path, ADR 0075)", () => {
+  beforeEach(() => {
+    mockedInvoke.mockReset();
+  });
+
+  it("invokes `reorder_sessions` with the `ids` argument key", async () => {
+    mockedInvoke.mockResolvedValue(undefined);
+    await reorderSessions(["s2", "s1", "s3"]);
+    // The ORDER is asserted exactly as given: the argument is the sidebar's
+    // whole visible slice of ONE Space in its new order, and
+    // `Db::reorder_sessions` writes the slice index as each row's stored order
+    // number. A wrapper that sorted, deduped or
+    // otherwise tidied the list would silently corrupt the drag and stay green
+    // on every other surface.
+    expect(mockedInvoke).toHaveBeenCalledWith("reorder_sessions", {
+      ids: ["s2", "s1", "s3"],
+    });
+  });
+});
+
+describe("reorderSpaces (the tab-strip drag write path, ADR 0075)", () => {
+  beforeEach(() => {
+    mockedInvoke.mockReset();
+  });
+
+  it("invokes `reorder_spaces` with the `paths` argument key", async () => {
+    mockedInvoke.mockResolvedValue(undefined);
+    await reorderSpaces(["/b", "/a"]);
+    // `paths`, NOT `ids`: the `spaces` table is keyed by the canonical path
+    // (`space_key`), and the command layer passes it through RAW (no
+    // re-canonicalizing — a folder that vanished mid-drag would otherwise be
+    // skipped and leave a PARTIAL renumber). The KEY name is the whole contract:
+    // `{ ids: [...] }` against Rust's `paths` parameter is a runtime-only failure
+    // no Rust test and no component test can see.
+    expect(mockedInvoke).toHaveBeenCalledWith("reorder_spaces", {
+      paths: ["/b", "/a"],
+    });
+  });
+});

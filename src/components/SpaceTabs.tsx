@@ -1,9 +1,10 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { PlusIcon, XIcon } from "lucide-react";
 import { basenameOfPath } from "../lib/paths";
 import { titleFor } from "../lib/sessionTitle";
 import { useSessions } from "../store/sessions";
 import { useSessionStatuses } from "../hooks/useSessionStatus";
+import { useDragReorder } from "../hooks/useDragReorder";
 import { SessionStatusMark } from "./SessionStatusMark";
 import { cn } from "./lib/utils";
 import type { SessionStatus } from "../hooks/useSessionStatus";
@@ -196,6 +197,17 @@ function tabStatusOf(
  * side-pane toggle moved to the `SidePane`'s footer — the tab bar is
  * tabs + `+` + a close control per tab.
  *
+ * THE STRIP IS DRAG-REORDERABLE (ADR 0075). It renders the store's `spaces`
+ * array verbatim — that array IS the Manual order — and a drag writes through
+ * the store's optimistic `reorderSpaces`, exactly as the sidebar's rows write
+ * through `reorderSessions`. ONE `useDragReorder` instance covers the whole
+ * strip: the gesture, the pointer's half and the indicator state are the hook's
+ * answers, and nothing in this file computes an index or sorts. Because
+ * `SpacesList`'s `views` is `spaces.map(spaceViewFor)`, the tab strip and the
+ * sidebar's group order inherit the same array and cannot disagree. HTML5 DnD is
+ * POINTER-ONLY, so a keyboard user cannot reorder — an accepted gap (ADR 0075),
+ * recorded rather than left implicit.
+ *
  * CLOSING A TAB (`×`, or the browser's middle-click) FORGETS the Space; it
  * deletes no conversation (`closeSpace` → `removeSpace`, which touches no
  * `sessions` row), so a quiet Space closes on the spot — re-opening the folder
@@ -214,7 +226,10 @@ function tabStatusOf(
  * it owns the middle-click (`mousedown` button 1) — a click on either child is
  * button 0, so the two paths cannot both fire. It also opts out of the window's
  * drag region explicitly (see the `data-tauri-drag-region` note on the pill):
- * the bar it sits in is a drag region, and a control must never be chrome.
+ * the bar it sits in is a drag region, and a control must never be chrome — and
+ * since ADR 0075 the same attribute is the SECOND reason it must stay, because
+ * it is what stops Tauri's injected script claiming the mousedown that starts a
+ * tab DRAG. The pill is the drag surface; the ✕ opts back out.
  *
  * THE LEADING MARK is `SessionStatusMark` — the spinner for a Space whose
  * Worker is in a turn, the `?` for one blocked on the user (see
@@ -247,6 +262,39 @@ export default function SpaceTabs() {
     name: string;
     sessions: { id: string; label: string }[];
   } | null>(null);
+
+  // THE DRAG, over the strip's own order. `spaces` IS the Manual order (ADR
+  // 0075: `Db::list_spaces` returns `sort_order`, the store never re-sorts, and
+  // `SpacesList`'s `views` is `spaces.map(spaceViewFor)`), so the ids handed to
+  // the hook are the same sequence the strip renders and the sidebar groups by —
+  // one source, and nothing here sorts. The `useMemo` keeps the array's identity
+  // stable across renders that did not change the strip, because `useDragReorder`
+  // closes its handlers over `ids` and rebuilds them whenever it changes.
+  const spacePaths = useMemo(() => spaces.map((s) => s.path), [spaces]);
+  // The write is the store's optimistic `reorderSpaces`, whose rollback restores
+  // the array it captured before the write (ADR 0075's Write path, as amended
+  // during T05: a refetch would be a WIDER mutation than the one being undone).
+  // It gets the WHOLE strip in its new order, not the moved tab — the command
+  // writes each slice index as the Space's stored number, so a partial list is a
+  // half-moved list, and a tab the slice omits is kept at the BOTTOM.
+  const reorderSpaces = useSessions((s) => s.reorderSpaces);
+  const handleReorder = useCallback(
+    (paths: string[]) => void reorderSpaces(paths),
+    [reorderSpaces],
+  );
+  const drag = useDragReorder({
+    ids: spacePaths,
+    onReorder: handleReorder,
+    // THE STRIP IS HORIZONTAL, so the pointer's half is read off X. This one
+    // argument is the whole difference between this call site and the sidebar's:
+    // a tab drag holds `clientY` constant, so with the default `"y"` the landing
+    // side was decided by where in the pill the user grabbed — and a grab at the
+    // pill's vertical centre answered "after" for every target, which turns every
+    // RIGHTWARD tab drag into the order the strip already had and therefore a
+    // SILENT NO-OP (the hook's "nothing moved" guard fires and no write happens).
+    // Leftward drags landed on "after" too, and so looked fine.
+    axis: "x",
+  });
 
   // A tab close, from either gesture: ask when the Space still holds open
   // Sessions, otherwise just do it.
@@ -369,6 +417,16 @@ export default function SpaceTabs() {
             // every pixel of the pill the label does not cover was window-drag
             // surface. A tab is a control, not chrome: every pixel of the pill
             // selects or closes, and never drags.
+            //
+            // THE SECOND REASON, and the one that made this attribute
+            // load-bearing twice (ADR 0075): the pill is now a DRAG SOURCE, and
+            // an HTML5 drag begins from the very mousedown that script hunts for.
+            // Without `"false"` the script claims it as a WINDOW drag, the
+            // browser never starts the tab's drag, and the strip looks draggable
+            // while moving the window. jsdom has no injected script, so no test
+            // here can catch its removal — which is exactly why the attribute is
+            // pinned twice in `SpaceTabs.test.tsx` (its presence, and its
+            // survival of a reorder re-render) rather than trusted.
             className={cn(
               // `bg-surface hover:bg-surface-hover` and `bg-surface-hover` are
               // mutually exclusive arms of one background group, so the merge is
@@ -379,7 +437,38 @@ export default function SpaceTabs() {
               // cannot move either.
               "flex h-8 max-w-48 items-center rounded-md",
               active ? "bg-surface-hover" : "bg-surface hover:bg-surface-hover",
+              // THE DROP INDICATOR — one edge, one class, on the pill that is
+              // already there (spec §Indicator). `border-brand` is named rather
+              // than left to `currentColor`, which would paint the line in
+              // whatever ink the tab's own text wears; it is the same token the
+              // sidebar row marks its edge with, so an edge means one thing in
+              // both lists. The two edge utilities are mutually exclusive, and
+              // `preflight`'s `box-sizing: border-box` means the 2px insets the
+              // label rather than growing the `h-8` pill.
+              //
+              // LEFT AND RIGHT, because this strip is horizontal. The hook's
+              // `DropEdge` means EARLIER/LATER in the array — axis-neutral — and
+              // the CALL SITE chooses the physical border that means "earlier" in
+              // its own layout: here "before" is the pill's LEFT edge and "after"
+              // its RIGHT one. The sidebar, a vertical list, keeps top/bottom.
+              // That choice lives here and not in the hook precisely so the hook
+              // keeps one copy of the ordering arithmetic and zero opinions about
+              // markup.
+              //
+              // The target test is `drag.overId === s.path`, NOT `overEdge`
+              // alone — the hook keeps the two as separate answers precisely so
+              // a call site cannot paint the current edge on every tab.
+              drag.overId === s.path && drag.overEdge === "before" && "border-l-2 border-brand",
+              drag.overId === s.path && drag.overEdge === "after" && "border-r-2 border-brand",
             )}
+            // THE DRAG SURFACE (ADR 0075, spec §Handle: "the whole row / pill is
+            // draggable"). The hook's six keys — `draggable: true` plus the five
+            // handlers — land on the WRAPPER rather than on the label, because
+            // the wrapper is the pill: it owns the geometry, the fill, and the
+            // pixels the label does not cover, so a drag started anywhere in the
+            // tab (including its dead pixels — see the `self-stretch` note) is a
+            // drag of the tab. The `✕` opts back out below.
+            {...drag.dragProps(s.path)}
             data-tauri-drag-region="false"
             onMouseDown={(e) => {
               // Middle-click anywhere on the pill closes the tab, as in every
@@ -388,6 +477,15 @@ export default function SpaceTabs() {
               // (The drag script never claims button 1, so this still fires
               // over the pill's `"false"` drag region, which only answers to
               // the left button.)
+              //
+              // THE EARLY RETURN IS ALSO WHAT KEEPS A DRAG FROM CLOSING THE TAB
+              // (ADR 0075): the left button is the button a drag starts with, so
+              // once the pill became a drag source this `!== 1` guard became the
+              // second half of "pressing to drag does not close the tab". It is
+              // pinned by `SpaceTabs.test.tsx`'s "a LEFT-drag started on the tab
+              // pill does not close the tab", which completes a real gesture and
+              // then asserts the middle-click still closes — both halves of this
+              // one handler.
               // `preventDefault` is the part that matters on Windows: without
               // it WebView2 opens its autoscroll cursor over the tab strip, and
               // the middle-click selects instead of closing.
@@ -471,6 +569,16 @@ export default function SpaceTabs() {
               type="button"
               aria-label={`Close ${name}`}
               title="Close tab"
+              // `draggable={false}`: the pill is a drag source and this ✕ is its
+              // CHILD. `draggable` is not an inherited property, but the browser
+              // resolves a drag on a nested element by walking to the nearest
+              // draggable ANCESTOR — so with nothing said here, a press on the
+              // close control starts a drag of the TAB instead of closing it
+              // (spec §Handle + §5 #18 — the same opt-out T06 gave the sidebar's
+              // Stop / Archive / Delete). Pinned in `SpaceTabs.test.tsx`
+              // alongside the pill's own `draggable="true"`, so the assertion
+              // cannot be satisfied by a pill that stopped being draggable.
+              draggable={false}
               onClick={() => requestClose(s.path, name)}
               // NOT `CHROME_BUTTON` (the chrome bar's shared button grammar,
               // `./chromeButton.ts`) and NOT a shared component — deliberately.

@@ -94,6 +94,16 @@ export interface SpaceCheck {
 }
 
 
+/** One session's recency, decoupled from its list position (ADR 0075). camelCase over IPC. */
+export interface SessionRecency {
+  sessionId: string;
+  /** Unix ms — the newest transcript stamp, or the row's own `created_at` when it has no messages. Never null. */
+  lastActiveAt: number;
+  /** The row's position in the user's Manual order (bigger = lower). Boot order map input; no component reads it. */
+  sortOrder: number;
+}
+
+
 /**
  * Why a session was closed (snake_case strings over the `session-closed`
  * event). The UI renders close reasons in the paused banner copy.

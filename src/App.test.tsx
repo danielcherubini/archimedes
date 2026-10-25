@@ -4,6 +4,7 @@ import App from "./App";
 import {
   externalOpen,
   listSpaces,
+  sessionRecency,
   listenInteractiveRequestClose,
   listenSessionTitled,
   listenSubagentClosed,
@@ -24,18 +25,34 @@ import {
 
 // Mock the Tauri IPC layer (the `importActual` pattern from
 // `NewSpaceDialog.test.tsx`): the boot `useEffect` loads `listSessions` /
-// `listSpaces` (resolving `[]` so the workspace renders its empty state),
-// every `listen*` registration resolves a no-op unlisten (the App's
-// listener `useEffect` awaits them in cleanup), and `listSkills` resolves
+// `listSpaces` / `sessionRecency` (all resolving `[]` so the workspace renders
+// its empty state), every `listen*` registration resolves a no-op unlisten (the
+// App's listener `useEffect` awaits them in cleanup), and `listSkills` resolves
 // `[]` (the `useSkillCatalog` hook in both `SpacesList` and `ChatStream`
 // calls it on mount — the hook catches rejections, but the mock avoids
 // noisy failures with a bare `vi.mock` factory).
+//
+// THE TRAP THIS FILE'S SHAPE SETS. Because the factory spreads `importActual`,
+// a boot fetch NOT listed below resolves to the real wrapper, which rejects
+// outside a webview — the boot `Promise.all` then rejects, its `.catch` swallows
+// the reason, and every test in this file goes red looking unrelated. Add the
+// mock in the same commit that adds the fetch.
 vi.mock("./lib/tauri", async () => {
   const actual = await vi.importActual<Record<string, unknown>>("./lib/tauri");
   return {
     ...actual,
     listSessions: vi.fn().mockResolvedValue([]),
     listSpaces: vi.fn().mockResolvedValue([]),
+    // The ADR 0075 recency fetch (which also carries the row's order number).
+    // REQUIRED, not tidy: this factory spreads `importActual`, so an un-mocked
+    // `sessionRecency` fires a real `invoke`, the boot `Promise.all` rejects,
+    // and the `.catch` swallows the reason. Measured with this line removed:
+    // 3 of the file's 41 tests go red, and only ONE names recency — the other
+    // two are Settings/start-failure cases that merely need a booted store, so
+    // they fail with `activeSpacePath: null` and look nothing like the cause.
+    // (The "~40 reds" this comment used to claim was never measured; the file's
+    // other boot mocks do not gate the whole suite.)
+    sessionRecency: vi.fn().mockResolvedValue([]),
     listSkills: vi.fn().mockResolvedValue([]),
     // `startSession`: required for the same reason as the catalog fetches below
     // — this factory spreads `importActual`, so the ⌘N chord's store command
@@ -1533,5 +1550,75 @@ describe("App (a failed ⌘N says why on the SETTINGS page)", () => {
     expect(screen.getByTestId("new-session-error").textContent).toContain(
       "the harness could not start",
     );
+  });
+});
+
+describe("App (the ADR 0075 recency fetch at boot)", () => {
+  // This file resets by hand-written key lists (nine of them, none importing
+  // `src/test/resetStores.ts`) — the exact leak that module exists to end. This
+  // describe follows the local pattern rather than starting the 9-describe
+  // refactor, but its key list NAMES BOTH new maps: a map seeded by one boot
+  // test otherwise survives into a later test in this file.
+  const clearStore = () =>
+    useSessions.setState({
+      sessions: [],
+      historySessions: [],
+      archivedSessions: [],
+      spaces: [],
+      activeSessionId: null,
+      activeSpacePath: null,
+      messages: {},
+      sessionRecency: {},
+      sessionOrder: {},
+    });
+  beforeEach(clearStore);
+  afterEach(clearStore);
+
+  it("boot fetches sessionRecency alongside listSessions and listSpaces and fills both maps before setSpaces runs", async () => {
+    vi.mocked(sessionRecency).mockResolvedValueOnce([
+      { sessionId: "h1", lastActiveAt: 9_000_000_000_000, sortOrder: 7 },
+    ]);
+    // The ORDER half of the contract, watched rather than assumed: `setSpaces`
+    // runs `autoSelectActive`, which since ADR 0075 decides the Landing Session
+    // from the recency map, so the map has to be filled FIRST. A `set` reports
+    // no order, so the store's own notification stream is the witness: every
+    // snapshot is captured with both the maps and the spaces, and the first
+    // snapshot that has Spaces must ALREADY have the recency entry.
+    const snapshots: Array<{
+      recency: Record<string, number>;
+      spaceCount: number;
+    }> = [];
+    const unsubscribe = useSessions.subscribe((s) => {
+      snapshots.push({ recency: s.sessionRecency, spaceCount: s.spaces.length });
+    });
+    vi.mocked(listSpaces).mockResolvedValueOnce([
+      { path: "/tmp/alpha", createdAt: 0, lastOpenedAt: 1, trusted: false },
+    ]);
+    render(<App />);
+    // Drain the boot effect the way this file already does.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    unsubscribe();
+    // EXACTLY once: the ORDER map rides this same payload, so a second IPC
+    // round-trip for the numbers the recency rows already carry is a regression
+    // against the reason the field was put on the payload at all.
+    expect(sessionRecency).toHaveBeenCalledTimes(1);
+    expect(useSessions.getState().sessionRecency).toEqual({
+      h1: 9_000_000_000_000,
+    });
+    expect(useSessions.getState().sessionOrder).toEqual({ h1: 7 });
+    // The ORDER assertion: the first snapshot in which Spaces have landed must
+    // ALREADY carry the recency entry. Swap the two `set` calls in `App.tsx` and
+    // this is the line that goes red — `setSpaces` would have run
+    // `autoSelectActive` over an empty map.
+    const withSpaces = snapshots.find((s) => s.spaceCount > 0);
+    expect(withSpaces?.recency).toEqual({ h1: 9_000_000_000_000 });
+    // The "BEFORE `setSpaces`" half of this test's name is not assertable from
+    // here — `set` does not report an order, and the consequence (boot landing
+    // on the recency-decided Session) belongs to the store's own boot test in
+    // `sessions.test.ts`, which drives `setSpaces` directly. What THIS file can
+    // pin is that the fetch happens, once, and that both maps are filled by the
+    // single payload.
   });
 });

@@ -18,7 +18,7 @@ import type {
 // Spaces commands (boot, the new-session dialog, "forget this space")
 // ---------------------------------------------------------------------------
 
-/** All spaces, most recently opened first. */
+/** All spaces, in the user's MANUAL ORDER (see `Db::list_spaces`; the order column is a Rust-side storage detail and never crosses the wire). Nothing but a drag (`reorderSpaces`) moves a row (ADR 0075). */
 export async function listSpaces(): Promise<SpaceRow[]> {
   return invoke<SpaceRow[]>("list_spaces");
 }
@@ -39,4 +39,10 @@ export async function setSpaceTrusted(path: string, trusted: boolean): Promise<v
 /** Canonicalize a folder and say whether a space row already exists for it. */
 export async function spaceForPath(path: string): Promise<SpaceCheck> {
   return invoke<SpaceCheck>("space_for_path", { path });
+}
+
+
+/** Rewrite the manual order of the spaces in one transaction — the whole tab strip, in its new order. Keyed by the canonical path. */
+export async function reorderSpaces(paths: string[]): Promise<void> {
+  return invoke("reorder_spaces", { paths });
 }

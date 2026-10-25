@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { useSessions } from "../store/sessions";
 import { makeSpaceRow } from "../test/fixtures";
 import { resetModuleFlags, resetStores } from "../test/resetStores";
@@ -53,9 +53,11 @@ const space = (path: string) => makeSpaceRow({ path });
 
 beforeEach(() => {
   // Every store back to its initial state (the hand-written version of this
-  // named nine `useSessions` keys; the store has sixteen data fields, and the
-  // seven it skipped — `contextUsage`, `compacting`, `inTurn`, `stopReasons`,
-  // `stalled`, `history`, `newSessionError` — leaked between cases).
+  // named nine `useSessions` keys and skipped everything else the store carries —
+  // `contextUsage`, `compacting`, `inTurn`, `stopReasons`, `stalled`, `history`,
+  // `newSessionError` among them — and those leaked between cases). No field
+  // count is quoted here: the store's shape moves, and a copied number goes
+  // stale in every copy that repeats it.
   resetStores();
   // The Open-Space-dialog flag is module-scoped: a leaked `true` would auto-mount
   // a real Radix modal (`aria-hidden`ing the rest of the document) in every later
@@ -282,5 +284,82 @@ describe("the space tabs, as rendered (active and inactive are one kind of objec
       expect(cls, "a rounded-top tab is the sheet's edge, not a pill").not.toMatch(/rounded-t-md/);
       expect(cls, "the paint-order hack is back with the bridge").not.toMatch(/relative z-\d+/);
     }
+  });
+
+  it("a drag in flight changes the TARGET pill by exactly the two indicator tokens, and adds no node", () => {
+    // The pill's "one kind of object" contract has to survive the drag feature
+    // (ADR 0075, T07). The indicator is a CLASS on the real pill — the spec
+    // forces it, because the obvious alternatives (a placeholder pill, a
+    // portal-drawn ghost) would add a DOM level to a strip whose tests resolve
+    // through ancestry — so the WHOLE difference a gesture makes must be two
+    // tokens on one element.
+    //
+    // TWO COMPETING ANSWERS: the target pill's token set gains EXACTLY
+    // `border-l-2` + `border-brand` and the strip's element count is unchanged
+    // (correct), vs a call site that smuggles in height/shadow utilities, or a
+    // placeholder element inserted beside the pills (the count moves, and every
+    // ancestry-resolving query in the repo's tab tests starts lying).
+    // (`border-l-2`, not the sidebar's `border-t-2`: this strip is horizontal, so
+    // the call site paints "earlier" on the pill's LEFT edge. The token pair is
+    // the call site's own choice — see `SpaceTabs.test.tsx`, which asserts the
+    // left/right pair here and the sidebar's top/bottom pair in
+    // `SpacesList.test.tsx`.)
+    useSessions.setState({
+      spaces: [space(ALPHA), space(BETA)],
+      activeSpacePath: ALPHA,
+    });
+    const view = render(<SpaceTabs />);
+    const pill = (name: string) =>
+      screen.getByRole("tab", { name }).parentElement!;
+    const tokens = (el: HTMLElement) =>
+      [...new Set(el.className.split(/\s+/).filter(Boolean))].sort();
+    const elementCount = () =>
+      screen.getByTestId("space-tabs").querySelectorAll("*").length;
+
+    const targetWas = tokens(pill("beta"));
+    const otherWas = tokens(pill("alpha"));
+    const countWas = elementCount();
+
+    // A drag in flight: `alpha` held, pointer over the LEFT half of `beta`. The
+    // rect override + hand-built event are the two jsdom idioms the drag tests
+    // in `SpaceTabs.test.tsx` document — without them the half is not a fact the
+    // test chooses.
+    //
+    // THE GEOMETRY IS HORIZONTAL, and that is the whole point of the override
+    // below: the strip is a row, so the pills share a y range and differ in x,
+    // and the pointer travels in X with `clientY` sitting exactly on their shared
+    // vertical midpoint (116 of 100..132). Under the pre-fix hook — which read
+    // `clientY` for both lists — that pointer answered "after" and this drag was
+    // a NO-OP, so the assertion below would have seen NO new tokens at all.
+    const pillRect = (left: number) => () =>
+      ({ top: 100, bottom: 132, height: 32, width: 120, left, right: left + 120, x: left, y: 100, toJSON: () => ({}) }) as DOMRect;
+    const from = pill("alpha");
+    const to = pill("beta");
+    from.getBoundingClientRect = pillRect(0);
+    to.getBoundingClientRect = pillRect(100); // 100..220, midpoint 160
+    const mk = (type: string, x: number, y: number) => {
+      const ev = new Event(type, { bubbles: true, cancelable: true });
+      Object.assign(ev, {
+        clientX: x,
+        clientY: y,
+        dataTransfer: { setData: () => {}, getData: () => "", setDragImage: () => {} },
+      });
+      return ev;
+    };
+    fireEvent(from, mk("dragstart", 60, 116));
+    // The vertical CENTRE (116) and the target's LEFT half (x 110 < 160): a
+    // rightward intent stated entirely in X.
+    fireEvent(to, mk("dragover", 110, 116));
+
+    expect(
+      tokens(to).filter((t) => !targetWas.includes(t)),
+      "the drop indicator is not the two pinned tokens",
+    ).toEqual(["border-brand", "border-l-2"]);
+    // The pill the pointer is NOT over is untouched — no second answer to "which
+    // pill is the target".
+    expect(tokens(pill("alpha"))).toEqual(otherWas);
+    // And nothing was INSERTED to draw the edge with.
+    expect(elementCount(), "the indicator added a DOM node").toBe(countWas);
+    view.unmount();
   });
 });

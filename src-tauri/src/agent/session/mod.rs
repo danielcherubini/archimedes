@@ -1240,7 +1240,7 @@ impl SessionManager {
         Ok(info)
     }
 
-    /// All stored sessions (most recently ACTIVE first — `Db::list_sessions`),
+    /// All stored sessions, in the user's MANUAL ORDER (`Db::list_sessions`),
     /// as `SessionInfo` (the `list_sessions` command's shape): the row's
     /// `capabilities` (the
     /// `normalize_capabilities` camelCase envelope), `config_options`

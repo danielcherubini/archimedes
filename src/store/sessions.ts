@@ -6,6 +6,8 @@ import {
   deleteSession as deleteSessionCommand,
   deleteSpace as deleteSpaceCommand,
   loadHistory,
+  reorderSessions as reorderSessionsCommand,
+  reorderSpaces as reorderSpacesCommand,
   resumeSession as resumeSessionCommand,
   setSessionArchived as setSessionArchivedCommand,
   setSpaceTrusted as setSpaceTrustedCommand,
@@ -14,10 +16,17 @@ import {
   type CloseReasonStr,
   type SessionConfigOption,
   type SessionInfo,
+  type SessionRecency,
   type SpaceRow,
   type StopReason,
 } from "../lib/tauri";
 import { basenameOfPath } from "../lib/paths";
+import {
+  mostRecentByRecency,
+  sortByManualOrder,
+  sortByRecency,
+  type RecencyEvidence,
+} from "../lib/sessionRecency";
 import { describeIpcError } from "../lib/ipcError";
 import { openNewSpaceDialog } from "../lib/newSpaceDialogState";
 import type { SessionUpdateBatchItem } from "../lib/batchSessionUpdates";
@@ -83,35 +92,44 @@ export function discardSessionMessages(sessionId: string): void {
 }
 
 /**
- * The session a fresh boot should land on: the most recently opened
- * space's newest session, live (in `sessions`) preferred over stored.
- * `null` when there's nothing.
+ * **Ordering note.** Both read queries the store boots from — `Db::list_spaces`
+ * and `Db::list_sessions` — return the user's MANUAL ORDER, so the store's input
+ * order IS the display order and the store still NEVER re-sorts. That rule is
+ * unchanged by ADR 0075 and it is now true for a better reason: the order is
+ * something the user arranged, not something the server inferred.
  *
- * **Ordering note:** `SessionInfo` over IPC has NO `createdAt` field (it is
- * `{ sessionId, cwd, capabilities }` — the Rust `SessionInfo` struct has no
- * such field). So we CANNOT sort by `createdAt`.
- * We rely on SERVER order instead: `Db::list_sessions` returns
- * `ORDER BY COALESCE(last message's created_at, created_at) DESC, id DESC` —
- * LAST ACTIVITY, so the head of a space's `historySessions` subsequence is the
- * session of that space the user used most recently, not the one they started
- * most recently — and `Db::list_spaces` returns
- * `ORDER BY last_opened_at DESC, path ASC`, and the store slices only
- * `filter`/`map` those rows (preserving order). Therefore "most recently active
- * first" **is** the input order — `spaces[0]` is the most recently opened space.
- * Do NOT re-sort by a field that doesn't exist.
+ * What ADR 0075 took away is the other half. Position carries NO evidence: it is
+ * not a proxy for recency, and since the columns became user-owned nothing moves
+ * a row again — not a new message, not a close, not a boot. So:
+ *  - RECENCY is a FIELD the store holds (`sessionRecency`, fed by the boot
+ *    `sessionRecency()` command) and a RULE `lib/sessionRecency` owns — ask it
+ *    with `recencyOf` / `mostRecentByRecency`, never by looking at a list head;
+ *  - so is POSITION (`sessionOrder`, from the SAME payload), merged into
+ *    `SpaceView.sessionIds` by `mergeSessionOrder`. A Space's sidebar rows are
+ *    ONE sequence spanning live and stored — there is no live block to keep at
+ *    the front, and a Session RESUMED this boot keeps the slot its row holds.
+ *    Re-introducing a live-first group here would move a row the user positioned.
+ *    The map is a BOOT SNAPSHOT only until a drag writes it: `reorderSessions`
+ *    is the mid-run writer, and it writes THE MAP — reordering the derived array
+ *    instead would be undone by the next `mergeSessionOrder`, and the dragged row
+ *    would snap back.
+ *    The numbers are comparable WITHIN one Space only, because
+ *    `mergeSessionOrder` is called with one Space's ids and nowhere else (so a
+ *    slice renumbered `0..n-1` cannot disturb another Space's rows — and the Rust
+ *    command renumbers the same way, which is why the map agrees with the
+ *    database rather than approximating it).
  *
- * (The SIDEBAR additionally re-sorts by the loaded transcript's last stamp —
- * `lib/sessionActivity` — because a session that CLOSED this boot is appended
- * to `historySessions` by `handleSessionClosed` and no server order can know
- * about it.)
+ * Therefore `spaces[0]` is the LEFTMOST tab, not the tab that was opened last,
+ * and the head of a Space's stored subsequence is the first row of a manual
+ * arrangement, not the Session the user used last.
  */
 
 /**
- * All live session IDs belonging to a space, ordered newest-first (most
- * recently started at index 0).
+ * All live session IDs belonging to a space, most recently STARTED first (that
+ * one at index 0 — a fact about when the Worker began, NOT recency: ADR 0075).
  *
  * `sessions` is in insertion order (appended by `addSession` / `resumeSession`),
- * so reversing the filtered slice yields newest-first.
+ * so reversing the filtered slice yields most-recently-STARTED first.
  */
 export function liveSessionsInSpace(
   sessions: SessionInfo[],
@@ -145,18 +163,24 @@ export function autoSelectActive(
   spaces: SpaceRow[],
   sessions: SessionInfo[],
   historySessions: SessionInfo[],
+  evidence: RecencyEvidence,
 ): string | null {
+  // Spaces are in the user's MANUAL ORDER, so the FIRST Space that owns any
+  // session is the leftmost tab with something to show — that is the meaning
+  // boot wants, and it is unchanged. What changed is the WITHIN-Space choice:
+  // the most RECENT stored Session by `recencyOf`, not the head of the
+  // subsequence (ADR 0075).
   for (const space of spaces) {
     // A space may hold MORE than one live session (the one-live cap is
     // lifted): `mostRecentLiveInSpace` picks the
     // most-recently-started one (coherent with `activeSessionId`).
     const live = mostRecentLiveInSpace(sessions, space.path);
     if (live) return live;
-    // No re-sort: input order IS newest-first (see the ordering note).
     const stored = historySessions
       .filter((s) => s.cwd === space.path)
       .map((s) => s.sessionId);
-    if (stored.length > 0) return stored[0];
+    const recent = mostRecentByRecency(stored, evidence);
+    if (recent !== null) return recent;
   }
   return null;
 }
@@ -165,9 +189,9 @@ export function autoSelectActive(
  * One per-space group for the UI (used by both this store and the Task 6
  * components). Built with the same input-order rule as `autoSelectActive`.
  *
- * Supports multiple coexisting live sessions per space: `liveSessionIds`
- * contains all active live sessions ordered newest-first, while `liveSessionId`
- * points to the most recently started live session (or `null`).
+ * A Space may hold more than one live session; `liveSessionId` points to the
+ * most recently STARTED one (or `null`) — the tab's live dot.
+ * `sessionIds` is what the rows RENDER — one sequence, not a live block.
  *
  * Note: a session without a space is NOT a case here by design — a space is
  * born at the same time as a session (the `record_session → upsert_space`
@@ -178,27 +202,56 @@ export interface SpaceView {
   path: string;
   /** Display label (base name; `""` if the base name is empty — the UI falls back to `path`). */
   title: string;
-  /** All live sessions in this space, most recently STARTED at index 0
-   * (reverse insertion order). The SIDEBAR re-sorts this by last ACTIVITY for
-   * display — `lib/sessionActivity` — because "started last" and "used last"
-   * are different facts once a space holds more than one Worker. */
-  liveSessionIds: string[];
-  /** The most recent live session in this space, or `null`. */
+  /**
+   * THE one order this Space's sidebar rows render (ADR 0075): ONE sequence
+   * spanning live and stored, no group headers, no re-sorting by anything the
+   * user did not do. Built from this Space's live and stored rows plus the boot
+   * order map by ONE function (`mergeSessionOrder`) so the rows and the
+   * collapsed rail cannot disagree, and so a row keeps its slot whether its
+   * Worker is live, stored, or has just been resumed.
+   * Position here means position, nothing more — recency is `lib/sessionRecency`.
+   */
+  sessionIds: string[];
+  /** The most recent live session in this space, or `null` (the tab's live dot). */
   liveSessionId: string | null;
-  /** Stored sessions of this space, in `list_sessions` order (most recently
-   * ACTIVE first — see the ordering note above). Do NOT re-sort here; the
-   * sidebar re-sorts what it can prove (`lib/sessionActivity`). */
-  storedSessionIds: string[];
   /**
    * Archived sessions of this space (NOT rendered in the Space group —
    * used only for `view` membership, so a space whose only sessions are
-   * archived still resolves its `view`).
+   * archived still resolves its `view`). Its own order comes from
+   * `archivedInSpace`, not from this field or from `sessionIds`.
    */
   archivedSessionIds: string[];
   /** Whether the space is trusted (permission prompts for gated tools are auto-approved). */
   trusted: boolean;
-  /** Close reason of the space's newest session (live one preferred, else the head of the stored subsequence, else the head of the archived subsequence), if any. */
+  /** Close reason of the space's Landing Session (a live one preferred, else the most RECENT stored Session by `recencyOf`, else the most recent archived one as a last resort), if any. */
   lastReason: CloseReasonStr | undefined;
+}
+
+/**
+ * THE one sequence a **Space**'s sidebar rows render: live and stored rows
+ * interleaved by their stored order numbers, ONE sequence with no group
+ * boundary (ADR 0075; the spec's Section 2 — the live-before-stored split has
+ * no headers, so keeping it was an invisible rule that made a dragged row jump
+ * when its Session closed or resumed, i.e. "stop them moving around" half-fixed).
+ *
+ * A row the order map does not know — a Session started after the boot fetch —
+ * goes at the BOTTOM, which is the spec's "new rows join at the bottom" rule
+ * restated for a client that has not written the row's number yet.
+ *
+ * With an EMPTY map every id is unknown, every id ties, and the answer is live
+ * rows then stored rows in input order: the pre-T03 sequence. That is not
+ * a fallback path, it is stability under no information, and it is what keeps
+ * every pre-existing fixture's expected order honest.
+ */
+export function mergeSessionOrder(
+  liveSessionIds: readonly string[],
+  storedSessionIds: readonly string[],
+  orderMap: Record<string, number>,
+): string[] {
+  // ONE union, ONE sort. A live id is never in `storedSessionIds` (both
+  // `addSession` and `resumeSession` filter it out of the stored arm when they
+  // add it to the live one), so the concatenation cannot double-count a row.
+  return sortByManualOrder([...liveSessionIds, ...storedSessionIds], orderMap);
 }
 
 export function spaceViewFor(
@@ -207,10 +260,14 @@ export function spaceViewFor(
   historySessions: SessionInfo[],
   closeReasons: Record<string, CloseReasonStr>,
   archivedSessions: SessionInfo[],
+  evidence: RecencyEvidence,
+  orderMap: Record<string, number>,
 ): SpaceView {
   const liveSessionIds = liveSessionsInSpace(sessions, space.path);
   const liveSessionId = liveSessionIds[0] ?? null;
-  // Input order = newest-first from `list_sessions`; NOT re-sorted.
+  // Store input order = the server's MANUAL ORDER. NOT re-sorted, and NOT
+  // evidence of anything (ADR 0075; the ordering note above says why). The
+  // order MAP is what lets a live row rejoin this sequence by position.
   const storedSessionIds = historySessions
     .filter((s) => s.cwd === space.path)
     .map((s) => s.sessionId);
@@ -219,26 +276,67 @@ export function spaceViewFor(
   const archivedSessionIds = archivedSessions
     .filter((s) => s.cwd === space.path)
     .map((s) => s.sessionId);
-  // The close reason of the session the user would LAND on: the live one, else
-  // the head of the stored subsequence (which `list_sessions` puts there by last
-  // ACTIVITY, so this is the session the boot would open, not the one created
-  // last), else the head of the archived subsequence (an archived session is
-  // still the space's most recent stored session — the close-reason banner must
-  // not silently vanish for an archived-only space); nothing when the space has
-  // no sessions.
-  const newestId =
-    liveSessionId ?? storedSessionIds[0] ?? archivedSessionIds[0];
+  // The session the user would LAND on for this Space: a live one first (a
+  // Space holding a Worker mid-turn shows that turn), else the most RECENT
+  // stored Session by `recencyOf` — NOT the head of the stored subsequence,
+  // which since ADR 0075 is merely the first row of a manual arrangement —
+  // else the most recent archived one as a last resort (the close-reason banner
+  // must not silently vanish for an archived-only Space). Note this ordering
+  // PREFERENCE is orthogonal to `sessionIds`: which row a tab opens and where
+  // the row RENDERs are different questions with different rules.
+  const landingId =
+    liveSessionId ??
+    mostRecentByRecency(storedSessionIds, evidence) ??
+    mostRecentByRecency(archivedSessionIds, evidence);
   return {
     path: space.path,
     title: basenameOfPath(space.path),
-    liveSessionIds,
+    sessionIds: mergeSessionOrder(liveSessionIds, storedSessionIds, orderMap),
     liveSessionId,
-    storedSessionIds,
     archivedSessionIds,
     trusted: space.trusted,
-    lastReason:
-      newestId === undefined ? undefined : closeReasons[newestId],
+    lastReason: landingId === undefined ? undefined : closeReasons[landingId],
   };
+}
+
+/**
+ * The **Archived** section's rows for one **Space**, in EXPLICIT recency order.
+ *
+ * This is the list ADR 0075 calls the trap: it used to render `archived.filter(…)`
+ * in input order and INHERIT recency for free from `list_sessions`. That query
+ * now returns the manual order, so the same filter would present a manual
+ * arrangement under a recency heading — and pass every pre-existing test while
+ * doing it. So the sort is said out loud, here, by the one function the section
+ * calls.
+ *
+ * The two filters are the section's existing ones and are load-bearing: the
+ * sticky live ids are excluded (a resumed archived Session renders in its Space
+ * group — CONTEXT.md "Archived session"), and rows of another Space are
+ * excluded (a row whose Space has no tab is **Detached** and belongs to
+ * Settings, not here). `spacePath === null` matches nothing, so the section's
+ * "No archived sessions." empty state with no Space selected is preserved.
+ *
+ * Returns ROWS, not ids, mirroring `detachedSessions`: the section renders
+ * `title`/`cwd` straight off them.
+ */
+export function archivedInSpace(
+  spacePath: string | null,
+  archivedSessions: SessionInfo[],
+  liveSessions: SessionInfo[],
+  evidence: RecencyEvidence,
+): SessionInfo[] {
+  const liveIds = new Set(liveSessions.map((s) => s.sessionId));
+  const visible = archivedSessions.filter(
+    (s) => s.cwd === spacePath && !liveIds.has(s.sessionId),
+  );
+  const byId = new Map(visible.map((s) => [s.sessionId, s]));
+  // The `!` is safe by construction — every id came out of `visible` — and the
+  // store already uses this idiom (`bySession.get(sessionId)!` in
+  // `applySessionUpdates`). `Map.get` cannot be narrowed any cheaper here.
+  return sortByRecency(
+    visible.map((s) => s.sessionId),
+    evidence,
+  ).map((id) => byId.get(id)!);
 }
 
 /**
@@ -256,7 +354,7 @@ export function spaceViewFor(
  *
  * The match is the same raw byte-for-byte string equality every other
  * Space↔session join in this file uses (`liveSessionsInSpace`,
- * `spaceViewFor`'s `storedSessionIds`/`archivedSessionIds` filters). Do NOT
+ * `spaceViewFor`'s `stored` / `archivedSessionIds` filters). Do NOT
  * normalise or canonicalise the path here — a normalised key would silently
  * disagree with those sites. It is also pure string equality with no
  * filesystem access: a row whose folder was deleted from disk is simply
@@ -267,11 +365,13 @@ export function spaceViewFor(
  * Close-anyway path calls `closeSpace` with no `stopSessionIds` (ADR 0043), so
  * a live session with no Space row is reachable.
  *
- * Order is the input order — `historySessions` first (stored rows in
- * `list_sessions` order, most-recently-ACTIVE first), then `archivedSessions`.
- * Do NOT "fix" this by sorting: `sortByActivity` needs loaded transcripts,
- * which the consuming Settings section has none of, and `SessionInfo` carries
- * no `createdAt` (see the ordering note above).
+ * Order is the store's input order — `historySessions` first (stored rows in
+ * the user's MANUAL ORDER, which is what `list_sessions` now returns), then
+ * `archivedSessions` in theirs. That is deliberate, not an oversight: Settings →
+ * Detached sessions is a MANAGEMENT list, not a recency list, so inheriting the
+ * manual order is the right answer and needs no sort. (It used to inherit
+ * recency by accident, because the query used to sort that way — see the
+ * ordering note above and ADR 0075.)
  */
 export function detachedSessions(
   spaces: { path: string }[],
@@ -375,6 +475,31 @@ interface SessionsState {
    * keys are never deleted.
    */
   closeReasons: Record<string, CloseReasonStr>;
+  /**
+   * Last activity per session id, in Unix ms, from the boot `session_recency`
+   * command (ADR 0075: position is not evidence, so anything that wants recency
+   * has to hold it as a FIELD). Same shape as `closeReasons`, and the same
+   * boot-fetched side-channel — but NOT merge-only: `setSessionRecency`
+   * replaces the whole map, because the command answers "every non-subagent
+   * session as of now" and a stale id must not outlive its row.
+   * Read ONLY through `lib/sessionRecency`'s `recencyOf` — never indexed by a
+   * call site, or the one rule has two owners.
+   */
+  sessionRecency: Record<string, number>;
+  /**
+   * Position per session id in the user's MANUAL ORDER, from the SAME boot
+   * payload as `sessionRecency` (bigger number = lower row; a row started after
+   * boot simply has no entry and sorts at the bottom).
+   *
+   * This is what makes ONE sequence span live and stored: a live row's position
+   * is knowable, so a Session RESUMED this boot keeps the slot the database
+   * holds for it instead of jumping to the front of a "live block". It is a
+   * position and nothing else — never evidence (ADR 0075) — and it is read ONLY
+   * by `mergeSessionOrder` via `sortByManualOrder`.
+   */
+  sessionOrder: Record<string, number>;
+  /** Replace BOTH maps from `sessionRecency()`'s rows (boot, alongside `setHistorySessions`). ONE call, ONE IPC round-trip's payload: the two maps must never be observable out of step. */
+  setSessionRecency: (rows: SessionRecency[]) => void;
   /** Transcript per session id. Kept after close for history. */
   messages: Record<string, Message[]>;
   /** Config options per session id. */
@@ -435,20 +560,22 @@ interface SessionsState {
   setActiveSession: (sessionId: string | null) => void;
   /**
    * Select a Space (the tab click): it becomes `activeSpacePath` and its
-   * most recent session opens — a LIVE session first (the most-recently
-   * started one, the one-live-cap-lifted rule), then the newest stored
-   * (input order — do NOT re-sort), then NOTHING (an empty space lands
-   * on the chat's empty state). A no-op for an unknown path.
+   * **Landing Session** opens — a LIVE session first (the most-recently
+   * started one, the one-live-cap-lifted rule), then the most RECENT stored
+   * one (`recencyOf`, which is NOT necessarily the first row of the Space's
+   * manual order), then NOTHING (an empty space lands on the chat's empty
+   * state). A no-op for an unknown path.
    */
   selectSpace: (path: string) => void;
   /**
-   * Boot: replace the spaces list (from `list_spaces`, `lastOpenedAt`-desc).
-   * If nothing is active yet, select via `autoSelectActive` (the most recent
-   * space's newest session, live preferred) and load it: `autoSelectActive`
-   * lands on a stored session (live ones never survive a restart), so the
-   * `openSession` call loads its transcript and boot lands on CONTENT, not
-   * an empty chat (no-op for live / already-loaded sessions; the fetch is
-   * self-guarding against a mid-flight switch).
+   * Boot: replace the spaces list (from `list_spaces`, in the user's MANUAL
+   * ORDER). If nothing is active yet, select via `autoSelectActive` (the
+   * LEFTMOST Space that owns a session, its most RECENT session, live
+   * preferred) and load it: `autoSelectActive` lands on a stored session (live
+   * ones never survive a restart), so the `openSession` call loads its
+   * transcript and boot lands on CONTENT, not an empty chat (no-op for live /
+   * already-loaded sessions; the fetch is self-guarding against a mid-flight
+   * switch).
    */
   setSpaces: (rows: SpaceRow[]) => void;
   /**
@@ -465,8 +592,9 @@ interface SessionsState {
    * gone, not what the user should be looking at next.
    *
    * RETURNS the Space the view has to fall back to when the removed one WAS
-   * the selected one: the first remaining row (input order — `lastOpenedAt`
-   * desc), or `null` when none remains. Removing a Space that was NOT selected
+   * the selected one: the LEFTMOST remaining tab (the first row of the manual
+   * order — since ADR 0075 that is what a neighbour tab means), or `null` when
+   * none remains. Removing a Space that was NOT selected
    * also answers `null` (there is nothing to fall back to), so a caller that
    * must tell "no Space left" from "a background Space went" has to remember
    * whether the removed Space was the selected one — which is exactly what
@@ -488,10 +616,11 @@ interface SessionsState {
    * standing decision recorded on it), so re-opening the folder returns the
    * Space WITH its history.
    * 3. Closing the SELECTED tab lands the user on the neighbour it fell back
-   * to, through `selectSpace` — so the chat shows that Space's most recent
-   * Session (live first, else newest stored) rather than a transcript whose
-   * tab is gone. The fallback path itself is `removeSpace`'s decision; this
-   * reads the result instead of restating the rule. When there is NO fallback
+   * to (the LEFTMOST remaining tab), through `selectSpace` — so the chat shows
+   * that Space's **Landing Session** (a live one first, else the most RECENT
+   * stored one by `recencyOf`) rather than a transcript whose tab is gone. The
+   * fallback path itself is `removeSpace`'s decision; this reads the result
+   * instead of restating the rule. When there is NO fallback
    * (the last tab), this clears `activeSessionId` so the chat shows its empty
    * state — see the note in the implementation.
    */
@@ -528,6 +657,45 @@ interface SessionsState {
    * flag rolls back to the previous value.
    */
   setSpaceTrusted: (path: string, trusted: boolean) => void;
+  /**
+   * Rewrite the manual order of ONE Space's visible Session rows (the sidebar
+   * drag's write path, ADR 0075). Optimistic — the ORDER MAP `sessionOrder` is
+   * updated synchronously, then `reorder_sessions` fires with the WHOLE slice in
+   * its new order — and on rejection the last COMMITTED map is restored (see
+   * `committedReorder`: the store's CURRENT map may be an earlier drag's
+   * uncommitted one) and the failure logged. NEVER rejects: the call site
+   * `void`s it and a rejection would be an
+   * unhandled rejection in the webview (see `useAgentOverridesWrites` for why that
+   * matters and where the epoch rule comes from).
+   *
+   * THE MAP, NOT THE ARRAY, AND THAT IS THE WHOLE POINT: `mergeSessionOrder`
+   * re-sorts the live∪stored union from `sessionOrder` on every derivation, so a
+   * write that only reordered `historySessions` would be undone by the next
+   * `spaceViewFor` — the row would snap back. `sessionOrder` is a boot snapshot
+   * until this action writes it.
+   *
+   * `ids` is the whole visible slice (`SpaceView.sessionIds`), live rows included
+   * (a live Session HAS a `sessions` row — `record_session` writes it at start —
+   * so renumbering it is meaningful) and archived rows EXCLUDED (the Archived
+   * section is recency-ordered and must not be renumbered invisibly). The store
+   * does not re-derive that slice: what is visible is the render layer's answer,
+   * and a second owner of it is a second thing that can disagree.
+   */
+  reorderSessions: (ids: string[]) => Promise<void>;
+  /**
+   * Rewrite the manual order of the Space tab strip (the tab drag's write path,
+   * ADR 0075). Same shape as `reorderSessions` — optimistic, ONE
+   * `reorder_spaces` call with the WHOLE strip, rollback on rejection, never
+   * rejects — with one deliberate asymmetry: **Spaces carry position in the
+   * ARRAY**, because `spaces.map(…)` IS the tab strip and `SpaceRow` carries no
+   * order field (the column never crosses the wire), while Sessions carry it in
+   * `sessionOrder`. So there is no map to write here and no snap-back hazard;
+   * what this action owns instead is the array's integrity — a row the slice does
+   * not name is KEPT, at the bottom (the approved new-row rule, so a tab opened
+   * mid-drag survives the write instead of vanishing with it), and a path the
+   * store has no row for is skipped, because it cannot be rendered.
+   */
+  reorderSpaces: (paths: string[]) => Promise<void>;
   /** Populate the history list from `list_sessions` (boot). */
   setHistorySessions: (rows: SessionInfo[]) => void;
   /**
@@ -604,6 +772,168 @@ const inFlightToggles = new Map<string, Promise<void>>();
 // baseline; the UI-value fallback below is a last resort only.
 const committedTrusted = new Map<string, boolean>();
 
+// The reorder write path (ADR 0075). ONE chain per list: two drags in the same
+// list must land in the order they happened, exactly as `inFlightToggles` does
+// for the trust flag. App-global per LIST (not per Space): the command rewrites
+// a whole slice, so two overlapping writes to the same table cannot be ordered
+// by anything but a chain. A stored promise never rejects (each link catches), so
+// a failed drag cannot poison the next one.
+const reorderChain: { sessions: Promise<void>; spaces: Promise<void> } = {
+  sessions: Promise.resolve(),
+  spaces: Promise.resolve(),
+};
+// How many optimistic reorder publishes each list has made. A failing link
+// compares its own epoch and DISCARDS its rollback if a newer drag has published
+// since — a rollback IS a publish, and a stale one deletes a newer move
+// (`useAgentOverridesWrites`' rule, copied). What is NOT copied from that hook is
+// its read-modify-write of a document: there is no file to re-read here, and the
+// epoch does not affect the success path at all.
+const reorderEpoch = { sessions: 0, spaces: 0 };
+
+// The last order each list is KNOWN to hold in the DATABASE — the rollback target
+// for a failed drag, and the reason a drag no longer captures
+// `get().sessionOrder` / `get().spaces` as its undo snapshot. The store's CURRENT
+// value is not the committed one: both actions publish optimistically, and the epoch
+// guard above deliberately DISCARDS an older drag's rollback — so with two drags
+// whose commands BOTH fail, a snapshot taken from the store restores the FIRST
+// drag's optimistic, never-committed order and the list settles on an arrangement
+// the database never held (it re-arranges at the next boot into something the user
+// never asked for and was never told had failed). The same argument as
+// `committedTrusted` above, one level up: a rollback target is what the database
+// says, never what the UI shows.
+//
+// WRITERS, and only these, because only they are DB-backed truth: `setSessionRecency`
+// (the boot map, filled from each row's `sort_order`) and `setSpaces` (the boot
+// array); a drag whose command SUCCEEDED, whose slice is APPLIED to the baseline
+// rather than copied out of the store; and the non-drag `spaces` writers
+// (`addSpace` / `removeSpace` / `setSpaceTrusted`) through `recordSpacesWrite`. An
+// optimistic publish NEVER writes it. That is the whole point.
+//
+// MODULE-SCOPE, so `resetStores()` cannot reach it (its own docs say so, and
+// `src/test/fixtures.test.ts` pins that). Neither `reorderChain` nor `reorderEpoch`
+// has a reset and none is added here; instead the snapshot is made HARMLESS when it
+// leaks: it is only trusted when the store's value cannot be an outstanding publish,
+// so ANY other writer — a boot fill, `resetStores()`, a test's `setState` — re-seeds
+// it from the store. Every test's boot path (`setSessionRecency` / `setSpaces`) also
+// reseeds it directly.
+const committedReorder: {
+  sessions: Record<string, number>;
+  spaces: SpaceRow[];
+} = { sessions: {}, spaces: [] };
+// What the LAST optimistic publish of each list installed, while its command may
+// still be in flight (`null` = nothing outstanding). The store holding THIS object is
+// the only way to tell "the user is looking at a drag the database has not agreed to"
+// from "the store is showing committed truth" — the publish destroys the evidence,
+// which is exactly why the baseline is recorded at publish time. Any OTHER value the
+// store holds is committed truth by elimination, and the resolvers below re-seed from
+// it rather than trusting a module value that no reset can reach.
+const uncommittedReorder: { sessions: unknown; spaces: unknown } = {
+  sessions: null,
+  spaces: null,
+};
+
+/** The Sessions list's COMMITTED order as of the store value handed in. Called at a
+ *  publish (to record what the optimistic write is about to overwrite), and again at
+ *  a rollback (so a DB-backed write that landed mid-drag is part of what comes back
+ *  instead of being erased by it). */
+function committedSessionsOrder(
+  current: Record<string, number>,
+): Record<string, number> {
+  if (current !== uncommittedReorder.sessions) {
+    committedReorder.sessions = current;
+  }
+  return committedReorder.sessions;
+}
+
+/** The Spaces half of the same rule, on the ARRAY (a Space carries its position in
+ *  the array, so the array IS the order there). */
+function committedSpacesArray(current: SpaceRow[]): SpaceRow[] {
+  if (current !== uncommittedReorder.spaces) {
+    committedReorder.spaces = current;
+  }
+  return committedReorder.spaces;
+}
+
+/** Re-point the "uncommitted order" marker at the array a NON-drag writer
+ *  (`addSpace` / `removeSpace` / a trust toggle) just built FROM the store, and
+ *  change NOTHING ELSE. Those writes replace the array with a fresh object, so the
+ *  object the marker named is gone — without this the resolver would read the store
+ *  as committed truth and LAUNDER a drag the database has not agreed to into the
+ *  baseline, which that drag's own rollback would then RESTORE. The baseline is left
+ *  alone because a value carried over from the store may BE that uncommitted order.
+ *  Handed the array as the store held it BEFORE the write. */
+function carrySpacesOrder(before: SpaceRow[], after: SpaceRow[]): void {
+  if (uncommittedReorder.spaces === before) {
+    uncommittedReorder.spaces = after;
+  }
+}
+
+/** A NON-drag write whose OWN change is committed in the database (`addSpace` and
+ *  `removeSpace`, both after their command; `setSpaceTrusted` on success, and on its
+ *  rollback, which restores the committed flag). The baseline takes that change and
+ *  NOT the store's order: it keeps its own committed sequence and applies `edit` to
+ *  its OWN rows — a flag flipped, a row's `lastOpenedAt`, nothing else moved — and
+ *  loses the rows this write dropped. The baseline never adopts a row object out of
+ *  the store, because with a drag in flight (or a toggle still optimistic) that object
+ *  may carry a value the database has not agreed to, and a rollback would then RESTORE
+ *  it. `edit` is the one exception because the caller knows its own write landed.
+ *  A row the baseline has never seen is NEW, and a new Space enters at the BOTTOM of
+ *  the strip — the same rule the optimistic publish uses, and what `upsert_space`'s
+ *  `MAX(sort_order) + 1` means. Handed the array as the store held it BEFORE the write. */
+function recordSpacesWrite(
+  before: SpaceRow[],
+  after: SpaceRow[],
+  edit: (row: SpaceRow) => SpaceRow,
+): void {
+  carrySpacesOrder(before, after);
+  // MEMBERSHIP is safe to read off the store and ORDER is not: a drag reorders rows,
+  // it never adds or drops one, so which paths exist is committed truth even while one
+  // is in flight — which is what lets a removal reach the baseline without an
+  // uncommitted sequence ever doing so.
+  const present = new Set(after.map((s) => s.path));
+  const committedPaths = new Set(committedReorder.spaces.map((s) => s.path));
+  committedReorder.spaces = [
+    ...committedReorder.spaces
+      .filter((s) => present.has(s.path))
+      .map(edit),
+    ...after.filter((s) => !committedPaths.has(s.path)).map(edit),
+  ];
+}
+
+/** The Sessions write itself, as a function of the order it is applied to: the slice
+ *  index becomes the new number and ids OUTSIDE the slice keep their entries (the
+ *  command updates only the ids it is given, so a wholesale map would sink every other
+ *  Space's rows to the bottom). ONE implementation for the optimistic publish and for
+ *  the success that confirms it — the two must agree exactly, which is the invariant
+ *  the field docs already claim about `Db::reorder_sessions`. */
+function appliedSessionOrder(
+  current: Record<string, number>,
+  ids: readonly string[],
+): Record<string, number> {
+  return {
+    ...current,
+    ...Object.fromEntries(ids.map((id, index) => [id, index])),
+  };
+}
+
+/** The Spaces write itself, the same rule for the same reason: a path the store has no
+ *  row for is skipped (it cannot be rendered, so inserting it would put `undefined` in
+ *  the strip) and a row the slice does not name goes to the BOTTOM (the approved
+ *  new-row rule, and the reason a tab opened mid-drag survives the write rather than
+ *  vanishing with it). */
+function appliedSpaceOrder(
+  current: SpaceRow[],
+  paths: readonly string[],
+): SpaceRow[] {
+  const byPath = new Map(current.map((s) => [s.path, s]));
+  const moved = paths.flatMap((p) => {
+    const found = byPath.get(p);
+    return found ? [found] : [];
+  });
+  const named = new Set(paths);
+  return [...moved, ...current.filter((s) => !named.has(s.path))];
+}
+
 // One new-session command at a time. APP-GLOBAL, not per-Space: there is one
 // selected Space and one new-session flow, and the thing it suppresses is two
 // entry points (the button and the `⌘N` chord, or a double-click) firing in the
@@ -629,6 +959,8 @@ export const useSessions = create<SessionsState>((set, get) => ({
   activeSpacePath: null,
   spaces: [],
   closeReasons: {},
+  sessionRecency: {},
+  sessionOrder: {},
   messages: {},
   history: {},
   configOptions: {},
@@ -685,11 +1017,14 @@ export const useSessions = create<SessionsState>((set, get) => ({
     const state = get();
     const selectedId =
       state.activeSessionId === null
-        ? autoSelectActive(rows, state.sessions, state.historySessions)
+        ? autoSelectActive(rows, state.sessions, state.historySessions, {
+            recency: state.sessionRecency,
+            messages: state.messages,
+          })
         : state.activeSessionId;
     // The selected session's space (matched by `cwd` — the session's `cwd`
-    // IS the Space's folder); when nothing is selected, the most recent
-    // space (the FIRST row — `list_spaces` order is `lastOpenedAt` desc).
+    // IS the Space's folder); when nothing is selected, the LEFTMOST tab (the
+    // FIRST row — `list_spaces` returns the user's MANUAL ORDER).
     const owner =
       selectedId === null
         ? null
@@ -708,6 +1043,10 @@ export const useSessions = create<SessionsState>((set, get) => ({
       activeSessionId: selectedId,
       activeSpacePath: owner ? owner.path : rows[0]?.path ?? null,
     });
+    // `list_spaces` IS the database's manual order (`ORDER BY sort_order`), so this
+    // array is the committed tab strip — the baseline a later drag rolls back to, and
+    // the reason a leaked module value cannot survive a boot.
+    committedReorder.spaces = rows;
     // Seed the committed-trusted baseline from the DB rows: every path
     // now has a known-committed value, so a rollback target is never
     // inferred from a possibly-optimistic UI value.
@@ -724,29 +1063,47 @@ export const useSessions = create<SessionsState>((set, get) => ({
     // a possibly-optimistic UI value. (A re-added space keeps its
     // existing baseline — `setSpaces` re-seeds it from the DB.)
     if (!committedTrusted.has(path)) committedTrusted.set(path, false);
+    const before = get().spaces;
+    const now = Date.now();
+    let written = before;
     set((state) => {
       const existing = state.spaces.find((s) => s.path === path);
-      const now = Date.now();
       const spaces = existing
         ? state.spaces.map((s) =>
             s.path === path ? { ...s, lastOpenedAt: now } : s,
           )
         : [...state.spaces, { path, createdAt: now, lastOpenedAt: now, trusted: false }];
+      written = spaces;
       // The start flow (the dialog / `⌘N`) lands on the new space: it
       // becomes the selected one (the tab bar highlights it).
       return { spaces, activeSpacePath: path };
     });
+    // The row this writes IS a DB row (`record_session`'s `upsert_space` hook ran
+    // before this), so the baseline takes it — at the BOTTOM, which is what
+    // `upsert_space`'s `MAX(sort_order) + 1` means. See `recordSpacesWrite`.
+    recordSpacesWrite(before, written, (row) =>
+      row.path === path ? { ...row, lastOpenedAt: now } : row,
+    );
   },
 
   selectSpace: (path) => {
     const state = get();
     if (!state.spaces.some((s) => s.path === path)) return;
     // Live first (the most-recently-started one — the one-live-cap-lifted
-    // rule), then the newest stored (input order — do NOT re-sort), then
-    // nothing (an empty space → the chat's empty state).
+    // rule), then the most RECENT stored Session (ADR 0075 — NOT the first row
+    // of the Space's manual order), then nothing (an empty space → the chat's
+    // empty state). Both maps go in because this action reads state
+    // imperatively: there is no subscription here, so none of the re-render
+    // cost that keeps `messages` out of the sidebar's call site applies.
     const live = mostRecentLiveInSpace(state.sessions, path);
-    const stored =
-      state.historySessions.find((s) => s.cwd === path)?.sessionId ?? null;
+    const evidence: RecencyEvidence = {
+      recency: state.sessionRecency,
+      messages: state.messages,
+    };
+    const stored = mostRecentByRecency(
+      state.historySessions.filter((s) => s.cwd === path).map((s) => s.sessionId),
+      evidence,
+    );
     const id = live ?? stored;
     set({ activeSpacePath: path, activeSessionId: id });
     // Load the opened session's transcript (a no-op when already loaded —
@@ -765,17 +1122,25 @@ export const useSessions = create<SessionsState>((set, get) => ({
     // (so the two can never disagree) and handed back to the caller, which is
     // the only thing that knows what the view should show next.
     let fallback: string | null = null;
+    const before = get().spaces;
+    let written = before;
     set((state) => {
       const remaining = state.spaces.filter((s) => s.path !== path);
       const wasSelected = state.activeSpacePath === path;
       fallback = wasSelected ? (remaining[0]?.path ?? null) : null;
+      written = remaining;
       return {
         spaces: remaining,
-        // The removed space was the selected one: fall back to the first
-        // remaining space (input order — `lastOpenedAt` desc) or `null`.
+        // The removed space was the selected one: fall back to the LEFTMOST
+        // remaining tab — since ADR 0075 the first row is the user's left-most
+        // tab, which is what a neighbour tab means — or `null`.
         ...(wasSelected ? { activeSpacePath: fallback } : {}),
       };
     });
+    // The `deleteSpaceCommand` above has LANDED, so the row is gone from the
+    // database too: the baseline loses it and nothing else moves (`sort_order` is
+    // untouched by a delete). See `recordSpacesWrite`.
+    recordSpacesWrite(before, written, (row) => row);
     return fallback;
   },
 
@@ -850,11 +1215,19 @@ export const useSessions = create<SessionsState>((set, get) => ({
       committedTrusted.get(path) ??
       get().spaces.find((s) => s.path === path)?.trusted ??
       false;
-    set((state) => ({
-      spaces: state.spaces.map((s) =>
+    const beforeToggle = get().spaces;
+    let toggled = beforeToggle;
+    set((state) => {
+      toggled = state.spaces.map((s) =>
         s.path === path ? { ...s, trusted } : s,
-      ),
-    }));
+      );
+      return { spaces: toggled };
+    });
+    // This flag is OPTIMISTIC — the command has not landed — so the baseline is NOT
+    // told about it, exactly as an optimistic reorder publish is not: a rollback must
+    // never restore a flag the database refused. The marker still has to follow the
+    // new object, or a drag in flight would look committed to the resolver.
+    carrySpacesOrder(beforeToggle, toggled);
     // Chain this command after the previous one for the path (the
     // per-path queue above) so the DB commits in click order. The stored
     // `done` promise never rejects (its errors are handled below), so a
@@ -874,20 +1247,154 @@ export const useSessions = create<SessionsState>((set, get) => ({
         // a removed path — and never writes `committedTrusted`.)
         if (get().spaces.some((s) => s.path === path)) {
           committedTrusted.set(path, trusted);
+          // The flag is DB truth now, so the baseline takes THE FLAG and nothing
+          // else: the order it holds stays the order it had, because another drag may
+          // have published on top of the store since and those numbers are not
+          // committed just because this command landed. Without this a tab drag that
+          // lands after the toggle would roll back to a row whose flag is stale.
+          recordSpacesWrite(toggled, get().spaces, (row) =>
+            row.path === path ? { ...row, trusted } : row,
+          );
         }
       },
       (err) => {
         console.error(`Failed to set trusted for ${path}:`, err);
-        set((state) => ({
-          spaces: state.spaces.map((s) =>
+        const beforeRollback = get().spaces;
+        let restored = beforeRollback;
+        set((state) => {
+          restored = state.spaces.map((s) =>
             s.path === path ? { ...s, trusted: previous } : s,
-          ),
-        }));
+          );
+          return { spaces: restored };
+        });
+        // The flag rolled back to the COMMITTED value, so the baseline's row must
+        // carry it too — it may still be holding the flag this command just refused.
+        // Same rule as the success arm: the edit only, never the store's order.
+        recordSpacesWrite(beforeRollback, restored, (row) =>
+          row.path === path ? { ...row, trusted: previous } : row,
+        );
       },
     );
     inFlightToggles.set(path, done);
   },
 
+  reorderSessions: (ids) => {
+    // The store cannot see a visible slice (that is the render layer's answer), so
+    // it guards only the one degenerate case it CAN see. The "nothing moved" case
+    // is `useDragReorder`'s to refuse, where the list is visible.
+    if (ids.length === 0) return Promise.resolve();
+    // Record the COMMITTED map BEFORE the optimistic publish below overwrites it —
+    // once the write has landed the store can no longer say which of its numbers the
+    // database holds. See `committedReorder`.
+    committedSessionsOrder(get().sessionOrder);
+    reorderEpoch.sessions += 1;
+    const epoch = reorderEpoch.sessions;
+    // Optimistic, and the write is the MAP. Slice index = the new number, which is
+    // exactly what `Db::reorder_sessions` will store, so the two agree without a
+    // round trip. Ids outside the slice keep their entries — the command updates
+    // only the ids it is given, and a wholesale map would sink every other
+    // Space's rows to the bottom.
+    let published: Record<string, number> = {};
+    set((state) => {
+      published = appliedSessionOrder(state.sessionOrder, ids);
+      return { sessionOrder: published };
+    });
+    // THIS map is the outstanding, not-yet-agreed-to order — the one value the next
+    // drag must not mistake for the database.
+    uncommittedReorder.sessions = published;
+    const link = () =>
+      reorderChain.sessions
+        .catch(() => {})
+        .then(() => reorderSessionsCommand(ids))
+        .then(() => {
+          // The command committed exactly THIS slice, so the baseline advances by
+          // exactly this slice. APPLIED, not copied out of the store: the store may
+          // be holding a newer drag's uncommitted numbers for the ids this command
+          // never named, and those are not truth whoever published them.
+          committedReorder.sessions = appliedSessionOrder(
+            committedReorder.sessions,
+            ids,
+          );
+          if (uncommittedReorder.sessions === published) {
+            uncommittedReorder.sessions = null;
+          }
+        })
+        .catch((err) => {
+          console.error("Failed to reorder sessions:", err);
+          if (reorderEpoch.sessions !== epoch) return; // a newer drag owns the store
+          // Restore, do NOT refetch: `setSessionRecency` replaces the recency map
+          // too, so a refetch would be a WIDER mutation than the one being undone —
+          // and the command is one transaction, so the committed order IS the state
+          // to go back to. Resolved NOW, not captured at publish, so a DB-backed
+          // write that landed while this command was in flight is part of what comes
+          // back instead of being erased by it. Read BEFORE the marker moves, which
+          // is what tells the resolver the store is not committed truth yet.
+          const restore = committedSessionsOrder(get().sessionOrder);
+          if (uncommittedReorder.sessions === published) {
+            uncommittedReorder.sessions = null;
+          }
+          set({ sessionOrder: restore });
+        });
+    const done = link();
+    reorderChain.sessions = done;
+    return done;
+  },
+
+  reorderSpaces: (paths) => {
+    if (paths.length === 0) return Promise.resolve();
+    // Record the COMMITTED strip BEFORE the publish destroys the evidence — see
+    // `committedReorder`, and the sessions half above for the whole argument.
+    committedSpacesArray(get().spaces);
+    reorderEpoch.spaces += 1;
+    const epoch = reorderEpoch.spaces;
+    // Optimistic, and the write is the ARRAY — for Spaces that IS the order (ADR
+    // 0075; `views = spaces.map(spaceViewFor)` inherits it, so the tab strip and
+    // the sidebar's group order cannot disagree). A path the store has no row for
+    // is skipped (it cannot be rendered, so inserting it would put `undefined` in
+    // the strip); a row the slice does not name goes to the BOTTOM (the approved
+    // new-row rule, and the reason a tab opened mid-drag survives the write rather
+    // than vanishing with it).
+    let published: SpaceRow[] = [];
+    set((state) => {
+      published = appliedSpaceOrder(state.spaces, paths);
+      return { spaces: published };
+    });
+    uncommittedReorder.spaces = published;
+    const link = () =>
+      reorderChain.spaces
+        .catch(() => {})
+        .then(() => reorderSpacesCommand(paths))
+        .then(() => {
+          // The sessions half's rule: the baseline advances by this slice, applied
+          // to the committed strip rather than copied from a store that may be
+          // showing a newer drag's uncommitted order.
+          committedReorder.spaces = appliedSpaceOrder(
+            committedReorder.spaces,
+            paths,
+          );
+          if (uncommittedReorder.spaces === published) {
+            uncommittedReorder.spaces = null;
+          }
+        })
+        .catch((err) => {
+          console.error("Failed to reorder spaces:", err);
+          if (reorderEpoch.spaces !== epoch) return; // a newer drag owns the store
+          // Restore, do NOT refetch: `setSpaces` is a BOOT action — it re-seeds
+          // `committedTrusted` and, with nothing selected, runs `autoSelectActive`
+          // and `openSession`, so a mid-error refetch could move the selected tab
+          // and fire a transcript load. And the command is one transaction, so the
+          // committed strip IS the state to go back to — resolved at commit, for the
+          // sessions half's reason, and read before the marker moves.
+          const restore = committedSpacesArray(get().spaces);
+          if (uncommittedReorder.spaces === published) {
+            uncommittedReorder.spaces = null;
+          }
+          set({ spaces: restore });
+        });
+    const done = link();
+    reorderChain.spaces = done;
+    return done;
+  },
   mergeRefreshedSessionRows: (rows) =>
     set((state) => {
       // Live ids are SKIPPED: the store's map wins over the row, and a live
@@ -936,6 +1443,23 @@ export const useSessions = create<SessionsState>((set, get) => ({
       );
       return { historySessions: history, archivedSessions: archived };
     }),
+
+  setSessionRecency: (rows) => {
+    // ONE payload, TWO readings: the recency a decision needs and the position
+    // the one sequence needs. Both replaced wholesale (see the field docs).
+    const sessionRecency = Object.fromEntries(
+      rows.map((r) => [r.sessionId, r.lastActiveAt]),
+    );
+    // `sortOrder` is the `sessions.sort_order` column straight off `list_sessions`
+    // (`ORDER BY sort_order`), so this map IS the database's manual order — the
+    // baseline a later drag rolls back to (`committedReorder`), and the boot seed
+    // every test's boot path runs.
+    const sessionOrder = Object.fromEntries(
+      rows.map((r) => [r.sessionId, r.sortOrder]),
+    );
+    committedReorder.sessions = sessionOrder;
+    set({ sessionRecency, sessionOrder });
+  },
 
   archiveSession: async (sessionId) => {
     // No-op when the id is in NONE of the lists — a Session this app run has

@@ -16,6 +16,7 @@ import type {
   HistoryPage,
   SessionConfigOption,
   SessionInfo,
+  SessionRecency,
   StopReason,
 } from "../types";
 
@@ -98,7 +99,7 @@ export async function setSessionConfigOption(
 // History (SQLite) + settings commands
 // ---------------------------------------------------------------------------
 
-/** All stored sessions, newest first. `includeArchived` includes the archived rows (their `archived` flag is set); `undefined` → the Rust default `false`. */
+/** All stored sessions, in the user's MANUAL ORDER (see `Db::list_sessions` — the stored order column lives in Rust and never crosses the wire). Position says nothing about recency, so ask for it with `sessionRecency` (ADR 0075). `includeArchived` includes the archived rows (their `archived` flag is set); `undefined` → the Rust default `false`. */
 export async function listSessions(
   includeArchived?: boolean,
 ): Promise<SessionInfo[]> {
@@ -131,4 +132,16 @@ export async function setSessionArchived(
   archived: boolean,
 ): Promise<boolean> {
   return invoke("set_session_archived", { sessionId, archived });
+}
+
+
+/** Every non-subagent session's recency as a FIELD (ADR 0075: position is not evidence, so anything that wants recency has to ask). Archived rows included, subagent rows not. */
+export async function sessionRecency(): Promise<SessionRecency[]> {
+  return invoke<SessionRecency[]>("session_recency");
+}
+
+
+/** Rewrite the manual order of the given session ids in one transaction — the sidebar's whole visible slice of ONE Space, in its new order. Only a drag calls this. */
+export async function reorderSessions(ids: string[]): Promise<void> {
+  return invoke("reorder_sessions", { ids });
 }

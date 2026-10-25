@@ -20,13 +20,17 @@ import type { StoreApi } from "zustand";
  * The store half of test isolation.
  *
  * WHY THIS EXISTS. Every test file that touches a store currently hand-writes a
- * `beforeEach` with the keys it happens to remember: `SpaceTabs.test.tsx` names
- * nine `useSessions` keys, and `sessions.ts` has SIXTEEN data fields — the ten
- * it does not name (`history`, `contextUsage`, `compacting`, `inTurn`,
- * `stopReasons`, `stalled`, `newSessionError`, …) leak from one case to the
- * next inside a file, which is how a test starts passing for a reason nobody
- * intends. This resets every store to the state zustand itself captured at
- * creation, so the list of fields is not something a test has to remember.
+ * `beforeEach` with the keys it happens to remember, and `sessions.ts` has more
+ * data fields than any such list names — so whichever fields the hand-written
+ * version of `SpaceTabs.test.tsx`'s reset left out (`history`, `contextUsage`,
+ * `compacting`, `inTurn`, `stopReasons`, `stalled`, `newSessionError`, …) leaked
+ * from one case to the next inside a file, which is how a test starts passing
+ * for a reason nobody intends. This resets every store to the state zustand
+ * itself captured at creation, so the list of fields is not something a test has
+ * to remember. No comment here quotes HOW MANY data fields a store has, on
+ * purpose: the count is a property of the store, it changes the moment a field
+ * is added, and every file that repeats the number has to be found and corrected
+ * when it does — which is the same failure this module exists to end.
  *
  * THREE THINGS THIS DOES **NOT** DO — read these before trusting it.
  *

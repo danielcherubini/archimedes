@@ -1,5 +1,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetStores } from "../test/resetStores";
 import {
+  archivedInSpace,
   autoSelectActive,
   detachedSessions,
   discardSessionMessages,
@@ -30,7 +32,10 @@ import {
   deleteSpace,
   closeSession,
   cancelSession,
+  resumeSession,
   startSession,
+  reorderSessions as reorderSessionsCommand,
+  reorderSpaces as reorderSpacesCommand,
 } from "../lib/tauri";
 import {
   getNewSpaceDialogOpen,
@@ -42,6 +47,7 @@ import type {
   SessionInfo,
   SpaceRow,
 } from "../lib/tauri";
+import type { RecencyEvidence } from "../lib/sessionRecency";
 
 vi.mock("../lib/tauri", async () => {
   const actual = await vi.importActual<Record<string, unknown>>("../lib/tauri");
@@ -73,6 +79,12 @@ vi.mock("../lib/tauri", async () => {
       capabilities: {},
       archived: false,
     }),
+    // The store's `reorderSessions` / `reorderSpaces` write the manual order with
+    // these (ADR 0075). Mock them for the same reason as the commands above: the
+    // REAL wrappers would `invoke` and reject in jsdom — no global Tauri mock
+    // exists — so an un-mocked reorder failure would look nothing like its cause.
+    reorderSessions: vi.fn().mockResolvedValue(undefined),
+    reorderSpaces: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -101,6 +113,23 @@ const row = (path: string, lastOpenedAt: number): SpaceRow => ({
   lastOpenedAt,
   trusted: false,
 });
+
+/**
+ * The recency evidence bag (ADR 0075). Empty by default: these fixtures are about
+ * membership and live order, and an empty map makes every id equally unevidenced,
+ * which is what the pre-T03 assertions were written against.
+ */
+const recencyEvidence = (
+  recency: Record<string, number> = {},
+  messages?: Record<string, Message[] | undefined>,
+): RecencyEvidence => ({ recency, ...(messages ? { messages } : {}) });
+
+/** The boot order map. EMPTY by default, and that default is load-bearing, not lazy:
+ *  with no entries every id is unknown, every id ties, and `sortByManualOrder` falls
+ *  through to input order — i.e. `[...live, ...stored]`, byte-for-byte the pre-T03
+ *  sequence. A pre-existing fixture that did not care about order keeps its expected
+ *  answer for the right reason. */
+const noOrder = (): Record<string, number> => ({});
 
 /**
  * `MessageRow` helper: override for `MessageRow` fixtures, to distinguish
@@ -641,8 +670,8 @@ describe("rowToMessages — an empty retraction row (ADR 0048)", () => {
 });
 
 describe("spaceViewFor (per-space grouping, pure)", () => {
-  // Spaces arrive `lastOpenedAt`-desc from `list_spaces`; `historySessions`
-  // most-recently-ACTIVE first from `list_sessions` — input order is the semantics.
+  // Both lists arrive in the user's MANUAL ORDER from the server (ADR 0075) —
+  // input order IS the display order, and it is evidence of nothing else.
   const spaces = [
     row("/workspaces/alpha", 3000),
     row("/workspaces/bravo", 2000),
@@ -661,66 +690,196 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
     idX: "agent-exited",
   };
 
+  // The ORDER map puts the LIVE row AFTER the stored one here
+  // (`live-alpha` 5 > `stored-alpha` 2), so `sessionIds` is
+  // ["stored-alpha", "live-alpha"] — NOT the live-block-first concatenation the
+  // two arms used to produce. `lastReason` stays "user" regardless: which row a
+  // tab OPENS (live preferred) and where that row RENDERs are different
+  // questions with different rules.
   it("groups a space with a live session and a stored session", () => {
-    const view = spaceViewFor(spaces[0], sessions, historySessions, closeReasons, []);
+    const view = spaceViewFor(
+      spaces[0],
+      sessions,
+      historySessions,
+      closeReasons,
+      [],
+      recencyEvidence(),
+      { "live-alpha": 5, "stored-alpha": 2 },
+    );
     expect(view).toEqual({
       path: "/workspaces/alpha",
       title: "alpha",
-      liveSessionIds: ["live-alpha"],
+      sessionIds: ["stored-alpha", "live-alpha"],
       liveSessionId: "live-alpha",
-      storedSessionIds: ["stored-alpha"],
       archivedSessionIds: [],
       trusted: false,
-      // The newest session's reason: the live one's (`live-alpha` →
+      // The Landing Session's reason: the live one's (`live-alpha` →
       // `user`), NOT the stored session's (`stored-alpha` → `error`) —
       // proves the lookup does not fall through to the stored one.
       lastReason: "user",
     });
   });
 
-  it("returns storedSessionIds in the given input order (no re-sort)", () => {
-    const view = spaceViewFor(spaces[1], sessions, historySessions, closeReasons, []);
+  it("returns sessionIds in the stored order the boot map carries (no re-sort)", () => {
+    // The map AGREES with the fixture's input order on purpose: this test is
+    // about "the store invents no sequence of its own", not about the merge —
+    // `"a Session RESUMED this boot keeps the MIDDLE slot …"` owns the merge.
+    const view = spaceViewFor(
+      spaces[1],
+      sessions,
+      historySessions,
+      closeReasons,
+      [],
+      recencyEvidence(),
+      { idX: 0, idY: 1 },
+    );
     expect(view).toEqual({
       path: "/workspaces/bravo",
       title: "bravo",
-      liveSessionIds: [],
+      sessionIds: ["idX", "idY"],
       liveSessionId: null,
-      storedSessionIds: ["idX", "idY"],
       archivedSessionIds: [],
       trusted: false,
-      // No live session: the head of the stored subsequence's reason.
+      // No live session: the most RECENT stored session's reason, and with an
+      // empty recency map every id is equally unevidenced, so the tie falls
+      // through to input order — `idX`, whose reason the fixture records.
       lastReason: "agent-exited",
     });
   });
 
   it("returns an empty shape for a space with no sessions", () => {
-    const view = spaceViewFor(spaces[2], sessions, historySessions, closeReasons, []);
+    const view = spaceViewFor(
+      spaces[2],
+      sessions,
+      historySessions,
+      closeReasons,
+      [],
+      recencyEvidence(),
+      noOrder(),
+    );
     expect(view).toEqual({
       path: "/workspaces/charlie",
       title: "charlie",
-      liveSessionIds: [],
+      sessionIds: [],
       liveSessionId: null,
-      storedSessionIds: [],
       archivedSessionIds: [],
       trusted: false,
       lastReason: undefined,
     });
   });
 
+  // THE test the D11 reversal exists for. `/w/alpha` holds three rows the user
+  // arranged (numbers 0/1/2) and the MIDDLE one has just been resumed, so it is
+  // LIVE. TWO COMPETING ANSWERS for this fixture: "live block first" — the old
+  // two-arm concatenation — answers
+  // ["resumed", "stored_top", "stored_bottom"], while ONE order by the stored
+  // number answers ["stored_top", "resumed", "stored_bottom"]. The row the user
+  // positioned does not move. The fixture drives the REAL `resumeSession`
+  // action (not a hand-built post-resume state), so the live/stored list
+  // bookkeeping this test depends on is the store's own.
+  it("a Session RESUMED this boot keeps the MIDDLE slot the database holds for it (one sequence spans live and stored)", async () => {
+    useSessions.setState({
+      spaces: [row("/w/alpha", 1000)],
+      sessions: [],
+      historySessions: [
+        info("stored_top", "/w/alpha"),
+        info("resumed", "/w/alpha"),
+        info("stored_bottom", "/w/alpha"),
+      ],
+      archivedSessions: [],
+      activeSessionId: null,
+      activeSpacePath: null,
+      closeReasons: {},
+      messages: {},
+      sessionRecency: {},
+      sessionOrder: { stored_top: 0, resumed: 1, stored_bottom: 2 },
+    });
+    vi.mocked(resumeSession).mockResolvedValueOnce({
+      sessionId: "resumed",
+      cwd: "/w/alpha",
+      capabilities: {},
+      archived: false,
+    });
+    await useSessions.getState().resumeSession("resumed");
+
+    const s = useSessions.getState();
+    // The store's own bookkeeping first: the resumed id left the stored arm and
+    // is now live (so the two INPUTS to the merge really do span both arms).
+    expect(s.sessions.map((x) => x.sessionId)).toEqual(["resumed"]);
+    expect(s.historySessions.map((x) => x.sessionId)).toEqual([
+      "stored_top",
+      "stored_bottom",
+    ]);
+
+    const view = spaceViewFor(
+      s.spaces[0],
+      s.sessions,
+      s.historySessions,
+      s.closeReasons,
+      s.archivedSessions,
+      recencyEvidence(),
+      s.sessionOrder,
+    );
+    expect(view.sessionIds).toEqual(["stored_top", "resumed", "stored_bottom"]);
+    // This describe is otherwise PURE (no store writes), so this test cleans up
+    // after itself rather than leaking a live row into the next describe.
+    resetStores();
+  });
+
+  it("a live row whose id the order map does not know joins at the BOTTOM of the sequence", () => {
+    // A Session started AFTER the boot fetch has no number anywhere. The
+    // approved rule is "new rows join at the bottom", so an implementation that
+    // defaulted the unknown to `0` — which would promote the fresh row to the
+    // TOP of a list the user arranged — is red here.
+    const view = spaceViewFor(
+      row("/w/alpha", 1000),
+      [info("fresh", "/w/alpha")],
+      [info("stored_row", "/w/alpha")],
+      {},
+      [],
+      recencyEvidence(),
+      { stored_row: 0 },
+    );
+    expect(view.sessionIds).toEqual(["stored_row", "fresh"]);
+  });
+
   // The one-live cap is LIFTED: a space may hold MORE than one
   // live session. `sessions` is in insertion order (newest appended by
   // `addSession` / `resumeSession`), so the space row points at the
   // MOST-RECENTLY-STARTED one.
+  //
+  // T05 repurposed this test: the newest-first ORDER half used to be read off
+  // the view's `liveSessionIds`, a field that has since been deleted (ADR 0075 —
+  // the view carries ONE sequence, `sessionIds`). The order contract now lives
+  // on `liveSessionsInSpace`, whose own test
+  // `"returns session IDs for matching cwd in reverse insertion order (newest first)"`
+  // pins it; what the VIEW still owns is the LIVE DOT, which is the fact the tab
+  // renders. Both halves stay asserted here, on the fields that carry them.
   it("a space with TWO coexisting live sessions points at the most-recently-started one (the one-live cap lift)", () => {
     const twoLive = [
       info("first", "/workspaces/alpha"),
       info("second", "/workspaces/alpha"),
     ];
-    const view = spaceViewFor(spaces[0], twoLive, historySessions, closeReasons, []);
-    expect(view.liveSessionIds).toEqual(["second", "first"]);
+    // The order half, on the helper that owns it: newest STARTED first.
+    expect(liveSessionsInSpace(twoLive, "/workspaces/alpha")).toEqual([
+      "second",
+      "first",
+    ]);
+    const view = spaceViewFor(
+      spaces[0],
+      twoLive,
+      historySessions,
+      closeReasons,
+      [],
+      recencyEvidence(),
+      noOrder(),
+    );
+    // The live-dot half, on the view: the tab's dot points at the newest one,
+    // i.e. the head of the helper's answer.
     expect(view.liveSessionId).toBe("second");
-    expect(view.liveSessionId).toBe(view.liveSessionIds[0] ?? null);
-    expect(view.storedSessionIds).toEqual(["stored-alpha"]);
+    expect(view.liveSessionId).toBe(
+      liveSessionsInSpace(twoLive, "/workspaces/alpha")[0] ?? null,
+    );
   });
 
   it("autoSelectActive prefers the most-recently-started live session in the space (the one-live cap lift)", () => {
@@ -728,20 +887,49 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
       info("first", "/workspaces/alpha"),
       info("second", "/workspaces/alpha"),
     ];
-    expect(autoSelectActive(spaces, twoLive, historySessions)).toBe("second");
+    expect(
+      autoSelectActive(spaces, twoLive, historySessions, recencyEvidence()),
+    ).toBe("second");
   });
 
+  // Same repurposing as the two-live test above: the newest-first ORDER half
+  // read the view's deleted `liveSessionIds` field (ADR 0075); it now belongs to
+  // `liveSessionsInSpace`, and the VIEW keeps the live-dot half.
   it("a space with three or more live sessions orders them newest-first", () => {
     const threeLive = [
       info("s1", "/workspaces/alpha"),
       info("s2", "/workspaces/alpha"),
       info("s3", "/workspaces/alpha"),
     ];
-    const view = spaceViewFor(spaces[0], threeLive, historySessions, closeReasons, []);
-    expect(view.liveSessionIds).toEqual(["s3", "s2", "s1"]);
+    // The order half, on the helper that owns it.
+    expect(liveSessionsInSpace(threeLive, "/workspaces/alpha")).toEqual([
+      "s3",
+      "s2",
+      "s1",
+    ]);
+    const view = spaceViewFor(
+      spaces[0],
+      threeLive,
+      historySessions,
+      closeReasons,
+      [],
+      recencyEvidence(),
+      noOrder(),
+    );
+    // The live-dot half, on the view.
     expect(view.liveSessionId).toBe("s3");
   });
 
+  // Its subject is per-Space MEMBERSHIP ACROSS Spaces, not the deleted pair, so
+  // it survives on the view — and gets STRONGER: it now pins the rendered
+  // sequence too, not just an input list.
+  //
+  // TWO COMPETING ANSWERS for Space A: with NO order map every id is unknown,
+  // every id ties, and the sequence is `liveSessionsInSpace`'s reverse insertion
+  // order — ["alpha-3","alpha-2","alpha-1"]. The seeded map below is what makes
+  // the fixture's own order the answer: ["alpha-3","alpha-1","alpha-2"], which
+  // reverse insertion order cannot produce. (A fixture expecting
+  // ["alpha-1","alpha-2","alpha-3"] here has mis-read the helper.)
   it("handles live sessions from multiple different spaces interleaved", () => {
     const interleavedLive = [
       info("alpha-1", "/workspaces/alpha"),
@@ -750,12 +938,43 @@ describe("spaceViewFor (per-space grouping, pure)", () => {
       info("bravo-2", "/workspaces/bravo"),
       info("alpha-3", "/workspaces/alpha"),
     ];
-    const alphaView = spaceViewFor(spaces[0], interleavedLive, historySessions, closeReasons, []);
-    expect(alphaView.liveSessionIds).toEqual(["alpha-3", "alpha-2", "alpha-1"]);
+    const alphaView = spaceViewFor(
+      spaces[0],
+      interleavedLive,
+      historySessions,
+      closeReasons,
+      [],
+      recencyEvidence(),
+      { "alpha-3": 0, "alpha-1": 1, "alpha-2": 2 },
+    );
+    expect(alphaView.sessionIds).toEqual([
+      "alpha-3",
+      "alpha-1",
+      "alpha-2",
+      // The describe's stored row for this Space: the map does not know it, so
+      // it sinks to the BOTTOM (the "unknown id joins at the bottom" rule).
+      "stored-alpha",
+    ]);
     expect(alphaView.liveSessionId).toBe("alpha-3");
 
-    const bravoView = spaceViewFor(spaces[1], interleavedLive, historySessions, closeReasons, []);
-    expect(bravoView.liveSessionIds).toEqual(["bravo-2", "bravo-1"]);
+    const bravoView = spaceViewFor(
+      spaces[1],
+      interleavedLive,
+      historySessions,
+      closeReasons,
+      [],
+      recencyEvidence(),
+      noOrder(),
+    );
+    // Space B has no map, so its live rows keep reverse insertion order and its
+    // stored rows follow — the point being that Space A's map moved nothing in
+    // Space B.
+    expect(bravoView.sessionIds).toEqual([
+      "bravo-2",
+      "bravo-1",
+      "idX",
+      "idY",
+    ]);
     expect(bravoView.liveSessionId).toBe("bravo-2");
   });
 });
@@ -785,8 +1004,8 @@ describe("liveSessionsInSpace (pure ordering and filtering)", () => {
 });
 
 describe("autoSelectActive (boot auto-select, pure)", () => {
-  // `spaces` arrives `lastOpenedAt`-desc — that IS input order; the function
-  // must NOT re-sort.
+  // `spaces` arrives in the user's MANUAL ORDER — that IS input order (the
+  // leftmost tab first); the function must NOT re-sort.
   const spaces = [
     row("/a/space-one", 3000),
     row("/a/space-two", 2000),
@@ -795,8 +1014,8 @@ describe("autoSelectActive (boot auto-select, pure)", () => {
   ];
 
   it("returns null when there is nothing at all", () => {
-    expect(autoSelectActive([], [], [])).toBeNull();
-    expect(autoSelectActive(spaces, [], [])).toBeNull();
+    expect(autoSelectActive([], [], [], recencyEvidence())).toBeNull();
+    expect(autoSelectActive(spaces, [], [], recencyEvidence())).toBeNull();
   });
 
   it("prefers the first space's live session", () => {
@@ -807,16 +1026,9 @@ describe("autoSelectActive (boot auto-select, pure)", () => {
     ];
     // Even if the other space's stored session is older/newer, the live
     // session in the most recent space wins.
-    expect(autoSelectActive(spaces, live, stored)).toBe("live-1");
-  });
-
-  it("falls back to the head of the first space's stored subsequence", () => {
-    const stored = [
-      info("newest-1", "/a/space-one"),
-      info("older-1", "/a/space-one"),
-    ];
-    // `historySessions` is most-recently-active first (server order): the head wins.
-    expect(autoSelectActive(spaces, [], stored)).toBe("newest-1");
+    expect(
+      autoSelectActive(spaces, live, stored, recencyEvidence()),
+    ).toBe("live-1");
   });
 
   it("skips a space with no sessions and advances to the next", () => {
@@ -824,20 +1036,140 @@ describe("autoSelectActive (boot auto-select, pure)", () => {
       info("newest-2", "/a/space-two"),
       info("older-2", "/a/space-two"),
     ];
-    expect(autoSelectActive(spaces, [], stored)).toBe("newest-2");
+    expect(
+      autoSelectActive(spaces, [], stored, recencyEvidence()),
+    ).toBe("newest-2");
   });
 
-  it("the first (most recent) space wins over a newer session in another", () => {
+  it("a stored Session in the FIRST Space still beats a LIVE one in a later Space", () => {
+    // The loop's subtle half, and after ADR 0075 nothing else pins it:
+    // `autoSelectActive` walks SPACES first and only then considers live vs
+    // stored, so Space precedence outranks the live-over-stored preference.
+    // The evidence favours nothing in Space one (both of its rows are
+    // unevidenced), so the answer comes from the Space walk and not from
+    // recency — `"…lands on the most recent stored Session of the first Space…"`
+    // owns the within-Space choice.
+    const stored = [
+      info("newest-1", "/a/space-one"),
+      info("older-1", "/a/space-one"),
+    ];
+    const live = [info("live-two", "/a/space-two")];
+    expect(
+      autoSelectActive(spaces, live, stored, recencyEvidence({ "live-two": 9_000_000_000_000 })),
+    ).toBe("newest-1");
+  });
+
+  it("the FIRST Space in manual order wins over a more recent session in a later Space", () => {
     const stored = [
       info("head-1", "/a/space-one"),
-      info("brand-new-2", "/a/space-two"), // delivered first in input order
+      info("brand-new-2", "/a/space-two"),
       info("older-2", "/a/space-two"),
     ];
-    // Input/recency order wins: the FIRST space's head, even though the
-    // second space's stored session was created more recently. (We cannot
-    // check timestamps — `SessionInfo` has no `createdAt` — so input order
-    // is THE ordering.)
-    expect(autoSelectActive(spaces, [], stored)).toBe("head-1");
+    // The evidence now FAVOURS the second Space's row — the recency map IS the
+    // timestamp now, so the assertion proves the SPACE-level precedence rather
+    // than input order. Expected id unchanged from the pre-ADR-0075 fixture,
+    // reason entirely different: boot lands in the LEFTMOST Space that has
+    // anything, however stale its rows are.
+    expect(
+      autoSelectActive(
+        spaces,
+        [],
+        stored,
+        recencyEvidence({ "brand-new-2": 9_000_000_000_000, "head-1": 1_000 }),
+      ),
+    ).toBe("head-1");
+  });
+});
+
+describe("Landing Session (ADR 0075: recency decides, position never does)", () => {
+  beforeEach(() => resetStores());
+  afterEach(() => resetStores());
+
+  const space = (path: string): SpaceRow => ({
+    path,
+    createdAt: 0,
+    lastOpenedAt: 0,
+    trusted: false,
+  });
+
+  it("selectSpace lands on the most RECENT stored Session even when it sits LAST in the Space's manual order", () => {
+    // TWO COMPETING ANSWERS: the head of the stored subsequence is `hist_first`;
+    // max `recencyOf` is `hist_last`. This is the exact conflation ADR 0075 was
+    // written to break, at the tab-click site.
+    useSessions.setState({
+      spaces: [space("/a"), space("/b")],
+      activeSpacePath: "/a",
+      historySessions: [
+        info("hist_first", "/b"),
+        info("hist_last", "/b"),
+      ],
+      sessionRecency: { hist_first: 1_000, hist_last: 9_000_000_000_000 },
+    });
+    useSessions.getState().selectSpace("/b");
+    expect(useSessions.getState().activeSessionId).toBe("hist_last");
+  });
+
+  it("autoSelectActive lands on the most recent stored Session of the first Space in manual order, not its head", () => {
+    // The within-Space choice at BOOT: the first Space's stored subsequence is
+    // ["head", "tail"] and `tail` carries the far-future stamp. Head-first
+    // answers "head", max recency answers "tail".
+    expect(
+      autoSelectActive(
+        [space("/a/space-one"), space("/a/space-two")],
+        [],
+        [info("head", "/a/space-one"), info("tail", "/a/space-one")],
+        recencyEvidence({ head: 1_000, tail: 9_000_000_000_000 }),
+      ),
+    ).toBe("tail");
+  });
+
+  it("a Session dragged to the BOTTOM of the manual order is still the Landing Session when it is the most recent", () => {
+    // THE test that would have caught the original bug (spec §9), and the pin
+    // that keeps the two boot maps from contaminating each other: `bottom` has
+    // the LARGEST order number (so it renders LAST) and the NEWEST stamp (so
+    // boot lands on it). Point the Landing Session at the order map and this
+    // goes red.
+    useSessions.getState().setHistorySessions([
+      { ...info("top", "/a"), archived: false },
+      { ...info("bottom", "/a"), archived: false },
+    ]);
+    useSessions.getState().setSessionRecency([
+      { sessionId: "top", lastActiveAt: 1_000, sortOrder: 0 },
+      { sessionId: "bottom", lastActiveAt: 9_000_000_000_000, sortOrder: 5 },
+    ]);
+    useSessions.getState().setSpaces([space("/a")]);
+    expect(useSessions.getState().activeSessionId).toBe("bottom");
+    // …and it still RENDERS last, which is the half that must not move.
+    const s = useSessions.getState();
+    expect(
+      spaceViewFor(
+        s.spaces[0],
+        s.sessions,
+        s.historySessions,
+        s.closeReasons,
+        s.archivedSessions,
+        { recency: s.sessionRecency },
+        s.sessionOrder,
+      ).sessionIds,
+    ).toEqual(["top", "bottom"]);
+  });
+
+  it("removeSpace lands on the LEFTMOST remaining tab even when another Space holds the most recent Session", async () => {
+    // THE PIN — this rule must NOT change. THREE Spaces so the two rules
+    // disagree: after `/a` goes, `/b` is the LEFTMOST tab while `/c` holds the
+    // by-far-newest Session. "Leftmost neighbour" answers "/b"; "the Space with
+    // the most recent Session" (or "max recency over the remaining Spaces")
+    // answers "/c". Closing a tab lands you on the tab to its left, which is
+    // what the first row of the manual order now means.
+    useSessions.setState({
+      spaces: [space("/a"), space("/b"), space("/c")],
+      activeSpacePath: "/a",
+      historySessions: [info("sess-b", "/b"), info("sess-c", "/c")],
+      sessionRecency: { "sess-b": 1_000, "sess-c": 9_000_000_000_000 },
+    });
+    const fallback = await useSessions.getState().removeSpace("/a");
+    expect(fallback).toBe("/b");
+    expect(useSessions.getState().activeSpacePath).toBe("/b");
   });
 });
 
@@ -2883,7 +3215,7 @@ describe("archivedSessions (sticky, ADR 0016)", () => {
 });
 
 describe("spaceViewFor — archivedSessionIds (view membership only)", () => {
-  it("reports archivedSessionIds without polluting storedSessionIds, and lastReason falls back to the archived head", () => {
+  it("reports archivedSessionIds without polluting sessionIds, and lastReason falls back to the most recent archived Session", () => {
     const space = row("/w/alpha", 1000);
     const live = info("live-a", "/w/alpha");
     const stored = info("stored-a", "/w/alpha");
@@ -2893,21 +3225,160 @@ describe("spaceViewFor — archivedSessionIds (view membership only)", () => {
       "stored-a": "error",
       "arch-a": "agent-exited",
     };
-    const view = spaceViewFor(space, [live], [stored], reasons, [archived]);
+    // An EMPTY order map: every id is unknown, every id ties, and the sequence
+    // keeps this fixture's live-before-stored answer (the safety property — see
+    // `mergeSessionOrder`). Membership and the banner are what this test owns.
+    const view = spaceViewFor(
+      space,
+      [live],
+      [stored],
+      reasons,
+      [archived],
+      recencyEvidence(),
+      noOrder(),
+    );
     expect(view.archivedSessionIds).toEqual(["arch-a"]);
-    // `storedSessionIds` is UNCHANGED: stored sessions only (the archived
+    // `sessionIds` is UNCHANGED in membership: stored + live only (the archived
     // id must NOT appear — the Space group renders stored sessions only).
-    expect(view.storedSessionIds).toEqual(["stored-a"]);
-    // The live session is the newest: its reason wins.
+    expect(view.sessionIds).toEqual(["live-a", "stored-a"]);
+    // The LIVE session is the Landing Session (live is preferred over any
+    // stored one, whatever the recency maps say): its reason wins.
     expect(view.lastReason).toBe("user");
 
-    // No live session, no stored sessions: the ARCHIVED head is still the
-    // space's newest stored session — the close-reason banner must not
-    // silently vanish for an archived-only space.
-    const archivedOnly = spaceViewFor(space, [], [], reasons, [archived]);
+    // No live session, no stored sessions: an archived row is still the last
+    // resort — the close-reason banner must not silently vanish for an
+    // archived-only Space.
+    const archivedOnly = spaceViewFor(
+      space,
+      [],
+      [],
+      reasons,
+      [archived],
+      recencyEvidence(),
+      noOrder(),
+    );
     expect(archivedOnly.archivedSessionIds).toEqual(["arch-a"]);
-    expect(archivedOnly.storedSessionIds).toEqual([]);
+    expect(archivedOnly.sessionIds).toEqual([]);
     expect(archivedOnly.lastReason).toBe("agent-exited");
+  });
+});
+
+describe("lastReason (ADR 0075: the banner follows the Landing Session, not the list head)", () => {
+  it("spaceViewFor reads lastReason off the max-recency stored Session, not the head", () => {
+    // TWO COMPETING ANSWERS: the head of the stored subsequence is
+    // `stored_first` → "error"; max recency is `stored_last` → "user". Since
+    // ADR 0075 the head is merely the first row of a manual arrangement, so the
+    // banner has to follow the recency answer.
+    const space = row("/w/alpha", 1000);
+    const reasons: Record<string, CloseReasonStr> = {
+      stored_first: "error",
+      stored_last: "user",
+    };
+    const view = spaceViewFor(
+      space,
+      [],
+      [info("stored_first", "/w/alpha"), info("stored_last", "/w/alpha")],
+      reasons,
+      [],
+      recencyEvidence({
+        stored_first: 1_000,
+        stored_last: 9_000_000_000_000,
+      }),
+      noOrder(),
+    );
+    expect(view.lastReason).toBe("user");
+  });
+
+  it("spaceViewFor falls back to the most recent ARCHIVED Session only when the Space has no stored one", () => {
+    // D5: the archived arm is a LAST RESORT, not a max over stored ∪ archived.
+    // THREE candidate answers for this fixture, and only one is right:
+    //   - the head of the stored subsequence (the pre-ADR-0075 rule) → "error";
+    //   - a max over stored ∪ archived (which the archived row's far-future
+    //     stamp would win) → "agent-exited";
+    //   - max recency WITHIN the stored arm, archived only if stored is empty →
+    //     "user". The fixture puts the most recent stored row SECOND, so the
+    //     head-of-list rule cannot answer it by accident.
+    const space = row("/w/alpha", 1000);
+    const reasons: Record<string, CloseReasonStr> = {
+      stored_head: "error",
+      stored_recent: "user",
+      "arch-a": "agent-exited",
+    };
+    const evidence = recencyEvidence({
+      stored_head: 1_000,
+      stored_recent: 5_000_000_000_000,
+      "arch-a": 9_000_000_000_000,
+    });
+    const withStored = spaceViewFor(
+      space,
+      [],
+      [info("stored_head", "/w/alpha"), info("stored_recent", "/w/alpha")],
+      reasons,
+      [{ ...info("arch-a", "/w/alpha"), archived: true }],
+      evidence,
+      noOrder(),
+    );
+    expect(withStored.lastReason).toBe("user");
+
+    // Drop BOTH stored rows and the archived arm answers — the banner survives
+    // an archived-only Space.
+    const archivedOnly = spaceViewFor(
+      space,
+      [],
+      [],
+      reasons,
+      [{ ...info("arch-a", "/w/alpha"), archived: true }],
+      evidence,
+      noOrder(),
+    );
+    expect(archivedOnly.lastReason).toBe("agent-exited");
+  });
+});
+
+describe("archivedInSpace (the Archived section sorts by recency, explicitly)", () => {
+  const archivedRow = (sessionId: string, cwd: string): SessionInfo => ({
+    sessionId,
+    cwd,
+    capabilities: {},
+    archived: true,
+  });
+
+  it("archivedInSpace sorts by recency and NOT by input order", () => {
+    // ADR 0075's named trap: this section used to inherit recency for free from
+    // `list_sessions`. TWO COMPETING ANSWERS: input order (the manual order the
+    // query now returns) is ["a_old", "a_new"]; recency order is
+    // ["a_new", "a_old"]. Swapping the two recency values reddens it.
+    const a_old = archivedRow("a_old", "/w/alpha");
+    const a_new = archivedRow("a_new", "/w/alpha");
+    const rows = archivedInSpace(
+      "/w/alpha",
+      [a_old, a_new],
+      [],
+      recencyEvidence({ a_old: 1_000, a_new: 9_000_000_000_000 }),
+    );
+    expect(rows.map((r) => r.sessionId)).toEqual(["a_new", "a_old"]);
+    // ROWS come back, not ids (the section renders title/cwd off them).
+    expect(rows[0]).toEqual(a_new);
+  });
+
+  it("archivedInSpace drops the sticky live ids and another Space's rows", () => {
+    const resumed = archivedRow("resumed", "/w/alpha");
+    const other = archivedRow("beta-1", "/w/beta");
+    const own = archivedRow("alpha-1", "/w/alpha");
+    const rows = archivedInSpace(
+      "/w/alpha",
+      [resumed, other, own],
+      [info("resumed", "/w/alpha")],
+      recencyEvidence(),
+    );
+    // A resumed archived Session renders in its Space group, not here; a row of
+    // another Space is Detached and belongs to Settings.
+    expect(rows.map((r) => r.sessionId)).toEqual(["alpha-1"]);
+    // The documented empty state: no Space selected matches NOTHING (the
+    // section's "No archived sessions." must not silently become "everything").
+    expect(
+      archivedInSpace(null, [own], [], recencyEvidence()).map((r) => r.sessionId),
+    ).toEqual([]);
   });
 });
 
@@ -2923,6 +3394,10 @@ describe("activeSpacePath (the selected Space — the top tabs' state)", () => {
       closeReasons: {},
       messages: {},
       configOptions: {},
+      // Both boot maps too: the tests below seed them, and this file resets by
+      // hand-written key lists — an unnamed key leaks into the next case.
+      sessionRecency: {},
+      sessionOrder: {},
     });
   });
 
@@ -2980,21 +3455,31 @@ describe("activeSpacePath (the selected Space — the top tabs' state)", () => {
     expect(useSessions.getState().activeSpacePath).toBe("/a");
   });
 
-  it("selectSpace: live session preferred, then the newest stored, then nothing", () => {
+  it("selectSpace: live session preferred, then the most RECENT stored, then nothing", () => {
     useSessions.setState({
       spaces: [space("/a"), space("/b")],
       activeSpacePath: "/a",
     });
-    // /b holds a live + a stored session: the live wins.
+    // /b holds a live + a stored session: the live wins (a Space with a Worker
+    // mid-turn shows that turn, whatever recency says).
     useSessions.getState().addSession(info("live-1", "/b"));
     useSessions.getState().setHistorySessions([
+      { ...info("hist-first", "/b"), archived: false },
       { ...info("hist-1", "/b"), archived: false },
+    ]);
+    // The recency map favours the SECOND stored row, so "most recent" is
+    // distinguishable from "first in the list" — the two rules this test used to
+    // be unable to tell apart.
+    useSessions.getState().setSessionRecency([
+      { sessionId: "hist-first", lastActiveAt: 1_000, sortOrder: 0 },
+      { sessionId: "hist-1", lastActiveAt: 9_000_000_000_000, sortOrder: 1 },
     ]);
     useSessions.getState().selectSpace("/b");
     expect(useSessions.getState().activeSpacePath).toBe("/b");
     expect(useSessions.getState().activeSessionId).toBe("live-1");
 
-    // No live in /b: the NEWEST stored (input order — first wins).
+    // No live in /b: the most RECENT stored row, which is the one sitting LAST
+    // in the manual order.
     useSessions.getState().handleSessionClosed("live-1", "user");
     useSessions.getState().selectSpace("/b");
     expect(useSessions.getState().activeSessionId).toBe("hist-1");
@@ -3032,7 +3517,10 @@ describe("activeSpacePath (the selected Space — the top tabs' state)", () => {
       spaces: [space("/a"), space("/b")],
       activeSpacePath: "/a",
     });
-    // `removeSpace` awaits the backend command (the mock resolves).
+    // `removeSpace` awaits the backend command (the mock resolves). The
+    // fallback is the LEFTMOST remaining TAB (the first row of the manual
+    // order, ADR 0075) — and this fixture keeps the `null`-when-nothing-remains
+    // half, which is the half only this test pins.
     await useSessions.getState().removeSpace("/a");
     expect(useSessions.getState().activeSpacePath).toBe("/b");
     await useSessions.getState().removeSpace("/b");
@@ -3524,7 +4012,12 @@ describe("views (store integration for space views)", () => {
     trusted: false,
   });
 
-  it("adding multiple sessions sequentially via addSession in the same space produces newest-first liveSessionIds in views()", () => {
+  it("adding sessions sequentially in one space yields a newest-first LIVE DOT and a newest-first sequence in views()", () => {
+    // T05 renamed this test: its old name named `liveSessionIds`, a `SpaceView`
+    // field ADR 0075 deleted. The fixture is unchanged and so is the expected
+    // sequence — it is simply pinned on fields that survive. The order map is
+    // EMPTY, so every id is unknown, every id ties, and the sequence is input
+    // order, which for all-live rows is reverse insertion order.
     useSessions.setState({
       spaces: [space("/workspaces/alpha")],
     });
@@ -3540,8 +4033,10 @@ describe("views (store integration for space views)", () => {
       s.historySessions,
       s.closeReasons,
       s.archivedSessions,
+      { recency: s.sessionRecency },
+      s.sessionOrder,
     );
-    expect(view.liveSessionIds).toEqual(["s3", "s2", "s1"]);
+    expect(view.sessionIds).toEqual(["s3", "s2", "s1"]);
     expect(view.liveSessionId).toBe("s3");
   });
 });
@@ -4254,10 +4749,11 @@ describe("detachedSessions (sessions with no open Space — CONTEXT.md's Detache
   });
 
   it("keeps input order: stored rows first, then archived, neither re-sorted", () => {
-    // `sortByActivity` cannot be used (it needs loaded transcripts, which the
-    // consuming section has none of) and `SessionInfo` carries no `createdAt`,
-    // so the order IS `list_sessions` order for the stored rows followed by the
-    // archived rows in their input order.
+    // The order IS the store's input order — the user's MANUAL ORDER for the
+    // stored rows, then the archived rows in theirs — and that is deliberate:
+    // Settings → Detached sessions is a management list, not a recency list
+    // (ADR 0075). The assertion is the pre-ADR-0075 one; only the REASON for it
+    // changed, which is exactly what a test that cannot see recency proves.
     const rows = detachedSessions(
       openSpaces,
       [stored("h2", "/tmp/gamma"), stored("h1", "/tmp/delta")],
@@ -4265,5 +4761,598 @@ describe("detachedSessions (sessions with no open Space — CONTEXT.md's Detache
       [],
     );
     expect(rows.map((r) => r.sessionId)).toEqual(["h2", "h1", "a2", "a1"]);
+  });
+});
+
+describe("sessionRecency (the recency + order side-channel, ADR 0075)", () => {
+  // This file resets by hand-written key lists elsewhere; this describe uses the
+  // shared `resetStores()` because the assertions below are about the store's
+  // INITIAL shape, which is exactly what that helper installs (from zustand's own
+  // `getInitialState()` capture, so a newly added field is covered for free).
+  beforeEach(() => resetStores());
+  afterEach(() => resetStores());
+
+  it("the store starts with empty sessionRecency and sessionOrder maps (the closeReasons side-channel shape)", () => {
+    // Both boot maps are `{}` before the boot fetch lands — the same shape
+    // `closeReasons` starts with, and the reason `recencyOf` must answer `null`
+    // rather than invent `0` for an id the map has never seen.
+    expect(useSessions.getState().sessionRecency).toEqual({});
+    expect(useSessions.getState().sessionOrder).toEqual({});
+  });
+
+  it("setSessionRecency reduces one row set into BOTH the per-id recency map and the per-id order map", () => {
+    // ONE payload, TWO readings. The two maps are seeded from the SAME array on
+    // purpose, so a setter that fills one and forgets the other is red here —
+    // the single most likely way to ship ADR 0075 broken (a recency map with no
+    // order map loses the one sequence; an order map with no recency map puts
+    // position back in charge of the Landing Session).
+    useSessions.getState().setSessionRecency([
+      { sessionId: "s1", lastActiveAt: 9_000_000_000_000, sortOrder: 4 },
+      { sessionId: "s2", lastActiveAt: 8_000_000_000_000, sortOrder: 1 },
+    ]);
+    expect(useSessions.getState().sessionRecency).toEqual({
+      s1: 9_000_000_000_000,
+      s2: 8_000_000_000_000,
+    });
+    expect(useSessions.getState().sessionOrder).toEqual({ s1: 4, s2: 1 });
+
+    // A later row for a known id WINS in both maps: unlike the merge-only
+    // `closeReasons` neighbour, these maps are a SNAPSHOT of the newest read
+    // (D13), so a stale entry must not outlive the row it described.
+    useSessions.getState().setSessionRecency([
+      { sessionId: "s1", lastActiveAt: 9_500_000_000_000, sortOrder: 0 },
+    ]);
+    expect(useSessions.getState().sessionRecency).toEqual({
+      s1: 9_500_000_000_000,
+    });
+    expect(useSessions.getState().sessionOrder).toEqual({ s1: 0 });
+  });
+});
+
+describe("reorderSessions (the sidebar drag write path, ADR 0075)", () => {
+  // The optimistic write's whole point is that it changes the ORDER MAP, so every
+  // fixture here seeds `sessionOrder` explicitly. A fixture that left it empty
+  // would make every id unknown, every id tied, and the derivation answer input
+  // order — which at this point in the chain is byte-for-byte what the OLD
+  // live-then-stored concatenation answered, i.e. a test that cannot fail.
+  beforeEach(() => {
+    resetStores();
+    vi.mocked(reorderSessionsCommand).mockReset().mockResolvedValue(undefined);
+  });
+  afterEach(() => resetStores());
+
+  /** Drain to a macrotask boundary, so "the chain has had every chance to reach
+   *  the command" is a fact about the QUEUE and not about how many
+   *  `await Promise.resolve()`s the implementation happens to need. */
+  const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  /** The store's own view of one Space, built the way the render layer builds it.
+   *  Step (b)/(c) of the acceptance test read THIS and not `historySessions`, on
+   *  purpose: an assertion on the store's array is the shape that passes for the
+   *  stale-map implementation the test exists to catch. */
+  const viewFor = (path: string) => {
+    const s = useSessions.getState();
+    return spaceViewFor(
+      row(path, 1000),
+      s.sessions,
+      s.historySessions,
+      s.closeReasons,
+      s.archivedSessions,
+      { recency: s.sessionRecency },
+      s.sessionOrder,
+    );
+  };
+
+  /** `/w/alpha` with three STORED rows the user arranged top-to-bottom as
+   *  top(0) mid(1) bottom(2), and no live rows. */
+  const seedAlpha = () => {
+    useSessions.setState({
+      spaces: [row("/w/alpha", 1000)],
+      sessions: [],
+      historySessions: [
+        info("top", "/w/alpha"),
+        info("mid", "/w/alpha"),
+        info("bottom", "/w/alpha"),
+      ],
+      archivedSessions: [],
+      activeSessionId: null,
+      activeSpacePath: "/w/alpha",
+      closeReasons: {},
+      messages: {},
+      sessionRecency: {},
+      sessionOrder: { top: 0, mid: 1, bottom: 2 },
+    });
+  };
+
+  it("a dragged row HOLDS its slot when the list is re-derived from the stored rows (the optimistic write moves the order map, not the array it derived)", async () => {
+    // THE ACCEPTANCE TEST FOR T05 — T03's recorded constraint, made observable.
+    //
+    // TWO COMPETING ANSWERS, and this is the whole task in one assertion:
+    //  - an implementation that reorders the DERIVED array (`historySessions`)
+    //    answers the ORIGINAL order at both (b) and (c): `sessionOrder` is a BOOT
+    //    SNAPSHOT, so `mergeSessionOrder` re-sorts the union straight back and the
+    //    row SNAPS BACK — the defect T03 recorded as a constraint;
+    //  - an implementation that writes the MAP answers ["mid","bottom","top"] at
+    //    every step.
+    seedAlpha();
+    // The whole visible slice in its new order — exactly what `useDragReorder`
+    // hands `onReorder`.
+    const done = useSessions.getState().reorderSessions([
+      "mid",
+      "bottom",
+      "top",
+    ]);
+
+    // (a) THE MAP MOVED. Slice index = the new number.
+    expect(useSessions.getState().sessionOrder).toEqual({
+      top: 2,
+      mid: 0,
+      bottom: 1,
+    });
+
+    // (b) THE PAINT: the sequence the rows render, read off the derivation.
+    expect(viewFor("/w/alpha").sessionIds).toEqual(["mid", "bottom", "top"]);
+
+    // (c) THE PROMISE: re-derive from the ORIGINAL boot array — the shape any
+    // refetch or any other writer restores. (b) alone already reddens the
+    // array-only write; (c) is the constraint as T03 recorded it — a drag holds
+    // ACROSS a re-derivation — and the step that stops a future implementation
+    // satisfying the paint while leaving the durable map stale.
+    useSessions.getState().setHistorySessions([
+      info("top", "/w/alpha"),
+      info("mid", "/w/alpha"),
+      info("bottom", "/w/alpha"),
+    ]);
+    expect(viewFor("/w/alpha").sessionIds).toEqual(["mid", "bottom", "top"]);
+
+    // (d) and it is still there once the command has landed.
+    await done;
+    expect(viewFor("/w/alpha").sessionIds).toEqual(["mid", "bottom", "top"]);
+  });
+
+  it("publishes the new order BEFORE the command resolves (the optimistic publish the sidebar paints from)", () => {
+    // `useAgentOverridesWrites`' "publish first (before the awaits)", copied. The
+    // COMPETING ANSWER is a write-after-await implementation, which leaves the
+    // boot map standing at this instant. Deliberately no `await` anywhere: the
+    // command is left pending and the assertions are synchronous.
+    seedAlpha();
+    useSessions.getState().reorderSessions(["mid", "bottom", "top"]);
+    expect(useSessions.getState().sessionOrder).toEqual({
+      top: 2,
+      mid: 0,
+      bottom: 1,
+    });
+    expect(viewFor("/w/alpha").sessionIds).toEqual(["mid", "bottom", "top"]);
+  });
+
+  it("sends the WHOLE visible slice VERBATIM — unsorted, undeduped, unfiltered — and sends nothing for an empty slice", async () => {
+    seedAlpha();
+    await useSessions.getState().reorderSessions(["mid", "bottom", "top"]);
+    // TWO COMPETING ANSWERS: "send just the moved id" answers ["mid"] — and
+    // because the Rust side writes the SLICE INDEX as each row's stored number,
+    // that is the half-moved list the spec calls a bug.
+    expect(reorderSessionsCommand).toHaveBeenCalledTimes(1);
+    expect(reorderSessionsCommand).toHaveBeenCalledWith(["mid", "bottom", "top"]);
+
+    // The empty slice is the one degenerate case the store CAN see (it has no
+    // view of a visible slice — that is the render layer's answer).
+    await useSessions.getState().reorderSessions([]);
+    expect(reorderSessionsCommand).toHaveBeenCalledTimes(1);
+    expect(useSessions.getState().sessionOrder).toEqual({
+      top: 2,
+      mid: 0,
+      bottom: 1,
+    });
+  });
+
+  it("a rejected reorder logs and restores the PREVIOUS order map, and the action never rejects", async () => {
+    useSessions.setState({
+      spaces: [row("/w/a", 1000)],
+      sessions: [],
+      historySessions: [info("a", "/w/a"), info("b", "/w/a")],
+      archivedSessions: [],
+      activeSpacePath: "/w/a",
+      closeReasons: {},
+      messages: {},
+      sessionRecency: {},
+      sessionOrder: { a: 0, b: 1 },
+    });
+    const errSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    vi.mocked(reorderSessionsCommand).mockRejectedValueOnce(new Error("boom"));
+    // The `await` IS the never-rejects proof: a rejecting action fails this test
+    // on the rejection rather than on an assertion.
+    await useSessions.getState().reorderSessions(["b", "a"]);
+    // TWO COMPETING ANSWERS: no rollback leaves ["b","a"] in the UI while the DB
+    // holds ["a","b"] — the list the user sees re-arranged at the next boot,
+    // which reads as the app ignoring them.
+    expect(useSessions.getState().sessionOrder).toEqual({ a: 0, b: 1 });
+    expect(viewFor("/w/a").sessionIds).toEqual(["a", "b"]);
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("reorder"),
+      expect.anything(),
+    );
+    errSpy.mockRestore();
+  });
+
+  it("a failed OLDER drag does not roll back a NEWER drag's order (the publish epoch, checked at commit)", async () => {
+    useSessions.setState({
+      spaces: [row("/w/a", 1000)],
+      sessions: [],
+      historySessions: [
+        info("a", "/w/a"),
+        info("b", "/w/a"),
+        info("c", "/w/a"),
+      ],
+      archivedSessions: [],
+      activeSpacePath: "/w/a",
+      closeReasons: {},
+      messages: {},
+      sessionRecency: {},
+      sessionOrder: { a: 0, b: 1, c: 2 },
+    });
+    const errSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    // Two drags in one tick: the FIRST one's command fails, the second's lands.
+    vi.mocked(reorderSessionsCommand).mockRejectedValueOnce(new Error("boom"));
+    const first = useSessions.getState().reorderSessions(["b", "a"]);
+    const second = useSessions.getState().reorderSessions(["c", "b", "a"]);
+    await Promise.all([first, second]);
+    // TWO COMPETING ANSWERS: an unconditional rollback restores the pre-FIRST
+    // snapshot {a:0,b:1,c:2} and silently DELETES the user's second drag — the
+    // exact failure `useAgentOverridesWrites`' epoch exists to stop.
+    expect(useSessions.getState().sessionOrder).toEqual({ c: 0, b: 1, a: 2 });
+    expect(viewFor("/w/a").sessionIds).toEqual(["c", "b", "a"]);
+    errSpy.mockRestore();
+  });
+
+  it("two drags whose commands BOTH fail return the order the DATABASE holds, not the first drag's optimistic one", async () => {
+    // The sibling of the epoch test above, and the case the epoch guard does NOT
+    // solve on its own. TWO COMPETING ANSWERS:
+    //  - the bug answers `{b:0, a:1, c:2}`: the SECOND drag captures its rollback
+    //    snapshot from the store, which at that instant IS the first drag's
+    //    optimistic, never-committed map, and the guard correctly discards the
+    //    FIRST drag's own rollback — so the only write left restores a number the
+    //    database never held, and the rows re-arrange themselves at the next boot
+    //    into an order the user never asked for and was never told had failed;
+    //  - the committed baseline answers `{a:0, b:1, c:2}`, which is what
+    //    `list_sessions` still returns because BOTH commands failed.
+    // The baseline is seeded through `setSessionRecency` — the boot path that
+    // fills `sessionOrder` from the row's own `sortOrder`, i.e. from the database.
+    useSessions.getState().setSessionRecency([
+      { sessionId: "a", lastActiveAt: 1_000, sortOrder: 0 },
+      { sessionId: "b", lastActiveAt: 2_000, sortOrder: 1 },
+      { sessionId: "c", lastActiveAt: 3_000, sortOrder: 2 },
+    ]);
+    useSessions.setState({
+      spaces: [row("/w/a", 1000)],
+      sessions: [],
+      historySessions: [
+        info("a", "/w/a"),
+        info("b", "/w/a"),
+        info("c", "/w/a"),
+      ],
+      archivedSessions: [],
+      activeSpacePath: "/w/a",
+      closeReasons: {},
+      messages: {},
+    });
+    const errSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    // BOTH commands reject (every call, not just the first).
+    vi.mocked(reorderSessionsCommand).mockRejectedValue(new Error("boom"));
+    const first = useSessions.getState().reorderSessions(["b", "a"]);
+    const second = useSessions.getState().reorderSessions(["c", "b", "a"]);
+    await Promise.all([first, second]);
+    expect(useSessions.getState().sessionOrder).toEqual({ a: 0, b: 1, c: 2 });
+    // And the PAINT agrees with the database, which is the only thing the user can
+    // check: the rows sit exactly where they were before either drag.
+    expect(viewFor("/w/a").sessionIds).toEqual(["a", "b", "c"]);
+    // Both writes really were attempted, in drag order (the chain is intact).
+    expect(reorderSessionsCommand).toHaveBeenCalledTimes(2);
+    errSpy.mockRestore();
+  });
+
+  it("reordering one Space leaves another Space's rows exactly where they were", async () => {
+    // Space B's rows sit in the ARRAY in the OPPOSITE order to their numbers, on
+    // purpose. TWO COMPETING ANSWERS: an implementation that rebuilds the map
+    // wholesale (`Object.fromEntries(ids.map(…))`) DELETES b1/b2, and
+    // `sortByManualOrder` sinks unknown ids while preserving their input order —
+    // so Space B silently answers ["b2","b1"]. Seeding B's array order to AGREE
+    // with its numbers would make the two rules answer identically, which is the
+    // trap the Conventions name.
+    useSessions.setState({
+      spaces: [row("/w/a", 1000), row("/w/b", 900)],
+      sessions: [],
+      historySessions: [
+        info("a1", "/w/a"),
+        info("a2", "/w/a"),
+        info("b2", "/w/b"),
+        info("b1", "/w/b"),
+      ],
+      archivedSessions: [],
+      activeSpacePath: "/w/a",
+      closeReasons: {},
+      messages: {},
+      sessionRecency: {},
+      sessionOrder: { a1: 0, a2: 1, b1: 0, b2: 1 },
+    });
+    // Prove the fixture is live: the map beats the array for Space B too.
+    expect(viewFor("/w/b").sessionIds).toEqual(["b1", "b2"]);
+
+    await useSessions.getState().reorderSessions(["a2", "a1"]);
+
+    expect(viewFor("/w/a").sessionIds).toEqual(["a2", "a1"]);
+    expect(viewFor("/w/b").sessionIds).toEqual(["b1", "b2"]);
+  });
+
+  it("ids outside the sent slice keep their map entries (the write touches the slice, as the command does)", async () => {
+    // The data-layer statement of the same failure as the test above: the command
+    // updates ONLY the ids it is given, so a wholesale map would sink every other
+    // Space's rows to the bottom.
+    useSessions.setState({ sessionOrder: { a: 0, b: 1, z: 7 } });
+    await useSessions.getState().reorderSessions(["b", "a"]);
+    expect(useSessions.getState().sessionOrder).toEqual({ a: 1, b: 0, z: 7 });
+  });
+
+  it("two drags in one list reach the database in DRAG ORDER (the chain — the newer drag must not land first)", async () => {
+    // The property `setSpaceTrusted`'s `inFlightToggles` queue exists for, copied
+    // (D4). TWO COMPETING ANSWERS: with the chain, the second drag's command does
+    // not START while the first is still in flight; without it, both fire as soon
+    // as they are called and the DB settles on whichever IPC finishes last — which
+    // can be the OLDER drag, leaving the database on an order the user has since
+    // overwritten. The optimistic map cannot save it: the map is the newer order
+    // while the DB is the older one, and the next boot re-derives from the DB.
+    useSessions.setState({
+      spaces: [row("/w/a", 1000)],
+      sessions: [],
+      historySessions: [
+        info("a", "/w/a"),
+        info("b", "/w/a"),
+        info("c", "/w/a"),
+      ],
+      archivedSessions: [],
+      activeSpacePath: "/w/a",
+      closeReasons: {},
+      messages: {},
+      sessionRecency: {},
+      sessionOrder: { a: 0, b: 1, c: 2 },
+    });
+    // Hold the first command open until the test says so.
+    let releaseFirst: () => void = () => {};
+    const firstCommand = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    vi.mocked(reorderSessionsCommand).mockImplementationOnce(
+      () => firstCommand,
+    );
+
+    const first = useSessions.getState().reorderSessions(["b", "a"]);
+    // Let the chain's `.then` reach the command, so the first IPC is genuinely in
+    // flight (not merely queued). A `setTimeout` flush drains the whole microtask
+    // queue, so the count below cannot be a tick-count artefact.
+    await flush();
+    expect(reorderSessionsCommand).toHaveBeenCalledTimes(1);
+
+    const second = useSessions.getState().reorderSessions(["c", "b", "a"]);
+    await flush();
+    // THE DISCRIMINATING ASSERTION: the second command has not even started.
+    expect(reorderSessionsCommand).toHaveBeenCalledTimes(1);
+
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(reorderSessionsCommand).toHaveBeenCalledTimes(2);
+    expect(reorderSessionsCommand).toHaveBeenNthCalledWith(1, ["b", "a"]);
+    expect(reorderSessionsCommand).toHaveBeenNthCalledWith(2, [
+      "c",
+      "b",
+      "a",
+    ]);
+    // And the optimistic map is the NEWER drag's, which is what the user sees.
+    expect(useSessions.getState().sessionOrder).toEqual({ c: 0, b: 1, a: 2 });
+  });
+});
+
+describe("reorderSpaces (the tab-strip drag write path, ADR 0075)", () => {
+  // The asymmetry with the describe above, stated once: a Space carries its
+  // position in the ARRAY — `SpaceRow` has no order field and the column never
+  // crosses the wire — so `spaces.map(…)` IS the tab strip and
+  // `views = spaces.map(spaceViewFor)` inherits it. There is therefore no map to
+  // write and no snap-back hazard; what this action owns instead is the array's
+  // integrity (nothing dropped, nothing invented).
+  beforeEach(() => {
+    resetStores();
+    vi.mocked(reorderSpacesCommand).mockReset().mockResolvedValue(undefined);
+  });
+  afterEach(() => resetStores());
+
+  const stripPaths = () => useSessions.getState().spaces.map((s) => s.path);
+
+  it("reorders the tab strip optimistically and sends the whole strip's PATHS", async () => {
+    useSessions.setState({
+      spaces: [row("/a", 3000), row("/b", 2000), row("/c", 1000)],
+    });
+    const done = useSessions.getState().reorderSpaces(["/c", "/a", "/b"]);
+    // SYNCHRONOUS — the optimistic publish the tab strip paints from. The
+    // COMPETING ANSWER is a write-after-await implementation, which still answers
+    // ["/a","/b","/c"] at this instant.
+    expect(stripPaths()).toEqual(["/c", "/a", "/b"]);
+    await done;
+    // PATHS, verbatim. Sending ids or whole rows instead is a `{ ids }` wire key
+    // against Rust's `paths` parameter — a runtime-only failure no Rust test and
+    // no component test can see, which is why it is pinned at this boundary too.
+    // Asserted AFTER the await on purpose: the write is CHAINED (D4), so the IPC
+    // legitimately starts a microtask after the publish — the optimistic half
+    // above is what has to be synchronous, not the call.
+    expect(reorderSpacesCommand).toHaveBeenCalledWith(["/c", "/a", "/b"]);
+    expect(stripPaths()).toEqual(["/c", "/a", "/b"]);
+  });
+
+  it("a rejected tab drag restores the PREVIOUS strip array (no refetch — see the doc)", async () => {
+    useSessions.setState({
+      spaces: [row("/a", 3000), row("/b", 2000), row("/c", 1000)],
+    });
+    const before = useSessions.getState().spaces;
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(reorderSpacesCommand).mockRejectedValueOnce(new Error("boom"));
+    // The `await` is the never-rejects proof (a rejecting action fails here on the
+    // rejection, not on an assertion).
+    await useSessions.getState().reorderSpaces(["/c", "/a", "/b"]);
+    // TWO COMPETING ANSWERS: leaving the dragged order means the strip and the DB
+    // disagree until a restart — and `removeSpace`'s leftmost-tab fallback then
+    // lands on a tab the DB does not think is leftmost.
+    expect(useSessions.getState().spaces).toBe(before);
+    expect(stripPaths()).toEqual(["/a", "/b", "/c"]);
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("reorder"),
+      expect.anything(),
+    );
+    errSpy.mockRestore();
+  });
+
+  it("a Space the slice does not name is kept, at the BOTTOM (a tab added mid-drag is not dropped)", async () => {
+    useSessions.setState({
+      spaces: [row("/a", 3000), row("/b", 2000), row("/c", 1000)],
+    });
+    // As if `/b` had been opened mid-gesture, so the drag's slice predates it.
+    // `/b` sits in the MIDDLE of the strip on purpose: seed it last and "keep its
+    // index" and "go to the bottom" answer identically and the test certifies
+    // nothing. THREE COMPETING ANSWERS:
+    //  - a naive `paths.map(lookup)` answers ["/c","/a"] — a tab that VANISHES
+    //    from the strip while its Space still exists is data loss in a UI costume;
+    //  - splicing the named rows and leaving the unnamed one at its ORIGINAL index
+    //    answers ["/c","/b","/a"];
+    //  - the approved new-row rule answers ["/c","/a","/b"].
+    await useSessions.getState().reorderSpaces(["/c", "/a"]);
+    expect(stripPaths()).toEqual(["/c", "/a", "/b"]);
+  });
+
+  it("an unknown path in the slice is ignored, and an empty slice sends nothing", async () => {
+    useSessions.setState({
+      spaces: [row("/a", 3000), row("/b", 2000), row("/c", 1000)],
+    });
+    // The ghost cannot be rendered, so it is not inserted as `undefined`; the
+    // slice still goes to the command verbatim (the store does not second-guess
+    // what the call site can see).
+    await useSessions.getState().reorderSpaces(["/ghost", "/a"]);
+    expect(stripPaths()).toEqual(["/a", "/b", "/c"]);
+    expect(reorderSpacesCommand).toHaveBeenCalledWith(["/ghost", "/a"]);
+
+    await useSessions.getState().reorderSpaces([]);
+    expect(reorderSpacesCommand).toHaveBeenCalledTimes(1);
+    expect(stripPaths()).toEqual(["/a", "/b", "/c"]);
+  });
+
+  it("after a tab drag, closing the selected tab lands on the NEW leftmost tab (a neighbour means the user's neighbour)", async () => {
+    // The ADR 0075 consequence, and the one place another action reads the array's
+    // order. `/c` is the SELECTED tab because `removeSpace` answers its fallback
+    // ONLY for the Space that was selected (`null` otherwise) — selecting anything
+    // else here would make the test fail for the wrong reason.
+    useSessions.setState({
+      spaces: [row("/a", 3000), row("/b", 2000), row("/c", 1000)],
+      activeSpacePath: "/c",
+    });
+    await useSessions.getState().reorderSpaces(["/c", "/b", "/a"]);
+    expect(stripPaths()).toEqual(["/c", "/b", "/a"]);
+    // `removeSpace`, not `closeSpace`: it RETURNS the fallback, which isolates the
+    // ordering claim, while `closeSpace` additionally runs `selectSpace` →
+    // `openSession` → a `loadHistory` IPC whose result could muddy an assertion
+    // about position.
+    const fallback = await useSessions.getState().removeSpace("/c");
+    // TWO COMPETING ANSWERS: had the reorder been a no-op the strip would still be
+    // ["/a","/b","/c"], and removing "/c" would leave ["/a","/b"] → leftmost
+    // "/a". After a REAL drag it leaves ["/b","/a"] → leftmost "/b".
+    // `removeSpace`'s rule is deliberately UNCHANGED by ADR 0075 ("the LEFTMOST
+    // remaining tab"), so this is the pin that the rule now reads the user's
+    // arrangement rather than a server-inferred recency.
+    expect(fallback).toBe("/b");
+  });
+
+  it("a failed OLDER tab drag does not roll back a NEWER tab drag's strip (the publish epoch)", async () => {
+    // The same rule as `reorderSessions`'s epoch test, on the other list: a
+    // rollback IS a publish, so a stale one silently deletes the user's newer
+    // move. TWO COMPETING ANSWERS: an unconditional rollback restores the
+    // pre-FIRST array and erases the second drag; the epoch-checked one discards
+    // the stale rollback and keeps ["/c","/b","/a"].
+    useSessions.setState({
+      spaces: [row("/a", 3000), row("/b", 2000), row("/c", 1000)],
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // Two drags in one tick; the FIRST command fails, the second's lands.
+    vi.mocked(reorderSpacesCommand).mockRejectedValueOnce(new Error("boom"));
+    const first = useSessions.getState().reorderSpaces(["/b", "/a", "/c"]);
+    const second = useSessions.getState().reorderSpaces(["/c", "/b", "/a"]);
+    await Promise.all([first, second]);
+    expect(stripPaths()).toEqual(["/c", "/b", "/a"]);
+    errSpy.mockRestore();
+  });
+
+  it("two tab drags whose commands BOTH fail restore the strip the DATABASE holds, not the first drag's", async () => {
+    // The spaces half of the same defect, on the list whose rows carry their
+    // position IN THE ARRAY. TWO COMPETING ANSWERS:
+    //  - the bug answers ["/b","/a","/c"]: the SECOND drag snapshots the strip for
+    //    its rollback from the store, which then already holds the FIRST drag's
+    //    optimistic, never-committed order, and the epoch guard correctly discards
+    //    the first drag's own rollback — so the tab strip ends on an arrangement
+    //    `reorder_spaces` never wrote, and `removeSpace`'s leftmost-tab fallback
+    //    then lands on a tab the DB does not think is leftmost;
+    //  - the committed baseline answers ["/a","/b","/c"], what `list_spaces` still
+    //    returns, because BOTH commands failed.
+    // Seeded through `setSpaces` — the boot path that installs the DB's rows, i.e.
+    // the last thing the store knows the database said.
+    useSessions.getState().setSpaces([
+      row("/a", 3000),
+      row("/b", 2000),
+      row("/c", 1000),
+    ]);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // BOTH commands reject (every call, not just the first).
+    vi.mocked(reorderSpacesCommand).mockRejectedValue(new Error("boom"));
+    const first = useSessions.getState().reorderSpaces(["/b", "/a", "/c"]);
+    const second = useSessions.getState().reorderSpaces(["/c", "/b", "/a"]);
+    await Promise.all([first, second]);
+    expect(stripPaths()).toEqual(["/a", "/b", "/c"]);
+    // The rows themselves survived — the rollback restores the committed ARRAY, it
+    // does not rebuild rows out of the drag's slice.
+    expect(useSessions.getState().spaces).toEqual([
+      row("/a", 3000),
+      row("/b", 2000),
+      row("/c", 1000),
+    ]);
+    expect(reorderSpacesCommand).toHaveBeenCalledTimes(2);
+    errSpy.mockRestore();
+  });
+
+  it("two tab drags in one list reach the database in DRAG ORDER (the chain)", async () => {
+    // The spaces half of the sessions chain pin, for the same reason: D4 says the
+    // command rewrites a WHOLE slice, so two overlapping writes to the `spaces`
+    // table have no order without a chain, and the DB could settle on the OLDER
+    // drag. Without the chain both commands start as soon as they are called.
+    useSessions.setState({
+      spaces: [row("/a", 3000), row("/b", 2000), row("/c", 1000)],
+    });
+    let releaseFirst: () => void = () => {};
+    const firstCommand = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    vi.mocked(reorderSpacesCommand).mockImplementationOnce(() => firstCommand);
+
+    const first = useSessions.getState().reorderSpaces(["/b", "/a", "/c"]);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(reorderSpacesCommand).toHaveBeenCalledTimes(1);
+
+    const second = useSessions.getState().reorderSpaces(["/c", "/b", "/a"]);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    // THE DISCRIMINATING ASSERTION: the second command has not even started.
+    expect(reorderSpacesCommand).toHaveBeenCalledTimes(1);
+
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(reorderSpacesCommand).toHaveBeenNthCalledWith(1, ["/b", "/a", "/c"]);
+    expect(reorderSpacesCommand).toHaveBeenNthCalledWith(2, ["/c", "/b", "/a"]);
+    expect(stripPaths()).toEqual(["/c", "/b", "/a"]);
   });
 });

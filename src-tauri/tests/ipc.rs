@@ -152,6 +152,9 @@ fn build_app(dirs: TestDirs) -> TestApp {
             archimedes_lib::commands::sessions::cancel_session,
             archimedes_lib::commands::sessions::get_stalled_info,
             archimedes_lib::commands::spaces::set_space_trusted,
+            archimedes_lib::commands::spaces::reorder_spaces,
+            archimedes_lib::commands::history::session_recency,
+            archimedes_lib::commands::history::reorder_sessions,
             archimedes_lib::commands::settings::list_models,
             archimedes_lib::commands::attention::attention_disarm,
         ])
@@ -926,6 +929,54 @@ async fn attention_disarm_resolves_through_the_real_ipc_surface() {
     // serialises to `null`.
     let payload = invoke_ok(&app.webview, "attention_disarm", json!({})).await;
     assert_eq!(payload, Value::Null, "`attention_disarm` returns `Ok(())`");
+}
+
+/// The three LIST-ORDER commands (ADR 0075, T02) resolve through the real IPC
+/// surface: `session_recency`, `reorder_sessions` and `reorder_spaces` are
+/// declared in this harness's `generate_handler!` list and the `Arc<Db>` they
+/// need is managed by the same `setup_dirs_with_factory` the app runs.
+///
+/// ONE test drives all three names, because what it proves is per-NAME (name
+/// resolution + managed-state wiring), not per-interaction — three mock apps
+/// would buy no extra signal. The argument lists are EMPTY on purpose: an empty
+/// reorder is the idempotent no-op T01 defines (an unknown/absent id is a 0-row
+/// `UPDATE`), so the test touches no real data while still exercising the
+/// `Vec<String>` argument decoding, and `session_recency` on the fresh boot `Db`
+/// answers the empty array. An unregistered name or an unmanaged `Arc<Db>` is
+/// the Err arm, which `invoke_ok` fails on with the payload in the message.
+///
+/// Scope of the claim, as the `attention_disarm` pin above states: this harness
+/// declares its OWN handler list, so it does NOT prove `lib.rs` lists the three
+/// commands — that is the `generate_handler!` block read directly.
+#[tokio::test]
+async fn the_list_order_commands_resolve_through_the_real_ipc_surface() {
+    let dirs = TestDirs::new();
+    let app = build_app(dirs);
+    assert!(
+        app.handle.try_state::<Arc<Db>>().is_some(),
+        "the setup manages the `Arc<Db>` all three commands take"
+    );
+
+    let recency = invoke_ok(&app.webview, "session_recency", json!({})).await;
+    assert_eq!(
+        recency,
+        Value::Array(Vec::new()),
+        "`session_recency` returns the array (empty on a fresh database)"
+    );
+
+    let sessions = invoke_ok(&app.webview, "reorder_sessions", json!({ "ids": [] })).await;
+    assert_eq!(
+        sessions,
+        Value::Null,
+        "`reorder_sessions` with an empty slice returns `Ok(())`"
+    );
+
+    let spaces = invoke_ok(&app.webview, "reorder_spaces", json!({ "paths": [] })).await;
+    assert_eq!(
+        spaces,
+        Value::Null,
+        "`reorder_spaces` with an empty slice returns `Ok(())`"
+    );
 }
 
 /// (#85) A provider refresh must reach LIVE sessions, not just new ones.

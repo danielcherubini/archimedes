@@ -426,10 +426,13 @@ beforeEach(() => {
   clearMentionCatalogsCache();
   // Every store back to zustand's own captured initial state (the rolling
   // migration). This replaces a hand-written 11-key `useSessions` reset — the
-  // store has SIXTEEN data fields, so `history`, `contextUsage`, `stalled`,
-  // `newSessionError` and friends used to leak from one test to the next — plus
-  // the per-id `dismiss*` calls (a whole-store replace already covers them) and
-  // the settings reset (whose values ARE the initial state).
+  // store carries data fields that list never named, so `history`,
+  // `contextUsage`, `stalled`, `newSessionError` and friends used to leak from
+  // one test to the next — plus the per-id `dismiss*` calls (a whole-store
+  // replace already covers them) and the settings reset (whose values ARE the
+  // initial state). No count of the store's data fields is quoted here on
+  // purpose: it goes stale the moment a field is added, and this comment would
+  // then be a confident lie about the store it is explaining.
   //
   // The queued-prompt loop ABOVE still runs first and is NOT redundant: its
   // `clearSession` releases staged object URLs, a side effect a state replace

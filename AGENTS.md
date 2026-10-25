@@ -286,9 +286,47 @@ These are properties of the repo, not of any branch:
   and there is no wine here, so `#[cfg(windows)]` code type-checks locally and
   only RUNS on CI's `windows-latest` leg — never describe Windows behaviour as
   behaviourally verified from this machine.
+- **`TMPDIR` is not a usable workaround for temp-dir pressure in the Rust
+  suite.** Two `commands::files` tests (`completion.rs`, `space_walk.rs`, via
+  `assert_readdir_disagrees_with_sorted_order`) PANIC on unix unless the temp
+  dir's `readdir` is unsorted — i.e. a tmpfs — because their "the survivors are
+  the alphabetically first" assertion needs raw order to disagree with the sort.
+  Two `sandbox` tests shell out to `TMPDIR=/tmp mktemp`, pinning `/tmp`
+  explicitly. So pointing `TMPDIR` at a real disk fixes most tests and breaks
+  those four. (Both halves re-measured, not copied from the plan that recorded
+  them.)
 - **`grep -c '#\[cfg(unix)\]'` counts LINES, including prose that names the
   attribute.** A census count needs the anchored `^#\[cfg(unix)\]$` or it
   false-reports high.
+- **A boot fetch that `src/App.test.tsx` does not mock reddens tests that have
+  nothing to do with it.** That file's `vi.mock("./lib/tauri")` factory spreads
+  `importActual`, so an un-mocked export resolves to the real wrapper, which
+  rejects outside a webview; the boot `Promise.all` rejects and its `.catch`
+  swallows the reason. Measured by deleting one boot mock: **3 of the file's 41
+  tests fail and only one names the fetch** — the other two are Settings /
+  start-failure cases that merely need a booted store and fail on
+  `activeSpacePath: null`. When `App.tsx` gains a boot fetch, add its mock in the
+  same commit. (Found the hard way adding the third one — and note that only a
+  minority of the file's tests need a booted store, so the blast radius is small
+  but misleading, not large.)
+- **The suite's green depends on file order.** Many `describe` blocks in
+  `src/store/sessions.test.ts` never call `resetStores()`, so they inherit
+  whatever a previous block left in the store; under
+  `npx vitest run src/store/sessions.test.ts --sequence.shuffle` some fail.
+  Nothing runs shuffled (no `shuffle` in `vitest.config.*`, `package.json`, or CI),
+  so `pnpm test` is legitimately green — but a new test that asserts on store
+  state must reset first, or it can pass for a reason nobody intends.
+  `src/App.test.tsx` is the extreme case: it never calls `resetStores()` and
+  hand-writes `useSessions.setState({...})` key lists per test, so a field the
+  list omits survives from one test to the next — when you add a store field,
+  grep that file rather than assuming the new field starts clean.
+  `src/test/resetStores.ts` also documents that it cannot reach module-`let`
+  state, so a store module holding its own bookkeeping needs a named reset.
+- **`src/components/MessageBubble.codeblock.test.tsx`'s
+  `renders a \`%s\` fence genuinely highlighted` (the `it.each` JSON case) flakes**
+  — it intermittently renders the unhighlighted fallback through shiki's async
+  path. Pre-existing, unrelated to whatever you just changed: if it fails once,
+  re-run before investigating. It needs an owner, not a drive-by fix.
 - **Plans carry stale baselines within hours** on a busy branch: re-measure test
   counts at your own HEAD rather than trusting the plan's.
 

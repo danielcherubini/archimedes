@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { cn } from "./lib/utils";
 import { RowButton } from "./RowButton";
+import type { DragReorderHandlers, DropEdge } from "../hooks/useDragReorder";
 
 /**
  * One **Session** row of the sidebar, ONCE (finding 3, Task C4).
@@ -41,11 +42,13 @@ import { RowButton } from "./RowButton";
  *
  * **NO DOM LEVEL.** Every child is a DIRECT child of the `role="button"`
  * element. `SpacesList.test.tsx`'s "keeps the rail's marks POSITIONALLY equal to
- * the rows after the activity sort" compares row positions with
- * `compareDocumentPosition` against the collapsed rail's marks, and the eight
- * `.closest('[role="button"]')` sites plus `rowOf()` resolve through ancestry.
- * Same lesson C6 recorded for the picker shell: a React boundary is free, an
- * element is not.
+ * the rows, because both come from the store's ONE sequence" compares row
+ * positions with `compareDocumentPosition` against the collapsed rail's marks,
+ * and the `.closest('[role="button"]')` sites plus `rowOf()` resolve through
+ * ancestry. Same lesson C6 recorded for the picker shell: a React boundary is
+ * free, an element is not. THIS is the rule the drop indicator obeys: it is a
+ * CLASS on the row (`dropEdge` below), never a placeholder node — the same
+ * contract `useDragReorder`'s header records for the same reason.
  *
  * **ONE `role="button"`.** The row is the affordance (`RowButton`); its hover
  * actions are plain `<button>` elements with no `role`. `RowButton` is
@@ -59,6 +62,34 @@ import { RowButton } from "./RowButton";
  * `hover:bg-surface-hover` reaches the string, which is what the `bg-selected`
  * pin — "opens a session on row click (the store's activeSessionId + the
  * selection styling)" — reads.
+ *
+ * ---------------------------------------------------------------------------
+ * THE TWO DRAG PROPS (ADR 0075, T06) — and why they are NAMED, not pass-through
+ * ---------------------------------------------------------------------------
+ *
+ * A row is a drop target AND a draggable, and both facts arrive from
+ * `useDragReorder` at the call site. They are two SEPARATE props because they
+ * answer two separate questions:
+ *
+ *  - **`drag`** is the GESTURE: the hook's six keys (`draggable` + five
+ *    handlers), spread onto `RowButton` so they reach the DOM through its
+ *    existing `...rest` — the route `RowButton`'s header already allows for
+ *    ("then whatever the caller spread"), which is why `RowButton.tsx` needed no
+ *    change. It is typed as the hook's OWN return type, so a seventh key cannot
+ *    ride in unnoticed: `useDragReorder.test.tsx` pins that surface at exactly
+ *    six keys precisely because this element's serialisation is byte-compared.
+ *    It is optional because NOT every row is draggable: the **Archived** section
+ *    keeps following recency (spec §Archived section), so those rows pass
+ *    nothing and emit no `draggable` attribute at all.
+ *  - **`dropEdge`** is the INDICATOR: which half of THIS row the pointer is in,
+ *    hence whether the dragged row will land above or below it. The spec forces
+ *    it to be a class on the real row — `border-t-2` / `border-b-2` — because
+ *    the NO-DOM-LEVEL rule above forbids the obvious alternative (a placeholder
+ *    row or a portal ghost breaks all nine ancestry reads). `null`/`undefined`
+ *    serialises EXACTLY the untouched row, which is what every non-target row
+ *    and every non-dragging moment must look like.
+ *
+ * Neither prop may add a node, a character of text, or a `role`.
  */
 export interface SessionListRowProps {
   /** The row's display title — already resolved by the caller (`titleFor`). */
@@ -73,6 +104,12 @@ export interface SessionListRowProps {
   actions?: ReactNode;
   /** Open the Session (click, or Enter). */
   onOpen: () => void;
+  /** The `useDragReorder` spread for THIS row (`dragProps(id)`), or nothing for
+   *  a row that is not draggable — see the note above. */
+  drag?: DragReorderHandlers;
+  /** Which half of this row the drag pointer is in, i.e. which edge to mark.
+   *  `null` (every row that is not the current target) paints nothing. */
+  dropEdge?: DropEdge | null;
 }
 
 export function SessionListRow({
@@ -82,13 +119,25 @@ export function SessionListRow({
   leading,
   actions,
   onOpen,
+  drag,
+  dropEdge = null,
 }: SessionListRowProps) {
   return (
     <RowButton
       onClick={onOpen}
+      {...drag}
       className={cn(
         "group flex cursor-pointer items-center gap-2 rounded-lg pl-2.5 pr-1 py-1",
         active ? "bg-selected" : "hover:bg-surface-hover",
+        // THE DROP INDICATOR — one edge, one class, and the ONLY reason a
+        // border appears on this row. `border-brand` is named rather than left
+        // to the initial `currentColor`, which would inherit the row's text ink
+        // and paint the line in whatever colour the title happens to be; the
+        // brand token is the app's "this one, here" ink and exists in all five
+        // palettes. The two edge utilities are mutually exclusive, so this rides
+        // beside the background ternary without fighting it.
+        dropEdge === "before" && "border-t-2 border-brand",
+        dropEdge === "after" && "border-b-2 border-brand",
       )}
     >
       {/* The state glyph, in the slot the spinner already owned: a session that
