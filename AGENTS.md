@@ -232,10 +232,47 @@ workflow can do — is writing notes a person would read.
    as "nothing was decided about `--out`": the file there is still the one you
    downloaded, and uploading it would publish the PREVIOUS
    release's manifest.
-5. Confirm, since `release.yml`'s notes step is `continue-on-error` on purpose (a
-   release whose notes failed must still ship): `gh release view vX.Y.Z --json
-   body -q .body` must show the curated text, not `Archimedes vX.Y.Z` — that
-   placeholder is what every release before this step read like.
+5. Confirm the human pass actually landed, on BOTH surfaces, and believe only
+   the second one for the manifest:
+
+   ```bash
+   gh release view vX.Y.Z --json body -q .body | head -3
+   # QUOTES LOAD-BEARING, same reason as the `--repo "<owner>/<repo>"` trap
+   # above: an unquoted `<owner>` here is an input redirect from a file called
+   # `owner`, so the line dies before curl runs instead of fetching anything.
+   curl -sSL "https://github.com/<owner>/<repo>/releases/latest/download/latest.json" \
+     | jq -r .notes
+   ```
+
+   **Checking for the placeholder is the wrong test.** `Archimedes vX.Y.Z` is
+   what `create-release` seeds and what the manifest falls back to when the
+   notes step FAILS — but that step is `continue-on-error`, and when it
+   SUCCEEDS the workflow applies GitHub's generated notes to the body and puts
+   its one-line summary in the manifest. So the ordinary way this step gets
+   skipped leaves the body opening `## What's Changed` with `by @user` suffixes
+   and the manifest notes reading `vX.Y.Z — N changes: <url>`, and a check for
+   `Archimedes vX.Y.Z` passes on both. The manifest half was measured on the
+   live v0.7.0 manifest before its rewrite; the body half is read off
+   `release.yml` ("Apply the generated notes to the release" writes the
+   generated markdown there) rather than observed — the body is not versioned,
+   so once step 5 rewrites it the pre-rewrite text is gone. Either way, look for
+   the generated shapes above, not for the placeholder.
+
+   **And `gh` cannot verify the manifest.** `gh release view`/`download` are
+   authenticated and read the asset API, so they return the file you just
+   uploaded immediately; `--clobber` replaces the asset but the
+   `/releases/latest/download/` URL keeps serving the PREVIOUS object for a
+   while after. A step-5 check built on `gh` therefore passes whether or not
+   installed clients can see the new notes yet — which is the one thing this
+   verification exists to catch. `curl` the public endpoint and wait it out.
+   Observed on v0.7.0: still old immediately after the upload and on a check 5
+   seconds later; the `/releases/download/vX.Y.Z/` form was stale too, so
+   pinning the version does not dodge this; fresh after a further 3-minute wait
+   with nothing done in between. Stale-at-5s and fresh-by-then is a bracket, not
+   an expiry — do not encode a sleep from it. Before suspecting the upload,
+   prove the asset itself:
+   `gh release download … --pattern latest.json` then `cmp` against the file you
+   composed. If they match, the upload landed and only the public URLs lag.
 
 - The minisign private key and its password live as GitHub secrets —
   `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — and
@@ -243,8 +280,54 @@ workflow can do — is writing notes a person would read.
   `src-tauri/tauri.conf.json` under `plugins.updater.pubkey`, because that is
   what every installed client verifies signatures against.
 - A keypair MISMATCH is **warn-only** in CI (tauri-cli logs it and carries on),
-  so CI cannot be the check: verify the pair locally before tagging — the
-  ceremony is in README's `## Releasing` section.
+  so CI cannot be the check: verify the pair before tagging — the ceremony is in
+  README's `## Releasing` section.
+- **Ask the RELEASE which key signed it — the check that needs no private key.**
+  A minisign signature blob is PLAIN (2 type bytes, 8 key-id bytes, 64
+  signature bytes) and the committed pubkey prints its own id in words, so:
+
+  ```bash
+  jq -r .plugins.updater.pubkey src-tauri/tauri.conf.json \
+    | base64 -d | head -n1        # -> "minisign public key: <ID>"
+  gh release download vPREV --pattern '*.sig' --dir sigs --clobber
+  for f in sigs/*.sig; do
+    base64 -d "$f" | sed -n 2p | base64 -d | od -An -tx1 -j2 -N8
+  done                            # byte-reversed <ID> must appear here
+  ```
+
+  The `.sig` files are themselves one base64-wrapped line, so decode the FILE
+  first and take line 2 of the result — `sed -n 2p` on the raw file yields
+  nothing. This asks the question a release actually poses ("will installed
+  clients accept what CI just signed?"). Verified this way on v0.6.0 and v0.7.0:
+  all four signatures on each carry the committed pubkey's id.
+- **Do NOT read a key id out of the SECRET key file.** The offset trick above
+  works only on PLAIN blobs. `archimedes-updater.key` is an ENCRYPTED key — its
+  decoded blob is 158 bytes, not 74, and its comment says `rsign encrypted
+  secret key` — so bytes 2..9 there are **KDF salt**, and reading them prints a
+  confident, well-formed, completely wrong key id. That is exactly what happened
+  during the v0.7.0 release: it produced a false "the local key is an orphan,
+  CI's key is the right one" conclusion that was nearly written into this file.
+  Verify the local pair by SIGNING something, which is also the only check that
+  exercises the password (README step 4):
+
+  ```bash
+  # cwd MUST be the repo root — `pnpm` resolves the project from it, and from
+  # anywhere else it dies with a `runDepsStatusCheck` stack trace that reads
+  # like a signing failure but is not one. The scratch FILE goes elsewhere; the
+  # .sig is written beside it, so the tree stays clean.
+  echo scratch > /tmp/scratch.txt
+  TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.archimedes/archimedes-updater.key)" \
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(cat ~/.archimedes/archimedes-updater.key.password)" \
+    pnpm tauri signer sign /tmp/scratch.txt
+  base64 -d /tmp/scratch.txt.sig | sed -n 2p | base64 -d | od -An -tx1 -j2 -N8
+  ```
+
+  That id must equal the byte-reversed id of the committed pubkey. Verified on
+  this machine after v0.7.0: it matches `2C0BB905F9BAB271`, so the local keypair
+  IS the deployed one. Two gotchas in that block, both hit live: the password
+  file is `archimedes-updater.key.password` (with `.key` — guessing
+  `archimedes-updater.password` fails before signing), and there is no
+  `tauri signer verify` subcommand, so decode and compare instead.
 - **A draft is not a shipped release.** The updater endpoint is
   `/releases/latest/download/latest.json`, and that path serves only a
   published, non-prerelease release — a draft 404s, which every installed
