@@ -160,10 +160,13 @@ export default function ChatStream() {
   const workingOrInTurn = agentState === "working" || inTurn;
   // The active session's in-flight compaction reason (ADR 0045) — the
   // `compaction_update` frame the harness emits around a compaction, and the
-  // ONLY signal for one: an idle compaction (the `/compact` command) emits no
-  // `turn_start` / `agent_settled`, so `inTurn` stays false and `agentState`
-  // stays idle. Indexed on `s.activeSessionId` INSIDE the selector (the outer
-  // `activeSessionId` is `string | null`, which TS2538 rejects as an index).
+  // ONLY signal for the COMPOSER LOCK: an idle compaction (the `/compact`
+  // command) emits no `turn_start` / `agent_settled`, so `inTurn` stays false and
+  // `agentState` stays idle. (A compaction also leaves a card in the transcript —
+  // ADR 0077 — but that is durable history, not a live busy flag: it settles and
+  // never unlocks anything.) Indexed on `s.activeSessionId` INSIDE the selector
+  // (the outer `activeSessionId` is `string | null`, which TS2538 rejects as an
+  // index).
   const compacting = useSessions((s) =>
     s.activeSessionId ? s.compacting[s.activeSessionId] : undefined,
   );

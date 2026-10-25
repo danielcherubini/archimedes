@@ -206,6 +206,40 @@ describe("ToolCallCard (rendering)", () => {
     fireEvent.click(screen.getByRole("button"));
     expect(screen.getAllByText("L5–54").length).toBe(2);
   });
+  // Issue #90 item 2, stated as the user stated it: expanding the compaction
+  // shows the text that came back from it.
+  it("expands a compaction card to the summary it produced", () => {
+    const summary = "User asked for X. Decided Y. Open task: Z.";
+    render(
+      <ToolCallCard
+        title="compaction"
+        status="completed"
+        rawInput={{ reason: "threshold" }}
+        rawOutput={{ content: [{ type: "text", text: summary }] }}
+      />,
+    );
+    // Header: the verb + the trigger, not the raw reason JSON.
+    expect(screen.getByText("Compacted")).toBeTruthy();
+    expect(screen.getByText("context over threshold")).toBeTruthy();
+    // Collapsed: the summary is not on screen.
+    expect(screen.queryByText(summary)).toBeNull();
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.getByText(summary)).toBeTruthy();
+  });
+  it("shows a failed compaction's reason on the card", () => {
+    const reason = "retryable: the summary hit the output token limit";
+    render(
+      <ToolCallCard
+        title="compaction"
+        status="failed"
+        rawInput={{ reason: "threshold" }}
+        rawOutput={{ content: [{ type: "text", text: reason }], details: { error: reason } }}
+      />,
+    );
+    expect(screen.getByText("Failed")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.getByText(reason)).toBeTruthy();
+  });
   it("renders the $ prompt + command in the expanded shell body", () => {
     render(
       <ToolCallCard
