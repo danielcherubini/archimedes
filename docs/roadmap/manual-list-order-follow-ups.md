@@ -78,7 +78,7 @@ this feature lives in `docs/features/manual-list-order.md` and ADR 0075, which a
 not deleted; this file is the open-work half, and if any item below is still open
 when it is read, the right move is to file it, not to resurrect the roadmap.
 
-## 3. `App.test.tsx`'s `vi.mock` factory spreads `importActual`, so an un-mocked boot fetch reddens the whole file
+## 3. `App.test.tsx`'s `vi.mock` factory spreads `importActual`, so an un-mocked boot fetch fails unrelated tests
 
 **Status: open hazard, cheap to close, and this feature is the reason it is now a trap.**
 
@@ -91,8 +91,9 @@ fatal for a boot fetch: `App`'s boot effect runs
 `Promise.all([listSessions(true), listSpaces(), sessionRecency()])`, and if any
 member rejects the whole `Promise.all` rejects into a `.catch` that only
 `console.error`s. So `setHistorySessions`, `setSessionRecency` and `setSpaces`
-never run, every test lands `activeSpacePath: null`, and the failures look nothing
-like the cause.
+never run and the store boots empty — which most of the file's tests never look
+at, and which is why the failures that *do* happen name something other than the
+cause.
 
 This feature put the third fetch in that array, and the mock is now load-bearing
 for the Landing Session: `setSpaces` runs `autoSelectActive`, which decides where
@@ -101,11 +102,18 @@ boot lands from the recency map, so the map has to be filled before it — pinne
 both maps before setSpaces runs")`.
 
 **The trap for the next person:** a fourth boot fetch, added to `App.tsx` without
-a matching line in this file's factory, reddens this file — and the count is not
-small. `App.test.tsx` holds **41 tests** at HEAD (measured: vitest reports `src/
-App.test.tsx (41 tests)`), and the in-file comment's "~40 reds, none of them about
-recency" is the same claim; treat it as the file's own estimate rather than a
-figure anyone has measured per-cause.
+a matching line in this file's factory, reddens tests that have nothing to do with
+it. **MEASURED by deleting one boot mock: 3 of the file's 41 tests fail, and only
+ONE names the missing fetch** — the other two are Settings / start-failure cases
+that merely need a booted store and fail on `activeSpacePath: null`. Removing a
+*different* boot mock (`listSpaces`) fails the same three, so the blast radius is
+uniform and small, not large.
+
+This corrects two claims that were written before anyone measured: the in-file
+comment's "~40 reds, none of them about recency" (now fixed in place, naming the
+real number), and a line this file used to carry saying "the count is not small".
+The hazard is real and worth closing — it is the MISLEADING cause, not the count,
+that costs time.
 
 **What it would cost:** one line, whenever the next fetch is added — but only if
 the person adding it knows. Closing the hazard properly means either failing

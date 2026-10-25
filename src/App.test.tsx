@@ -25,12 +25,18 @@ import {
 
 // Mock the Tauri IPC layer (the `importActual` pattern from
 // `NewSpaceDialog.test.tsx`): the boot `useEffect` loads `listSessions` /
-// `listSpaces` (resolving `[]` so the workspace renders its empty state),
-// every `listen*` registration resolves a no-op unlisten (the App's
-// listener `useEffect` awaits them in cleanup), and `listSkills` resolves
+// `listSpaces` / `sessionRecency` (all resolving `[]` so the workspace renders
+// its empty state), every `listen*` registration resolves a no-op unlisten (the
+// App's listener `useEffect` awaits them in cleanup), and `listSkills` resolves
 // `[]` (the `useSkillCatalog` hook in both `SpacesList` and `ChatStream`
 // calls it on mount — the hook catches rejections, but the mock avoids
 // noisy failures with a bare `vi.mock` factory).
+//
+// THE TRAP THIS FILE'S SHAPE SETS. Because the factory spreads `importActual`,
+// a boot fetch NOT listed below resolves to the real wrapper, which rejects
+// outside a webview — the boot `Promise.all` then rejects, its `.catch` swallows
+// the reason, and every test in this file goes red looking unrelated. Add the
+// mock in the same commit that adds the fetch.
 vi.mock("./lib/tauri", async () => {
   const actual = await vi.importActual<Record<string, unknown>>("./lib/tauri");
   return {
@@ -40,9 +46,12 @@ vi.mock("./lib/tauri", async () => {
     // The ADR 0075 recency fetch (which also carries the row's order number).
     // REQUIRED, not tidy: this factory spreads `importActual`, so an un-mocked
     // `sessionRecency` fires a real `invoke`, the boot `Promise.all` rejects,
-    // the `.catch` swallows it, and `setSpaces` never runs — every test in this
-    // file then lands `activeSpacePath: null` for a reason that looks nothing
-    // like the cause (~40 reds, none of them about recency).
+    // and the `.catch` swallows the reason. Measured with this line removed:
+    // 3 of the file's 41 tests go red, and only ONE names recency — the other
+    // two are Settings/start-failure cases that merely need a booted store, so
+    // they fail with `activeSpacePath: null` and look nothing like the cause.
+    // (The "~40 reds" this comment used to claim was never measured; the file's
+    // other boot mocks do not gate the whole suite.)
     sessionRecency: vi.fn().mockResolvedValue([]),
     listSkills: vi.fn().mockResolvedValue([]),
     // `startSession`: required for the same reason as the catalog fetches below
