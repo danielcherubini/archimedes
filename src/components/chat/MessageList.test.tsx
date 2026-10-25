@@ -269,26 +269,27 @@ describe("MessageList", () => {
 });
 
 /**
- * CHARACTERISATION (issue #86 — "just empty/blank instead of hidden").
+ * THE INVARIANT (issue #86 — "just empty/blank instead of hidden").
  *
- * These tests assert what renders TODAY, not what should render. The shape the
- * reporter described is a transcript row that occupies its padded space and
- * shows nothing, and the one path that reaches it through production code is
- * the ASK-ANCHORED row: `MessageList.tsx:299-308` swaps the tool card out for
- * an `<AskQuestionCard>` whenever a `main` ask request is anchored to the tool
- * call's `id`, and `AskQuestionCard.tsx:319` returns `null` for a request that
- * is gone from the store or carries zero questions. `wrap()` never inspects its
- * child, so the padded `message-row` div survives the `null`.
+ * The shape the reporter described was a transcript row that occupied its
+ * padded space and showed nothing, reached through the ASK-ANCHORED row:
+ * `MessageList` swaps the tool card out for an `<AskQuestionCard>` whenever a
+ * `main` ask request is anchored to the tool call's `id`, and the card renders
+ * `null` for a request that is gone from the store or carries zero questions.
+ * `wrap()` used to never inspect its child, so the padded `message-row` div
+ * survived the `null`.
  *
- * Task 2 inverts these assertions (no `message-row` at all for such a unit).
- * Until then they PASS by proving `row.childElementCount === 0` — the row
- * exists and holds no element, which is the blank row.
+ * FIXED (Task 2): the anchored branch evaluates the card's own emptiness
+ * predicate (`isAskRowRenderable`) at the call site and returns `null` for the
+ * whole row, so such a unit contributes NO row at all — hidden, not blank.
+ * These tests assert that invariant.
  *
- * `childElementCount` and never `textContent`: an icon-only row also has an
- * empty `textContent` while visibly showing a glyph, so a text-based assertion
- * conflates "nothing is drawn" with "only a glyph is drawn".
+ * `childElementCount` / row absence and never `textContent`: an icon-only row
+ * also has an empty `textContent` while visibly showing a glyph, so a
+ * text-based assertion conflates "nothing is drawn" with "only a glyph is
+ * drawn".
  */
-describe("the ask-anchored row renders nothing when the ask has nothing to draw (issue #86, characterisation)", () => {
+describe("an ask-anchored unit with nothing to draw contributes no row at all (issue #86)", () => {
   beforeEach(() => {
     // `AGENTS.md`: this suite inherits neighbour state — several describes never
     // reset, so a store-reading test must reset explicitly.
@@ -333,53 +334,77 @@ describe("the ask-anchored row renders nothing when the ask has nothing to draw 
         onStartReached={() => {}}
       />,
     );
-    return [
+    const rows = [
       ...(container.querySelectorAll('[data-testid="message-row"]') as NodeListOf<HTMLElement>),
     ];
+    return { container, rows };
   }
 
-  it("a request present with questions: [] leaves a padded row containing NO element", () => {
+  it("a request present with questions: [] renders NO row for the anchored unit", () => {
     // The tool-call message exists (the anchor) AND the store holds the request
-    // — the exact precondition `MessageList.tsx:299-308` needs to prefer the
-    // ask card over the tool card.
+    // — the exact precondition `MessageList`'s anchored branch needs to prefer
+    // the ask card over the tool card. The card has nothing to draw, so the
+    // call site refuses the row: hidden, not padded-and-blank (issue #86).
     useSessions.setState({ messages: { s1: [toolMsg("call_ask")] } });
     useInteractive.getState().addRequest("s1", anchoredAsk({ questions: [] }));
 
-    const rows = renderAnchored([anchoredAsk({ questions: [] })]);
+    const { rows } = renderAnchored([anchoredAsk({ questions: [] })]);
 
-    // The row is there — one per unit — and it is the ask row, not the tool
-    // card (a tool card would render a <button> with a verb).
-    expect(rows).toHaveLength(1);
-    const row = rows[0]!;
-    expect(row.childElementCount).toBe(0);
-    // Nothing at all inside: no element, no text node.
-    expect(row.childNodes).toHaveLength(0);
-    // And the ask card's only testid is never reached, because the card
-    // returned null before rendering its footer.
+    // No row at all for the single unit — the padded empty div is gone.
+    expect(rows).toHaveLength(0);
+    // And nothing was padded-and-empty behind it: not one row exists, so there
+    // is no row that could hold zero elements.
+    expect(screen.queryAllByTestId("message-row")).toHaveLength(0);
+    // The ask card's only testid is never reached (it has no questions), and
+    // the tool card did NOT render in its place either — the unit is skipped.
     expect(screen.queryByTestId("ask-footer")).toBeNull();
-    // The tool card did NOT render either — so the row is blank, not swapped.
     expect(screen.queryByText("Ran")).toBeNull();
   });
 
-  it("a dismissed request (removeRequest) leaves the anchored row padded and containing NO element", () => {
-    // The durable version of the same blank row: the anchor's tool-call message
-    // outlives the answer, so if `askRequests` (the prop the row reads) still
-    // lists a request the STORE no longer has, `AskQuestionCard.tsx:319`'s
-    // `!request` arm fires and the row keeps its padding.
+  it("a dismissed request (removeRequest) renders NO row for the anchored unit", () => {
+    // The durable version of the old blank row: the anchor's tool-call message
+    // outlives the answer, so `askRequests` (the prop the row reads) can still
+    // list a request the STORE no longer has. `isAskRowRenderable`'s `!request`
+    // arm now fires at the CALL SITE, so no row is emitted at all.
     useSessions.setState({ messages: { s1: [toolMsg("call_ask")] } });
     useInteractive.getState().addRequest("s1", anchoredAsk({
       questions: [{ id: "q1", question: "Which file?", options: [{ label: "A" }] }],
     }));
     useInteractive.getState().removeRequest("s1", "req-blank");
 
-    const rows = renderAnchored([anchoredAsk({
+    const { rows } = renderAnchored([anchoredAsk({
       questions: [{ id: "q1", question: "Which file?", options: [{ label: "A" }] }],
     })]);
 
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.childElementCount).toBe(0);
-    expect(rows[0]!.childNodes).toHaveLength(0);
+    expect(rows).toHaveLength(0);
+    expect(screen.queryAllByTestId("message-row")).toHaveLength(0);
     // Proof it is the removed-request arm and not a rendering of the question:
     expect(screen.queryByText("Which file?")).toBeNull();
+  });
+
+  it("a well-formed ask request still renders its card inside a row, exactly as before", () => {
+    // The POSITIVE case — the guard must not swallow a real ask. The request is
+    // in the store AND carries a question, so the anchored row renders the card
+    // in the same padded `message-row` wrapper every other row uses.
+    useSessions.setState({ messages: { s1: [toolMsg("call_ask")] } });
+    useInteractive.getState().addRequest("s1", anchoredAsk({
+      questions: [{ id: "q1", question: "Which file?", options: [{ label: "A" }] }],
+    }));
+
+    const { rows } = renderAnchored([anchoredAsk({
+      questions: [{ id: "q1", question: "Which file?", options: [{ label: "A" }] }],
+    })]);
+
+    // Exactly one row — the anchored unit's — and it is not empty.
+    expect(rows).toHaveLength(1);
+    const row = rows[0]!;
+    expect(row.childElementCount).toBeGreaterThan(0);
+    expect(row.textContent).toContain("Which file?");
+    // The card's own footer is present, so this is the real card and not a
+    // placeholder, and the row is the standard flex-column rhythm wrapper.
+    expect(screen.getByTestId("ask-footer")).toBeTruthy();
+    expect(row.className.split(/\s+/)).toEqual(
+      expect.arrayContaining(["flex", "flex-col", "min-w-0", "max-w-full", "px-4"]),
+    );
   });
 });

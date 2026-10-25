@@ -242,28 +242,26 @@ describe("the transcript's vertical rhythm", () => {
   });
 
   /**
-   * THE AMPLIFIER, pinned (issue #86, characterisation).
+   * THE AMPLIFIER, disarmed (issue #86 — "empty/blank instead of hidden").
    *
-   * `wrap()` pads whatever its child renders — and when the child is an
-   * `AskQuestionCard` whose request has left the store, that child renders
-   * `null` (`AskQuestionCard.tsx:319`). This case is the pairing that makes the
-   * symptom visible: the row keeps the FULL rhythm (`px-4` + the `pt-7`
-   * breathing gap, i.e. 16px of side padding on top of 28px of air) while
-   * holding no element at all. That is "empty/blank instead of hidden", and the
-   * row wrapper — not the card — is what turns a `null` child into whitespace.
+   * `wrap()` pads whatever its child renders, so when the child was an
+   * `AskQuestionCard` whose request had left the store the row kept the FULL
+   * rhythm (`px-4` + the `pt-7` breathing gap) while holding no element at all.
+   * FIXED: the anchored branch evaluates the card's own emptiness predicate
+   * (`isAskRowRenderable`) at the CALL SITE and returns `null` for the whole
+   * row, so a unit with nothing to draw contributes no row — the padded
+   * wrapper is never emitted.
    *
-   * Asserts the padding AND the absence of a child element, never "no text
-   * content": an icon-only row also has `textContent === ""` while showing a
-   * visible glyph, so a text-based assertion would conflate the two.
-   *
-   * Task 2 must fix this by refusing to emit the row — and must keep the class
-   * list asserted here intact for every row that DOES render (the flex column
-   * is load-bearing: a block wrapper re-adds the line box's descender space).
+   * Asserts row ABSENCE (never "no text content": an icon-only row also has
+   * `textContent === ""` while showing a visible glyph), and pins the two
+   * things the fix must NOT disturb — the surviving sibling row's rhythm, and
+   * the class list of a row that DOES render (the flex column is load-bearing:
+   * a block wrapper re-adds the line box's descender space).
    */
-  describe("the row wrapper pads a child that rendered nothing (issue #86, characterisation)", () => {
+  describe("a dismissed ask row is not rendered at all (issue #86)", () => {
     afterEach(() => resetStores());
 
-    it("the dismissed ask row carries `px-4` + the `pt-7` breathing gap and contains NO element", () => {
+    it("the anchored unit contributes no row: no padded empty div survives", () => {
       resetStores();
       // The anchor: the tool-call message survives in the transcript...
       useSessions.setState({ messages: { s1: [tool("t1"), tool("call_ask")] } });
@@ -284,21 +282,58 @@ describe("the transcript's vertical rhythm", () => {
         [],
         [stale],
       );
-      const blankRows = [
+      const allRows = [
         ...(scroll.querySelectorAll('[data-testid="message-row"]') as NodeListOf<HTMLElement>),
-      ].filter((r) => r.childElementCount === 0);
+      ];
 
-      // Exactly one such row, and it is the anchored one (the second unit).
-      expect(blankRows).toHaveLength(1);
-      const blank = blankRows[0]!;
-      const tokens = blank.className.split(/\s+/);
-      expect(tokens).toContain("px-4");
-      // Tool → tool, so this row breathes: the blank row is 28px of air plus
-      // 16px of side padding, and it shows nothing.
-      expect(extra(blank)).toEqual(["pt-7"]);
-      expect(blank.childNodes).toHaveLength(0);
-      // The sibling row is untouched, so the blank one is not the only row.
-      expect(scroll.querySelectorAll('[data-testid="message-row"]')).toHaveLength(2);
+      // NOT ONE row is padded-and-empty — the blank row is gone rather than
+      // merely losing its padding.
+      expect(allRows.filter((r) => r.childElementCount === 0)).toHaveLength(0);
+      // And the anchored unit is simply absent: two units in, ONE row out.
+      expect(allRows).toHaveLength(1);
+      // The surviving row is the sibling tool row (unit 0 → no breathing gap),
+      // so the fix removed a row rather than re-skinning the wrong one.
+      const [sibling] = allRows;
+      expect(sibling!.className.split(/\s+/)).toContain("px-4");
+      expect(extra(sibling!)).toEqual([]);
+      expect(sibling!.textContent).toContain("Ran");
+    });
+
+    it("a well-formed anchored ask still renders its card in a fully-rhythmed row", () => {
+      resetStores();
+      // The same two units, but the store HOLDS the request and it carries a
+      // question — so the guard stays out of the way and the ask row keeps the
+      // `pt-7` breathing gap the rhythm tests above pin for a tool pair.
+      useSessions.setState({ messages: { s1: [tool("t1"), tool("call_ask")] } });
+      const live: InteractiveRequestData = {
+        requestId: "req-live",
+        method: "ask",
+        source: "main",
+        toolCallId: "call_ask",
+        params: {
+          questions: [{ id: "q1", question: "Which color?", options: [{ label: "Red" }] }],
+        },
+      };
+      useInteractive.getState().addRequest("s1", live);
+
+      const scroll = renderMessageList(
+        [single(tool("t1")), single(tool("call_ask"))],
+        [],
+        [live],
+      );
+      const allRows = [
+        ...(scroll.querySelectorAll('[data-testid="message-row"]') as NodeListOf<HTMLElement>),
+      ];
+
+      expect(allRows).toHaveLength(2);
+      const askRow = allRows[1]!;
+      expect(askRow.textContent).toContain("Which color?");
+      // Tool → tool, so the row that DOES draw keeps the breathing gap, and it
+      // is still the flex column every other row is.
+      expect(extra(askRow)).toEqual(["pt-7"]);
+      expect(askRow.className.split(/\s+/)).toEqual(
+        expect.arrayContaining(["flex", "flex-col", "min-w-0", "max-w-full", "px-4"]),
+      );
     });
   });
 });

@@ -2,13 +2,14 @@ import { useRef, useEffect, type ReactNode } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import MessageBubble from "../MessageBubble";
 import ChangesGroupCard from "../ChangesGroupCard";
-import AskQuestionCard from "../AskQuestionCard";
+import AskQuestionCard, { isAskRowRenderable } from "../AskQuestionCard";
 import TranscriptFooter, { transcriptFooterIsEmpty } from "./TranscriptFooter";
 import EmptyStateFilm from "./EmptyStateFilm";
 import { Spinner } from "../ui/spinner";
 import { cn } from "../lib/utils";
 import type { RenderUnit } from "../../lib/toolGroups";
 import type { PermissionPromptData } from "../../store/permissions";
+import { useInteractive } from "../../store/interactive";
 import type { InteractiveRequestData } from "../../store/interactive";
 import type { ChildGate } from "../../hooks/useChildGates";
 import { isInlineChildGate } from "../../hooks/useChildGates";
@@ -284,14 +285,24 @@ export default function MessageList({
         // or trailing space would arrive there as an empty token and the filter
         // would still be right, but the attribute would be dirty for a human
         // reading devtools, so it is asserted below that nothing regressed.
-        const wrap = (child: ReactNode) => (
-          <div
-            data-testid="message-row"
-            className={cn("flex min-w-0 max-w-full flex-col px-4", paddingClass)}
-          >
-            {child}
-          </div>
-        );
+        const wrap = (child: ReactNode) => {
+          // DEFENCE-IN-DEPTH, NOT THE FIX. Every call site hands `wrap` a JSX
+          // ELEMENT, so this arm never fires today — a child component's own
+          // `return null` happens during render, after `wrap` has already built
+          // the row (that is exactly why the issue #86 guard lives at the
+          // anchored call site, below). This exists only for a FUTURE call site
+          // that passes a literal `null`/`undefined` and would otherwise get a
+          // padded empty row.
+          if (child === null || child === undefined) return null;
+          return (
+            <div
+              data-testid="message-row"
+              className={cn("flex min-w-0 max-w-full flex-col px-4", paddingClass)}
+            >
+              {child}
+            </div>
+          );
+        };
         if (unit.kind === "changes-group") {
           return wrap(<ChangesGroupCard messages={unit.messages} />);
         }
@@ -301,6 +312,31 @@ export default function MessageList({
             (r) => r.source === "main" && r.toolCallId === message.id,
           );
           if (anchored) {
+            // THE FIX for issue #86 ("empty/blank instead of hidden"), and it
+            // lives HERE at the call site rather than inside `wrap`, because
+            // `wrap` receives a JSX ELEMENT: `<AskQuestionCard …/>` is a
+            // non-null object and the card's own `return null` happens LATER,
+            // during render, where `wrap` cannot observe it. A `child === null`
+            // guard in `wrap` alone would compile, pass review, and change
+            // nothing. So the row evaluates the SAME predicate the card uses
+            // (`isAskRowRenderable` — one rule, two callers; a duplicated
+            // condition here is the bug returning) on the request it looks up
+            // exactly as the card does (`requests[sessionId]` by `requestId`),
+            // and emits NO row when it has nothing to draw: a dismissed request
+            // (the anchor's `tool-call` message outlives the answer) or a
+            // zero-question one would otherwise stay a padded `px-4` +
+            // `pt-3`/`pt-7` div holding nothing.
+            //
+            // READ ON DEMAND, not subscribed — this component subscribes to
+            // nothing today (see the `emptyStateAnimation` doc) and the store
+            // read is only ever needed at this moment. It cannot be stale: the
+            // `askRequests` prop is derived from THIS SAME store slice by
+            // `ChatStream`, so any change to the session's request list
+            // re-renders here and re-runs this lookup.
+            const request = (
+              useInteractive.getState().requests[activeSessionId] ?? []
+            ).find((r) => r.requestId === anchored.requestId);
+            if (!isAskRowRenderable(request)) return null;
             return wrap(
               <AskQuestionCard
                 sessionId={activeSessionId}
