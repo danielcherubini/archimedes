@@ -401,6 +401,40 @@ deliberately left undone.
   matches stderr before the summary and can look like silence. Redirect to a
   file and `grep -a` for a reliable count.
 
+- 2026-10-25 — **A REAL USER-FACING BUG SHIPPED BY T07 AND FOUND BY THE
+  ORCHESTRATOR, NOT BY ANY TEST — the most important finding of the run.**
+  `useDragReorder` decided the drop edge from `clientY` ONLY. Correct for the
+  vertical sidebar; wrong for the HORIZONTAL tab strip, where a drag holds Y
+  constant. Measured with a 32px pill and the most natural grab (its vertical
+  centre, y=116, midpoint 116, `116 < 116` false → "after"):
+  **rightward** gamma→beta answers `[alpha,beta,gamma]` = UNCHANGED → the
+  "nothing moved" guard fires → **the drag does nothing at all, silently**;
+  **leftward** alpha→beta answers `[beta,alpha,gamma]` → works BY ACCIDENT.
+  So leftward tab drags worked and rightward ones were dead. Fixed in `4afff6b`
+  with an explicit `axis: "y" | "x"` ARGUMENT (never inferred from the rect's
+  proportions — a wide short sidebar row would flip), default `"y"` so the
+  sidebar is byte-identical (proved by diffing rendered HTML against a HEAD
+  worktree), and the tab indicator moved to `border-l-2`/`border-r-2`.
+- 2026-10-25 — **WHY BOTH TEST SUITES MISSED IT, and the general rule.** The
+  child corrected my own diagnosis: the rects were NOT zero-width — `layOut`
+  already spelled `width: 200`. The real blindness was that **no test anywhere
+  delivered a `clientX`**, and `undefined < 100` is `false` → the same answer a
+  zero-width rect gives. RULE: **a test of geometry must supply BOTH axes
+  explicitly, and the axis it is NOT testing must carry a value that answers the
+  OPPOSITE way.** Every `dragOver` helper now requires both coordinates and every
+  vertical pointer carries a contradicting X — proven by mutating the hook to a
+  proportion heuristic, which reddens 11 tests including 5 in `SpacesList.test.tsx`
+  that previously could not see an axis error at all.
+- 2026-10-25 — **T07's flag was the thread that led here.** It recorded using
+  the hook's "VERTICAL rule, unchanged for a horizontal strip" as a DEVIATION
+  rather than silently doing it. Had it stayed silent the bug ships. Honoured
+  flags from children are worth re-reading before closing a task.
+- 2026-10-25 — **AXIS FIX DONE** (`4afff6b`). Gates measured by the orchestrator:
+  `pnpm test` **3144 / 151** exit 0 · `pnpm build` green with `border-l-2` +
+  `border-r-2` CONFIRMED emitted in `dist/assets/*.css` (non-vacuity proven: HEAD's
+  build lacks `.border-r-2`) · `cargo test` 1468/0 · clippy 0 · fmt clean. Seam
+  = 6 files, no store/lib/Rust.
+
 ## Changelog
 
 One line per task: hash, what shipped, gate numbers at that moment.
