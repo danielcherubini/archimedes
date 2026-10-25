@@ -5,7 +5,17 @@ import MessageList from "./MessageList";
 import type { RenderUnit } from "../../lib/toolGroups";
 import type { Message } from "../../store/sessions";
 import type { ChildGate } from "../../hooks/useChildGates";
+import type { InteractiveRequestData } from "../../store/interactive";
 import { useInteractive } from "../../store/interactive";
+import { useSessions } from "../../store/sessions";
+import { resetStores } from "../../test/resetStores";
+
+// NO `vi.mock("../../lib/tauri")` here, on purpose (see the same note in
+// `MessageList.test.tsx`): the anchored ask card's self-cancelling effect
+// swallows its own `invoke` failure (`.catch(() => {})`,
+// `AskQuestionCard.tsx:315`), so the blank row renders identically without the
+// seam — and `src/lib/tauriBarrel.test.ts:390` pins HOW MANY test files mock
+// that barrel, a count this diagnostic task may not move.
 
 /**
  * The transcript's VERTICAL RHYTHM (ZCode's model: rows carry no padding and
@@ -46,6 +56,7 @@ const single = (message: Message): RenderUnit => ({ kind: "single", message });
 function renderMessageList(
   units: RenderUnit[],
   childGates: ChildGate[] = [],
+  askRequests: InteractiveRequestData[] = [],
 ): HTMLElement {
   const { container } = render(
     createElement(MessageList, {
@@ -53,7 +64,7 @@ function renderMessageList(
       messageCount: units.length,
       activeSessionId: "s1",
       inTurn: false,
-      askRequests: [],
+      askRequests,
       prompts: [],
       stackedAskRequests: [],
       // The child-gate list defaults to `[]` because the rhythm tests below
@@ -228,5 +239,66 @@ describe("the transcript's vertical rhythm", () => {
     const gateRow = withGate[withGate.length - 1]!;
     expect(gateRow.textContent).toContain("Which color?");
     expect(extra(gateRow)).toEqual([]);
+  });
+
+  /**
+   * THE AMPLIFIER, pinned (issue #86, characterisation).
+   *
+   * `wrap()` pads whatever its child renders — and when the child is an
+   * `AskQuestionCard` whose request has left the store, that child renders
+   * `null` (`AskQuestionCard.tsx:319`). This case is the pairing that makes the
+   * symptom visible: the row keeps the FULL rhythm (`px-4` + the `pt-7`
+   * breathing gap, i.e. 16px of side padding on top of 28px of air) while
+   * holding no element at all. That is "empty/blank instead of hidden", and the
+   * row wrapper — not the card — is what turns a `null` child into whitespace.
+   *
+   * Asserts the padding AND the absence of a child element, never "no text
+   * content": an icon-only row also has `textContent === ""` while showing a
+   * visible glyph, so a text-based assertion would conflate the two.
+   *
+   * Task 2 must fix this by refusing to emit the row — and must keep the class
+   * list asserted here intact for every row that DOES render (the flex column
+   * is load-bearing: a block wrapper re-adds the line box's descender space).
+   */
+  describe("the row wrapper pads a child that rendered nothing (issue #86, characterisation)", () => {
+    afterEach(() => resetStores());
+
+    it("the dismissed ask row carries `px-4` + the `pt-7` breathing gap and contains NO element", () => {
+      resetStores();
+      // The anchor: the tool-call message survives in the transcript...
+      useSessions.setState({ messages: { s1: [tool("t1"), tool("call_ask")] } });
+      // ...and the ask prop still lists the request the store no longer holds
+      // (the durable version of the blank row — `removeRequest` cleared it).
+      const stale: InteractiveRequestData = {
+        requestId: "req-blank",
+        method: "ask",
+        source: "main",
+        toolCallId: "call_ask",
+        params: {
+          questions: [{ id: "q1", question: "Which color?", options: [{ label: "Red" }] }],
+        },
+      };
+
+      const scroll = renderMessageList(
+        [single(tool("t1")), single(tool("call_ask"))],
+        [],
+        [stale],
+      );
+      const blankRows = [
+        ...(scroll.querySelectorAll('[data-testid="message-row"]') as NodeListOf<HTMLElement>),
+      ].filter((r) => r.childElementCount === 0);
+
+      // Exactly one such row, and it is the anchored one (the second unit).
+      expect(blankRows).toHaveLength(1);
+      const blank = blankRows[0]!;
+      const tokens = blank.className.split(/\s+/);
+      expect(tokens).toContain("px-4");
+      // Tool → tool, so this row breathes: the blank row is 28px of air plus
+      // 16px of side padding, and it shows nothing.
+      expect(extra(blank)).toEqual(["pt-7"]);
+      expect(blank.childNodes).toHaveLength(0);
+      // The sibling row is untouched, so the blank one is not the only row.
+      expect(scroll.querySelectorAll('[data-testid="message-row"]')).toHaveLength(2);
+    });
   });
 });
