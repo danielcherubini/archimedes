@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { useSessions } from "../store/sessions";
 import { makeSpaceRow } from "../test/fixtures";
 import { resetModuleFlags, resetStores } from "../test/resetStores";
@@ -282,5 +282,65 @@ describe("the space tabs, as rendered (active and inactive are one kind of objec
       expect(cls, "a rounded-top tab is the sheet's edge, not a pill").not.toMatch(/rounded-t-md/);
       expect(cls, "the paint-order hack is back with the bridge").not.toMatch(/relative z-\d+/);
     }
+  });
+
+  it("a drag in flight changes the TARGET pill by exactly the two indicator tokens, and adds no node", () => {
+    // The pill's "one kind of object" contract has to survive the drag feature
+    // (ADR 0075, T07). The indicator is a CLASS on the real pill — the spec
+    // forces it, because the obvious alternatives (a placeholder pill, a
+    // portal-drawn ghost) would add a DOM level to a strip whose tests resolve
+    // through ancestry — so the WHOLE difference a gesture makes must be two
+    // tokens on one element.
+    //
+    // TWO COMPETING ANSWERS: the target pill's token set gains EXACTLY
+    // `border-t-2` + `border-brand` and the strip's element count is unchanged
+    // (correct), vs a call site that smuggles in height/shadow utilities, or a
+    // placeholder element inserted beside the pills (the count moves, and every
+    // ancestry-resolving query in the repo's tab tests starts lying).
+    useSessions.setState({
+      spaces: [space(ALPHA), space(BETA)],
+      activeSpacePath: ALPHA,
+    });
+    const view = render(<SpaceTabs />);
+    const pill = (name: string) =>
+      screen.getByRole("tab", { name }).parentElement!;
+    const tokens = (el: HTMLElement) =>
+      [...new Set(el.className.split(/\s+/).filter(Boolean))].sort();
+    const elementCount = () =>
+      screen.getByTestId("space-tabs").querySelectorAll("*").length;
+
+    const targetWas = tokens(pill("beta"));
+    const otherWas = tokens(pill("alpha"));
+    const countWas = elementCount();
+
+    // A drag in flight: `alpha` held, pointer over the TOP half of `beta`. The
+    // rect override + hand-built event are the two jsdom idioms the drag tests
+    // in `SpaceTabs.test.tsx` document — without them the half is not a fact the
+    // test chooses.
+    const from = pill("alpha");
+    const to = pill("beta");
+    from.getBoundingClientRect = () =>
+      ({ top: 0, bottom: 40, height: 40, width: 200, left: 0, right: 200, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+    to.getBoundingClientRect = () =>
+      ({ top: 100, bottom: 140, height: 40, width: 200, left: 0, right: 200, x: 0, y: 100, toJSON: () => ({}) }) as DOMRect;
+    fireEvent.dragStart(from, { dataTransfer: { setData: () => {} } });
+    const over = new Event("dragover", {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    Object.assign(over, { clientY: 110 });
+    fireEvent(to, over);
+
+    expect(
+      tokens(to).filter((t) => !targetWas.includes(t)),
+      "the drop indicator is not the two pinned tokens",
+    ).toEqual(["border-brand", "border-t-2"]);
+    // The pill the pointer is NOT over is untouched — no second answer to "which
+    // pill is the target".
+    expect(tokens(pill("alpha"))).toEqual(otherWas);
+    // And nothing was INSERTED to draw the edge with.
+    expect(elementCount(), "the indicator added a DOM node").toBe(countWas);
+    view.unmount();
   });
 });

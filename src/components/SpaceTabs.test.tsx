@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { closeSession, deleteSpace } from "../lib/tauri";
+import { closeSession, deleteSpace, reorderSpaces } from "../lib/tauri";
 import { useSessions } from "../store/sessions";
 import { usePermissions } from "../store/permissions";
 import { getNewSpaceDialogOpen } from "../lib/newSpaceDialogState";
@@ -27,6 +27,12 @@ vi.mock("../lib/tauri", async () => {
     // `invoke` and reject in jsdom.
     deleteSpace: vi.fn().mockResolvedValue(undefined),
     closeSession: vi.fn().mockResolvedValue(undefined),
+    // The tab strip's drag write (ADR 0075). The store's `reorderSpaces` action
+    // calls through THIS module, and this file's mock replaces the module — so
+    // without an armed arm the real wrapper would `invoke` and reject in jsdom,
+    // and the store's rollback would snap the strip back a microtask after the
+    // optimistic write the DOM assertions below read.
+    reorderSpaces: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -291,11 +297,27 @@ describe("SpaceTabs (the Spaces as browser-style tabs at the top of the chat)", 
     const pill = tab.parentElement!;
     // The wrapper is one object holding BOTH controls (the label and the ✕).
     expect(close.parentElement, "the ✕ left the pill").toBe(pill);
-    // (a) THE DRAG REGION. The chrome bar is `data-tauri-drag-region="deep"`,
-    // and Tauri's injected drag script walks the event's composed path and
-    // stops at the FIRST element carrying the attribute: `="false"` means "not
-    // chrome". A plain `div` with no attribute is therefore claimed as drag
-    // surface, which would make part of a control drag the window.
+    // (a) THE DRAG REGION — and this attribute has TWO load-bearing reasons, so
+    // do not "simplify" it away when reading either one. The chrome bar is
+    // `data-tauri-drag-region="deep"`, and Tauri's injected drag script walks the
+    // event's composed path and stops at the FIRST element carrying the
+    // attribute: `="false"` means "not chrome". A plain `div` with no attribute is
+    // therefore claimed as drag surface, which would make part of a control drag
+    // the window.
+    //   REASON 1 (the original one, and the one the assertions below read): a
+    //   control is not chrome — every pixel of the pill selects or closes, so no
+    //   pixel of it may drag the window.
+    //   REASON 2 (ADR 0075, T07): it is what lets a tab be DRAGGED AT ALL. The
+    //   pill is now a drag source (`draggable` + the `useDragReorder` handlers),
+    //   and HTML5 drag-and-drop begins from the same mousedown the injected
+    //   script is hunting for. Without this `"false"` the script claims that
+    //   mousedown as a WINDOW drag and the browser never starts the tab's drag —
+    //   the tab strip would look draggable and move the window instead, with
+    //   every drag test in this file still green, because jsdom has no injected
+    //   script. Pinned alongside the attribute by
+    //   "the pill keeps opting OUT of the window-drag region after a drag
+    //   (spec §5 #16)"; the drag itself is pinned by
+    //   "a LEFT-drag started on the tab pill does not close the tab".
     expect(pill.getAttribute("data-tauri-drag-region")).toBe("false");
     // (b) NO SLACK. `items-center` on the wrapper centred the label's LINE
     // inside the `h-8` pill and left ~6px of bare pill above and below it —
@@ -826,5 +848,475 @@ describe("the tab label and the `+` route through <Button> (C7)", () => {
     // raw shape; this is the same claim, re-asserted after the sweep).
     expect(screen.getByRole("tab", { name: "alpha" }).querySelector("button")).toBeNull();
     expect(container.querySelectorAll("button button")).toHaveLength(0);
+  });
+});
+
+/**
+ * T07 — the tab strip is DRAGGABLE (ADR 0075, spec §4 "Tabs" + §Drag mechanics).
+ *
+ * `useDragReorder` (T05) owns the gesture and the store's `reorderSpaces` (T05)
+ * owns the write; what THIS block pins is the WIRING between them and the pills:
+ * the hook's six spread keys reaching the pill `div`, the pointer's half deciding
+ * left-or-right in the RENDERED strip, the drop edge drawn on the target pill and
+ * nowhere else, the ✕ refusing to start a drag, and the two hazards the spec
+ * names as "pin in tests, not discover later".
+ *
+ * TWO jsdom FACTS every drag here is built on, both inherited verbatim from
+ * `useDragReorder.test.tsx` (and from T06's block in `SpacesList.test.tsx`) —
+ * reach for the obvious idiom instead and these tests pass VACUOUSLY:
+ *  1. `fireEvent.dragOver(el, { clientY })` does NOT deliver `clientY` (a plain
+ *     `Event` swallows the unknown init member and it arrives `undefined`), so
+ *     `dragOver` below hand-builds the event and assigns the property.
+ *  2. `getBoundingClientRect()` is all zeros in jsdom, so the midpoint is `0`
+ *     and EVERY pointer answers "after" — hence `layOut`, which makes the half a
+ *     fact the test chooses rather than one the environment decides.
+ *
+ * WHY FOUR TABS AND WHY ALL FOUR ARE NAMED BY THE SLICE. The store's
+ * `reorderSpaces` keeps a Space the slice does not name at the BOTTOM of the
+ * array (the approved "new rows join at the bottom" rule), which is deliberately
+ * NOT its original index. Every fixture here names every Space the strip renders,
+ * so that rule has nothing to sink and no order assertion below can be satisfied
+ * by it — the strip's order is the user's, exactly. (The disagreement between the
+ * two rules is pinned where it can be constructed without a render race:
+ * `src/store/sessions.test.ts`'s "a Space the slice does not name is kept, at the
+ * BOTTOM".)
+ */
+describe("SpaceTabs (dragging the tabs, ADR 0075)", () => {
+  // FOUR tabs, not three. With three, dragging the last tab onto the middle
+  // one's BOTTOM half answers `alpha, beta, gamma` — the order the strip already
+  // has — so the hook correctly writes nothing and the bottom-half test would
+  // have to assert an absence. Four is the smallest strip where before, after
+  // and the off-by-one are three DIFFERENT arrays.
+  const TAB_NAMES = ["alpha", "beta", "gamma", "delta"];
+  const TAB_PATHS = ["/w/alpha", "/w/beta", "/w/gamma", "/w/delta"];
+
+  /** Four tabs, in this order, with `alpha` selected. */
+  function seedFourTabs(): void {
+    useSessions.setState({
+      spaces: TAB_PATHS.map((path) => space(path)),
+      activeSpacePath: "/w/alpha",
+    });
+  }
+
+  beforeEach(() => {
+    // The file-level mock factory arms `reorderSpaces` to resolve; `clearAllMocks`
+    // in the file's own `beforeEach` wipes call records but keeps that
+    // implementation, so a drag's write resolves here exactly as it does in the
+    // sidebar's block.
+    seedFourTabs();
+  });
+
+  /** The pill `div` for a tab (the wrapper holding the label and the ✕ — the
+   *  shape the tests above pin), which is what the drag surface rides on. */
+  const pillOf = (name: string): HTMLElement =>
+    screen.getByRole("tab", { name }).parentElement!;
+
+  /** jsdom has no layout: override the rect so the pointer's half is chosen
+   *  here. (Same helper, same reason, as `useDragReorder.test.tsx`'s `layOut`.) */
+  const layOut = (el: HTMLElement, top: number, height = 40) => {
+    el.getBoundingClientRect = () =>
+      ({
+        top,
+        bottom: top + height,
+        height,
+        width: 200,
+        left: 0,
+        right: 200,
+        x: 0,
+        y: top,
+        toJSON: () => ({}),
+      }) as DOMRect;
+  };
+
+  /** `fireEvent.dragOver(el, { clientY })` does NOT deliver `clientY` (measured
+   *  `undefined`) — build the event and assign it. The return value is `false`
+   *  iff a handler called `preventDefault`, i.e. "this pill accepted the drop". */
+  const dragOver = (el: Element, clientY: number) => {
+    const ev = new Event("dragover", {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    Object.assign(ev, { clientY });
+    return fireEvent(el, ev);
+  };
+
+  const buildDrop = () =>
+    new Event("drop", { bubbles: true, cancelable: true, composed: true });
+
+  /** The strip's RENDER order, derived from the DOM rather than from the store —
+   *  the whole point is to assert what the user is shown. `before` counts how
+   *  many sibling tabs precede a tab, so the sort is a real positional read
+   *  rather than a comparator that happens to be consistent. */
+  const renderedStrip = (): string[] => {
+    const nodes = TAB_NAMES.map((n) => screen.getByRole("tab", { name: n }));
+    return nodes
+      .map((node, i) => ({
+        path: TAB_PATHS[i]!,
+        before: nodes.filter(
+          (other) =>
+            other !== node &&
+            (other.compareDocumentPosition(node) &
+              Node.DOCUMENT_POSITION_FOLLOWING) !==
+              0,
+        ).length,
+      }))
+      .sort((a, b) => a.before - b.before)
+      .map((x) => x.path);
+  };
+
+  /** Press-and-hold on `fromName`, hover `overName` at `clientY`, release.
+   *  Returns the `drop` event so a test can read `defaultPrevented`. */
+  function drag(fromName: string, overName: string, clientY: number): Event {
+    const from = pillOf(fromName);
+    const to = pillOf(overName);
+    layOut(from, 0);
+    layOut(to, 100); // 100..140, midpoint 120
+    fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
+    dragOver(to, clientY);
+    const ev = buildDrop();
+    fireEvent(to, ev);
+    return ev;
+  }
+
+  it("every tab pill is draggable, and the drag surface is EXACTLY the pills", () => {
+    // THE WIRING PIN, and the positive control every gesture test below leans on.
+    // TWO COMPETING ANSWERS: `draggable="true"` on each pill (the hook's spread
+    // landed) vs the attribute absent (the prop was dropped at the call site) —
+    // and with it absent NO tab can be dragged in the app while every other test
+    // in this block still passes, because they drive the handlers directly. The
+    // CENSUS is the other half: a `draggable` that leaked onto the tablist
+    // container or the spacer would make the whole strip one drag source, so
+    // "exactly four elements in the strip carry it" is the claim, not "at least".
+    render(<SpaceTabs />);
+    const strip = screen.getByTestId("space-tabs");
+    const draggables = [...strip.querySelectorAll('[draggable="true"]')];
+    expect(draggables).toHaveLength(TAB_PATHS.length);
+    for (const name of TAB_NAMES) {
+      expect(pillOf(name).getAttribute("draggable"), name).toBe("true");
+      expect(draggables, name).toContain(pillOf(name));
+    }
+  });
+
+  it("dragging a tab onto another tab's TOP half reorders the strip to alpha, delta, beta, gamma", async () => {
+    // Spec §5 test #13, in the tab strip. TWO COMPETING ANSWERS: "before" means
+    // DIRECTLY LEFT of the target → [alpha, delta, beta, gamma]; an off-by-one
+    // reading "before" as one slot earlier answers [delta, alpha, beta, gamma],
+    // i.e. the tab lands left of alpha while the indicator was promising beta.
+    // A display sort is the THIRD answer, and the one ADR 0075 exists to delete.
+    render(<SpaceTabs />);
+    expect(renderedStrip()).toEqual(TAB_PATHS);
+    drag("delta", "beta", 110); // 110 < midpoint 120 → top half
+    expect(renderedStrip()).toEqual([
+      "/w/alpha",
+      "/w/delta",
+      "/w/beta",
+      "/w/gamma",
+    ]);
+    // The write is the WHOLE strip, not the moved tab (the Rust side writes each
+    // index as the row's stored number, so a partial list is a half-moved list —
+    // and a Space the slice omits is kept at the BOTTOM, which would silently
+    // strand the tabs that were not named). `waitFor` because the store LINKS its
+    // command behind the previous reorder's promise, so the IPC call lands a
+    // microtask after the optimistic write the DOM above already reflects.
+    await waitFor(() => expect(reorderSpaces).toHaveBeenCalledTimes(1));
+    expect(reorderSpaces).toHaveBeenCalledWith([
+      "/w/alpha",
+      "/w/delta",
+      "/w/beta",
+      "/w/gamma",
+    ]);
+  });
+
+  it("dragging a tab onto another tab's BOTTOM half reorders to alpha, beta, delta, gamma — the other answer", async () => {
+    // The same gesture with the pointer 20px lower. Without BOTH halves
+    // asserted, a call site that ignores `overEdge` (or a hook that always
+    // inserts after) passes the top-half test by accident.
+    render(<SpaceTabs />);
+    drag("delta", "beta", 130); // 130 > midpoint 120 → bottom half
+    expect(renderedStrip()).toEqual([
+      "/w/alpha",
+      "/w/beta",
+      "/w/delta",
+      "/w/gamma",
+    ]);
+    await waitFor(() =>
+      expect(reorderSpaces).toHaveBeenCalledWith([
+        "/w/alpha",
+        "/w/beta",
+        "/w/delta",
+        "/w/gamma",
+      ]),
+    );
+  });
+
+  it("the drop edge shows on the TARGET pill only, on the edge the pointer is nearest", () => {
+    // The indicator is a class on the real pill (spec §Indicator) — asserted on
+    // the pill under the pointer and on NO other pill. TWO COMPETING ANSWERS at
+    // the call site: `border-*` gated on `drag.overId === path` (the hook's edge,
+    // gated on the hook's target) vs gated on `overEdge` alone — which paints the
+    // edge on EVERY pill and would read as the whole strip lifting.
+    render(<SpaceTabs />);
+    const from = pillOf("delta");
+    const to = pillOf("beta");
+    layOut(from, 0);
+    layOut(to, 100);
+    fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
+    dragOver(to, 110);
+    expect(to.className).toContain("border-t-2");
+    expect(to.className).not.toContain("border-b-2");
+    for (const name of ["alpha", "gamma", "delta"]) {
+      const el = pillOf(name);
+      expect(el.className, name).not.toContain("border-t-2");
+      expect(el.className, name).not.toContain("border-b-2");
+    }
+    // The pointer crossing to the bottom half flips the edge, and the top edge
+    // goes away — an indicator that only ever paints one edge is the bug the
+    // hook's `overEdge` exists to prevent.
+    dragOver(to, 130);
+    expect(to.className).toContain("border-b-2");
+    expect(to.className).not.toContain("border-t-2");
+  });
+
+  it("no edge is painted before the gesture and none after it ends", () => {
+    // A lingering indicator reads as "drop here" on a strip that is no longer
+    // being dragged at. THE POSITIVE CONTROL is the middle assertion: without
+    // proving the edge APPEARS mid-gesture, this whole test is a statement about
+    // a class nothing in the tree can ever paint — the "certifying the absence of
+    // the mechanism" shape this branch has been bitten by twice.
+    render(<SpaceTabs />);
+    const edge = (el: HTMLElement) =>
+      el.className.includes("border-t-2") || el.className.includes("border-b-2");
+    for (const name of TAB_NAMES) expect(edge(pillOf(name))).toBe(false);
+    const from = pillOf("delta");
+    const to = pillOf("beta");
+    layOut(from, 0);
+    layOut(to, 100);
+    fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
+    dragOver(to, 130);
+    expect(edge(to)).toBe(true);
+    // Release (which clears the gesture) — no edge survives it.
+    fireEvent(to, buildDrop());
+    for (const name of TAB_NAMES) expect(edge(pillOf(name))).toBe(false);
+  });
+
+  it("dropping a tab on itself is a no-op: no reorder, no IPC, no indicator, no move", async () => {
+    // TWO COMPETING ANSWERS: a call site that lets a pill target itself fires an
+    // IPC with an unchanged slice (a pointless write that still rewrites every
+    // Space's stored number) and paints an edge on the tab the user is holding.
+    // The hook refuses the target — this pins that the refusal reaches the
+    // RENDERED strip, not just the hook's own state.
+    render(<SpaceTabs />);
+    const self = pillOf("beta");
+    // THE POSITIVE CONTROL, and the reason it sits here rather than only in the
+    // wiring test: with no drag mounted at all, every assertion below passes on
+    // an inert pill — `dragOver` returns `true` because NOTHING handled it.
+    expect(self.getAttribute("draggable")).toBe("true");
+    layOut(self, 100);
+    fireEvent.dragStart(self, { dataTransfer: { setData: vi.fn() } });
+    // `true` === nothing prevented === the browser's no-drop cursor, and the
+    // window backstop is what swallows the release (spec hazard 2).
+    expect(dragOver(self, 130)).toBe(true);
+    expect(self.className).not.toContain("border-b-2");
+    fireEvent(self, buildDrop());
+    expect(reorderSpaces).not.toHaveBeenCalled();
+    expect(renderedStrip()).toEqual(TAB_PATHS);
+    // THE CONTROL THAT MAKES THE SILENCE MEAN SOMETHING: the same tab, dropped on
+    // a NEIGHBOUR in a way that actually changes the order, does fire the write —
+    // so the two assertions above are the self-target refusal talking, not dead
+    // wiring. (It has to be the BOTTOM half: dropping `beta` on `gamma`'s TOP half
+    // is the order the strip already has, and the hook correctly refuses to write
+    // a no-op — so that gesture would leave this control as green as the bug.)
+    drag("beta", "gamma", 130);
+    await waitFor(() => expect(reorderSpaces).toHaveBeenCalledTimes(1));
+  });
+
+  it("a tab that joined the strip mid-drag is named by the write and keeps its own slot", async () => {
+    // THE INDEPENDENCE PIN, and the fixture the "new rows join at the bottom"
+    // rule forces. The store's `reorderSpaces` keeps a Space the slice does not
+    // name at the BOTTOM of the array — deliberately NOT its original index — so
+    // an order assertion that could be satisfied by that rule pins nothing. Here
+    // a fifth Space arrives MID-GESTURE and in the MIDDLE of the strip (a boot
+    // `setSpaces` re-seeds the array in the DB's order, so a Space can land
+    // anywhere), which makes the two rules answer differently:
+    //  - the hook reads the ids of the LAST RENDER, so the write names all five
+    //    and `epsilon` keeps the MIDDLE slot the strip shows it in →
+    //    [alpha, epsilon, delta, beta, gamma];
+    //  - a call site that froze the paths when the drag STARTED sends four, and
+    //    the bottom-join rule sinks `epsilon` → [alpha, delta, beta, gamma,
+    //    epsilon] — a tab the user never dragged jumps to the end.
+    // The write's own contents are asserted too, because "the strip looks right"
+    // is also true for the stale slice until the next re-render.
+    render(<SpaceTabs />);
+    const from = pillOf("delta");
+    const to = pillOf("beta");
+    layOut(from, 0);
+    layOut(to, 100);
+    fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
+    // The Space arrives mid-gesture, in the MIDDLE (see the note above).
+    act(() => {
+      useSessions.setState({
+        spaces: [
+          space("/w/alpha"),
+          space("/w/epsilon"),
+          space("/w/beta"),
+          space("/w/gamma"),
+          space("/w/delta"),
+        ],
+      });
+    });
+    dragOver(to, 110); // top half → before
+    fireEvent(to, buildDrop());
+    expect(
+      useSessions.getState().spaces.map((s) => s.path),
+      "the mid-drag tab was sunk to the bottom by a stale slice",
+    ).toEqual(["/w/alpha", "/w/epsilon", "/w/delta", "/w/beta", "/w/gamma"]);
+    await waitFor(() => expect(reorderSpaces).toHaveBeenCalledTimes(1));
+    expect(reorderSpaces).toHaveBeenCalledWith([
+      "/w/alpha",
+      "/w/epsilon",
+      "/w/delta",
+      "/w/beta",
+      "/w/gamma",
+    ]);
+  });
+
+  it("the ✕ carries draggable={false}, so a press on the close control starts no drag", () => {
+    // Spec §Handle + §5 test #18. The ✕ is a CHILD of the draggable pill, so an
+    // inherited/absent value lets the browser walk up to the pill and drag the
+    // TAB instead of closing it — a destructive control reachable only by
+    // accident. TWO COMPETING ANSWERS: `"false"` (the opt-out landed) vs the
+    // attribute absent. The pill's own `draggable="true"` is asserted alongside so
+    // the ✕ is proven to sit inside a draggable parent — otherwise "false" would
+    // be inherited-free by construction and the test would certify nothing.
+    render(<SpaceTabs />);
+    for (const name of TAB_NAMES) {
+      const close = screen.getByRole("button", { name: `Close ${name}` });
+      expect(close.getAttribute("draggable"), name).toBe("false");
+      expect(pillOf(name).getAttribute("draggable"), name).toBe("true");
+    }
+  });
+
+  it("a LEFT-drag started on the tab pill does not close the tab", async () => {
+    // SPEC HAZARD 2, and the one this branch could not pin before `draggable`
+    // existed (T05's D8): the pill's `onMouseDown` closes on `button === 1` and
+    // returns early for every other button, so a left press falls through — a
+    // property with no mechanism until the pill became a drag source.
+    // TWO COMPETING ANSWERS: the left press is the drag's start and closes
+    // nothing (correct) vs an `onMouseDown` rewritten to act on any button, which
+    // closes the tab the moment the user commits to a drag.
+    render(<SpaceTabs />);
+    const from = pillOf("beta");
+    expect(from.getAttribute("draggable"), "the drag surface never landed").toBe(
+      "true",
+    );
+    // The press that begins a drag, then the gesture itself, on the SAME pill.
+    fireEvent.mouseDown(from, { button: 0 });
+    // FLUSH, then assert: `closeSpace` → `removeSpace` reaches `deleteSpace`
+    // through a promise chain, so a synchronous `not.toHaveBeenCalled()` here
+    // would be green even under the bug (measured — a mutated handler that acts
+    // on button 0 was only caught several assertions later, which is how a pin
+    // ends up pointing at the wrong line). A macrotask drains the whole chain.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(deleteSpace, "a left press closed the tab").not.toHaveBeenCalled();
+    expect(useSessions.getState().spaces).toHaveLength(4);
+    layOut(from, 0);
+    const to = pillOf("alpha");
+    layOut(to, 100);
+    fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
+    expect(dragOver(to, 110)).toBe(false);
+    fireEvent(to, buildDrop());
+    // The drag COMPLETED (so the assertions above are a fall-through talking, not
+    // an inert pill) and still nothing closed, and nothing asked.
+    await waitFor(() => expect(reorderSpaces).toHaveBeenCalledTimes(1));
+    expect(deleteSpace).not.toHaveBeenCalled();
+    expect(closeSession).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(useSessions.getState().spaces.map((s) => s.path)).toEqual([
+      "/w/beta",
+      "/w/alpha",
+      "/w/gamma",
+      "/w/delta",
+    ]);
+    // THE OTHER BUTTON STILL WORKS: the same pill's middle-click closes, exactly
+    // as it did before the pill was draggable — the two gestures share one
+    // `onMouseDown` and only one of them may fire.
+    fireEvent.mouseDown(pillOf("beta"), { button: 1 });
+    await waitFor(() => expect(deleteSpace).toHaveBeenCalledTimes(1));
+    expect(useSessions.getState().spaces.map((s) => s.path)).toEqual([
+      "/w/alpha",
+      "/w/gamma",
+      "/w/delta",
+    ]);
+  });
+
+  it("the pill keeps opting OUT of the window-drag region after a drag (spec §5 #16)", () => {
+    // SPEC HAZARD 1, the after-drag half. The attribute's presence is pinned by
+    // "the pill opts OUT of the window-drag region …" above (whose comment names
+    // both reasons it is load-bearing); this pins that the reorder's re-render —
+    // the pills moving to new DOM positions — does not lose it. TWO COMPETING
+    // ANSWERS: every pill still answers `"false"` vs a re-render that drops it,
+    // which hands Tauri's injected drag script the mousedown and makes the tab
+    // drag the WINDOW instead of the tab.
+    render(<SpaceTabs />);
+    drag("delta", "beta", 110);
+    // The strip actually moved, so the pills below were re-rendered and re-read.
+    expect(renderedStrip()).toEqual([
+      "/w/alpha",
+      "/w/delta",
+      "/w/beta",
+      "/w/gamma",
+    ]);
+    for (const name of TAB_NAMES) {
+      expect(
+        pillOf(name).getAttribute("data-tauri-drag-region"),
+        name,
+      ).toBe("false");
+    }
+  });
+
+  it("a tab's drop wins without stopping propagation, so a release outside any pill is left to the backstop", async () => {
+    // Spec hazard 2 at the CALL SITE. `useWindowDropBackstop` listens on `window`
+    // and the pill's handler fires first during bubbling, so the pill wins the
+    // drop on its own — but only if it does not take propagation away on the way
+    // out, because the backstop is the one thing standing between a stray drop
+    // and the webview NAVIGATING to it. (The backstop mounts in `ChatStream`, not
+    // here, so what is provable in this file is the pill's half — the same split
+    // T06 documents for a sidebar row.)
+    // TWO COMPETING ANSWERS to "did the pill claim the event?": a pill that calls
+    // `stopPropagation` reorders correctly AND leaves the backstop deaf (every
+    // reorder test stays green, the app navigates away on a stray drop); the
+    // correct pill prevents and propagates.
+    render(<SpaceTabs />);
+    const from = pillOf("delta");
+    const to = pillOf("beta");
+    layOut(from, 0);
+    layOut(to, 100);
+    fireEvent.dragStart(from, { dataTransfer: { setData: vi.fn() } });
+    // THE POSITIVE CONTROL: the pill has to have CLAIMED the gesture for the
+    // release below to mean anything. Without this line the assertions pass on a
+    // strip with no drag wiring at all.
+    expect(dragOver(to, 110)).toBe(false);
+
+    // Half one — released ON the pill: prevented, reordered, and NOT stopped.
+    const onPill = buildDrop();
+    const stopped = vi.spyOn(onPill, "stopPropagation");
+    fireEvent(to, onPill);
+    expect(onPill.defaultPrevented).toBe(true);
+    expect(stopped).toHaveBeenCalledTimes(0);
+    await waitFor(() => expect(reorderSpaces).toHaveBeenCalledTimes(1));
+
+    // Half two — released OUTSIDE every pill: the strip never claims it, so the
+    // event arrives at `window` un-prevented and un-stopped for the backstop to
+    // swallow, and no tab moves.
+    vi.mocked(reorderSpaces).mockClear();
+    const stray = buildDrop();
+    const strayStopped = vi.spyOn(stray, "stopPropagation");
+    fireEvent(document.body, stray);
+    expect(stray.defaultPrevented).toBe(false);
+    expect(strayStopped).toHaveBeenCalledTimes(0);
+    expect(reorderSpaces).not.toHaveBeenCalled();
   });
 });
