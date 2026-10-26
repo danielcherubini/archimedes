@@ -398,6 +398,84 @@ assert_contains "and says it is not supported" "not supported" "$output"
 run_check_env "TMPDIR= ARCHIMEDES_CENSUS_UNAME_S=Linux" base
 assert_eq "Linux with no TMPDIR resolves to /tmp (Rust's fallback)" "/tmp" "$output"
 
+# ---------------------------------------------------------------------------
+# 17. THE DOTTED-NAME EXCLUSION IS DARWIN-SCOPED, AND THE SCOPING IS PROVEN
+#     FROM THE LINUX SIDE.
+#
+#     On macOS the per-user `TMPDIR` (`/var/folders/…/T`) is NOT quiescent: while
+#     a ~90s suite runs, system daemons (`com.apple.Maps.mapssyncd`,
+#     `com.apple.AuthenticationServices.*`, `com.apple.RemoteManagementAgent`, …)
+#     create directories in it. CI run 40347693926's macos-latest leg reddened on
+#     19 of them and ZERO of ours — the premise test passed and the snapshot
+#     resolved the right base, so the guard was counting the correct directory and
+#     the suite leaked nothing there. Ubuntu's `/tmp` on a fresh runner IS
+#     quiescent (that leg snapshotted 13 dirs and verified clean), so Linux keeps
+#     the fully strict whole-temp-dir delta.
+#
+#     The exclusion is a SHAPE (`*.*` — the name contains a dot) and NOT a name
+#     list; see the WHY block in `check-temp-dir-census.sh`. Every Archimedes
+#     minter prefix is dot-free, so a dotted name cannot be one of ours.
+#
+#     THIS CASE IS THE SCOPING PROOF: on Linux a planted DOTTED directory must
+#     still be reported. If the exclusion is ever widened past Darwin (a dropped
+#     platform gate, a `case` that matches everything), Linux — the leg that
+#     carries the real coverage — silently loses its strictness, and this is the
+#     only assertion that notices.
+fixture linux_dotted
+run_check_env "ARCHIMEDES_CENSUS_UNAME_S=Linux" snapshot --state "$state" --base "$base"
+assert_eq "Linux snapshot exits 0" "0" "$status"
+mkdir -p "$base/com.apple.Maps.mapssyncd"
+run_check_env "ARCHIMEDES_CENSUS_UNAME_S=Linux" verify --state "$state" --base "$base"
+assert_eq "on LINUX a dotted directory is still a leak (the exclusion is Darwin-only)" "1" "$status"
+assert_contains "and it is named" "com.apple.Maps.mapssyncd" "$output"
+assert_not_contains "and nothing is reported as excluded on Linux" "excluded:" "$output"
+
+# 18. THE DARWIN HALF, BOTH DIRECTIONS. A bug that excludes EVERYTHING must fail
+#     here, which is why the dot-free half shares a fixture with the dotted half:
+#     a dotted-only fixture stays green under a `*` rule instead of `*.*`.
+fixture darwin_dotted
+run_check_env "ARCHIMEDES_CENSUS_UNAME_S=Darwin" snapshot --state "$state" --base "$base"
+assert_eq "Darwin snapshot exits 0" "0" "$status"
+mkdir -p "$base/com.apple.Maps.mapssyncd" "$base/com.apple.SafariShared.SafariConfigurationSubscriber"
+run_check_env "ARCHIMEDES_CENSUS_UNAME_S=Darwin" verify --state "$state" --base "$base"
+assert_eq "on DARWIN daemon dirs are excluded and the run is clean" "0" "$status"
+assert_contains "the clean message still appears" "census clean" "$output"
+# The exclusion must be VISIBLE, never silent — a silent exclusion is the
+# vacuous-green failure mode this guard exists to prevent, so the count and the
+# reason are asserted, not just the exit code.
+assert_contains "the exclusion is announced with its count" "excluded: 2 dotted-name dir(s)" "$output"
+# The BASE is asserted by its own component, not in full: `--base` is
+# canonicalised, so on macOS `$tmp_root` spells as `/private/var/…` here. The
+# component plus the dash after it is the part that is spelling-independent.
+assert_contains "and it names the base it excluded from" "$(basename "$base") — macOS" "$output"
+assert_contains "and it says why (daemons share the per-user TMPDIR)" "system daemons share the per-user TMPDIR" "$output"
+assert_contains "and it says why the shape is safe (no minter name has a dot)" "no Archimedes minter name contains a dot" "$output"
+
+# 18b. THE OTHER HALF, SAME FIXTURE: a DOT-FREE leak on Darwin is still reported,
+#      with the exclusion still announced. `*` instead of `*.*` passes 18 and dies
+#      here.
+mkdir -p "$base/planted-darwin-leak-1a2b3c4d"
+run_check_env "ARCHIMEDES_CENSUS_UNAME_S=Darwin" verify --state "$state" --base "$base"
+assert_eq "a dot-free directory on DARWIN is still a leak" "1" "$status"
+assert_contains "and it is named" "planted-darwin-leak-1a2b3c4d" "$output"
+assert_not_contains "the excluded daemon dir is not itself listed as a failure" "com.apple.Maps.mapssyncd" "$output"
+assert_contains "and the exclusion is STILL announced on the failing path" "excluded: 2 dotted-name dir(s)" "$output"
+
+# 18c. A DOTTED NAME THAT IS ALSO A KNOWN MINTER PREFIX would be an Archimedes
+#      leak wearing a daemon's shape. It cannot exist today — verified against
+#      this tree: no `in_env_temp`/`in_tmpfs`/`in_dir` prefix, and no historical
+#      prefix on disk, contains a dot — but if a future minter broke that
+#      invariant the exclusion WOULD hide it. So the invariant is asserted here,
+#      which is what makes "the shape is safe" a checked claim instead of an
+#      assumed one.
+if grep -rqE '(in_env_temp|in_tmpfs|in_dir)\(\s*"[^"]*\.' src-tauri/src src-tauri/tests 2>/dev/null; then
+  echo "FAIL no minter prefix contains a dot (the Darwin dotted-name exclusion depends on this)"
+  grep -rnE '(in_env_temp|in_tmpfs|in_dir)\(\s*"[^"]*\.' src-tauri/src src-tauri/tests | sed 's/^/       /'
+  failures=$((failures + 1))
+else
+  echo "ok   no minter prefix contains a dot (the Darwin dotted-name exclusion depends on this)"
+fi
+
 if ((failures > 0)); then
   echo
   echo "$failures check(s) failed" >&2

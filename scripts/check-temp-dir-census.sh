@@ -39,6 +39,11 @@
 # Prefixes therefore survive ONLY as the ATTRIBUTION table below (so a red sends
 # you to the right file), never as the filter.
 #
+# One filter DOES exist — the Darwin-only dotted-name exclusion further down — and
+# it is NOT the shape this section rejects. Read `exclusion_applies_here` for why a
+# SHAPE (contains a dot) has none of the allow-list's blindness and needs no
+# widening as daemons come and go.
+#
 # USAGE
 #   check-temp-dir-census.sh snapshot --state FILE [--base DIR]
 #   check-temp-dir-census.sh verify   --state FILE [--base DIR]
@@ -226,6 +231,69 @@ TABLE
 # is NEW, and NEW is precisely what this guard is for.
 unattributed_note() {
   printf '%s\n' '<UNATTRIBUTED: no known minter matches this prefix — it is NEW, which is exactly what this guard is for>'
+}
+
+# ---------------------------------------------------------------------------
+# THE DOTTED-NAME EXCLUSION — DARWIN ONLY, A SHAPE, AND NEVER SILENT.
+#
+# WHY IT EXISTS. macOS gives every user a private temp dir
+# (`confstr(_CS_DARWIN_USER_TEMP_DIR)` → `/var/folders/nn/…/T`) that is NOT
+# quiescent: while a ~90s suite runs, system daemons create directories in it. CI
+# run 40347693926's `macos-latest` leg reddened on 19 of them —
+# `com.apple.Maps.mapssyncd`, `com.apple.AuthenticationServices.*`,
+# `com.apple.RemoteManagementAgent`, `com.apple.SafariShared.*` — and NOT ONE of
+# them was ours. The premise test
+# (`the_census_base_is_the_temp_dir_the_suite_actually_uses`) passed on macOS and
+# the snapshot resolved `/private/var/folders/…/T`, so the guard was counting the
+# RIGHT directory and the suite leaked ZERO dirs there. That is the whole-temp-dir
+# delta behaving exactly as the header predicts: a VISIBLE FALSE POSITIVE from a
+# foreign process, with the offending names printed for attribution.
+#
+# WHY THIS IS NOT THE ALLOW-LIST THE HEADER REJECTS. The header rejects a PREFIX
+# ALLOW-LIST because "a new leaky test mints a new prefix the list does not
+# contain, so the guard passes forever". That argument is about NAMES. What lives
+# here is a SHAPE: *do not count a candidate whose name contains a dot*. It needs
+# no widening as daemons arrive and go (they all reverse-DNS-name, so they all
+# have dots), and it cannot hide a new Archimedes prefix, because — verified
+# against this tree — **no Archimedes minter prefix contains a dot**: every
+# `in_env_temp`/`in_tmpfs`/`in_dir` prefix, every prefix in the attribution table,
+# and every historical prefix on disk is dot-free. A dotted name therefore cannot
+# be one of ours, and the guard stays blind to nothing it could ever own. `check-temp-dir-census.test.sh`
+# case 18c asserts that invariant in the tree, so a minter that broke it reddens a
+# test rather than quietly becoming invisible.
+#
+# DO NOT MATCH `com.apple.*`. That is a NAME LIST — the exact rejected shape,
+# needing a diff every time Apple ships a new daemon, and silently blind to any
+# non-Apple dot-named neighbour.
+#
+# DARWIN ONLY, AND THAT IS WHY THE COVERAGE COST IS SMALL. Linux (and every future
+# platform) keeps the FULLY STRICT whole-temp-dir delta: Ubuntu's `/tmp` on a fresh
+# runner is quiescent — that leg snapshotted 13 dirs and verified clean — so it
+# loses nothing by staying strict, and it is the leg that carries the real
+# coverage. The relaxation is confined to the one platform where the temp dir is
+# demonstrably shared with processes we cannot own. `check-temp-dir-census.test.sh`
+# case 17 plants a DOTTED dir on the LINUX platform and requires exit 1: the
+# scoping is PROVEN, not assumed, so a future edit that drops the platform gate
+# reddens Linux instead of quietly disarming it.
+#
+# NEVER SILENT. `verify` prints the count and the reason whenever it excludes
+# anything, on the clean path AND the failing path. A silent exclusion is the
+# vacuous-green failure mode this entire task exists to prevent: it would turn
+# "nothing leaked" into "nothing I chose to look at leaked" with no artifact to
+# argue with.
+exclusion_applies_here() {
+  case "$(host_uname_s)" in
+    Darwin) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The shape: a name containing a dot. Not `com.apple.*` (see above).
+dotted_name() {
+  case "$1" in
+    *.*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -601,6 +669,34 @@ run_verify() {
   local new
   new="$(new_names "$before" "$after")"
 
+  # THE DOTTED-NAME EXCLUSION (Darwin only — see the block above `exclusion_applies_here`
+  # for why this is a SHAPE and not the rejected allow-list, and why Linux stays
+  # strict). Applied to the DELTA, BEFORE classification, so an excluded name can
+  # reach neither the strict list nor a tolerance count, and can never mask a
+  # dot-free leak.
+  local -a excluded=()
+  if exclusion_applies_here && [[ -n "$new" ]]; then
+    local counted="" cand
+    while IFS= read -r cand; do
+      [[ -z "$cand" ]] && continue
+      if dotted_name "$cand"; then
+        excluded+=("$cand")
+      else
+        counted+="$cand"$'\n'
+      fi
+    done <<<"$new"
+    new="$counted"
+  fi
+
+  # The exclusion is ANNOUNCED whenever it fires — on the clean path and the
+  # failing path alike. Only the COUNT is printed, never the names: a name that
+  # was excluded must not reappear where a reader could mistake it for a failure,
+  # and the count is what tells them the guard looked and set something aside.
+  local excluded_note=""
+  if (( ${#excluded[@]} > 0 )); then
+    excluded_note="$(printf 'excluded: %s dotted-name dir(s) in %s — macOS system daemons share the per-user TMPDIR; no Archimedes minter name contains a dot (#96)\n' "${#excluded[@]}" "$base")"
+  fi
+
   # Classify: the STRICT count comes from names matching NO tolerance row,
   # computed INDEPENDENTLY of the tolerated count, so a tolerated leak can never
   # mask a strict one. Over budget, the tolerated names fold into the strict list.
@@ -614,7 +710,7 @@ run_verify() {
   local -a tol_prefix=()
   local -a tol_count=()
   local -a tol_budget=()
-  local prefix name budget row_prefix row_budget _rest idx i
+  local prefix name budget row_prefix row_budget _rest idx i cand
 
   # Pass 1: per tolerance row, how many new names it matched. Each name belongs to
   # exactly one row (longest-prefix-wins via `tolerance_prefix`), so the counts
@@ -673,6 +769,11 @@ run_verify() {
 
   if (( ${#strict[@]} > 0 )); then
     {
+      # The exclusion is printed FIRST, above the failure: a reader triaging a red
+      # must be able to see what the guard set aside, or the count in the headline
+      # is unauditable. It goes to stderr with the rest of the report so the two
+      # cannot interleave into each other in a CI log.
+      [[ -n "$excluded_note" ]] && printf '%s\n' "$excluded_note"
       printf 'error: the Rust test suite left %s new directories in %s — #96'"'"'s leak is back\n' "${#strict[@]}" "$base"
       local n owner
       for n in "${strict[@]}"; do
@@ -700,6 +801,11 @@ run_verify() {
       printf '  %s  ← %s\n' "$t" "$(attribute "$t")"
     done
   fi
+
+  # Clean verdict, but the exclusion is still announced — "clean" plus "and here
+  # is what I declined to count" is an auditable statement; a bare "clean" after
+  # silently dropping 19 candidates is the vacuous green this task exists to kill.
+  [[ -n "$excluded_note" ]] && printf '%s\n' "$excluded_note"
 
   printf 'census clean: no new directories in %s\n' "$base"
 }
@@ -1033,7 +1139,65 @@ run_self_test() {
     self_fail "an unrecognised platform is refused and prints the reason" "exit $self_status: $self_output"
   fi
 
-  # Case 13: the REAL base is resolvable and walkable — step 1's logic is attached
+  # Case 13: THE DOTTED-NAME EXCLUSION IS DARWIN-ONLY — PROVEN FROM THE LINUX
+  # SIDE. macOS's per-user TMPDIR is shared with system daemons that mint dotted
+  # (`com.apple.*`) directories mid-suite; Linux's `/tmp` on a fresh runner is
+  # quiescent, so Linux keeps the FULLY STRICT whole-temp-dir delta and a dotted
+  # candidate there is still a leak. This case is what stops the exclusion from
+  # ever being widened past Darwin unnoticed: drop the platform gate and THIS
+  # goes red. (Re-invoked with an injected `uname` + `--base`, the same injection
+  # case 12 uses for the refusal.)
+  self_mk -p "$root_canonical/linux-strict-base"
+  self_status=0
+  self_output="$(env TMPDIR= ARCHIMEDES_CENSUS_UNAME_S=Linux "$script" snapshot --state "$root_canonical/linux-strict.txt" --base "$root_canonical/linux-strict-base" 2>&1)" || self_status=$?
+  self_test_created+=("$root_canonical/linux-strict.txt")
+  if [[ "$self_status" == "0" ]]; then
+    self_mk -p "$root_canonical/linux-strict-base/com.apple.Maps.mapssyncd"
+    self_status=0
+    self_output="$(env TMPDIR= ARCHIMEDES_CENSUS_UNAME_S=Linux "$script" verify --state "$root_canonical/linux-strict.txt" --base "$root_canonical/linux-strict-base" 2>&1)" || self_status=$?
+    if [[ "$self_status" == "1" && "$self_output" == *"com.apple.Maps.mapssyncd"* && "$self_output" != *"excluded:"* ]]; then
+      self_ok "on LINUX a dotted directory is still reported (the exclusion is Darwin-only)"
+    else
+      self_fail "on LINUX a dotted directory is still reported" "exit $self_status: $self_output"
+    fi
+  else
+    self_fail "on LINUX a dotted directory is still reported (snapshot step failed)" "exit $self_status: $self_output"
+  fi
+
+  # Case 14: THE DARWIN HALF, BOTH DIRECTIONS. A planted dotted dir is excluded
+  # AND the exclusion is ANNOUNCED (a silent exclusion is the vacuous green this
+  # whole task exists to prevent); a planted DOT-FREE dir is still reported. Both
+  # halves are asserted against the SAME base, so a bug that excludes everything
+  # — `*` where `*.*` belongs — fails the dot-free half, and a bug that excludes
+  # nothing fails the dotted half.
+  self_mk -p "$root_canonical/darwin-base"
+  self_status=0
+  self_output="$(env TMPDIR= ARCHIMEDES_CENSUS_UNAME_S=Darwin "$script" snapshot --state "$root_canonical/darwin-state.txt" --base "$root_canonical/darwin-base" 2>&1)" || self_status=$?
+  self_test_created+=("$root_canonical/darwin-state.txt")
+  if [[ "$self_status" != "0" ]]; then
+    self_fail "darwin fixture snapshot exits 0" "exit $self_status: $self_output"
+  else
+    self_mk -p "$root_canonical/darwin-base/com.apple.Maps.mapssyncd"
+    self_status=0
+    self_output="$(env TMPDIR= ARCHIMEDES_CENSUS_UNAME_S=Darwin "$script" verify --state "$root_canonical/darwin-state.txt" --base "$root_canonical/darwin-base" 2>&1)" || self_status=$?
+    if [[ "$self_status" == "0" && "$self_output" == *"census clean"* && "$self_output" == *"excluded: 1 dotted-name dir(s)"* ]]; then
+      self_ok "on DARWIN a dotted daemon dir is excluded, and the exclusion is PRINTED"
+    else
+      self_fail "on DARWIN a dotted daemon dir is excluded and the exclusion is printed" "exit $self_status: $self_output"
+    fi
+
+    # The other half, same base: the dot-free leak survives the exclusion.
+    self_mk -p "$root_canonical/darwin-base/planted-darwin-leak-1"
+    self_status=0
+    self_output="$(env TMPDIR= ARCHIMEDES_CENSUS_UNAME_S=Darwin "$script" verify --state "$root_canonical/darwin-state.txt" --base "$root_canonical/darwin-base" 2>&1)" || self_status=$?
+    if [[ "$self_status" == "1" && "$self_output" == *"planted-darwin-leak-1"* && "$self_output" == *"excluded: 1 dotted-name dir(s)"* ]]; then
+      self_ok "on DARWIN a dot-free directory is still reported (the exclusion is a shape, not a wildcard)"
+    else
+      self_fail "on DARWIN a dot-free directory is still reported" "exit $self_status: $self_output"
+    fi
+  fi
+
+  # Case 15: the REAL base is resolvable and walkable — step 1's logic is attached
   # to a directory that exists on this machine/OS. Read-only: nothing is planted
   # here, and the entry count is asserted unchanged by the .test.sh harness.
   local real_count=0
