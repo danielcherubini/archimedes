@@ -260,12 +260,11 @@ mod tests {
     use super::{logged, logged_line};
     use crate::agent::{debuglog, SessionError};
 
-    /// A unique temp dir (removed by the caller) — the `debuglog.rs` test
-    /// helper's shape, kept local so this module owns no cross-module coupling.
-    fn temp_dir() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("sessions-log-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A unique scratch dir, OWNED (#96 task 07) — the `debuglog.rs` test helper's
+    /// shape, kept local so this module owns no cross-module coupling. NOT
+    /// `Clone`: `to_path_buf()` is what `debuglog::init`'s `Option<PathBuf>` takes.
+    fn temp_dir() -> crate::test_support::ScratchDir {
+        crate::test_support::ScratchDir::in_env_temp("sessions-log-test-", "log")
     }
 
     /// Restores the global debug log to DISABLED on scope exit — INCLUDING on
@@ -345,9 +344,14 @@ mod tests {
         // `debuglog`'s own private test `lock()`, which lives inside that
         // module's `#[cfg(test)] mod tests` and is unreachable from here).
         let _lock = crate::test_support::env_lock();
-        let _disable = DisableDebuglogOnExit;
+        // #96 task 07: the guard is declared BEFORE the global-clearing marker so
+        // that it drops AFTER it (locals drop in reverse) — `debuglog::init(false,
+        // None)` must clear the process-global `DIR` before this dir is removed,
+        // or the global is left naming a path that no longer exists. The lock is
+        // declared FIRST so it outlives both.
         let dir = temp_dir();
-        debuglog::init(true, Some(dir.clone()));
+        let _disable = DisableDebuglogOnExit;
+        debuglog::init(true, Some(dir.to_path_buf()));
 
         // A unique path = the marker: no sibling line can contain it.
         let err = SessionError::FolderMissing {
@@ -372,7 +376,6 @@ mod tests {
             written.contains("ipc start_session FAILED:"),
             "the line is framed with the command name:\n{written}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An ACCEPTED command passes through unchanged and writes NOTHING — the
@@ -384,9 +387,12 @@ mod tests {
     #[test]
     fn logged_passes_an_ok_through_without_writing_a_line() {
         let _lock = crate::test_support::env_lock();
-        let _disable = DisableDebuglogOnExit;
+        // #96 task 07: same ordering as the sibling above — guard BEFORE the
+        // marker (so it drops AFTER it: the process-global `DIR` is cleared
+        // before the log dir is removed) and the lock FIRST (it outlives both).
         let dir = temp_dir();
-        debuglog::init(true, Some(dir.clone()));
+        let _disable = DisableDebuglogOnExit;
+        debuglog::init(true, Some(dir.to_path_buf()));
 
         let label = format!("close_session_{}", uuid::Uuid::new_v4());
         assert_eq!(
@@ -400,6 +406,57 @@ mod tests {
             !written.contains(&label),
             "an accepted command must NOT be logged:\n{written}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #96 task 07: `temp_dir()` must OWN what it creates. It handed back a bare
+    /// `PathBuf` and the only cleanup was a trailing `remove_dir_all` STATEMENT,
+    /// so an assertion failing before that line left the log dir behind. This
+    /// module's green delta is 0 (the two mints were already 1:1 with their two
+    /// removals) — so this is a RED about OWNERSHIP, not about a green leak: it
+    /// pins that the helper now owns its dir, which is exactly what makes the
+    /// panic path free.
+    ///
+    /// Takes NO `env_lock()` and calls NO `debuglog::init` — it exercises
+    /// ownership only, so it touches neither the process-global nor the env, and
+    /// stays order-independent against the other tests in these three modules.
+    #[test]
+    fn the_temp_dir_fixture_removes_its_dir_when_its_owner_is_dropped() {
+        let dir = temp_dir();
+        let captured = dir.to_path_buf();
+        assert!(captured.is_dir(), "the fixture created its scratch dir");
+        drop(dir);
+        assert!(
+            !captured.exists(),
+            "the fixture's scratch goes with its owner: {captured:?}"
+        );
+    }
+
+    /// The panic path for the sessions log dir: the guard is MOVED INTO the
+    /// panicking scope, so it is the unwind that runs the removal (the
+    /// `test_support` precedent). Today's trailing `remove_dir_all` is a
+    /// statement AFTER the assertions, so a failing one of those skips it. The
+    /// escaped-panic case (a failing test whose guard is a plain local) is
+    /// deliberately NOT pinned here — Rust makes no portable guarantee and
+    /// status-doc D10 gives it to task 09's census.
+    #[test]
+    fn a_panicking_assertion_still_removes_the_sessions_log_dir() {
+        let captured = {
+            let dir = temp_dir();
+            let path = dir.to_path_buf();
+            assert!(path.is_dir(), "the fixture created its scratch dir");
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let _held = dir;
+                assert_eq!(
+                    1, 2,
+                    "an assertion fails while the fixture owns its log dir"
+                );
+            }));
+            assert!(r.is_err(), "the assertion failed as arranged");
+            path
+        };
+        assert!(
+            !captured.exists(),
+            "the unwind ran the removal: {captured:?}"
+        );
     }
 }

@@ -136,8 +136,12 @@ mod tests {
 
     #[test]
     fn history_page_todos_first_page_and_subsequent_pages() {
-        let dir = std::env::temp_dir().join(format!("history-todos-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        // #96 task 07: OWNED. Declared FIRST on purpose — locals drop in reverse
+        // declaration order, so the guard goes last, after `path` and after the
+        // `Db` whose SQLite file lives inside this dir. Linux tolerates the wrong
+        // order (POSIX unlinks an open file); Windows does not, and `Drop`
+        // swallows the error, so the position is enforced by reading.
+        let dir = crate::test_support::ScratchDir::in_env_temp("history-todos-test-", "db");
         let path = dir.join("t.db");
         let db = Db::open(&path).expect("db should open");
 
@@ -195,8 +199,6 @@ mod tests {
             p_empty.todos, None,
             "session with no todos returns todos: None"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (ADR 0075) The WIRE KEYS of `SessionRecency` are pinned as literals:
@@ -219,9 +221,10 @@ mod tests {
     /// number (or the other row's) and be caught here.
     #[test]
     fn session_recency_rows_serializes_to_the_pinned_camel_case_keys() {
-        let dir =
-            std::env::temp_dir().join(format!("history-recency-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).expect("create the test dir");
+        // #96 task 07: OWNED, and declared FIRST on purpose — reverse drop order
+        // puts the guard last, after `path`, after the raw `Connection` block
+        // below, and after the `Db` whose SQLite file lives inside this dir.
+        let dir = crate::test_support::ScratchDir::in_env_temp("history-recency-test-", "db");
         let path = dir.join("t.db");
         let db = Db::open(&path).expect("db should open");
 
@@ -320,8 +323,6 @@ mod tests {
             serde_json::json!(0_i64),
             "`s_plain` carries the number the reorder gave it"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (ADR 0075) `reorder_session_rows` writes the slice in the GIVEN order:
@@ -331,9 +332,10 @@ mod tests {
     /// wrapper needs.
     #[test]
     fn reorder_session_rows_writes_the_slice_in_given_order() {
-        let dir =
-            std::env::temp_dir().join(format!("history-reorder-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).expect("create the test dir");
+        // #96 task 07: OWNED, declared FIRST so the guard drops LAST — after the
+        // `Db` whose SQLite file lives inside this dir (reverse declaration
+        // order; the Linux/Windows asymmetry is documented on the first test).
+        let dir = crate::test_support::ScratchDir::in_env_temp("history-reorder-test-", "db");
         let db = Db::open(&dir.join("t.db")).expect("db should open");
 
         let titled = |id: &str| SessionInfo {
@@ -365,7 +367,5 @@ mod tests {
             vec!["s_c".to_string(), "s_a".to_string(), "s_b".to_string()],
             "the given slice order IS the stored order"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
