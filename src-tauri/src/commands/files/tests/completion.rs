@@ -1,6 +1,6 @@
 use super::support::{
     assert_readdir_disagrees_with_sorted_order, git_repo, list_query, rows, slash_query_form,
-    tmp_dir, touch, write,
+    tmp_dir, tmpfs_dir, touch, write,
 };
 use crate::commands::files::{
     abs_to_slash, completion_dir, expand_completion_root, list_completion_entries,
@@ -16,7 +16,7 @@ fn expand_completion_root_expands_tilde_only_in_first_position() {
     );
     assert_eq!(
         expand_completion_root("~/", Some(&home)),
-        Some(home.clone())
+        Some(home.to_path_buf())
     );
     assert_eq!(expand_completion_root("a~b", Some(&home)), None);
     assert_eq!(expand_completion_root("~", Some(&home)), None);
@@ -504,7 +504,10 @@ fn completion_dir_offers_dot_named_files_and_directories() {
 
 #[test]
 fn completion_dir_truncates_at_the_cap() {
-    let root = tmp_dir("completion-cap");
+    // tmpfs-backed: the premise asserted below belongs to the FILESYSTEM, so a
+    // non-tmpfs `TMPDIR` (the desktop app sets one; its children inherit it)
+    // makes the guard fire for reasons unrelated to this test. See `tmpfs_dir`.
+    let root = tmpfs_dir("completion-cap");
     for i in 0..5 {
         touch(&root, &format!("f{i}.txt"));
     }

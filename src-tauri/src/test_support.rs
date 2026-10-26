@@ -126,9 +126,147 @@ pub fn is_incarnation_stamp(s: &str) -> bool {
     s.len() == 6 && s == s.to_lowercase() && s.bytes().all(lower_hex)
 }
 
+/// A scratch dir for ONE test, REMOVED when it is dropped.
+///
+/// The shared guard behind #96: a fixture that hands back a bare `PathBuf`
+/// leaks its directory the moment an assertion panics, and one green run
+/// leaked 432 of them into the temp dir until the per-user quota exhausted.
+/// Ownership is the fix — a dir the fixture cannot forget to delete. (What a
+/// per-test panic can and cannot pin is recorded on the panic test in this
+/// module (`the_guard_removes_its_dir_when_the_scope_holding_it_panics`); the
+/// run-level proof is task 09's census.)
+///
+/// The BASE is a parameter, never a guess: [`ScratchDir::in_dir`] (the caller
+/// names the base), [`ScratchDir::in_env_temp`] (the ambient temp dir) and
+/// [`ScratchDir::in_tmpfs`] (a tmpfs, for fixtures whose PREMISE belongs to the
+/// filesystem). `agent/tools/sandbox.rs` deliberately does NOT use either
+/// convenience constructor — its fixtures must sit OUTSIDE the sandbox write
+/// allow-list, and a fallback to `std::env::temp_dir()` would put them inside
+/// it. See its `test_base()`.
+///
+/// NOT `Clone`, on purpose: a second owner would `remove_dir_all` the same path
+/// twice. [`ScratchDir::to_path_buf`] is the escape hatch for a call site that
+/// needs an owned path — but the dir still dies with the guard.
+///
+/// This module is NOT `#[cfg(test)]`-gated (see the module docs): these items
+/// are compiled into release builds and into the rlib `tests/*.rs` links
+/// against, which is what lets an integration test reach
+/// `archimedes_lib::test_support::ScratchDir`. A `Drop` impl in a shipping
+/// binary is harmless — it removes a directory this type created — and it is
+/// here deliberately, not left behind by accident.
+pub struct ScratchDir {
+    path: std::path::PathBuf,
+}
+
+impl ScratchDir {
+    /// A fresh dir directly inside `base`, named `{prefix}{tag}-{uuid}`.
+    /// `None` when `base` cannot accept it — the caller decides whether that
+    /// means "skip" or "panic" (the sandbox tests skip loudly; they must not
+    /// fall back to a base that would make them vacuous).
+    pub fn in_dir(base: &std::path::Path, prefix: &str, tag: &str) -> Option<Self> {
+        let path = base.join(format!("{prefix}{tag}-{}", uuid::Uuid::new_v4()));
+        // `create_dir_all` IS the probe: a present-but-unwritable base must
+        // report `None` rather than panic a fixture (the lesson of the prior
+        // art, which checked `is_dir()` first and could still fail the write).
+        std::fs::create_dir_all(&path).ok()?;
+        Some(Self { path })
+    }
+
+    /// The ambient temp dir (`std::env::temp_dir()`) — the base the guards in
+    /// `boundary`, `loop/tests` and `commands/files` use today. Panics only if
+    /// `temp_dir()` itself is unwritable, which every one of those guards has
+    /// always assumed.
+    pub fn in_env_temp(prefix: &str, tag: &str) -> Self {
+        Self::in_dir(&std::env::temp_dir(), prefix, tag).expect(
+            "`std::env::temp_dir()` accepts a `create_dir_all` — the guards this \
+             replaces already assumed it writable, so this is a carried-over \
+             precondition rather than an invariant (`TMPDIR` can name a dir that \
+             is not writable; that is the condition #96 describes)",
+        )
+    }
+
+    /// A tmpfs: the first entry of [`tmpfs_base_candidates`] that accepts a
+    /// `create_dir_all`. For fixtures that assert something about the
+    /// FILESYSTEM (the `commands/files` cap fixtures need `readdir` to
+    /// disagree with sorted order, which only a tmpfs guarantees).
+    pub fn in_tmpfs(prefix: &str, tag: &str) -> Self {
+        for base in tmpfs_base_candidates() {
+            if let Some(dir) = Self::in_dir(&base, prefix, tag) {
+                return dir;
+            }
+        }
+        panic!(
+            "no tmpfs candidate accepted a scratch dir for `{prefix}{tag}` — the \
+             final candidate is `std::env::temp_dir()`, which the guards this \
+             replaces already assumed writable (a carried-over precondition, not \
+             an invariant: an unwritable `TMPDIR` is exactly #96's hostile case)"
+        )
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// The dir as a shell-quotable string (the tags are uuid-derived, so no
+    /// quoting character can appear) — the sandbox tests' `display()` needs.
+    pub fn display(&self) -> String {
+        self.path.display().to_string()
+    }
+
+    pub fn to_path_buf(&self) -> std::path::PathBuf {
+        self.path.clone()
+    }
+}
+
+/// The tmpfs candidates, best first:
+/// - `/dev/shm` when `Path::new("/dev/shm").is_dir()` — tmpfs on Linux, and it
+///   satisfies the readdir premise for BOTH cap-fixture layouts (measured on
+///   the prior art, `5e3cfc6`). Linux-only, so macOS and Windows get a
+///   one-element list.
+/// - `std::env::temp_dir()` — always last, always present.
+///
+/// `/dev/shm` carries the SAME per-user quota as `/tmp`, so landing here is
+/// not a licence to leak; the `Drop` below is what keeps the base change from
+/// MOVING the leak.
+pub fn tmpfs_base_candidates() -> Vec<std::path::PathBuf> {
+    let shm = std::path::Path::new("/dev/shm")
+        .is_dir()
+        .then(|| std::path::PathBuf::from("/dev/shm"));
+    shm.into_iter()
+        .chain(std::iter::once(std::env::temp_dir()))
+        .collect()
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+impl std::ops::Deref for ScratchDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+/// Load-bearing, not decoration: `std::fs::create_dir_all(&guard)` and
+/// `std::os::unix::fs::symlink(&guard, …)` FAIL with
+/// `` the trait bound `ScratchDir: AsRef<Path>` is not satisfied `` when only
+/// `Deref` is present — the blanket `impl AsRef<U> for &T` needs `T: AsRef<U>`,
+/// and `Deref` does not supply it. Both spellings occur in
+/// `commands/files/tests/` today. `Deref` alone covers the method calls
+/// (`root.join(..)`, `root.to_string_lossy()`) and the `Some(&home)` →
+/// `Option<&Path>` coercion; `AsRef` alone does not cover those. Both required.
+impl AsRef<std::path::Path> for ScratchDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_incarnation_stamp;
+    use super::{is_incarnation_stamp, tmpfs_base_candidates, ScratchDir};
 
     /// Does the CI data-dir redirect actually reach `dirs::data_dir()`?
     ///
@@ -223,6 +361,126 @@ mod tests {
             "",        // the EMPTY stamp `TurnState::default()` carries
         ] {
             assert!(!is_incarnation_stamp(bad), "{bad} is NOT a stamp");
+        }
+    }
+
+    /// The guard removes its dir when its owner is dropped — the whole
+    /// mechanism #96 needs (a bare `PathBuf` has no `Drop`, so every panicking
+    /// assertion leaked one dir; 432 per green run).
+    #[test]
+    fn a_scratch_dir_is_gone_when_its_owner_is_dropped() {
+        let guard = ScratchDir::in_env_temp("test-support-guard-", "drop");
+        assert!(guard.path().is_dir(), "creating the guard made the dir");
+        let captured = guard.to_path_buf();
+        drop(guard);
+        assert!(
+            !captured.exists(),
+            "the guard's `Drop` removed its dir — {captured:?} is gone"
+        );
+    }
+
+    /// What this pins: the guard's `Drop` runs during an UNWIND, not only on a
+    /// normal `drop()` (the test above). The shape is the repo's own precedent,
+    /// `agent/mcp/oauth.rs`'s panic test: the guard is created and MOVED INTO
+    /// the panicking closure, so the scope the panic unwinds past is the scope
+    /// that owns it. That placement is load-bearing — `catch_unwind` is
+    /// `ManuallyDrop` machinery around the `try` intrinsic and nothing in its
+    /// contract drops values that OUTLIVED the caught panic, so a guard created
+    /// outside the closure would prove only that `catch_unwind` returned.
+    ///
+    /// What this does NOT pin, and what no per-test Rust test can: #96's
+    /// headline case — a test that FAILS with its guard as a plain local, so
+    /// the panic ESCAPES the test fn and it is the harness's own unwind that
+    /// would have to remove the dir. Rust makes no portable guarantee there
+    /// (during an unwind, dropping is treated as fallible — a double panic
+    /// aborts), so claiming it from one test would be decoration. That case is
+    /// pinned by the CENSUS instead: roadmap task 09's post-run count of the
+    /// per-prefix dirs after a run. A failing test that leaks is caught by the
+    /// count, not here.
+    #[test]
+    fn the_guard_removes_its_dir_when_the_scope_holding_it_panics() {
+        let captured = {
+            let guard = ScratchDir::in_env_temp("test-support-guard-", "unwind");
+            let path = guard.to_path_buf();
+            assert!(path.is_dir(), "the guard created its dir");
+            // The guard MOVES into the panicking scope: that is the value the
+            // unwind drops. Created outside the closure, this asserts nothing.
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _held = guard;
+                panic!("a fixture blows up while holding its scratch dir");
+            }));
+            assert!(r.is_err(), "the closure panicked as arranged");
+            path
+        };
+        assert!(
+            !captured.exists(),
+            "the unwind ran the guard's `Drop` — {captured:?} is gone"
+        );
+    }
+
+    /// The naming contract the #96 census reads: `{prefix}{tag}-{uuid}`. The
+    /// uuid half matters as much as the shape — two tests that ask for the
+    /// SAME tag must not share a dir (they would delete each other's fixture).
+    #[test]
+    fn the_guard_names_the_dir_after_the_prefix_and_tag_it_is_given() {
+        let a = ScratchDir::in_env_temp("test-support-guard-", "naming");
+        let name = a
+            .path()
+            .file_name()
+            .expect("a scratch dir has a file name")
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            name.starts_with("test-support-guard-naming-"),
+            "the name must carry the prefix then the tag: {name}"
+        );
+        // The uuid segment is non-empty (a name ending in `-` would mean two
+        // tests collide on it).
+        assert!(
+            name.strip_prefix("test-support-guard-naming-")
+                .is_some_and(|uuid| !uuid.is_empty()),
+            "the uuid segment must be present: {name}"
+        );
+
+        let b = ScratchDir::in_env_temp("test-support-guard-", "naming");
+        assert_ne!(
+            a.path(),
+            b.path(),
+            "the SAME tag must still mint a DIFFERENT dir"
+        );
+    }
+
+    /// The fallback chain `in_tmpfs` walks, pinned: non-empty, terminating at
+    /// the ambient temp dir (so the constructor can only panic where `tmp_dir`
+    /// already assumed writability), and actually honoured by `in_tmpfs`.
+    #[test]
+    fn the_tmpfs_candidates_end_at_the_ambient_temp_dir() {
+        let candidates = tmpfs_base_candidates();
+        assert!(
+            !candidates.is_empty(),
+            "there is always at least one candidate"
+        );
+        assert_eq!(
+            candidates.last().map(|p| p.as_path()),
+            Some(std::env::temp_dir().as_path()),
+            "the LAST candidate must be the ambient temp dir"
+        );
+
+        let d = ScratchDir::in_tmpfs("test-support-guard-", "tmpfs-chain");
+        assert!(
+            candidates.iter().any(|c| d.path().starts_with(c)),
+            "in_tmpfs landed {:?}, which is not under any candidate {candidates:?}",
+            d.path()
+        );
+
+        #[cfg(target_os = "linux")]
+        if std::path::Path::new("/dev/shm").is_dir() {
+            assert_eq!(
+                candidates.first().map(|p| p.as_path()),
+                Some(std::path::Path::new("/dev/shm")),
+                "on Linux `/dev/shm` is the FIRST candidate — it is the base the \
+                 cap fixtures' readdir premise holds on regardless of `TMPDIR`"
+            );
         }
     }
 }
