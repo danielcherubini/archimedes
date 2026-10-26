@@ -341,6 +341,73 @@ mod tests {
         );
     }
 
+    /// Is the directory `scripts/check-temp-dir-census.sh` counts the directory
+    /// this suite actually writes into?
+    ///
+    /// This is the PREMISE of that census, in the same two-halves shape as
+    /// `the_ci_data_dir_redirect_took_effect` above: the script asserts the
+    /// conclusion ("no NEW directories appeared"), and this test asserts that the
+    /// conclusion was drawn about the right directory. The script cannot ask Rust
+    /// what `std::env::temp_dir()` resolves to, and its own resolution rule
+    /// (`$TMPDIR` if set, else the platform default —
+    /// `library/std/src/sys/paths/unix.rs`) is an imitation of Rust's, however
+    /// careful. If the imitation ever diverges — a renamed variable, a runner that
+    /// sets `TMPDIR` for the shell step but not for the `cargo test` step, a
+    /// platform whose default the script guesses wrong — the census counts a
+    /// directory nobody wrote to and prints "census clean" having checked nothing.
+    /// That is this repo's most-repeated failure mode (the stdin test that passed
+    /// with `closed_stdin` DELETED because CI's fd 0 was already `/dev/null`,
+    /// recorded at `agent/tools/exec.rs:1780-1791`), and it is why #96 task 09's
+    /// guard ships with this test rather than with the script alone.
+    ///
+    /// **Both sides are canonicalised, and that is load-bearing on macOS.**
+    /// `temp_dir()` returns `TMPDIR` VERBATIM; the script canonicalises with
+    /// `cd … && pwd -P` because `find` will not descend a symlinked start point.
+    /// macOS's `TMPDIR` is `/var/folders/…/T/` and `/var` is a symlink to
+    /// `/private/var`, so a plain string comparison would FAIL A CORRECT SETUP —
+    /// the same reason this module's sibling chose `starts_with` over equality for
+    /// the macOS `Library/Application Support` nesting.
+    ///
+    /// **Unset means "a local run" and the test returns immediately** — the arm is
+    /// inert, not dead. `ARCHIMEDES_TEST_CENSUS_BASE` is written by the CI snapshot
+    /// step into `$GITHUB_ENV`, which exports it to SUBSEQUENT steps only, so it
+    /// reaches this test precisely because the snapshot runs BEFORE `cargo test`;
+    /// move that step below the suite and this test silently takes the unset arm
+    /// (green, having verified nothing) while `verify`'s own base-drift check is
+    /// what reddens the run. A developer's plain `cargo test` has no bracket to
+    /// verify. Nothing here sets or mutates an environment variable: the lib binary
+    /// reads env globally WITHOUT holding `ENV_LOCK` (see the note on that static),
+    /// so a `set_var` from any test is forbidden — this test only READS.
+    ///
+    /// SCOPE, honestly: it proves the shell's resolved base and Rust's agree on the
+    /// leg that runs it. It says nothing about WINDOWS, where CI gates the census
+    /// off entirely (Rust resolves the temp dir through `GetTempPath2W` over
+    /// `TMP`/`TEMP`, not `TMPDIR`) — Windows keeps the `childproc` census invariant
+    /// as its only leak guard, a recorded gap and not an oversight.
+    #[test]
+    fn the_census_base_is_the_temp_dir_the_suite_actually_uses() {
+        let Some(var) = std::env::var_os("ARCHIMEDES_TEST_CENSUS_BASE") else {
+            // A local run: no bracket was asked for, so there is nothing to
+            // verify (see the doc comment — this arm is inert by design).
+            return;
+        };
+
+        let expected = std::fs::canonicalize(&var).expect(
+            "the CI census base exists — the snapshot step resolved it out of the \
+             same environment this test runs in, so a failure here means the \
+             variable names a path that is not a directory",
+        );
+        let actual = std::fs::canonicalize(std::env::temp_dir())
+            .expect("`std::env::temp_dir()` names a real dir");
+
+        assert_eq!(
+            actual, expected,
+            "the census in `scripts/check-temp-dir-census.sh` counted {expected:?}, but this \
+             test's `std::env::temp_dir()` is {actual:?} — the guard is counting a directory \
+             the suite does not write to, so it passes having checked nothing (#96 task 09)"
+        );
+    }
+
     /// The negative cases are the point, though only `A3F9C1` is a case the
     /// `len() == 6` + `u32::from_str_radix(_, 16)` check this replaces was
     /// actually BLIND to — the length clause already caught the 7-char, 5-char
