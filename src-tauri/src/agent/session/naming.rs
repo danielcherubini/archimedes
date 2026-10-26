@@ -674,7 +674,6 @@ fn note_success(state: &StdMutex<HashMap<String, NamingState>>, session_id: &str
 #[cfg(test)]
 mod tests {
     use std::collections::{HashSet, VecDeque};
-    use std::path::PathBuf;
     use std::sync::{Arc, Mutex as StdMutex};
 
     use futures_util::stream::{self, BoxStream, StreamExt};
@@ -701,6 +700,7 @@ mod tests {
     use crate::agent::tools::{ContentBlock, ImageRef};
     use crate::agent::worker::client::WorkerInboundEvent;
     use crate::storage::Db;
+    use crate::test_support::ScratchDir;
     use crate::types::SessionInfo;
     use serde_json::{json, Value};
 
@@ -1400,7 +1400,18 @@ mod tests {
         manager: SessionManager,
         db: Arc<Db>,
         /// The config dir (the `settings.json` home) and the session `cwd`.
-        dir: PathBuf,
+        /// A `ScratchDir` (#96 task 04): the dir — and the SQLite file inside
+        /// it — is removed when the harness drops.
+        ///
+        /// FIELD POSITION IS LOAD-BEARING. Struct fields drop in DECLARATION
+        /// order, so `dir` must stay AFTER `manager` and `db`: `db` is an open
+        /// SQLite connection whose FILE LIVES INSIDE `dir`. Unix tolerates
+        /// unlinking a directory entry out from under an open file, so a wrong
+        /// order would keep the suite green HERE — but Windows does not allow
+        /// removing a directory containing an open file, `Drop` swallows the
+        /// failure (`let _ = …`), and the dir leaks. Do not reorder these
+        /// fields.
+        dir: ScratchDir,
         /// The sink's receiver — `None` when `set_sink` was never called
         /// (the "a title is still persisted with nobody listening" case).
         rx: Option<mpsc::UnboundedReceiver<Value>>,
@@ -1418,7 +1429,7 @@ mod tests {
         let dir = temp_config_dir();
         let db = open_db(&dir);
         let model = level_test_model("tama", "m1", &["off", "low", "high", "xhigh"]);
-        let mut manager = SessionManager::new(dir.clone());
+        let mut manager = SessionManager::new(dir.to_path_buf());
         manager.attach_db(db.clone());
         manager.set_catalog(ModelCatalog {
             models: vec![
@@ -1468,7 +1479,7 @@ mod tests {
             self.db
                 .record_session(&SessionInfo {
                     session_id: id.to_string(),
-                    cwd: self.dir.clone(),
+                    cwd: self.dir.to_path_buf(),
                     capabilities: json!({}),
                     config_options: None,
                     archived: false,
@@ -2035,7 +2046,7 @@ mod tests {
             .insert(
                 id.to_string(),
                 LiveWorkerSession {
-                    cwd: h.dir.clone(),
+                    cwd: h.dir.to_path_buf(),
                     close_kind: Arc::new(StdMutex::new(None)),
                     pending_turn: Arc::new(StdMutex::new(None)),
                     cancel_requested: Arc::new(StdMutex::new(false)),
@@ -2126,6 +2137,50 @@ mod tests {
         assert!(
             !h.has_naming_entry(id),
             "a failure after the teardown counts nothing and leaves nothing"
+        );
+    }
+
+    /// #96 task 04: `harness_with_sink`'s dir must be OWNED. Nothing in this
+    /// module removed it before (zero `remove_dir_all` in `naming.rs`), so this
+    /// is a real green-path win — unlike `store.rs` in task 03, whose dirs were
+    /// already removed on the happy path. 20 harness dirs leaked per green run.
+    #[test]
+    fn the_harness_removes_its_dir_when_it_is_dropped() {
+        let h = harness(vec![Script::answering("never")]);
+        let captured = h.dir.to_path_buf();
+        assert!(captured.is_dir(), "the harness created its dir");
+        drop(h);
+        assert!(
+            !captured.exists(),
+            "the dir goes with its owner — {captured:?} is gone"
+        );
+    }
+
+    /// The panic path: an assertion that FAILS while a harness owns its dir must
+    /// not leave the dir behind. The harness is moved INTO the panicking scope —
+    /// that is the value the unwind drops (the `test_support` / `mcp/oauth.rs`
+    /// precedent; `catch_unwind` does not drop values that OUTLIVED the caught
+    /// panic). What this does NOT pin is #96's headline case — a test that fails
+    /// with its guard as a plain local, so the HARNESS's own unwind would have to
+    /// remove the dir. Rust makes no portable guarantee there (during an unwind
+    /// dropping is fallible; a double panic aborts), so D10 assigns that case to
+    /// task 09's census, not to a test.
+    #[test]
+    fn a_panicking_assertion_still_removes_the_harness_dir() {
+        let captured = {
+            let h = harness(vec![Script::answering("never")]);
+            let path = h.dir.to_path_buf();
+            assert!(path.is_dir(), "the harness created its dir");
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let _h = h;
+                assert_eq!(1, 2, "an assertion fails while the harness owns its dir");
+            }));
+            assert!(r.is_err(), "the assertion failed as arranged");
+            path
+        };
+        assert!(
+            !captured.exists(),
+            "the unwind ran the removal — {captured:?} is gone"
         );
     }
 }

@@ -2173,6 +2173,7 @@ mod session_tests {
     use crate::agent::worker::client::{WorkerError, WorkerHandle};
     use crate::agent::worker::manager::WorkerFactory;
     use crate::storage::Db;
+    use crate::test_support::ScratchDir;
     use std::path::Path;
     use tokio::sync::mpsc;
 
@@ -2203,10 +2204,19 @@ mod session_tests {
         }
     }
 
-    pub fn temp_config_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
-        std::fs::create_dir(&dir).unwrap();
-        dir
+    /// A scratch config dir for ONE test, OWNED (#96 task 04): it is removed
+    /// when the caller's binding drops, so a fixture cannot forget — the shape
+    /// that leaked 32 dirs per green run (31 minting sites, 18 cleanups).
+    ///
+    /// NAME CHANGE, recorded deliberately: this used to mint a BARE UUID with
+    /// no prefix at all, which #96's census could not attribute to ANY
+    /// producer. `ScratchDir` names `{prefix}{tag}-{uuid}`, so a prefix had to
+    /// be added — `session-cfg-` makes the issue's largest bucket readable as
+    /// well as empty. `create_dir` → `create_dir_all` is `ScratchDir::in_dir`'s
+    /// own behaviour and is unobservable here (a UUID-suffixed name never
+    /// pre-exists).
+    pub fn temp_config_dir() -> ScratchDir {
+        ScratchDir::in_env_temp("session-cfg-", "cfg")
     }
 
     /// A `Db` in the temp dir (shared with `session::naming`'s tests).
@@ -2226,7 +2236,7 @@ mod session_tests {
         let (manager, _wm, db) = build_worker_manager(&dir, native_test_catalog(), &sink);
 
         let info = manager
-            .start_session(dir.clone(), &sink)
+            .start_session(dir.to_path_buf(), &sink)
             .await
             .expect("the native session started");
         assert!(!info.archived, "a fresh native start is never archived");
@@ -2234,7 +2244,7 @@ mod session_tests {
             .expect("set_session_archived should succeed");
 
         let resumed = manager
-            .resume_session(&info.session_id, dir.clone(), &sink)
+            .resume_session(&info.session_id, dir.to_path_buf(), &sink)
             .await
             .expect("the native resume succeeded");
         assert_eq!(resumed.session_id, info.session_id);
@@ -2252,7 +2262,6 @@ mod session_tests {
         );
 
         let _ = manager.close_session(&info.session_id).await;
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The title round-trip over IPC: a FRESH start carries `None` (nothing
@@ -2268,7 +2277,7 @@ mod session_tests {
         let (manager, _wm, db) = build_worker_manager(&dir, native_test_catalog(), &sink);
 
         let info = manager
-            .start_session(dir.clone(), &sink)
+            .start_session(dir.to_path_buf(), &sink)
             .await
             .expect("the native session started");
         assert_eq!(
@@ -2279,7 +2288,7 @@ mod session_tests {
             .expect("set_session_title should succeed");
 
         let resumed = manager
-            .resume_session(&info.session_id, dir.clone(), &sink)
+            .resume_session(&info.session_id, dir.to_path_buf(), &sink)
             .await
             .expect("the native resume succeeded");
         assert_eq!(resumed.session_id, info.session_id);
@@ -2299,7 +2308,6 @@ mod session_tests {
         );
 
         let _ = manager.close_session(&info.session_id).await;
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (ADR 0016) `SessionInfo` round-trips the `archived` flag (a
@@ -2465,7 +2473,7 @@ mod session_tests {
         // The crash-log dir — the late-wire seam (`setup_dirs_with_factory`
         // wires the app data dir here in production).
         let crash_dir = temp_config_dir();
-        manager.set_crash_log_dir(crash_dir.clone());
+        manager.set_crash_log_dir(crash_dir.to_path_buf());
 
         // The crashed Worker's own log, and a NEWER one belonging to nobody
         // we care about.
@@ -2633,7 +2641,6 @@ mod session_tests {
             "the remembered (validated) level beats the settings default"
         );
         let _ = manager.close_session(&info.session_id).await;
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A STALE remembered entry (not a member of the model's
@@ -2672,7 +2679,6 @@ mod session_tests {
             info.capabilities
         );
         let _ = manager.close_session(&info.session_id).await;
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The `Settings.default_thinking_level` rung APPLIES when it is a
@@ -2705,7 +2711,6 @@ mod session_tests {
             "a settings default that IS a member of the model's levels applies"
         );
         let _ = manager.close_session(&info.session_id).await;
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (the stored rung's lenient rule, mirrored on the settings rung) A
@@ -2735,7 +2740,6 @@ mod session_tests {
             "a model with no advertised levels applies the settings default as-is"
         );
         let _ = manager.close_session(&info.session_id).await;
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (ADR 0015) A model that advertises NO `thinking_levels` gets NO
@@ -2763,7 +2767,6 @@ mod session_tests {
             info.capabilities
         );
         let _ = manager.close_session(&info.session_id).await;
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (ADR 0015) An EXPLICIT `thought_level` change (native) persists
@@ -2791,7 +2794,6 @@ mod session_tests {
         let on_disk: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(on_disk["defaultThinkingLevels"]["fake/m1"], "medium");
         let _ = manager.close_session(&info.session_id).await;
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (review finding) An EMPTY `thought_level` value is rejected BEFORE
@@ -2849,7 +2851,6 @@ mod session_tests {
             "no event may be emitted for a rejected change"
         );
         let _ = manager.close_session(&info.session_id).await;
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (ADR 0015) A native model switch is a MINIMAL-SURPRISE reset: the
@@ -2894,7 +2895,6 @@ mod session_tests {
             "an invalid level resets to the new model's remembered level"
         );
         let _ = manager.close_session(&info.session_id).await;
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (ADR 0015) The flip side: a current level that IS a member of the
@@ -2932,7 +2932,6 @@ mod session_tests {
             "a valid level is kept across the switch"
         );
         let _ = manager.close_session(&info.session_id).await;
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (ADR 0015) Native resume: the remembered level (VALIDATED) wins over
@@ -2961,7 +2960,7 @@ mod session_tests {
         // the model; a mid-session change to `xhigh` is only in the memory).
         db.record_session(&SessionInfo {
             session_id: "nat-resume-1".to_string(),
-            cwd: dir.clone(),
+            cwd: dir.to_path_buf(),
             capabilities: json!({
                 "native": true,
                 "model": "tama/m1",
@@ -2976,7 +2975,7 @@ mod session_tests {
         })
         .expect("record_session should succeed");
         let info = manager
-            .resume_session("nat-resume-1", dir.clone(), &sink)
+            .resume_session("nat-resume-1", dir.to_path_buf(), &sink)
             .await
             .expect("the native resume works");
         assert_eq!(
@@ -2984,7 +2983,6 @@ mod session_tests {
             "memory wins over the stale stored value"
         );
         let _ = manager.close_session(&info.session_id).await;
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `list_sessions` carries the stored session's `config_options`
@@ -3007,14 +3005,14 @@ mod session_tests {
         };
         let dir = temp_config_dir();
         let db = open_db(&dir);
-        let mut manager = SessionManager::new(dir.clone());
+        let mut manager = SessionManager::new(dir.to_path_buf());
         manager.attach_db(db.clone());
         manager.set_catalog(catalog);
         // The stored row: the start-of-session `model` / `thinkingLevel`
         // (the `capabilities` envelope) + a persisted context usage.
         db.record_session(&SessionInfo {
             session_id: "nat-list-1".to_string(),
-            cwd: dir.clone(),
+            cwd: dir.to_path_buf(),
             capabilities: json!({
                 "native": true,
                 "model": "tama/m1",
@@ -3068,7 +3066,6 @@ mod session_tests {
             .expect("context_usage is carried from the row");
         assert_eq!(usage.used, 53_760);
         assert_eq!(usage.window, 128_000);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (#85) A stored session's `context_usage.window` is DERIVED from the model
@@ -3092,14 +3089,14 @@ mod session_tests {
         };
         let dir = temp_config_dir();
         let db = open_db(&dir);
-        let mut manager = SessionManager::new(dir.clone());
+        let mut manager = SessionManager::new(dir.to_path_buf());
         manager.attach_db(db.clone());
         manager.set_catalog(catalog);
         // The row ran `tama/m1` when the catalog said 128k, so that is the
         // snapshot written with the usage.
         db.record_session(&SessionInfo {
             session_id: "cu-derive-1".to_string(),
-            cwd: dir.clone(),
+            cwd: dir.to_path_buf(),
             capabilities: json!({
                 "native": true,
                 "model": "tama/m1",
@@ -3140,7 +3137,6 @@ mod session_tests {
             usage.used, 53_760,
             "`used` is a real measurement of the session — replayed, never re-derived"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (#85) The fallback half: a row whose `capabilities.model` no longer
@@ -3154,13 +3150,13 @@ mod session_tests {
         };
         let dir = temp_config_dir();
         let db = open_db(&dir);
-        let mut manager = SessionManager::new(dir.clone());
+        let mut manager = SessionManager::new(dir.to_path_buf());
         manager.attach_db(db.clone());
         manager.set_catalog(catalog);
         // A model key the catalog does not know (the provider was removed).
         db.record_session(&SessionInfo {
             session_id: "cu-derive-gone".to_string(),
-            cwd: dir.clone(),
+            cwd: dir.to_path_buf(),
             capabilities: json!({
                 "native": true,
                 "model": "gone/model",
@@ -3187,7 +3183,6 @@ mod session_tests {
             usage.window, 640_000,
             "an unresolvable model keeps the snapshot — it is the only window known"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `list_sessions` carries the stored `title` (the naming pass's
@@ -3207,13 +3202,13 @@ mod session_tests {
         };
         let dir = temp_config_dir();
         let db = open_db(&dir);
-        let mut manager = SessionManager::new(dir.clone());
+        let mut manager = SessionManager::new(dir.to_path_buf());
         manager.attach_db(db.clone());
         manager.set_catalog(catalog);
         for id in ["nat-titled-1", "nat-untitled-2"] {
             db.record_session(&SessionInfo {
                 session_id: id.to_string(),
-                cwd: dir.clone(),
+                cwd: dir.to_path_buf(),
                 capabilities: json!({
                     "native": true,
                     "model": "tama/m1",
@@ -3248,7 +3243,6 @@ mod session_tests {
             by_id["nat-untitled-2"], None,
             "an untitled stored row carries None"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A resume carries the stored `context_usage` (the last known before
@@ -3271,7 +3265,7 @@ mod session_tests {
         let (manager, _wm, db) = build_worker_manager(&dir, catalog, &sink);
         db.record_session(&SessionInfo {
             session_id: "nat-resume-cu-1".to_string(),
-            cwd: dir.clone(),
+            cwd: dir.to_path_buf(),
             capabilities: json!({
                 "native": true,
                 "model": "tama/m1",
@@ -3287,7 +3281,7 @@ mod session_tests {
         db.record_session_context_usage("nat-resume-cu-1", 96_000, 128_000)
             .expect("record_session_context_usage should succeed");
         let info = manager
-            .resume_session("nat-resume-cu-1", dir.clone(), &sink)
+            .resume_session("nat-resume-cu-1", dir.to_path_buf(), &sink)
             .await
             .expect("the native resume works");
         let usage = info
@@ -3296,7 +3290,6 @@ mod session_tests {
         assert_eq!(usage.used, 96_000);
         assert_eq!(usage.window, 128_000);
         let _ = manager.close_session(&info.session_id).await;
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (settings chain) the native model resolution chain: the
@@ -3323,7 +3316,7 @@ mod session_tests {
         write_settings_default_model(&dir, Some("s/m1"));
         let (manager, _wm, _db) = build_worker_manager(&dir, catalog.clone(), &sink);
         let info = manager
-            .start_session(dir.clone(), &sink)
+            .start_session(dir.to_path_buf(), &sink)
             .await
             .expect("the native session started");
         assert_eq!(
@@ -3338,7 +3331,7 @@ mod session_tests {
         write_settings_default_model(&dir, Some("gone/m1"));
         let (manager, _wm, _db) = build_worker_manager(&dir, catalog.clone(), &sink);
         let info = manager
-            .start_session(dir.clone(), &sink)
+            .start_session(dir.to_path_buf(), &sink)
             .await
             .expect("the native session started");
         assert_eq!(
@@ -3351,7 +3344,7 @@ mod session_tests {
         write_settings_default_model(&dir, None);
         let (manager, _wm, _db) = build_worker_manager(&dir, catalog.clone(), &sink);
         let info = manager
-            .start_session(dir.clone(), &sink)
+            .start_session(dir.to_path_buf(), &sink)
             .await
             .expect("the native session started");
         assert_eq!(
@@ -3359,7 +3352,6 @@ mod session_tests {
             "an absent settings default degrades to the catalog default"
         );
         let _ = manager.close_session(&info.session_id).await;
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (live `/v1/models` discovery) `refresh_model_metadata` applies the
@@ -3402,9 +3394,8 @@ mod session_tests {
                 });
             }
         });
-        let dir = std::env::temp_dir().join(format!("refresh-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut manager = SessionManager::new(dir.clone());
+        let dir = crate::test_support::ScratchDir::in_env_temp("refresh-", "metadata");
+        let mut manager = SessionManager::new(dir.to_path_buf());
         manager.set_catalog(ModelCatalog {
             models: vec![Model {
                 id: "m1".into(),
@@ -3509,7 +3500,7 @@ mod session_tests {
         write_settings_provider(&dir, "tama", &format!("http://{addr}/v1"));
         // A seeded catalog under a DIFFERENT provider id (coexists — no
         // clash).
-        let mut manager = SessionManager::new(dir);
+        let mut manager = SessionManager::new(dir.to_path_buf());
         manager.set_catalog(ModelCatalog {
             models: vec![provider_model("s/1", "other", "https://other/v1")],
             ..Default::default()
@@ -3552,7 +3543,7 @@ mod session_tests {
             &format!("http://{addr}/v1"),
             "anthropic-messages",
         );
-        let manager = SessionManager::new(dir);
+        let manager = SessionManager::new(dir.to_path_buf());
         let effective = manager.effective_catalog(None).await;
         let user: Vec<&Model> = effective
             .models
@@ -3585,7 +3576,7 @@ mod session_tests {
         )
         .await;
         write_settings_provider_api(&dir, "llm", &format!("http://{addr}/v1"), "litellm");
-        let manager = SessionManager::new(dir);
+        let manager = SessionManager::new(dir.to_path_buf());
         let effective = manager.effective_catalog(None).await;
         let user: Vec<&Model> = effective
             .models
@@ -3611,7 +3602,7 @@ mod session_tests {
     async fn effective_catalog_a_failed_discovery_still_shadows_the_seeded_provider() {
         let dir = temp_config_dir();
         write_settings_provider(&dir, "tama", "http://127.0.0.1:1/v1"); // unreachable
-        let mut manager = SessionManager::new(dir);
+        let mut manager = SessionManager::new(dir.to_path_buf());
         manager.set_catalog(ModelCatalog {
             models: vec![
                 provider_model("stale/1", "tama", "https://stale/v1"),
@@ -3650,7 +3641,7 @@ mod session_tests {
         )
         .await;
         write_settings_provider(&dir, "tama", &format!("http://{addr}/v1"));
-        let mut manager = SessionManager::new(dir.clone());
+        let mut manager = SessionManager::new(dir.to_path_buf());
         manager.set_catalog(ModelCatalog::default());
         let first = manager.effective_catalog(None).await;
         assert!(first.models.iter().any(|m| m.id == "v1"));
@@ -3707,7 +3698,7 @@ mod session_tests {
         // Port 1 refuses instantly — a deterministic "unreachable" (no timeout
         // to wait out), the same fixture the shadow test uses.
         write_settings_provider(&dir, "tama", "http://127.0.0.1:1/v1");
-        let mut manager = SessionManager::new(dir.clone());
+        let mut manager = SessionManager::new(dir.to_path_buf());
         manager.set_catalog(ModelCatalog::default());
         let failed = manager.effective_catalog(None).await;
         assert!(
@@ -3769,7 +3760,7 @@ mod session_tests {
         let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
         let (manager, _wm, _db) = build_worker_manager(&dir, native_test_catalog(), &sink);
         let info = manager
-            .start_session(dir.clone(), &sink)
+            .start_session(dir.to_path_buf(), &sink)
             .await
             .expect("the native session started");
         assert!(
@@ -3799,7 +3790,7 @@ mod session_tests {
         let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
         let persister = Arc::new(TranscriptPersister::new(db.clone()));
 
-        let (manager, wm) = SessionManagerBuilder::new(dir.clone(), db, sink, persister)
+        let (manager, wm) = SessionManagerBuilder::new(dir.to_path_buf(), db, sink, persister)
             .with_worker_factory(Arc::new(FixtureFactory))
             .build();
 
@@ -3819,9 +3810,10 @@ mod session_tests {
         let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
         let persister = Arc::new(TranscriptPersister::new(db.clone()));
 
-        let (manager, _wm) = SessionManagerBuilder::new(dir.clone(), db, sink, persister.clone())
-            .with_worker_factory(Arc::new(FixtureFactory))
-            .build();
+        let (manager, _wm) =
+            SessionManagerBuilder::new(dir.to_path_buf(), db, sink, persister.clone())
+                .with_worker_factory(Arc::new(FixtureFactory))
+                .build();
 
         assert!(
             Arc::ptr_eq(
