@@ -1,9 +1,10 @@
 ---
 status: live
 last-verified: 2026-10-26
-verified-by: read against this tree at `7471728`, plus measurements taken on this box (temp-dir
-  counts, `--self-test`, three sabotages of the census script, `wine --version`) — every gap below
-  re-confirmed still open, not copied from the plans that recorded them
+verified-by: read against this tree at `00676d5` plus **the first CI run of PR #99** (real
+  ubuntu/macOS/windows legs, logs read in full), plus measurements on this box (temp-dir counts,
+  `--self-test`, five sabotages of the census script, drop-order probes, `wine --version`). Gaps 9
+  and 10 are what that CI run *found*; the rest were re-confirmed still open rather than copied.
 ---
 
 # Temp-dir hygiene — known gaps
@@ -166,13 +167,66 @@ Every number in this area was wrong at least once through one of these. Measure 
   Use `cargo test … -- --list` for counts, never `grep -c '#[test]'` — that misses
   `#[tokio::test(start_paused = true)]`.
 
-## 9. The macOS census leg is unverified
+## 9. macOS's census is now known-working, and known-noisy
 
-The census runs on the macOS CI leg and is expected to work — the runner sets a
-per-user `TMPDIR`, Rust honours `TMPDIR` first, and the `/var → /private/var` spelling
-difference is absorbed by canonicalisation on both sides. But it was written on Linux
-and never run on macOS. `test_support::the_census_base_is_the_temp_dir_the_suite_actually_uses`
-is what converts that from expectation into CI-observed fact on the first push; if
-that test fails on macOS, the census is not measuring what the suite writes, and the
-bracket should be gated off until `resolve_base`'s `getconf DARWIN_USER_TEMP_DIR`
-spelling is confirmed.
+The first CI run (PR #99) settled most of what this gap used to speculate about, so
+it is rewritten rather than left as a prediction:
+
+- **Base resolution works.** The snapshot resolved
+  `/private/var/folders/…/T`, `TMPDIR` was honoured, the `/var → /private/var`
+  spelling was absorbed by canonicalisation on both sides, and
+  `test_support::the_census_base_is_the_temp_dir_the_suite_actually_uses` **passed on
+  both non-Windows legs**. The `$GITHUB_ENV` handoff works too — the variable is
+  present in the `cargo test` step's env, so the premise test takes its active arm,
+  not the inert "unset means a local run" one. Do not gate the macOS leg off; it was
+  proven on its first run.
+- **But macOS's per-user `TMPDIR` is not quiescent.** That first run reddened on
+  **19 directories, all `com.apple.*` system daemons, zero Archimedes minters** —
+  `mapssyncd`, `privatecloudcomputed`, the `remotemanagement` subscribers and so on,
+  written by the OS during a ~90s suite. Linux does not have this problem: Ubuntu's
+  fresh-runner `/tmp` snapshotted 13 directories and verified clean.
+- The fix is a **Darwin-only shape rule**: a candidate whose name contains a dot is
+  not counted, and the count is always announced (`excluded: N dotted-name dir(s)
+  …`) so the exclusion is never silent. It is a shape, not a name list — deliberately
+  **not** `com.apple.*`, which would need widening every time a daemon appears. It
+  rests on an invariant that is now **pinned by a test** (`.test.sh` case 18c): no
+  Archimedes minter prefix contains a dot. If someone mints a dotted prefix, a test
+  reddens instead of the leak becoming invisible.
+- **The remaining macOS unknown**: the exclusion is exercised in CI only by
+  injected-platform cases (`ARCHIMEDES_CENSUS_UNAME_S`), never by a real Darwin
+  `uname -s` on this box, because no macOS is available locally. The `getconf
+  DARWIN_USER_TEMP_DIR` spelling in `resolve_base` is now corroborated by the
+  snapshot's own output, but the `TMPDIR`-unset path that reaches it has not run.
+
+## 10. `ScratchDir::drop` cannot tell you it failed — and on Windows nothing else can either
+
+`ScratchDir::drop` is `let _ = std::fs::remove_dir_all(&self.path);`. On Linux a
+failed removal is rare; on Windows it is the *expected* consequence of a wrong drop
+order (removing a directory containing an open handle is refused), and the `let _ =`
+swallows it. So the in-process guard is **silent about the exact failure Windows is
+most likely to hit**, and the census — the thing that would catch it — is gated off
+on Windows (gap 2). Nothing currently detects a Windows leak.
+
+This is not theoretical. PR #99's first Windows run failed
+`tests/storage.rs::a_panicking_assertion_still_removes_the_temp_db_scratch`, which is
+one of the few places that asserts the removal *happened* and so is the only Windows
+evidence of the leak class. The cause was the D19 trap in gap 1: the test bound
+`let (_db, _path, _dir) = (db, path, dir);`, and **tuple-pattern bindings drop in
+reverse order**, so the guard went *first* and the removal ran while the SQLite
+handle was open. Linux passed it anyway. The fix binds a tuple **value**
+(`let _fixture = (db, path, dir);`), which drops left-to-right.
+
+Two things worth keeping from that:
+
+- **A test that passes on Linux is not evidence about drop order.** Every guard
+  placement in this codebase is verified by reading, and the panic-path tests are the
+  only executable part of that — which is why they bind tuple *values* and say so in
+  comments. `tests/harness_store.rs` got it right first time and documents why;
+  `tests/storage.rs` did not and cost a CI round-trip.
+- A plausible improvement is to make `Drop` **report** rather than swallow (write a
+  note somewhere the census can see, or `eprintln!`). It was deliberately not done
+  here: `Drop` cannot fail, panicking in `Drop` during an unwind aborts, and printing
+  from a guard would spam the harness output for a case Linux does not care about.
+  If someone picks it up, the constraint is that it must not turn a passing test into
+  a failing one on the platform where removals legitimately race.
+

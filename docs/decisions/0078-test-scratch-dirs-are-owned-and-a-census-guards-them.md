@@ -93,3 +93,9 @@ a way the guard could have been silently always-green:
 - Windows is **not** covered — the script refuses rather than guesses. That is the
   platform where this bug is worst, and the gap is written into the CI step itself.
   Details in the gap doc.
+- macOS's census is **noisy rather than wrong**: its per-user `TMPDIR` is shared with
+  system daemons, which write into it during a suite run, so the delta there sees
+  directories nothing in this repo created. Linux's `/tmp` on a fresh runner is
+  quiescent and stays fully strict. macOS therefore excludes dotted names — a shape,
+  not a name list, and always announced — resting on the fact that no minter prefix
+  here contains a dot, which a test now pins. See the gap doc.
