@@ -1239,8 +1239,7 @@ mod tests {
     /// key is asserted here).
     #[test]
     fn upsert_space_insert_sets_trusted_from_the_flag() {
-        let dir = std::env::temp_dir().join(format!("db-trusted-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-trusted-test-", "scratch");
         let db = Db::open(&dir.join("t.db")).unwrap();
         let a = dir.join("a");
         std::fs::create_dir_all(&a).unwrap();
@@ -1261,7 +1260,6 @@ mod tests {
             !row_b.trusted,
             "the INSERT writes `trusted` from the flag (false)"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (settings trust) a re-upsert on an EXISTING row never touches the
@@ -1270,8 +1268,7 @@ mod tests {
     /// → the row is STILL trusted.
     #[test]
     fn upsert_space_conflict_leaves_the_existing_trust_untouched() {
-        let dir = std::env::temp_dir().join(format!("db-trusted-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-trusted-test-", "scratch");
         let db = Db::open(&dir.join("t.db")).unwrap();
         let c = dir.join("c");
         std::fs::create_dir_all(&c).unwrap();
@@ -1282,7 +1279,6 @@ mod tests {
         let rows = db.list_spaces().unwrap();
         let row = rows.iter().find(|r| r.path == c_canon).unwrap();
         assert!(row.trusted, "the CONFLICT branch never touches `trusted`");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (the FK migration) A crash MID-BATCH leaves a stale
@@ -1293,8 +1289,7 @@ mod tests {
     /// already exists` and `Db::open` errored forever, bricking startup).
     #[test]
     fn a_crashed_fk_migration_recovers_on_the_next_open() {
-        let dir = std::env::temp_dir().join(format!("db-migration-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-migration-test-", "scratch");
         let path = dir.join("t.db");
         // A pre-existing database: `native_messages` WITHOUT the FK (the
         // pre-migration schema) + a session row + a transcript row.
@@ -1365,7 +1360,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1, "the pre-existing transcript row survived");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (finding 5) A legacy crash state: a crash under the pre-fix
@@ -1378,8 +1372,7 @@ mod tests {
     /// forever, bricking startup).
     #[test]
     fn a_crashed_fk_migration_with_native_messages_gone_recovers_on_the_next_open() {
-        let dir = std::env::temp_dir().join(format!("db-migration-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-migration-test-", "scratch");
         let path = dir.join("t.db");
         // The crash state: `native_messages` is GONE (dropped + autocommitted)
         // and the rows live in `native_messages_migrated` (created WITH the FK
@@ -1436,7 +1429,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1, "the transcript row survived the recovery");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (ADR 0016) A pre-existing database whose `sessions` table predates
@@ -1445,8 +1437,7 @@ mod tests {
     /// must read `archived == false` (the default).
     #[test]
     fn archived_column_migration_on_a_preexisting_db() {
-        let dir = std::env::temp_dir().join(format!("db-archived-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-archived-test-", "scratch");
         let path = dir.join("t.db");
         // A pre-existing database: the LEGACY `sessions` table (WITHOUT
         // `archived`) + the rest of the schema.
@@ -1528,7 +1519,6 @@ mod tests {
             !rows[0].archived,
             "the re-opened row still reads archived == false"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (native-only rip-out) A pre-rip-out database (`sessions` WITH the
@@ -1542,8 +1532,7 @@ mod tests {
     /// (the `PRAGMA table_info` probe is the guard).
     #[test]
     fn opening_a_pre_rip_out_database_migrates_it() {
-        let dir = std::env::temp_dir().join(format!("db-riput-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-riput-test-", "scratch");
         let path = dir.join("t.db");
         // A pre-rip-out database: the CURRENT schema with the `agent_id`
         // column still on `sessions` (the pre-feature shape).
@@ -1696,7 +1685,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(native_sessions, 1, "the native row survived the re-open");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (ADR 0016) `list_sessions(false)` never returns archived rows;
@@ -1706,8 +1694,7 @@ mod tests {
     /// both with the correct flags.
     #[test]
     fn list_sessions_filters_archived_by_default() {
-        let dir = std::env::temp_dir().join(format!("db-archived-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-archived-test-", "scratch");
         let path = dir.join("t.db");
         let db = Db::open(&path).expect("db should open");
         let mk = |id: &str| SessionInfo {
@@ -1760,15 +1747,13 @@ mod tests {
             "the archived flag is set on the row"
         );
         assert_eq!(by_id["sess-2"], &false, "the non-archived flag is clear");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (ADR 0016) `set_session_archived` on an id with no row is a no-op:
     /// `Ok(false)` (mirrors `set_space_trusted`'s documented behavior).
     #[test]
     fn set_session_archived_is_a_noop_for_an_unknown_id() {
-        let dir = std::env::temp_dir().join(format!("db-archived-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-archived-test-", "scratch");
         let path = dir.join("t.db");
         let db = Db::open(&path).expect("db should open");
         assert!(
@@ -1776,7 +1761,6 @@ mod tests {
                 .expect("should not error"),
             "a missing row is a no-op returning false"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The list is ordered by `sort_order`, then `id DESC`: the position the
@@ -1789,8 +1773,7 @@ mod tests {
     /// under either statement and prove nothing.
     #[test]
     fn list_sessions_orders_by_sort_order_then_id_desc() {
-        let dir = std::env::temp_dir().join(format!("db-sortlist-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-sortlist-test-", "scratch");
         let db = Db::open(&dir.join("t.db")).expect("db should open");
         // Recorded through `record_session` so `sort_order` is actually written
         // (raw INSERTs would leave every row on `DEFAULT 0` and tie the list).
@@ -1827,7 +1810,6 @@ mod tests {
             "rows come back in `sort_order` order even though the last one has \
              the newest message — position is not evidence of recency"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Two rows sharing a `sort_order` break the tie on `id DESC`, and BOTH arms
@@ -1840,8 +1822,7 @@ mod tests {
     /// transcript), so the assertion cannot be satisfied by the old ordering.
     #[test]
     fn list_sessions_ties_break_on_id_desc() {
-        let dir = std::env::temp_dir().join(format!("db-sorttie-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-sorttie-test-", "scratch");
         let db = Db::open(&dir.join("t.db")).expect("db should open");
         db.record_session(&title_session("s_a"))
             .expect("record s_a");
@@ -1896,7 +1877,6 @@ mod tests {
             vec!["s_b", "s_a"],
             "the archived-inclusive arm orders the tied pair identically"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (ADR 0075 behaviour pin) Transcript activity never moves a row: the
@@ -1905,8 +1885,7 @@ mod tests {
     /// every persisted message, which is the bug ADR 0075 exists to kill.
     #[test]
     fn list_sessions_ignores_transcript_activity() {
-        let dir = std::env::temp_dir().join(format!("db-sortidle-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-sortidle-test-", "scratch");
         let db = Db::open(&dir.join("t.db")).expect("db should open");
         for id in ["s_a", "s_b", "s_c"] {
             db.record_session(&title_session(id))
@@ -1952,7 +1931,6 @@ mod tests {
             vec!["s_c", "s_b", "s_a"],
             "the session with the newest message keeps its middle position"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// CHARACTERISATION (ADR 0075, the pin Task 1 exists for): `session_recency`'s
@@ -1986,8 +1964,7 @@ mod tests {
     /// the wrong reason (the trap T01 records and carries forward here).
     #[test]
     fn session_recency_matches_the_old_coalesce_expression() {
-        let dir = std::env::temp_dir().join(format!("db-recency-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-recency-test-", "scratch");
         let db = Db::open(&dir.join("t.db")).expect("db should open");
         for id in ["s_msg_new", "s_msg_old", "s_no_messages", "s_archived"] {
             db.record_session(&title_session(id))
@@ -2102,7 +2079,6 @@ mod tests {
             rows.iter().any(|r| r.session_id == "s_archived"),
             "an archived session gets a recency entry — the Archived section sorts by it"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The DRIFT GUARD beside the characterisation test: `LAST_ACTIVITY` equals
@@ -2134,9 +2110,7 @@ mod tests {
     /// never wrote the row".
     #[test]
     fn session_recency_covers_archived_and_excludes_subagent_rows() {
-        let dir =
-            std::env::temp_dir().join(format!("db-recencycover-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-recencycover-test-", "scratch");
         let db = Db::open(&dir.join("t.db")).expect("db should open");
 
         db.record_session(&title_session("main-1"))
@@ -2186,7 +2160,6 @@ mod tests {
             hidden, 1,
             "the subagent row exists in `sessions` — it was EXCLUDED, not missing"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (ADR 0075, D11 reversed) `session_recency` carries the row's OWN stored
@@ -2211,9 +2184,7 @@ mod tests {
     /// never recomputed from a constant under test.
     #[test]
     fn session_recency_reports_the_manual_order_number_and_reorder_moves_it() {
-        let dir =
-            std::env::temp_dir().join(format!("db-recencyorder-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-recencyorder-test-", "scratch");
         let db = Db::open(&dir.join("t.db")).expect("db should open");
         for id in ["a", "b", "c"] {
             db.record_session(&title_session(id))
@@ -2256,7 +2227,6 @@ mod tests {
             "after `reorder_sessions([c, a, b])` the reported numbers are the \
              new slice indices — the reader and the writer agree about the column"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Spaces order by `sort_order` with `path ASC` breaking ties. The fixture
@@ -2266,8 +2236,7 @@ mod tests {
     /// as stable across reads, not re-derived from recency).
     #[test]
     fn list_spaces_orders_by_sort_order_then_path() {
-        let dir = std::env::temp_dir().join(format!("db-spacelist-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-spacelist-test-", "scratch");
         let db = Db::open(&dir.join("t.db")).expect("db should open");
         // Upserted z, m, a: `sort_order` 0,1,2 while `path ASC` is a,m,z — the
         // two orders disagree, so the tie-break half below is not vacuous.
@@ -2329,7 +2298,6 @@ mod tests {
             vec![keys[0].clone(), keys[2].clone(), keys[1].clone()],
             "a tied `sort_order` breaks on `path ASC` and never on recency"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A minimal recorded-session shape for the title tests (the title
@@ -2357,8 +2325,7 @@ mod tests {
     /// naming pass's write must reach the boot fetch that lists sessions).
     #[test]
     fn set_session_title_writes_a_null_title_and_reads_back() {
-        let dir = std::env::temp_dir().join(format!("db-title-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-title-test-", "scratch");
         let path = dir.join("t.db");
         let db = Db::open(&path).expect("db should open");
         db.record_session(&title_session("sess-1"))
@@ -2396,7 +2363,6 @@ mod tests {
             Some("Refactor the auth middleware"),
             "list_sessions reads the title back"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A title that already exists is NEVER overwritten — a second
@@ -2406,8 +2372,7 @@ mod tests {
     /// fire on several turns, and only the first write lands.
     #[test]
     fn set_session_title_never_overwrites_an_existing_title() {
-        let dir = std::env::temp_dir().join(format!("db-title-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-title-test-", "scratch");
         let path = dir.join("t.db");
         let db = Db::open(&path).expect("db should open");
         db.record_session(&title_session("sess-1"))
@@ -2428,15 +2393,13 @@ mod tests {
             Some("First title"),
             "the first title survives the second call"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `set_session_title` on an id with no row is a no-op: `Ok(false)`
     /// (mirrors `set_session_archived` — a missing row is not an error).
     #[test]
     fn set_session_title_is_a_noop_for_an_unknown_id() {
-        let dir = std::env::temp_dir().join(format!("db-title-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-title-test-", "scratch");
         let path = dir.join("t.db");
         let db = Db::open(&path).expect("db should open");
         assert!(
@@ -2444,7 +2407,6 @@ mod tests {
                 .expect("should not error"),
             "a missing row is a no-op returning false"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A re-`record_session` (the resume re-record) never clears the stored
@@ -2453,8 +2415,7 @@ mod tests {
     /// must not un-archive it).
     #[test]
     fn record_session_preserves_the_title() {
-        let dir = std::env::temp_dir().join(format!("db-title-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-title-test-", "scratch");
         let path = dir.join("t.db");
         let db = Db::open(&path).expect("db should open");
         let session = title_session("sess-1");
@@ -2474,7 +2435,6 @@ mod tests {
             Some("Kept title"),
             "a re-record never clears the stored title"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (ADR 0016) A re-`record_session` (the resume re-record) never clears
@@ -2482,8 +2442,7 @@ mod tests {
     /// touch `archived` (no retroactive un-archive).
     #[test]
     fn record_session_preserves_the_archived_flag() {
-        let dir = std::env::temp_dir().join(format!("db-archived-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-archived-test-", "scratch");
         let path = dir.join("t.db");
         let db = Db::open(&path).expect("db should open");
         let session = SessionInfo {
@@ -2517,7 +2476,6 @@ mod tests {
             all[0].archived,
             "a re-record never clears the archived flag"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (ADR 0025 §3) A subagent `sessions` row (`is_subagent = 1`) is
@@ -2526,8 +2484,7 @@ mod tests {
     /// for subagent ids — it does NOT filter on `is_subagent`).
     #[test]
     fn list_sessions_hides_subagent_rows_but_their_transcripts_load() {
-        let dir = std::env::temp_dir().join(format!("db-subagent-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-subagent-test-", "scratch");
         let path = dir.join("t.db");
         let db = Db::open(&path).expect("db should open");
         // A main session row.
@@ -2565,7 +2522,6 @@ mod tests {
             .load_native_messages("sub-1")
             .expect("load subagent transcript");
         assert_eq!(rows.len(), 1, "the subagent transcript loads");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A pre-existing database whose `sessions` table predates the
@@ -2574,8 +2530,7 @@ mod tests {
     /// `context_usage == None` (the default).
     #[test]
     fn context_usage_column_migration_on_a_preexisting_db() {
-        let dir = std::env::temp_dir().join(format!("db-context-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-context-test-", "scratch");
         let path = dir.join("t.db");
         // A pre-existing database: the `sessions` table WITHOUT
         // `context_usage_json` (the `archived` column IS present — this
@@ -2632,7 +2587,6 @@ mod tests {
             rows[0].context_usage_json.is_none(),
             "the re-opened row still reads context_usage == None"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `record_session_context_usage` persists the session's last known
@@ -2642,8 +2596,7 @@ mod tests {
     /// `record_session` (the resume re-record) does NOT clobber it.
     #[test]
     fn record_session_context_usage_persists_and_survives_record_session() {
-        let dir = std::env::temp_dir().join(format!("db-context-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-context-test-", "scratch");
         let path = dir.join("t.db");
         let db = Db::open(&path).expect("db should open");
         let session = SessionInfo {
@@ -2695,15 +2648,13 @@ mod tests {
             usage["used"], 53_760,
             "a re-record never clobbers the context usage"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `messages_page` pages newest-first by id, returns ascending order,
     /// and reports `has_more` correctly across boundaries and exact fits.
     #[test]
     fn messages_page_paginates_and_reports_has_more() {
-        let dir = std::env::temp_dir().join(format!("db-page-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-page-test-", "scratch");
         let path = dir.join("t.db");
         let db = Db::open(&path).expect("db should open");
         let mk = |id: &str| SessionInfo {
@@ -2794,14 +2745,11 @@ mod tests {
         assert_eq!(p_sess2.len(), 2);
         assert!(!has_more2);
         assert!(p_sess2.iter().all(|r| r.session_id == "sess-2"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn record_session_todos_roundtrips_and_clears() {
-        let dir = std::env::temp_dir().join(format!("db-todos-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-todos-test-", "scratch");
         let path = dir.join("t.db");
         let db = Db::open(&path).expect("db should open");
         let info = SessionInfo {
@@ -2831,14 +2779,11 @@ mod tests {
         // Missing session id is a no-op returning Ok(()) and session_todos returns None
         db.record_session_todos("nonexistent", Some(todos)).unwrap();
         assert_eq!(db.session_todos("nonexistent").unwrap(), None);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn legacy_db_migration_backfills_newest_non_read_todos_once() {
-        let dir = std::env::temp_dir().join(format!("db-todos-backfill-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-todos-backfill-", "scratch");
         let path = dir.join("t.db");
 
         // Pre-migration DB: WITHOUT todos_json
@@ -2962,8 +2907,6 @@ mod tests {
             db2.session_todos("s1").unwrap(),
             Some("sentinel".to_string())
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The pre-`sort_order` schema: the current `SCHEMA` with the
@@ -3087,8 +3030,7 @@ mod tests {
     /// no migration runs (the pragma gate in `Db::open` skips it).
     #[test]
     fn sort_order_columns_exist_on_a_fresh_database() {
-        let dir = std::env::temp_dir().join(format!("db-sortfresh-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-sortfresh-test-", "scratch");
         let db = Db::open(&dir.join("t.db")).expect("db should open");
         let conn = db.conn.lock().expect("db mutex poisoned");
         for table in ["spaces", "sessions"] {
@@ -3107,7 +3049,6 @@ mod tests {
             );
         }
         drop(conn);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (sort_order) A pre-existing database is seeded in the order the user
@@ -3118,8 +3059,7 @@ mod tests {
     /// backfill cannot add rows and pollute the assertion.
     #[test]
     fn sort_order_seeded_in_the_old_space_order_on_a_preexisting_db() {
-        let dir = std::env::temp_dir().join(format!("db-sortspace-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-sortspace-test-", "scratch");
         let path = dir.join("t.db");
         create_pre_sort_order_db(&path);
         let conn = Connection::open(&path).expect("raw open of the fixture db");
@@ -3147,7 +3087,6 @@ mod tests {
             "the seed numbers the spaces in the OLD display order \
              (last_opened_at DESC, then path ASC on a tied timestamp)"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (sort_order) A pre-existing database is seeded in the order the user
@@ -3156,8 +3095,7 @@ mod tests {
     /// `created_at DESC` alone, so the assertion pins the whole expression.
     #[test]
     fn sort_order_seeded_in_the_old_session_order_on_a_preexisting_db() {
-        let dir = std::env::temp_dir().join(format!("db-sortsess-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-sortsess-test-", "scratch");
         let path = dir.join("t.db");
         create_pre_sort_order_db(&path);
         let conn = Connection::open(&path).expect("raw open of the fixture db");
@@ -3195,7 +3133,6 @@ mod tests {
             "the seed numbers the sessions in the OLD display order \
              (last activity DESC, then id DESC)"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (sort_order) The seed is GATED, not merely idempotent: after the first
@@ -3204,8 +3141,7 @@ mod tests {
     /// `legacy_db_migration_backfills_newest_non_read_todos_once`.
     #[test]
     fn sort_order_seed_does_not_rerun_on_reopen() {
-        let dir = std::env::temp_dir().join(format!("db-sortonce-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-sortonce-test-", "scratch");
         let path = dir.join("t.db");
         create_pre_sort_order_db(&path);
         let conn = Connection::open(&path).expect("raw open of the fixture db");
@@ -3262,7 +3198,6 @@ mod tests {
             session_value, 77,
             "the seed gate is closed on the second open, so the session sentinel survives"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (hazard H1) The seed renumbers EVERY session row, hidden subagent rows
@@ -3272,8 +3207,7 @@ mod tests {
     /// values and tie them with the visible row at 0.
     #[test]
     fn sort_order_seed_numbers_subagent_rows_too() {
-        let dir = std::env::temp_dir().join(format!("db-sortsub-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-sortsub-test-", "scratch");
         let path = dir.join("t.db");
         create_pre_sort_order_db(&path);
         let conn = Connection::open(&path).expect("raw open of the fixture db");
@@ -3315,7 +3249,6 @@ mod tests {
             at_zero, 1,
             "exactly one row sits at 0 — no tie with the hidden row"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A NEW space row joins the list at the BOTTOM (`MAX + 1`), not at the
@@ -3327,9 +3260,7 @@ mod tests {
     /// on its own and the test would pass vacuously.
     #[test]
     fn upsert_space_new_row_joins_at_the_bottom() {
-        let dir =
-            std::env::temp_dir().join(format!("db-spacebottom-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-spacebottom-test-", "scratch");
         let db = Db::open(&dir.join("t.db")).expect("db should open");
         let a = dir.join("zzz-first-inserted");
         let b = dir.join("mmm-second-inserted");
@@ -3361,7 +3292,6 @@ mod tests {
             vec![0, 1, 2],
             "the numbers grow from the bottom, one per row"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A RE-TOUCH never renumbers: the `ON CONFLICT … DO UPDATE` branch
@@ -3374,9 +3304,7 @@ mod tests {
     /// carry `DEFAULT 0`.
     #[test]
     fn upsert_space_retouch_does_not_renumber() {
-        let dir =
-            std::env::temp_dir().join(format!("db-spaceretouch-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-spaceretouch-test-", "scratch");
         let db = Db::open(&dir.join("t.db")).expect("db should open");
         let a = dir.join("zzz-first-and-retouched");
         let b = dir.join("aaa-second");
@@ -3405,7 +3333,6 @@ mod tests {
             vec![key_a, key_b],
             "the re-touched row did not move"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A NEW session row joins at the BOTTOM too. The ids are chosen so `id
@@ -3413,8 +3340,7 @@ mod tests {
     /// cannot be satisfied by the tie-break alone.
     #[test]
     fn record_session_new_row_joins_at_the_bottom() {
-        let dir = std::env::temp_dir().join(format!("db-sessbottom-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-sessbottom-test-", "scratch");
         let db = Db::open(&dir.join("t.db")).expect("db should open");
         db.record_session(&session_on("s_first", Path::new("/tmp/proj"), false))
             .expect("record s_first");
@@ -3437,7 +3363,6 @@ mod tests {
             vec![0, 1],
             "the numbers grow from the bottom, one per row"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A RE-RECORD never renumbers: a resume re-runs `record_session`, and the
@@ -3450,9 +3375,7 @@ mod tests {
     /// tie-break cannot hide a shared number).
     #[test]
     fn record_session_re_record_does_not_renumber() {
-        let dir =
-            std::env::temp_dir().join(format!("db-sessretouch-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-sessretouch-test-", "scratch");
         let db = Db::open(&dir.join("t.db")).expect("db should open");
         let resumed = session_on("s_resumed", Path::new("/tmp/proj"), false);
         db.record_session(&resumed)
@@ -3472,7 +3395,6 @@ mod tests {
             1,
             "and the row below it is not dragged up or pushed down by the re-record"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (hazard H4) The phase-11 space-backfill INSERT carries the same
@@ -3486,9 +3408,7 @@ mod tests {
     /// test pins distinctness only and never encodes that nondeterminism.
     #[test]
     fn backfilled_space_rows_join_at_the_bottom() {
-        let dir =
-            std::env::temp_dir().join(format!("db-spacebackfill-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-spacebackfill-test-", "scratch");
         let path = dir.join("t.db");
         let cwd_a = dir.join("cwd_a");
         let cwd_b = dir.join("cwd_b");
@@ -3521,15 +3441,13 @@ mod tests {
             at_zero, 1,
             "exactly one row sits at 0 — not every backfilled row tied there"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
     /// `reorder_spaces` writes the given slice as `sort_order`, in one call:
     /// the slice INDEX becomes the value, so the list comes back exactly as
     /// handed and the numbers are the dense `0..n` the caller implied.
     #[test]
     fn reorder_spaces_writes_the_given_order() {
-        let dir = std::env::temp_dir().join(format!("db-reordersp-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-reordersp-test-", "scratch");
         let db = Db::open(&dir.join("t.db")).expect("db should open");
         let keys = ["aaa", "mmm", "zzz"].map(|n| {
             let d = dir.join(n);
@@ -3571,15 +3489,13 @@ mod tests {
         assert_eq!(sort_order_of(&db, "spaces", "path", &c), 0);
         assert_eq!(sort_order_of(&db, "spaces", "path", &a), 1);
         assert_eq!(sort_order_of(&db, "spaces", "path", &b), 2);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A reorder is PERSISTED work, not a view: it survives a close + re-open,
     /// i.e. the one-time seed gate stays closed and does not clobber the order.
     #[test]
     fn reorder_spaces_survives_a_reopen() {
-        let dir = std::env::temp_dir().join(format!("db-reopentest-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-reopentest-test-", "scratch");
         let path = dir.join("t.db");
         let db = Db::open(&path).expect("db should open");
         let keys: Vec<String> = ["aaa", "mmm", "zzz"]
@@ -3610,7 +3526,6 @@ mod tests {
             listed, wanted,
             "the reorder survives the re-open — the seed gate did not fire and did not renumber"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An id the caller never heard of is a NO-OP, not an error, and it still
@@ -3619,9 +3534,7 @@ mod tests {
     /// them undefined.
     #[test]
     fn reorder_spaces_with_an_unknown_path_is_not_an_error() {
-        let dir =
-            std::env::temp_dir().join(format!("db-reordernope-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-reordernope-test-", "scratch");
         let db = Db::open(&dir.join("t.db")).expect("db should open");
         let keys: Vec<String> = ["aaa", "mmm"]
             .iter()
@@ -3652,7 +3565,6 @@ mod tests {
             2,
             "and the second known row at 2"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `reorder_sessions` writes the visible slice's order AND renumbers hidden
@@ -3663,8 +3575,7 @@ mod tests {
     /// number moved is raw SQL against the connection.
     #[test]
     fn reorder_sessions_writes_the_given_order() {
-        let dir = std::env::temp_dir().join(format!("db-reorderses-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-reorderses-test-", "scratch");
         let path = dir.join("t.db");
         let db = Db::open(&path).expect("db should open");
         let cwd = Path::new("/tmp/proj");
@@ -3724,7 +3635,6 @@ mod tests {
             0,
             "and the hidden row's new number survives it too"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A reorder renumbers ONLY the slice it was handed. The sidebar passes the
@@ -3737,8 +3647,7 @@ mod tests {
     /// record them a1, a2, b1, b2 and no collision is possible at all.
     #[test]
     fn reorder_sessions_is_per_space_even_when_numbers_collide_across_spaces() {
-        let dir = std::env::temp_dir().join(format!("db-reorderps-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-reorderps-test-", "scratch");
         let db = Db::open(&dir.join("t.db")).expect("db should open");
         // Canonical cwds, so the `cwd` string the rows store is the string we filter on.
         let dir_a = dir.join("space_a");
@@ -3787,6 +3696,5 @@ mod tests {
              across Spaces is expected, and `ORDER BY sort_order ASC, id DESC` is \
              still total so every read stays deterministic"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
