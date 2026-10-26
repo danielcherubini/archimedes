@@ -175,14 +175,29 @@ export default function GeneralSection({
         value={policy("reads")}
         onChange={(value) => savePolicy("reads", value)}
       />
+      {/* The file-access policy (ADR 0030). WHY this row carries a disclosure
+          the other two do not: the protected-dir refusal is forbidden from
+          naming the route that bypasses it (issue #33), so this row is the
+          ONLY place a human learns the carve-out is not absolute. It must
+          therefore read as ADR 0030 wrote it — a guard-rail, not a security
+          boundary — and no other surface contradicts it. Note the refusal is
+          scoped to the protected LIST, not to a path: a directory is covered
+          because the list names it, which is what the code actually does. */}
       <PolicyRow
         label="Writes"
         description={
           <>
             Writing files outside the boundary. The default, "Don't ask me",
-            lets the agent write anywhere on the machine with no prompt — the
-            only carve-out is the protected agent-definition directories (your
-            global skills and agents), which it can never rewrite.
+            lets the agent write anywhere on the machine with no prompt. The
+            one carve-out is the protected agent-definition directories (your
+            global skills and agents): the file tools refuse to rewrite a
+            directory while it is on this app's protected list, and that
+            refusal is a guard-rail against the agent silently rewriting its
+            own instructions — not a security boundary. The shell tool and
+            sudo_exec are governed by their own gates and reach these
+            directories by design, and no setting here closes that; the
+            guard-rail follows that list rather than the folder, so a
+            directory the list does not name is not covered by it.
           </>
         }
         value={policy("writes")}
