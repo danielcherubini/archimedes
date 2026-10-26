@@ -77,7 +77,18 @@ fn a_panicking_assertion_still_removes_the_temp_db_scratch() {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             // The guard MOVES into the panicking scope: that is the value the
             // unwind drops. Created outside the closure, this asserts nothing.
-            let (_db, _path, _dir) = (db, path, dir);
+            //
+            // ONE tuple VALUE, bound to a single name — NOT `let (_db, _path,
+            // _dir) = (db, path, dir);`. That destructures into three locals, and
+            // locals drop in REVERSE declaration order, so `_dir` would go FIRST:
+            // the dir is removed while the SQLite handle inside it is still open.
+            // Linux unlinks happily so the test passes there; Windows refuses the
+            // removal and `ScratchDir::drop`'s `let _ =` swallows it, so the dir
+            // survives and this assertion fails — which is exactly what it did on
+            // CI's windows-latest leg. A tuple VALUE drops left-to-right, so `db`
+            // closes before `dir` is removed: the ordering Windows needs and Linux
+            // cannot show. Same reasoning as `harness_store.rs`'s panic test.
+            let _fixture = (db, path, dir);
             assert_eq!(
                 1, 2,
                 "an assertion fails while the fixture owns its scratch"
