@@ -74,13 +74,17 @@ mod tests {
     /// A temp-dir `Db` + a REAL temp `cwd` dir (the `spaces` rows are
     /// keyed by the CANONICAL path — a nonexistent path canonicalize-
     /// fails and `space_trusted` fails closed to `false`).
-    fn temp_db_cwd() -> (Arc<Db>, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("harness-trust-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+    ///
+    /// The guard owns the PARENT; `cwd` is a plain `PathBuf` INTO it (the
+    /// `spaces` rows need a path that exists, not a second owner). Two
+    /// guards over one subtree would be a double `remove_dir_all`, so the
+    /// nested dir dies with the parent's `Drop`.
+    fn temp_db_cwd() -> (crate::test_support::ScratchDir, Arc<Db>, std::path::PathBuf) {
+        let dir = crate::test_support::ScratchDir::in_env_temp("harness-trust-test-", "db");
         let db = Arc::new(Db::open(&dir.join("t.db")).expect("db should open"));
         let cwd = dir.join("workspace");
         std::fs::create_dir_all(&cwd).unwrap();
-        (db, cwd)
+        (dir, db, cwd)
     }
 
     /// `StaticTrustSource` — `new(false)` is untrusted; `set(true)`
@@ -125,7 +129,7 @@ mod tests {
     /// a nonexistent `cwd` canonicalize-fails → `false`.
     #[test]
     fn sqlite_trust_source_reads_the_space_flag() {
-        let (db, cwd) = temp_db_cwd();
+        let (_dir, db, cwd) = temp_db_cwd();
         let source = SqliteTrustSource::new(db.clone());
         // No `spaces` row yet → fail-closed `false`.
         assert!(!source.is_trusted(&cwd));

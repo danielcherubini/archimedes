@@ -264,9 +264,8 @@ mod tests {
 
     /// A temp-dir `Db` with a recorded `sessions` row (the `native_messages`
     /// / `messages` rows FK to `sessions`).
-    fn temp_db() -> (Arc<Db>, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("harness-store-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+    fn temp_db() -> (crate::test_support::ScratchDir, Arc<Db>) {
+        let dir = crate::test_support::ScratchDir::in_env_temp("harness-store-test-", "db");
         let db = Arc::new(Db::open(&dir.join("t.db")).expect("db should open"));
         db.record_session(&SessionInfo {
             session_id: "s1".to_string(),
@@ -279,7 +278,7 @@ mod tests {
             is_subagent: false,
         })
         .expect("record_session");
-        (db, dir)
+        (dir, db)
     }
 
     #[test]
@@ -332,7 +331,7 @@ mod tests {
     /// same `(session_id, seq)` collapses to one row).
     #[test]
     fn session_store_insert_load_round_trip() {
-        let (db, dir) = temp_db();
+        let (_dir, db) = temp_db();
         let store = SessionStore::new(db.clone());
         let msg = ChatMessage {
             role: crate::agent::harness::provider::ChatRole::User,
@@ -351,7 +350,6 @@ mod tests {
         let loaded = store.load_messages("s1").unwrap();
         assert_eq!(loaded.len(), 1, "the upsert is idempotent (one row)");
         assert_eq!(loaded[0], msg, "the content round-trips verbatim");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `persist_display` — a `Vec<DisplayRow>` lands as `messages` rows via
@@ -359,7 +357,7 @@ mod tests {
     /// updated payload refreshes the SAME row, never duplicates).
     #[test]
     fn session_store_persist_display_upserts_rows() {
-        let (db, dir) = temp_db();
+        let (_dir, db) = temp_db();
         let store = SessionStore::new(db.clone());
         store
             .persist_display(
@@ -413,7 +411,6 @@ mod tests {
             text.payload_json, r#"{"text":"Hello"}"#,
             "the payload was refreshed"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `record_context_usage` — lands in `sessions.context_usage_json`
@@ -421,7 +418,7 @@ mod tests {
     /// `sessions` row is a no-op, not an error).
     #[test]
     fn session_store_record_context_usage_lands_in_the_sessions_row() {
-        let (db, dir) = temp_db();
+        let (_dir, db) = temp_db();
         let store = SessionStore::new(db.clone());
         store.record_context_usage("s1", 53_760, 128_000).unwrap();
         let row = db.session("s1").unwrap().unwrap();
@@ -431,6 +428,48 @@ mod tests {
         assert_eq!(usage["window"], 128_000);
         // A missing `sessions` row is a no-op (the `UPDATE` matches nothing).
         assert!(store.record_context_usage("missing-session", 1, 10).is_ok());
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #96: `temp_db`'s dir must be OWNED. The green path already removed it
+    /// (the `remove_dir_all` this replaces), so the GREEN half of this
+    /// assertion proves nothing on its own — what it pins is that ownership
+    /// survives a PANIC, which is the only path that leaked here.
+    #[test]
+    fn temp_db_removes_its_dir_when_its_owner_is_dropped() {
+        let (dir, db) = temp_db();
+        let captured = dir.to_path_buf();
+        assert!(captured.is_dir(), "temp_db created the dir");
+        drop((db, dir));
+        assert!(
+            !captured.exists(),
+            "the dir goes with its owner — {captured:?}"
+        );
+    }
+
+    /// The panic path, which is what this conversion actually buys: an
+    /// assertion that FAILS while the fixture's dir is still owned must not
+    /// leave the dir behind. The guard is moved INTO the panicking scope —
+    /// that is the value the unwind drops (the `test_support` / `mcp/oauth.rs`
+    /// precedent). What this does NOT pin is #96's headline case, a test that
+    /// fails with its guard as a plain local so the HARNESS's own unwind would
+    /// have to remove the dir; Rust makes no portable guarantee there and
+    /// status doc D10 assigns that case to task 09's census.
+    #[test]
+    fn a_panicking_assertion_still_removes_the_temp_db_dir() {
+        let captured = {
+            let (dir, db) = temp_db();
+            let path = dir.to_path_buf();
+            assert!(path.is_dir(), "temp_db created the dir");
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let (_dir, _db) = (dir, db);
+                assert_eq!(1, 2, "an assertion fails while the fixture owns its dir");
+            }));
+            assert!(r.is_err(), "the assertion failed as arranged");
+            path
+        };
+        assert!(
+            !captured.exists(),
+            "the unwind ran the removal — {captured:?} is gone"
+        );
     }
 }
