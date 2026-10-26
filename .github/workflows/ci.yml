@@ -126,6 +126,73 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --all-targets -- -D warnings
 
+      # #96 task 09's census guard, in three steps that only work TOGETHER and in
+      # this order: prove-it-can-fail, snapshot, verify. A whole-temp-dir DIRECTORY
+      # DELTA around the `cargo test` step below — a green guard proves nothing on
+      # its own, which is why the first step exists (#96's D7 list is a catalogue of
+      # filters that silently matched nothing and reported success).
+      #
+      # SAME JOB AS `cargo test`, deliberately: a separate job gets a FRESH RUNNER
+      # with an empty temp dir, so the delta would be 0 no matter what the suite did
+      # — a guard that passes vacuously. (The `scripts` job's isolation is fine for
+      # the version check, which asks about the checkout, and fatal for a delta,
+      # which asks about a machine.)
+      #
+      # GATED OFF WINDOWS (`runner.os != 'windows'`), and the gap is recorded rather
+      # than glossed: Rust resolves the Windows temp dir with `GetTempPath2W` over
+      # `TMP`/`TEMP` — NOT `TMPDIR` (`library/std/src/sys/paths/windows.rs`), the
+      # script refuses any `uname` it cannot resolve instead of guessing, and the
+      # MSYS<->Win32 path translation was not verifiable from the Linux box that
+      # wrote this. **Windows is the platform where a wrong drop order leaks
+      # PERMANENTLY** — it refuses to remove a directory holding an open handle while
+      # Linux unlinks happily — so Windows' ONLY leak guard remains the `childproc`
+      # census invariant plus the `--all-targets` compile gate. The follow-up that
+      # closes it is a Windows `resolve_base` arm (`cygpath -u "$TMP"`) plus running
+      # `--self-test` on a Windows runner and watching it report a planted leak.
+      #
+      # macOS runs the bracket: the runner sets a per-user `TMPDIR`
+      # (`/var/folders/…/T/`) and Rust honours `TMPDIR` first, so both sides read the
+      # same variable, and the `/var` -> `/private/var` spelling difference is absorbed
+      # by canonicalisation on both sides. UNVERIFIED on real macOS from the box that
+      # wrote this — `the_census_base_is_the_temp_dir_the_suite_actually_uses` is what
+      # converts that into a CI-observed fact on the first push.
+      - name: Prove the temp-dir census guard can fail
+        if: runner.os != 'windows'
+        shell: bash
+        run: bash scripts/check-temp-dir-census.sh --self-test
+
+      # BEFORE `cargo test`, and that ordering carries a second load: a step's
+      # `$GITHUB_ENV` writes apply to SUBSEQUENT steps only, so
+      # `ARCHIMEDES_TEST_CENSUS_BASE` reaches the Rust premise test precisely because
+      # this step ran first. Move it below `cargo test` and
+      # `test_support::the_census_base_is_the_temp_dir_the_suite_actually_uses`
+      # silently takes its inert "unset means a local run" arm — green, having
+      # verified nothing. That is the same silent-vacuity class as every D7 entry.
+      #
+      # ONE resolution, handed forward through `$GITHUB_ENV` rather than a second
+      # copy of the path: hardcoding the census base here and in the `verify` step is
+      # the duplicated-literal hazard the crash-log step below warns about. No `env:`
+      # block is needed on the `cargo test` steps — `$GITHUB_ENV` exports into every
+      # subsequent step. `verify` deliberately does NOT consume the variable: it
+      # re-resolves the base itself and compares against the state file's first line,
+      # because a `verify` that trusted a variable would inherit the very drift it
+      # exists to catch.
+      #
+      # The state file lives in `$RUNNER_TEMP` (`/home/runner/work/_temp`), which is
+      # OUTSIDE the census base. That is not tidiness: `mktemp`/`mktemp -d` with no
+      # `-p` writes into `$TMPDIR`, which IS the base, so a state file there is the
+      # guard reporting its own bookkeeping as the suite's leak on every run. The
+      # script refuses a state path under the base for exactly that reason, so do not
+      # "simplify" this to a bare `mktemp`.
+      - name: Snapshot the temp dir before cargo test
+        id: census_snapshot
+        if: runner.os != 'windows'
+        shell: bash
+        working-directory: src-tauri
+        run: |
+          bash ../scripts/check-temp-dir-census.sh snapshot --state "$RUNNER_TEMP/archimedes-temp-census.txt"
+          echo "ARCHIMEDES_TEST_CENSUS_BASE=$(bash ../scripts/check-temp-dir-census.sh base)" >> "$GITHUB_ENV"
+
       # The crash-log leak guard (crash-log-hardening Task 7), in two halves: the
       # `cargo test` step below runs the suite with its data dir REDIRECTED into
       # the runner temp dir, and the `Check the test suite wrote no crash log`
@@ -225,6 +292,55 @@ jobs:
           ARCHIMEDES_TEST_DATA_DIR: ${{ runner.temp }}/archimedes-test-data
         run: bash scripts/check-test-data-dir.sh "$ARCHIMEDES_TEST_DATA_DIR"
 
+      # The census bracket's second half (#96 task 09). `if:` is spelled
+      # `steps.census_snapshot.outcome == 'success' && !cancelled()`, and every part
+      # of that is load-bearing:
+      #   * GitHub skips later steps when an earlier one FAILS, and **a FAILING test
+      #     is precisely when a guard drops unrun and leaks** — D10 delegated the
+      #     escaped-panic case to this census because Rust makes no portable promise
+      #     about drops during the harness's own unwind, so no unit test can pin it.
+      #     Plain placement would leave the guard structurally blind to the one case
+      #     it owns. (Do NOT rewrite this to `!= 'failure'`: that also runs when the
+      #     snapshot was SKIPPED, and a skipped snapshot means no state file, so the
+      #     step would die on "state file missing" and re-enable the confusion this
+      #     spelling avoids — the `== 'success'` form is what keeps a never-taken
+      #     bracket from producing a second, misleading red.)
+      #   * `!cancelled()` stops it burning time on a cancelled job.
+      # Stated plainly, because it limits what this step is: `SIGKILL` and Ctrl-C
+      # defeat ANY in-process guard — `Drop` never runs — so the census is the
+      # BACKSTOP and the in-process `ScratchDir` is the guard. Neither alone is
+      # sufficient; the pairing is the design.
+      #
+      # TRIAGE for whoever reads this step red (the same three bullets live next to
+      # the tolerance table in the script — you are reading CI output, not the plan):
+      #   * A prefix NOT in the tolerance table is the real leak this guard exists
+      #     for: give that test's fixture a `test_support::ScratchDir` (guard FIRST
+      #     in a body, LAST in a struct — D19's two opposite spellings; see #96 tasks
+      #     01-08). NEVER add a tolerance to make a red go away.
+      #   * A `harness-subagent-*` red at OVER BUDGET: raise the budget only with a
+      #     re-measured rate recorded in the commit message (the current 1 comes from
+      #     0.125/run over 8 scoped runs, D19b's detached-loop-task race). There is
+      #     no flag for it on purpose — widening is always a diff a reviewer sees.
+      #   * A `sessions-log-test-*` red: 1 dir and EMPTY is the same degenerate case;
+      #     a dir that CONTAINS A FILE (`.db`, `supervisor.log`, anything) is NOT the
+      #     race — it is a real leak, keep it red and fix the test. It was refused a
+      #     tolerance deliberately (0 in 16 sibling-inclusive runs plus both
+      #     whole-suite brackets): tolerances are earned by measurement, not granted
+      #     by mechanism.
+      #
+      # NOT widened to cover `pnpm test` below, and it must not be. The frontend
+      # leaks 1 dir/run of its OWN (Vitest's `join(tmpdir(), nanoid())`, D13: Vitest
+      # hardcodes it, there is no `tmpdir` config knob, and task 10's `cacheDir`
+      # investigation falsified its premise and produced no commit). A Rust gate that
+      # reddens because a frontend run happened in between is a gate people will
+      # mute; guarding that leak is a different bracket around `pnpm test`, with its
+      # own budget, in a different task.
+      - name: Check the test suite left no temp directories
+        if: steps.census_snapshot.outcome == 'success' && !cancelled()
+        shell: bash
+        working-directory: src-tauri
+        run: bash ../scripts/check-temp-dir-census.sh verify --state "$RUNNER_TEMP/archimedes-temp-census.txt"
+
       # The junit report exists for the one failure mode this workflow could not
       # answer: a single test failing ONCE, on a cold first run, with nothing to
       # reproduce it. The log that named it is the log the next push overwrites in
@@ -280,6 +396,19 @@ jobs:
       # nesting case is the one that decides whether that guard is vacuous.
       - name: Test the test-data-dir crash-log check
         run: bash scripts/check-test-data-dir.test.sh
+
+      # #96 task 09's census guard, twice over: its own fixture harness, then its
+      # `--self-test` premise mode. Both run HERE as well as in the matrix because
+      # the guard is a shell script with no cargo and no suite in its teeth-proof —
+      # this job is the cheapest place in the repo to learn that the guard has lost
+      # the ability to fail, and a guard that cannot fail is the decoration this
+      # task exists to prevent. (The matrix copy runs the same `--self-test` before
+      # its snapshot, on the OS whose base it will census.)
+      - name: Test the temp-dir census check
+        run: bash scripts/check-temp-dir-census.test.sh
+
+      - name: Prove the temp-dir census guard can fail
+        run: bash scripts/check-temp-dir-census.sh --self-test
 
       - name: Test the updater-manifest composer
         run: bash scripts/compose-updater-manifest.test.sh

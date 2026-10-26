@@ -7,12 +7,43 @@ use crate::commands::files::CompletionEntryDto;
 /// newline (which also terminates the message).
 pub const UNGRAMMATABLE: [&str; 2] = ["we?ird.md", "bad\nname.md"];
 
-/// A fresh temp dir for one test (the same pattern the `read_file_bytes`
-/// tests below use).
-pub fn tmp_dir(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("files-cmd-test-{tag}-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A fresh scratch dir for one test, removed on drop (was a bare `PathBuf`,
+/// which is how #96's 432 leaked dirs got made: a panicking assertion skipped
+/// the cleanup).
+pub fn tmp_dir(tag: &str) -> crate::test_support::ScratchDir {
+    crate::test_support::ScratchDir::in_env_temp("files-cmd-test-", tag)
+}
+
+/// A tmpfs-backed scratch dir (the two cap fixtures only).
+///
+/// WHY A BASE AT ALL: those fixtures assert that `readdir` order DISAGREES with
+/// alphabetical order (see [`assert_readdir_disagrees_with_sorted_order`]), and
+/// that premise belongs to the FILESYSTEM, not to the filename set. Measured on
+/// one dev box, the same `f0.txt`..`f4.txt` layout enumerates UNSORTED on tmpfs
+/// and ALREADY SORTED on the btrfs under `$HOME` — so a fixture built on
+/// `std::env::temp_dir()` passes or fails depending on wherever `TMPDIR` happens
+/// to point. That is not hypothetical: the desktop app sets `TMPDIR` for its own
+/// scratch, every child it spawns inherits it (an agent running `make test-rust`
+/// included), and both cap fixtures then fail inside the guard for a reason that
+/// has nothing to do with the change under review.
+///
+/// So the fixtures ASK for a tmpfs instead of inferring one from the ambient
+/// environment. The candidate order lives on
+/// [`crate::test_support::tmpfs_base_candidates`]: `/dev/shm` (tmpfs on Linux,
+/// and it satisfies the premise for BOTH fixture layouts — `f0..f4` and `a..l`,
+/// measured — independent of `TMPDIR`), then `std::env::temp_dir()` for macOS
+/// (no `/dev/shm`; APFS already disagrees with sorted order) and any box where
+/// `/dev/shm` is absent or unusable. Windows lands on the fallback too and the
+/// guard degrades there exactly as it does today.
+///
+/// The last candidate is ATTEMPTED with `create_dir_all` rather than assumed: a
+/// present-but-unwritable `/dev/shm` must not panic a fixture.
+///
+/// `/dev/shm` is tmpfs — RAM, and it carries the SAME per-user quota as `/tmp`.
+/// A dir taken from there therefore has to be removed, or this helper would move
+/// the leak instead of fixing it; hence the guard's `Drop`.
+pub fn tmpfs_dir(tag: &str) -> crate::test_support::ScratchDir {
+    crate::test_support::ScratchDir::in_tmpfs("files-cmd-test-", tag)
 }
 
 pub fn touch(dir: &std::path::Path, rel: &str) {
@@ -125,7 +156,7 @@ pub fn os_allows_grammar_hostile_name() -> bool {
     cfg!(unix)
 }
 
-pub fn ungrammatical_fixture(tag: &str) -> std::path::PathBuf {
+pub fn ungrammatical_fixture(tag: &str) -> crate::test_support::ScratchDir {
     let root = tmp_dir(tag);
     touch(&root, "keep.md");
     touch(&root, "normal.rs");

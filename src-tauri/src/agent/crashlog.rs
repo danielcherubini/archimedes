@@ -342,11 +342,16 @@ mod tests {
     /// writer is reachable without touching the hook slot.
     static HOOK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// A temp dir for the crash logs (unique per test).
-    fn temp_dir() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("crashlog-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A temp dir for the crash logs (unique per test), OWNED (#96 task 08) —
+    /// removed when the guard drops. It is a body local in every caller, so it
+    /// drops at the end of the body, after every assertion and after the
+    /// `set_hook(previous)` teardown.
+    ///
+    /// HONEST SIZING: all 14 mints already ran a `remove_dir_all` on the green
+    /// path, so this file's census delta is 0 BEFORE and 0 AFTER — the win is
+    /// the panic path (14 dirs that survive a failed assertion today).
+    fn temp_dir() -> crate::test_support::ScratchDir {
+        crate::test_support::ScratchDir::in_env_temp("crashlog-test-", "dir")
     }
 
     /// A panic (the hook installed, writing to a temp dir) writes a
@@ -367,7 +372,7 @@ mod tests {
         // file is THIS panic's log (see the NOTE above).
         let marker = format!("test crash payload {}", uuid::Uuid::new_v4());
         let previous = std::panic::take_hook();
-        let dir_hook = dir.clone();
+        let dir_hook = dir.to_path_buf();
         std::panic::set_hook(Box::new(move |info| {
             let _ = write_crash_log_from_info(&dir_hook, "worker", info);
             // The log is the primary output — the previous hook is NOT
@@ -437,7 +442,6 @@ mod tests {
             !backtrace.trim().is_empty(),
             "force_capture produces frames even without RUST_BACKTRACE"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The hook writes to the directory IT WAS HANDED at install time —
@@ -460,7 +464,10 @@ mod tests {
         // panic's log (see the NOTE on the other hook test).
         let marker = format!("injected-dir {}", uuid::Uuid::new_v4());
         let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(hook_closure("worker-capture".into(), dir.clone())));
+        std::panic::set_hook(Box::new(hook_closure(
+            "worker-capture".into(),
+            dir.to_path_buf(),
+        )));
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let panic_payload = marker.clone();
         std::thread::spawn(move || {
@@ -503,7 +510,7 @@ mod tests {
         let path = found.expect("the crash log lands in the injected directory");
         assert_eq!(
             path.parent(),
-            Some(dir.as_path()),
+            Some(dir.path()),
             "the hook wrote into the directory it was handed, not somewhere it resolved itself"
         );
         let content = std::fs::read_to_string(&path).expect("the crash log is readable");
@@ -523,7 +530,6 @@ mod tests {
             name.ends_with(&format!("-worker-capture-{}.log", std::process::id())),
             "the tag given to `hook_closure` is in the file name: {name}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The writer seam: `write_crash` is callable with NO `PanicHookInfo`
@@ -536,7 +542,7 @@ mod tests {
         let marker = format!("seam payload {}", uuid::Uuid::new_v4());
         let path = write_crash(&dir, "worker", &marker, "src/agent/crashlog.rs:1:2")
             .expect("the write succeeds");
-        assert_eq!(path.parent(), Some(dir.as_path()));
+        assert_eq!(path.parent(), Some(dir.path()));
         let name = path
             .file_name()
             .unwrap_or_default()
@@ -562,7 +568,6 @@ mod tests {
             !backtrace.trim().is_empty(),
             "force_capture produces frames even without RUST_BACKTRACE"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The name carries the WRITING process's pid:
@@ -596,7 +601,6 @@ mod tests {
             name.contains("-worker-"),
             "the tag survives the rename, pinned between the two `-`s: {name}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `install_panic_hook` is idempotent (a double install is safe —
@@ -619,8 +623,8 @@ mod tests {
         let _hook = HOOK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = temp_dir();
         let previous = std::panic::take_hook();
-        install_panic_hook("worker", dir.clone());
-        install_panic_hook("worker", dir.clone());
+        install_panic_hook("worker", dir.to_path_buf());
+        install_panic_hook("worker", dir.to_path_buf());
         // Put the slot back as it was found: the `Once` above installed
         // our hook over it, and leaving that in place would write a crash
         // log for every panic in the REST of the test process (into the
@@ -628,7 +632,6 @@ mod tests {
         let installed = std::panic::take_hook();
         drop(installed);
         std::panic::set_hook(previous);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ------------------------------------------------------------------
@@ -718,7 +721,6 @@ mod tests {
             names.contains(&"crash-cap-0.log".to_string()),
             "the newest of the seeded files survives: {names:?}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Both sides of the age bound: a 31-day-old log dies, a 29-day-old
@@ -746,7 +748,6 @@ mod tests {
             5,
             "nothing else was touched (the 29-day file, the 3 fresh ones and the new log)"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The prune spares everything it was never asked about: `debuglog`'s
@@ -772,7 +773,6 @@ mod tests {
                 "`{name}` is not a crash log: it survives"
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A directory that cannot be created is a `None` and a dir that is
@@ -805,7 +805,6 @@ mod tests {
         );
         assert!(parent.join("crash-one.log").exists());
         assert!(parent.join("crash-two.log").exists());
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// THE ORDERING PIN. The prune runs AFTER a successful write, never
@@ -850,7 +849,6 @@ mod tests {
             before,
             "a write that failed deleted no crash log — the prune runs only after success"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The prune pattern is deliberately WIDER than the attribution
@@ -878,7 +876,6 @@ mod tests {
             "pid-stamped names are pruned too, found {names:?}"
         );
         assert!(written.exists(), "the just-written log survives");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A file whose mtime is in the FUTURE (clock skew, a restored backup)
@@ -904,7 +901,6 @@ mod tests {
             "a future-dated mtime is clock skew, not freshness — it is never deleted"
         );
         assert!(!ancient.exists(), "the genuinely old file is still deleted");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A future-dated crash-log-shaped file, one that is
@@ -986,7 +982,6 @@ mod tests {
             names.contains(&"crash-future-0.log".to_string()),
             "the newest of the future-dated files is spared: {names:?}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// THE PROTECTED-FILE RULE, case 2 (the likelier one): the whole full
@@ -1076,6 +1071,5 @@ mod tests {
                 let _ = std::fs::remove_file(dir.join(name));
             }
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

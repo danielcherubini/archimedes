@@ -59,10 +59,11 @@ impl EventSink for RecSink {
 // ── the fixtures ──────────────────────────────────────────────────────────
 
 /// A temp config dir (the `settings.json` home — the seeded settings give
-/// the session start a `defaultThinkingLevel` — the settings-driven rung).
-fn temp_config_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("session-native-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
+/// the session start a `defaultThinkingLevel` — the settings-driven rung),
+/// OWNED (#96 task 06): the guard removes the dir and its `settings.json`
+/// and `archimedes.db` when it drops.
+fn temp_config_dir() -> archimedes_lib::test_support::ScratchDir {
+    let dir = archimedes_lib::test_support::ScratchDir::in_env_temp("session-native-", "cfg");
     std::fs::write(
         dir.join("settings.json"),
         json!({ "theme": "dark", "defaultThinkingLevel": "high" }).to_string(),
@@ -180,7 +181,7 @@ async fn native_session_end_to_end() {
     // The base catalog is empty in a test → the model resolves from the
     // `set_catalog` catalog's default (`fake/m1`).
     let info = manager
-        .start_session(dir.clone(), &sink)
+        .start_session(dir.to_path_buf(), &sink)
         .await
         .expect("the native session starts (a Worker spawned — no in-process loop)");
     assert!(
@@ -303,7 +304,7 @@ async fn native_session_end_to_end() {
 
     manager.close_session(&sid).await.expect("close works");
     let resumed = manager
-        .resume_session(&sid, dir.clone(), &sink)
+        .resume_session(&sid, dir.to_path_buf(), &sink)
         .await
         .expect("a native session resumes from the native_messages table (not NotResumable)");
 
@@ -425,7 +426,6 @@ async fn native_session_end_to_end() {
     );
 
     let _ = manager.close_session(&sid).await;
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A legacy session whose stored ID is a bare UUID (no `arch_` prefix)
@@ -449,7 +449,7 @@ async fn resuming_legacy_bare_uuid_session_preserves_id() {
     let db = Db::open(&dir.join("archimedes.db")).unwrap();
     let info = SessionInfo {
         session_id: legacy_id.clone(),
-        cwd: dir.clone(),
+        cwd: dir.to_path_buf(),
         capabilities: json!({
             "model": "fake/m1",
             "loadSession": true,
@@ -470,7 +470,7 @@ async fn resuming_legacy_bare_uuid_session_preserves_id() {
     .unwrap();
 
     let resumed = manager
-        .resume_session(&legacy_id, dir.clone(), &sink)
+        .resume_session(&legacy_id, dir.to_path_buf(), &sink)
         .await
         .expect("legacy session resumes");
     assert_eq!(
@@ -489,5 +489,4 @@ async fn resuming_legacy_bare_uuid_session_preserves_id() {
     assert_eq!(chunk["content"]["text"], "canned ");
 
     let _ = manager.close_session(&legacy_id).await;
-    let _ = std::fs::remove_dir_all(&dir);
 }

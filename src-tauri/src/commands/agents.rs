@@ -412,7 +412,7 @@ mod tests {
         // span (the `env_lock` guard); no other thread mutates HOME
         // concurrently.
         unsafe {
-            std::env::set_var("HOME", &home);
+            std::env::set_var("HOME", home.path());
         }
         fs::create_dir_all(home.join(".agents/agents")).unwrap();
         fs::write(
@@ -467,7 +467,7 @@ mod tests {
         // span (the `env_lock` guard); no other thread mutates HOME
         // concurrently.
         unsafe {
-            std::env::set_var("HOME", &home);
+            std::env::set_var("HOME", home.path());
         }
         let dir = scratch();
         fs::create_dir_all(dir.join(".agents/agents")).unwrap();
@@ -503,7 +503,7 @@ mod tests {
         // span (the `env_lock` guard); no other thread mutates HOME
         // concurrently.
         unsafe {
-            std::env::set_var("HOME", &home);
+            std::env::set_var("HOME", home.path());
         }
         fs::create_dir_all(home.join(".agents/agents")).unwrap();
         fs::write(
@@ -550,7 +550,7 @@ mod tests {
         // span (the `env_lock` guard); no other thread mutates HOME
         // concurrently.
         unsafe {
-            std::env::set_var("HOME", &home);
+            std::env::set_var("HOME", home.path());
         }
         fs::create_dir_all(home.join(".agents/agents")).unwrap();
         fs::write(
@@ -599,7 +599,7 @@ mod tests {
         // span (the `env_lock` guard); no other thread mutates HOME
         // concurrently.
         unsafe {
-            std::env::set_var("HOME", &home);
+            std::env::set_var("HOME", home.path());
         }
         fs::create_dir_all(home.join(".agents/agents")).unwrap();
         fs::write(
@@ -843,7 +843,7 @@ mod tests {
         // SAFETY: the `ENV_LOCK` is held for the whole set→assert→restore span;
         // no other thread mutates HOME concurrently.
         unsafe {
-            std::env::set_var("HOME", &home);
+            std::env::set_var("HOME", home.path());
         }
 
         // (settings.json body, definition frontmatter, expected `effective`,
@@ -1023,7 +1023,7 @@ mod tests {
         // SAFETY: the `ENV_LOCK` is held for the whole set→assert→restore span;
         // no other thread mutates HOME concurrently.
         unsafe {
-            std::env::set_var("HOME", &home);
+            std::env::set_var("HOME", home.path());
         }
 
         let space = scratch();
@@ -1113,7 +1113,7 @@ mod tests {
         // SAFETY: the `ENV_LOCK` is held for the whole set→assert→restore span;
         // no other thread mutates HOME concurrently.
         unsafe {
-            std::env::set_var("HOME", &home);
+            std::env::set_var("HOME", home.path());
         }
         // A Space with its own definition — `discover_agents(None)` never
         // scans it, so its row must be absent.
@@ -1480,10 +1480,60 @@ mod tests {
         );
     }
 
-    fn scratch() -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("archimedes-cmd-agents-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    /// #96 task 07: `scratch()` must OWN what it creates. It returned a bare
+    /// `PathBuf` and nothing in this module ever removed it — 16 call sites,
+    /// 22 dirs per green run, 1584 on disk. Both halves of this assertion are
+    /// real wins here: the drop half is the 22-dir GREEN leak being closed, and
+    /// the sibling below is the panic path that today cost 22 more.
+    #[test]
+    fn the_scratch_fixture_removes_its_dir_when_its_owner_is_dropped() {
+        let dir = scratch();
+        let captured = dir.to_path_buf();
+        assert!(captured.is_dir(), "the fixture created its scratch dir");
+        drop(dir);
+        assert!(
+            !captured.exists(),
+            "the fixture's scratch goes with its owner: {captured:?}"
+        );
+    }
+
+    /// The panic path: an assertion that FAILS while the fixture still owns its
+    /// scratch must not leave it behind. The guard is MOVED INTO the panicking
+    /// scope — that is the value the unwind drops (the `test_support` /
+    /// `agent/mcp/oauth.rs` precedent); created outside the closure this would
+    /// assert only that `catch_unwind` returned. What this does NOT pin is #96's
+    /// headline case — a test failing with its guard as a plain local, so the
+    /// HARNESS's own unwind would have to remove the dir — because Rust makes no
+    /// portable guarantee there and status-doc D10 gives that case to task 09's
+    /// census.
+    #[test]
+    fn a_panicking_assertion_still_removes_the_scratch_dir() {
+        let captured = {
+            let dir = scratch();
+            let path = dir.to_path_buf();
+            assert!(path.is_dir(), "the fixture created its scratch dir");
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let _held = dir;
+                assert_eq!(
+                    1, 2,
+                    "an assertion fails while the fixture owns its scratch"
+                );
+            }));
+            assert!(r.is_err(), "the assertion failed as arranged");
+            path
+        };
+        assert!(
+            !captured.exists(),
+            "the unwind ran the removal: {captured:?}"
+        );
+    }
+
+    /// A unique scratch dir, OWNED (#96 task 07): the dir and everything in it is
+    /// removed when the guard drops. `scratch()` used to hand back a bare
+    /// `PathBuf` and NOTHING in this module ever removed it — 16 call sites,
+    /// 22 executions per run, 1584 of them on disk. NOT `Clone`: `to_path_buf()`
+    /// is the escape hatch for a call site that needs an owned `PathBuf`.
+    fn scratch() -> crate::test_support::ScratchDir {
+        crate::test_support::ScratchDir::in_env_temp("archimedes-cmd-agents-", "scratch")
     }
 }

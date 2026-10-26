@@ -33,8 +33,11 @@ fn image_within_cap_bounded_by_max_image_bytes() {
 
 #[tokio::test]
 async fn read_file_bytes_returns_the_file_content_for_a_picked_image() {
-    let dir = std::env::temp_dir().join(format!("files-cmd-test-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
+    // Was an inline `temp_dir().join("files-cmd-test-{uuid}")` with no tag
+    // segment — the only two `files-cmd-test-*` dirs whose owner was
+    // unguessable from the name. PREFIX preserved, tag added, and now
+    // Drop-owned (#96).
+    let dir = tmp_dir("image-pick");
     let path = dir.join("shot.png");
     let bytes: Vec<u8> = vec![0x89, 0x50, 0x4E, 0x47, 1, 2, 3];
     std::fs::write(&path, &bytes).unwrap();
@@ -44,8 +47,9 @@ async fn read_file_bytes_returns_the_file_content_for_a_picked_image() {
 
 #[tokio::test]
 async fn read_file_bytes_returns_none_for_a_non_image_extension() {
-    let dir = std::env::temp_dir().join(format!("files-cmd-test-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
+    // See `read_file_bytes_returns_the_file_content_for_a_picked_image`: same
+    // prefix, tag added, Drop-owned.
+    let dir = tmp_dir("image-non-image");
     let path = dir.join("notes.txt");
     std::fs::write(&path, b"hello").unwrap();
     let result = read_file_bytes(path.to_string_lossy().into()).await;

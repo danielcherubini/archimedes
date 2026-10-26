@@ -13,14 +13,22 @@ use archimedes_lib::agent::SessionInfo;
 use archimedes_lib::storage::Db;
 use serde_json::json;
 
-/// A temp `Db` (a fresh file per test — `Db` is a single
-/// `rusqlite::Connection` behind a `std::sync::Mutex`).
-fn temp_db() -> (Arc<Db>, std::path::PathBuf) {
-    let dir = std::env::temp_dir().join(format!("harness-store-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
+/// A temp `Db` with its scratch dir OWNED (#96 task 06). The guard is FIRST:
+/// destructured locals drop in reverse declaration order, so the `Db` — whose
+/// SQLite file lives INSIDE `dir` — closes before `dir` is removed. That is
+/// what Windows needs and Linux cannot show (a probe outside this repo
+/// confirmed `remove_dir_all` succeeds there even with the handle open).
+///
+/// The old signature was `(Arc<Db>, PathBuf)`, and every caller bound the
+/// `PathBuf` as `_dir` — a name that owned nothing, so all five dirs leaked.
+///
+/// A fresh file per test — `Db` is a single `rusqlite::Connection` behind a
+/// `std::sync::Mutex`.
+fn temp_db() -> (archimedes_lib::test_support::ScratchDir, Arc<Db>) {
+    let dir = archimedes_lib::test_support::ScratchDir::in_env_temp("harness-store-", "db");
     let path = dir.join("db.sqlite");
     let db = Arc::new(Db::open(&path).unwrap());
-    (db, dir)
+    (dir, db)
 }
 
 /// A `sessions` row (the display `messages` table AND `native_messages`
@@ -59,7 +67,7 @@ fn assistant(text: &str) -> ChatMessage {
 
 #[test]
 fn insert_and_load_round_trip() {
-    let (db, _dir) = temp_db();
+    let (_dir, db) = temp_db();
     record_session(&db, "s1");
     let store = SessionStore::new(db.clone());
 
@@ -94,7 +102,7 @@ fn insert_and_load_round_trip() {
 
 #[test]
 fn insert_is_idempotent_on_conflict() {
-    let (db, _dir) = temp_db();
+    let (_dir, db) = temp_db();
     record_session(&db, "s1");
     let store = SessionStore::new(db.clone());
 
@@ -114,7 +122,7 @@ fn insert_is_idempotent_on_conflict() {
 
 #[test]
 fn clear_messages_clears_native_but_not_display() {
-    let (db, _dir) = temp_db();
+    let (_dir, db) = temp_db();
     let store = SessionStore::new(db.clone());
     record_session(&db, "s1");
     // A display row (the `record_message` upsert — the display
@@ -148,7 +156,7 @@ fn tool_transcript_round_trip_preserves_tool_calls_and_ids() {
     // + a `tool` result message (with `tool_call_id`) must round-trip
     // through `content_json` with the tool-call arguments and the
     // result's `tool_call_id` intact.
-    let (db, _dir) = temp_db();
+    let (_dir, db) = temp_db();
     record_session(&db, "s1");
     let store = SessionStore::new(db.clone());
 
@@ -206,7 +214,7 @@ fn tool_transcript_round_trip_preserves_tool_calls_and_ids() {
 
 #[test]
 fn display_record_is_independent_of_native_messages() {
-    let (db, _dir) = temp_db();
+    let (_dir, db) = temp_db();
     let store = SessionStore::new(db.clone());
     record_session(&db, "s1");
 
@@ -219,5 +227,62 @@ fn display_record_is_independent_of_native_messages() {
     assert!(
         store.load_messages("s1").unwrap().is_empty(),
         "a display row never lands in native_messages"
+    );
+}
+
+/// #96 task 06: the store fixture must OWN its scratch. `temp_db()` handed
+/// back a bare `PathBuf` and every caller bound it as `_dir` — a name that
+/// owns nothing — so all five dirs outlived the run (100 of them on disk,
+/// 5 per run). The GREEN half of this assertion is the real win in this
+/// file; the drop is what makes the panic path cost nothing.
+#[test]
+fn the_temp_db_fixture_removes_its_scratch_when_its_owner_is_dropped() {
+    let (dir, db) = temp_db();
+    record_session(&db, "s1");
+    let captured = dir.to_path_buf();
+    assert!(captured.is_dir(), "the fixture created its scratch dir");
+    // `drop((a, b))` drops LEFT then RIGHT, so the `Db` closes before the
+    // dir holding its SQLite file is removed — correct for BOTH the old
+    // `(db, dir)` and the new `(dir, db)` shape, which is what lets this
+    // test compile at RED and only need a REBIND at GREEN.
+    drop((db, dir));
+    assert!(
+        !captured.exists(),
+        "the fixture's scratch goes with its owner: {captured:?}"
+    );
+}
+
+/// The panic path: an assertion that FAILS while the fixture still owns its
+/// scratch must not leave it behind. The guard is MOVED INTO the panicking
+/// scope — that is the value the unwind drops (the `test_support` /
+/// `agent/mcp/oauth.rs` precedent). What this does NOT pin is #96's headline
+/// case — a test failing with its guard as a plain local, so the HARNESS's
+/// own unwind would have to remove the dir — because Rust makes no portable
+/// guarantee there and status-doc D10 assigns that case to task 09's census.
+#[test]
+fn a_panicking_assertion_still_removes_the_temp_db_scratch() {
+    let captured = {
+        let (dir, db) = temp_db();
+        let p = dir.to_path_buf();
+        assert!(p.is_dir(), "the fixture created its scratch dir");
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            // ONE tuple binding, not a destructure: a tuple VALUE drops
+            // left-to-right (`db` closes, then `dir` is removed), while
+            // `let (a, b) = tuple` would create two locals and drop them in
+            // REVERSE declaration order — which would remove the dir under
+            // the still-open SQLite handle. Both orders pass on Linux; only
+            // the first is correct on Windows.
+            let _fixture = (db, dir);
+            assert_eq!(
+                1, 2,
+                "an assertion fails while the fixture owns its scratch"
+            );
+        }));
+        assert!(r.is_err(), "the assertion failed as arranged");
+        p
+    };
+    assert!(
+        !captured.exists(),
+        "the unwind ran the removal: {captured:?}"
     );
 }

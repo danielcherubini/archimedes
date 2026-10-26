@@ -696,10 +696,13 @@ mod tests {
 
     /// A throwaway directory to seed crash logs into (the selector takes
     /// the directory — that is the whole point of Task 6's seam).
-    fn crash_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("crashsel-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).expect("the crash dir is creatable");
-        dir
+    ///
+    /// An owning [`ScratchDir`](crate::test_support::ScratchDir) (#96 task 04):
+    /// this used to mint a bare `crashsel-{uuid}` and remove nothing, leaking
+    /// one dir per test per run. The prefix stays VERBATIM — only the tag is
+    /// new — so #96's census keeps attributing it here.
+    fn crash_dir() -> crate::test_support::ScratchDir {
+        crate::test_support::ScratchDir::in_env_temp("crashsel-", "select")
     }
 
     /// Attribution is by IDENTITY, not by recency: with N concurrent
@@ -786,11 +789,10 @@ mod tests {
 
     #[test]
     fn sink_frame_interactive_event_todos_update_persists_for_main_not_subagent() {
-        let dir = std::env::temp_dir().join(format!("router-todos-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::ScratchDir::in_env_temp("router-todos-", "persist");
         let db = Arc::new(crate::storage::Db::open(&dir.join("t.db")).unwrap());
 
-        let mut manager = SessionManager::new(dir.clone());
+        let mut manager = SessionManager::new(dir.to_path_buf());
         manager.attach_db(db.clone());
 
         struct LocalTestSink {
@@ -814,7 +816,7 @@ mod tests {
 
         db.record_session(&crate::agent::SessionInfo {
             session_id: main_sid.to_string(),
-            cwd: dir.clone(),
+            cwd: dir.to_path_buf(),
             capabilities: serde_json::Value::Null,
             config_options: None,
             archived: false,
@@ -826,7 +828,7 @@ mod tests {
 
         db.record_session(&crate::agent::SessionInfo {
             session_id: sub_sid.to_string(),
-            cwd: dir.clone(),
+            cwd: dir.to_path_buf(),
             capabilities: serde_json::Value::Null,
             config_options: None,
             archived: false,
@@ -904,7 +906,5 @@ mod tests {
             assert_eq!(frames[1].0, "interactive-event");
             assert_eq!(frames[1].1, sub_payload);
         }
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

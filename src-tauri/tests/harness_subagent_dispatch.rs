@@ -125,13 +125,17 @@ async fn build_harness(
     provider: MockProvider,
     subagent_manager: Option<Arc<SubagentSessionManager>>,
 ) -> (
+    archimedes_lib::test_support::ScratchDir,
     mpsc::Sender<Prompt>,
     mpsc::UnboundedReceiver<RpcEvent>,
     mpsc::UnboundedReceiver<(String, Value)>,
     SessionStore,
 ) {
-    let dir = std::env::temp_dir().join(format!("harness-subagent-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
+    // The guard comes back FIRST: a destructured tuple drops in REVERSE
+    // declaration order, so `_dir` drops LAST — after `_store`, which holds
+    // the `Arc<Db>` whose SQLite file lives inside the dir. That is the
+    // Windows-critical edge (Linux unlinks happily with the handle open).
+    let dir = archimedes_lib::test_support::ScratchDir::in_env_temp("harness-subagent-", "db");
     let db = Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
     db.record_session(&archimedes_lib::agent::SessionInfo {
         session_id: "ns1".to_string(),
@@ -158,7 +162,7 @@ async fn build_harness(
     let model = parent_model();
     let loop_ = archimedes_lib::agent::harness::AgentLoop::new(
         "ns1".to_string(),
-        dir,
+        dir.to_path_buf(),
         model,
         Box::new(provider),
         Default::default(),
@@ -188,7 +192,7 @@ async fn build_harness(
     // Reap the task on drop (the tests don't await it — the `events`
     // channel is the observation point).
     drop(task);
-    (prompt_tx, events_rx, sink_rx, store)
+    (dir, prompt_tx, events_rx, sink_rx, store)
 }
 
 /// Wait up to `timeout` for a predicate over the collected `RpcEvent`s.
@@ -274,7 +278,7 @@ async fn native_subagent_tool_spawns_a_worker_child_and_captures_the_result() {
         ]),
     ]);
 
-    let (prompt_tx, mut events, _sink, _store) =
+    let (_dir, prompt_tx, mut events, _sink, _store) =
         build_harness(provider, Some(subagent_manager)).await;
 
     let _ = prompt_tx
@@ -404,7 +408,7 @@ async fn native_subagent_tool_without_a_manager_returns_an_error_result() {
         ]),
     ]);
 
-    let (prompt_tx, mut events, _sink, _store) = build_harness(provider, None).await;
+    let (_dir, prompt_tx, mut events, _sink, _store) = build_harness(provider, None).await;
 
     let _ = prompt_tx
         .send(Prompt {

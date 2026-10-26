@@ -1,6 +1,6 @@
 use super::support::{
-    assert_readdir_disagrees_with_sorted_order, git_repo, tmp_dir, touch, ungrammatical_fixture,
-    write,
+    assert_readdir_disagrees_with_sorted_order, git_repo, tmp_dir, tmpfs_dir, touch,
+    ungrammatical_fixture, write,
 };
 use crate::commands::files::{collect_files, list_space_files};
 
@@ -299,6 +299,13 @@ fn collect_files_does_not_let_a_gitignore_above_the_git_root_reach_in() {
 #[cfg(unix)]
 #[test]
 fn collect_files_skips_an_unreadable_subdirectory_without_losing_the_listing() {
+    // KNOWN RESIDUAL (recorded, not closed): this fixture chmods `locked` to
+    // `0o000` and restores it only AFTER `catch_unwind`. If the walk PANICS,
+    // the restore never runs and the guard's `remove_dir_all` then fails on the
+    // unreadable child, so a FAILING run can still leave this one dir behind.
+    // The #96 acceptance census measures a GREEN run, so it does not affect the
+    // measurement; closing it would mean a chmod-restoring guard this shared
+    // type does not offer.
     use std::os::unix::fs::PermissionsExt;
     let root = tmp_dir("unreadable");
     touch(&root, "a.txt");
@@ -359,7 +366,8 @@ fn collect_files_caps_and_reports_truncation() {
 
 #[test]
 fn collect_files_truncation_keeps_the_alphabetically_first_entries_not_readdir_order() {
-    let root = tmp_dir("cap-order");
+    // tmpfs-backed, same reason as `completion_dir_truncates_at_the_cap`.
+    let root = tmpfs_dir("cap-order");
     let names: Vec<String> = ('a'..='l').map(|c| format!("{c}.txt")).collect();
     for name in &names {
         touch(&root, name);

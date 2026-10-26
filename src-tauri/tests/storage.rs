@@ -11,8 +11,96 @@ use std::path::PathBuf;
 use archimedes_lib::agent::SessionInfo;
 use archimedes_lib::storage::Db;
 
-fn temp_db_path() -> PathBuf {
-    std::env::temp_dir().join(format!("archimedes-storage-test-{}", uuid::Uuid::new_v4()))
+/// A scratch dir plus the path of a database file inside it. The guard is
+/// FIRST in the tuple on purpose: destructured locals drop in reverse
+/// declaration order, so the `Db` opened at `path` closes before the dir
+/// holding it is removed (#96's Windows half — Unix tolerates the unlink,
+/// Windows does not, and no Windows run has been performed from this box).
+fn temp_db(tag: &str) -> (archimedes_lib::test_support::ScratchDir, PathBuf) {
+    let dir =
+        archimedes_lib::test_support::ScratchDir::in_env_temp("archimedes-storage-test-", tag);
+    let path = dir.join("t.db");
+    (dir, path)
+}
+
+/// A path that is deliberately NEVER created — the `space_trusted`
+/// canonicalize-failure probe. It owns nothing because it makes nothing;
+/// converting it to a guard would create the very directory whose absence
+/// the assertion depends on.
+fn missing_db_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "archimedes-storage-test-missing-{}",
+        uuid::Uuid::new_v4()
+    ))
+}
+
+/// #96: the storage fixture must OWN its scratch. `temp_db_path()` used to hand
+/// back a bare `PathBuf` naming a file in the temp dir, so nothing removed it
+/// if an assertion failed first. The GREEN half of this assertion is the real
+/// win in this file (one dir per run, measured); the drop is what makes the
+/// panic path cost nothing.
+#[test]
+fn the_temp_db_fixture_removes_its_scratch_when_its_owner_is_dropped() {
+    let (dir, path) = temp_db("drop-guard");
+    let db = Db::open(&path).expect("db should open");
+    db.record_session(&sample_session())
+        .expect("record_session should succeed");
+    // The DIR, not the file inside it — the guard owns the dir and the db file
+    // (`t.db`) goes down with the whole tree.
+    let captured = dir.to_path_buf();
+    assert!(captured.exists(), "Db::open created the fixture dir");
+    assert!(path.exists(), "Db::open created the db file inside it");
+    // The guard is dropped LAST (reverse declaration order), i.e. after the
+    // `Db` — the ordering Windows needs and Linux cannot show.
+    drop((db, dir));
+    assert!(
+        !captured.exists(),
+        "the fixture's scratch goes with its owner: {captured:?}"
+    );
+}
+
+/// The panic path: an assertion that FAILS while the fixture still owns its
+/// scratch must not leave it behind. The guard is MOVED INTO the panicking
+/// scope — that is the value the unwind drops (the `test_support` /
+/// `agent/mcp/oauth.rs` precedent). What this does NOT pin is #96's headline
+/// case — a test failing with its guard as a plain local, so the HARNESS's own
+/// unwind would have to remove the dir — because Rust makes no portable
+/// guarantee there and status-doc D10 assigns that case to task 09's census.
+#[test]
+fn a_panicking_assertion_still_removes_the_temp_db_scratch() {
+    let (dir, path) = temp_db("panic-guard");
+    let captured = {
+        let db = Db::open(&path).expect("db should open");
+        let p = dir.to_path_buf();
+        assert!(p.is_dir(), "the guard created its dir");
+        assert!(path.exists(), "Db::open created the db file inside it");
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            // The guard MOVES into the panicking scope: that is the value the
+            // unwind drops. Created outside the closure, this asserts nothing.
+            //
+            // ONE tuple VALUE, bound to a single name — NOT `let (_db, _path,
+            // _dir) = (db, path, dir);`. That destructures into three locals, and
+            // locals drop in REVERSE declaration order, so `_dir` would go FIRST:
+            // the dir is removed while the SQLite handle inside it is still open.
+            // Linux unlinks happily so the test passes there; Windows refuses the
+            // removal and `ScratchDir::drop`'s `let _ =` swallows it, so the dir
+            // survives and this assertion fails — which is exactly what it did on
+            // CI's windows-latest leg. A tuple VALUE drops left-to-right, so `db`
+            // closes before `dir` is removed: the ordering Windows needs and Linux
+            // cannot show. Same reasoning as `harness_store.rs`'s panic test.
+            let _fixture = (db, path, dir);
+            assert_eq!(
+                1, 2,
+                "an assertion fails while the fixture owns its scratch"
+            );
+        }));
+        assert!(r.is_err(), "the assertion failed as arranged");
+        p
+    };
+    assert!(
+        !captured.exists(),
+        "the unwind ran the removal: {captured:?}"
+    );
 }
 
 fn sample_session() -> SessionInfo {
@@ -34,7 +122,7 @@ fn sample_session() -> SessionInfo {
 
 #[test]
 fn records_sessions_and_messages_with_upsert_semantics() {
-    let path = temp_db_path();
+    let (_dir, path) = temp_db("upsert-semantics");
     let db = Db::open(&path).expect("db should open");
 
     let session = sample_session();
@@ -115,8 +203,6 @@ fn records_sessions_and_messages_with_upsert_semantics() {
             .is_empty(),
         "messages must be removed with their session (ON DELETE CASCADE)"
     );
-
-    let _ = std::fs::remove_file(&path);
 }
 
 /// (finding 10) `native_messages` must NOT be orphaned on session delete:
@@ -125,7 +211,7 @@ fn records_sessions_and_messages_with_upsert_semantics() {
 /// foreign_keys` is on), while an unrelated session's rows survive.
 #[test]
 fn delete_session_cascades_native_messages() {
-    let path = temp_db_path();
+    let (_dir, path) = temp_db("cascade");
     let db = Db::open(&path).expect("db should open");
 
     let session = sample_session(); // sess-1
@@ -159,8 +245,6 @@ fn delete_session_cascades_native_messages() {
         1,
         "an unrelated session's native_messages rows survive"
     );
-
-    let _ = std::fs::remove_file(&path);
 }
 
 /// (finding 10) Pre-existing databases: a `native_messages` table that
@@ -169,8 +253,8 @@ fn delete_session_cascades_native_messages() {
 /// the pre-existing rows survive, and a session delete cascades.
 #[test]
 fn native_messages_fk_migrated_on_preexisting_databases() {
-    let base = std::env::temp_dir().join(format!("archimedes-native-mig-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&base).expect("base dir");
+    let base =
+        archimedes_lib::test_support::ScratchDir::in_env_temp("archimedes-native-mig-", "scratch");
     let path = base.join("archimedes.db");
     // A pre-migration database: the OLD `native_messages` (no FK) with a
     // row, plus a session row for it.
@@ -232,8 +316,6 @@ fn native_messages_fk_migrated_on_preexisting_databases() {
         .load_native_messages("sess-1")
         .expect("load_native_messages reopen")
         .is_empty());
-
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// The `replace_native_messages` rewrite (the `run_compaction` seam):
@@ -242,7 +324,7 @@ fn native_messages_fk_migrated_on_preexisting_databases() {
 /// an empty / partial transcript.
 #[test]
 fn replace_native_messages_replaces_the_transcript() {
-    let path = temp_db_path();
+    let (_dir, path) = temp_db("replace-native");
     let db = Db::open(&path).expect("db should open");
     db.record_session(&sample_session())
         .expect("record_session");
@@ -271,13 +353,11 @@ fn replace_native_messages_replaces_the_transcript() {
     );
     assert_eq!(rows[0], r#"{"a":"summary"}"#);
     assert_eq!(rows[1], r#"{"a":100}"#);
-
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
 fn reopens_an_existing_database() {
-    let path = temp_db_path();
+    let (_dir, path) = temp_db("reopen");
     {
         let db = Db::open(&path).expect("db should open");
         let session = sample_session();
@@ -290,12 +370,11 @@ fn reopens_an_existing_database() {
     let db = Db::open(&path).expect("db should reopen");
     assert_eq!(db.list_sessions(true).expect("list_sessions").len(), 1);
     assert_eq!(db.messages_for("sess-1").expect("messages_for").len(), 1);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
 fn spaces_upsert_find_delete() {
-    let path = temp_db_path();
+    let (_dir, path) = temp_db("spaces-crud");
     let db = Db::open(&path).expect("db should open");
 
     assert!(
@@ -351,8 +430,6 @@ fn spaces_upsert_find_delete() {
         pb.created_at > pa_before.created_at,
         "a recreated space gets a fresh created_at"
     );
-
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The ordering half of the old `spaces_upsert_find_delete_and_order`, asserted
@@ -362,7 +439,7 @@ fn spaces_upsert_find_delete() {
 /// (ADR 0075 — `docs/decisions/0075-list-position-is-not-evidence.md`).
 #[test]
 fn space_retouch_keeps_its_position_and_new_rows_join_last() {
-    let path = temp_db_path();
+    let (_dir, path) = temp_db("retouch");
     let db = Db::open(&path).expect("db should open");
 
     // The paths are upserted in a NON-alphabetical order, so a list that fell
@@ -397,14 +474,12 @@ fn space_retouch_keeps_its_position_and_new_rows_join_last() {
         vec!["/tmp/pz", "/tmp/pm", "/tmp/pa", "/tmp/pd"],
         "a NEW row joins at the bottom, whatever its timestamp or name"
     );
-
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
 fn open_backfills_space_rows_from_existing_sessions() {
-    let base = std::env::temp_dir().join(format!("archimedes-spaces-bk-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&base).expect("base dir");
+    let base =
+        archimedes_lib::test_support::ScratchDir::in_env_temp("archimedes-spaces-bk-", "scratch");
     let cwd_a = base.join("cwd_a");
     let cwd_b = base.join("cwd_b");
     // These MUST exist for the backfill's canonicalization.
@@ -490,8 +565,6 @@ fn open_backfills_space_rows_from_existing_sessions() {
         before, after,
         "the backfill must not refresh last_opened_at or created_at"
     );
-
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
@@ -500,14 +573,15 @@ fn spaces_trusted_column_fresh_and_migrated() {
     // FIRST so `space_trusted`'s canonicalize succeeds and the assertion
     // actually exercises the fresh-DB default (a missing dir makes
     // canonicalize fail → fail-closed `Ok(false)` regardless of the default).
-    let dir =
-        std::env::temp_dir().join(format!("archimedes-trusted-fresh-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).expect("fresh dir");
+    let dir = archimedes_lib::test_support::ScratchDir::in_env_temp(
+        "archimedes-trusted-fresh-",
+        "scratch",
+    );
     let p = std::fs::canonicalize(&dir)
         .expect("canonical fresh dir")
         .display()
         .to_string();
-    let fresh = temp_db_path();
+    let (_fresh_dir, fresh) = temp_db("fresh-db");
     let db = Db::open(&fresh).expect("db should open");
     db.upsert_space(&p, false).expect("upsert_space");
     assert!(
@@ -517,12 +591,11 @@ fn spaces_trusted_column_fresh_and_migrated() {
     let spaces = db.list_spaces().expect("list_spaces");
     assert_eq!(spaces.len(), 1);
     assert!(!spaces[0].trusted, "fresh row defaults to untrusted");
-    let _ = std::fs::remove_file(&fresh);
 
     // (b) Pre-migration database: a `spaces` table with the OLD 3-column
     // schema, then `Db::open` must `ALTER TABLE` it into shape.
-    let base = std::env::temp_dir().join(format!("archimedes-spaces-mig-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&base).expect("base dir");
+    let base =
+        archimedes_lib::test_support::ScratchDir::in_env_temp("archimedes-spaces-mig-", "scratch");
     let cwd = base.join("proj");
     std::fs::create_dir_all(&cwd).expect("proj dir");
     let p = std::fs::canonicalize(&cwd)
@@ -568,16 +641,14 @@ fn spaces_trusted_column_fresh_and_migrated() {
     let spaces3 = db3.list_spaces().expect("list_spaces");
     assert_eq!(spaces3.len(), 1);
     assert!(!spaces3[0].trusted);
-
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
 fn set_space_trusted_updates_and_flag_reads() {
-    let path = temp_db_path();
+    let (_db_dir, path) = temp_db("trusted-t");
     let db = Db::open(&path).expect("db should open");
-    let dir = std::env::temp_dir().join(format!("archimedes-trusted-t-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).expect("dir");
+    let dir =
+        archimedes_lib::test_support::ScratchDir::in_env_temp("archimedes-trusted-t-", "scratch");
     let p = std::fs::canonicalize(&dir)
         .expect("canonical dir")
         .display()
@@ -611,14 +682,11 @@ fn set_space_trusted_updates_and_flag_reads() {
             .expect("set on a missing row is a no-op"),
         "a missing row updates nothing (false, not an error)"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
 fn space_trusted_fail_closed() {
-    let path = temp_db_path();
+    let (_dir, path) = temp_db("fail-closed");
     let db = Db::open(&path).expect("db should open");
     // No row for the path: fail-closed, not an error.
     assert!(
@@ -627,13 +695,12 @@ fn space_trusted_fail_closed() {
         "a missing row is untrusted (fail-closed)"
     );
     // Canonicalize failure: fail-closed, not an error.
-    let gone = temp_db_path().with_extension("does-not-exist");
+    let gone = missing_db_path();
     assert!(
         !db.space_trusted(&gone)
             .expect("space_trusted must not error on a canonicalize failure"),
         "a canonicalize failure is untrusted (fail-closed)"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The `spaces` table has ONE key form (ADR 0010: the canonical path), shared
@@ -642,7 +709,8 @@ fn space_trusted_fail_closed() {
 #[cfg(unix)]
 #[test]
 fn space_methods_agree_on_the_canonical_key() {
-    let base = std::env::temp_dir().join(format!("archimedes-canonical-{}", uuid::Uuid::new_v4()));
+    let base =
+        archimedes_lib::test_support::ScratchDir::in_env_temp("archimedes-canonical-", "scratch");
     let real = base.join("real");
     std::fs::create_dir_all(&real).expect("real dir");
     let link = base.join("link");
@@ -684,8 +752,6 @@ fn space_methods_agree_on_the_canonical_key() {
             .expect("set on a missing row is not an error"),
         "a missing row updates nothing"
     );
-
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// INVARIANT (issue #44, `docs/roadmap/readable-ipc-errors.md` Task 4): for
@@ -727,8 +793,10 @@ fn space_methods_agree_on_the_canonical_key() {
 /// canonicalizes for the same reason.
 #[test]
 fn the_session_cwd_string_and_the_space_path_key_are_the_same_string() {
-    let base =
-        std::env::temp_dir().join(format!("archimedes-cwd-coupling-{}", uuid::Uuid::new_v4()));
+    let base = archimedes_lib::test_support::ScratchDir::in_env_temp(
+        "archimedes-cwd-coupling-",
+        "scratch",
+    );
     std::fs::create_dir_all(base.join("space")).expect("space dir");
     let db_path = base.join("archimedes.db");
 
@@ -780,6 +848,4 @@ fn the_session_cwd_string_and_the_space_path_key_are_the_same_string() {
          change to either side (e.g. stripping the Windows verbatim prefix) has \
          to be applied to BOTH in the same change"
     );
-
-    let _ = std::fs::remove_dir_all(&base);
 }
