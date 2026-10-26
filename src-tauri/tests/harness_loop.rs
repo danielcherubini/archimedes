@@ -110,10 +110,10 @@ fn test_model(context_window: u32) -> Model {
     }
 }
 
-fn temp_cwd() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("harness-loop-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// The loop's `space_cwd`, OWNED (#96 task 06). Absorbed into `Harness` as a
+/// trailing field by its only caller — it never needs to escape the builder.
+fn temp_cwd() -> archimedes_lib::test_support::ScratchDir {
+    archimedes_lib::test_support::ScratchDir::in_env_temp("harness-loop-", "cwd")
 }
 
 struct Harness {
@@ -126,6 +126,14 @@ struct Harness {
     /// every turn stays on disk for the whole test — `None` = the loop has
     /// no `config_dir` at all).
     _config_dir: Option<TempDir>,
+    /// The `Db` dir (#96 task 06). LAST-BUT-ONE on purpose: struct fields drop
+    /// in DECLARATION order, so this goes after `store` — which is what holds
+    /// the `Arc<Db>` whose SQLite file lives inside it.
+    _dir: archimedes_lib::test_support::ScratchDir,
+    /// The loop's `space_cwd` (#96 task 06), also AFTER `store` for the same
+    /// reason. The loop task can outlive it on a FAILING assertion — recorded
+    /// limit, see the plan's CRUX section (task 03's identical limit).
+    _cwd: archimedes_lib::test_support::ScratchDir,
 }
 
 /// A temp dir removed on drop (the settings fixture must outlive the loop's
@@ -168,8 +176,10 @@ async fn build_harness_with_settings(
     if let (Some(dir), Some(json)) = (config_dir.as_ref(), settings) {
         std::fs::write(dir.join("settings.json"), json).unwrap();
     }
-    let dir = std::env::temp_dir().join(format!("harness-loop-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = archimedes_lib::test_support::ScratchDir::in_env_temp("harness-loop-", "db");
+    // The loop's `space_cwd` — its own guard, same prefix, different tag, so
+    // one census glob still covers both dirs.
+    let cwd = temp_cwd();
     let db = Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
     // The `native_messages` rows FK to `sessions`: record the test session
     // so transcript inserts (and the `run_compaction` rewrite) are valid.
@@ -201,7 +211,7 @@ async fn build_harness_with_settings(
     let (settle_tx, _settle_rx) = watch::channel(0u64);
     let loop_ = archimedes_lib::agent::harness::AgentLoop::new(
         "ns1".to_string(),
-        temp_cwd(),
+        cwd.to_path_buf(),
         model,
         Box::new(provider),
         ModelCatalog {
@@ -235,6 +245,8 @@ async fn build_harness_with_settings(
             pending,
             store,
             _config_dir: config_dir.map(TempDir),
+            _dir: dir,
+            _cwd: cwd,
         },
         task,
     )

@@ -103,8 +103,10 @@ fn subagent_start(session_id: &str, cwd: &str) -> StartEnv {
 /// and the `user` transcript row are the proof).
 #[tokio::test]
 async fn a_prompt_larger_than_the_pipe_bound_reaches_the_loop() {
-    let dir = std::env::temp_dir().join(format!("worker-stdin-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
+    // The child's `StartEnv` cwd, OWNED (#96 task 06). Declared FIRST so it
+    // drops LAST — after the `child.kill().await` reap below, which is a
+    // statement and so runs before any local's `Drop` at scope exit.
+    let dir = archimedes_lib::test_support::ScratchDir::in_env_temp("worker-stdin-", "cwd");
 
     let mut child = spawn_worker().spawn().expect("the worker starts");
     let mut reader = tokio::io::BufReader::new(child.stdout.take().expect("stdout is piped"));
@@ -223,5 +225,4 @@ async fn a_prompt_larger_than_the_pipe_bound_reaches_the_loop() {
 
     writer.abort();
     let _ = child.kill().await;
-    let _ = std::fs::remove_dir_all(&dir);
 }

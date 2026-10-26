@@ -18,7 +18,7 @@
 //! `WorkerFactory` seam makes this direct).
 
 use std::borrow::Cow;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,11 +47,11 @@ impl WorkerFactory for RealWorkerFactory {
     }
 }
 
-/// A unique temp dir.
-fn temp_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("worker-e2e-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A unique temp dir, OWNED (#96 task 06): the dir and everything in it is
+/// removed when the guard drops. NOT `Clone` — `to_path_buf()` is the escape
+/// hatch for a call site that needs an owned `PathBuf`.
+fn temp_dir() -> archimedes_lib::test_support::ScratchDir {
+    archimedes_lib::test_support::ScratchDir::in_env_temp("worker-e2e-", "scratch")
 }
 
 /// A wiremock-backed OpenAI-compatible model (the `harness/provider.rs`
@@ -141,6 +141,11 @@ struct E2e {
     /// call's `tool_execution_start`).
     collected_events: Vec<(String, bool, WorkerInboundEvent)>,
     collected_sink: Vec<(String, Value)>,
+    /// The `Db` dir, LAST field on purpose (#96 task 06): struct fields drop
+    /// in DECLARATION order, so this goes after `db` and `persister` — the
+    /// SQLite handle living inside the dir closes BEFORE the dir holding it is
+    /// removed. Linux unlinks happily with the handle open; Windows refuses.
+    _dir: archimedes_lib::test_support::ScratchDir,
 }
 
 impl E2e {
@@ -182,6 +187,7 @@ impl E2e {
             sink,
             collected_events: Vec::new(),
             collected_sink: Vec::new(),
+            _dir: dir,
         }
     }
 
@@ -317,6 +323,10 @@ fn tool_execution_end(
 /// `enabled_tools` rides the HARNESS convention verbatim — `Some(v)` =
 /// exactly `v`). NO `settings.json` is written, so the Worker runs on the
 /// all-`Allow` file-access default (ADR 0030).
+///
+/// Returns the `config_dir` guard WITH the env (#96 task 06): `StartEnv`
+/// carries only the `display()` string, so a guard dropped at the end of this
+/// builder would delete the `settings.json` the child has not read yet.
 fn start_env(
     session_id: &str,
     cwd: &Path,
@@ -325,7 +335,7 @@ fn start_env(
     trusted: bool,
     enabled_tools: Option<Vec<String>>,
     subagent_enabled: bool,
-) -> StartEnv {
+) -> (StartEnv, archimedes_lib::test_support::ScratchDir) {
     start_env_with_file_policy(
         session_id,
         cwd,
@@ -342,6 +352,15 @@ fn start_env(
 /// is written into the temp `config_dir` BEFORE the env is returned, so the
 /// Worker's per-turn read (ADR 0030 Deviation 4) sees the pinned policy from
 /// its first tool call. `None` = no file at all (the default).
+///
+/// The `config_dir` guard comes back as the tuple's SECOND element (#96 task
+/// 06) — LOAD-BEARING, not tidiness: `StartEnv` carries only
+/// `config_dir.display().to_string()`, so if the guard were a local of this
+/// builder it would drop HERE and remove the `settings.json` before the child
+/// ever read it. That would break
+/// `permission_round_trip_real_worker` in a way that looks like a policy bug.
+/// The tests bind it FIRST in their own bodies, which is what makes it drop
+/// LAST there — after the `detach` reap.
 // The Worker's start envelope IS 8 positional knobs; a struct would obscure
 // which `StartEnv` field each test pins (and this mirrors `start_env`).
 #[allow(clippy::too_many_arguments)]
@@ -354,7 +373,7 @@ fn start_env_with_file_policy(
     enabled_tools: Option<Vec<String>>,
     subagent_enabled: bool,
     file_policy: Option<archimedes_lib::agent::policy::FilePolicy>,
-) -> StartEnv {
+) -> (StartEnv, archimedes_lib::test_support::ScratchDir) {
     let config_dir = temp_dir();
     if let Some(policy) = file_policy {
         std::fs::write(
@@ -366,19 +385,22 @@ fn start_env_with_file_policy(
         )
         .expect("the settings file is written");
     }
-    StartEnv::from_parts(
-        session_id.to_string(),
-        cwd.display().to_string(),
-        archimedes_lib::agent::worker::protocol::StartMode::Fresh,
-        None,
-        model,
-        catalog,
-        None,
-        trusted,
-        enabled_tools,
-        config_dir.display().to_string(),
-        subagent_enabled,
-        None,
+    (
+        StartEnv::from_parts(
+            session_id.to_string(),
+            cwd.display().to_string(),
+            archimedes_lib::agent::worker::protocol::StartMode::Fresh,
+            None,
+            model,
+            catalog,
+            None,
+            trusted,
+            enabled_tools,
+            config_dir.display().to_string(),
+            subagent_enabled,
+            None,
+        ),
+        config_dir,
     )
 }
 
@@ -420,7 +442,7 @@ async fn full_turn_real_worker_canned_provider() {
     )
     .await;
     let cwd = temp_dir();
-    let env = start_env(
+    let (env, _config_dir) = start_env(
         "e2e-full",
         &cwd,
         wire_model(&server, "e2e-model"),
@@ -703,7 +725,7 @@ async fn permission_round_trip_real_worker() {
     )
     .await;
     let cwd = temp_dir();
-    let env = start_env_with_file_policy(
+    let (env, _config_dir) = start_env_with_file_policy(
         "e2e-perm",
         &cwd,
         wire_model(&server, "e2e-model"),
@@ -883,7 +905,7 @@ async fn crash_path_on_crash_fires_and_rows_stay_intact() {
         thinking_levels: Vec::new(),
         api: Some("openai-completions".to_string()),
     };
-    let env = start_env(
+    let (env, _config_dir) = start_env(
         "e2e-crash",
         &cwd,
         dead_model.clone(),
@@ -1064,7 +1086,7 @@ async fn subagent_dispatch_end_to_end_real_workers() {
     // span (the `_lock` guard); no other thread mutates HOME
     // concurrently.
     unsafe {
-        std::env::set_var("HOME", &home);
+        std::env::set_var("HOME", home.path());
     }
 
     let mut h = E2e::new().await;
@@ -1100,7 +1122,7 @@ async fn subagent_dispatch_end_to_end_real_workers() {
         models: vec![main_model.clone(), sub_model],
         ..Default::default()
     };
-    let env = start_env(
+    let (env, _config_dir) = start_env(
         "e2e-sub",
         &cwd,
         main_model.clone(),
@@ -1405,7 +1427,7 @@ async fn a_child_with_a_tools_list_and_an_empty_body_gets_no_main_prompt() {
     // SAFETY: the `ENV_LOCK` is held for the whole set→assert→restore
     // span (the `_lock` guard); no other thread mutates HOME concurrently.
     unsafe {
-        std::env::set_var("HOME", &home);
+        std::env::set_var("HOME", home.path());
     }
 
     let mut h = E2e::new().await;
@@ -1435,7 +1457,7 @@ async fn a_child_with_a_tools_list_and_an_empty_body_gets_no_main_prompt() {
         models: vec![main_model.clone(), sub_model],
         ..Default::default()
     };
-    let env = start_env(
+    let (env, _config_dir) = start_env(
         "e2e-nochildprompt",
         &cwd,
         main_model.clone(),

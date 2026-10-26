@@ -10,15 +10,15 @@
 //! skill/agent discovery roots, so a file under the SECOND root must be
 //! readable while a path under NO root stays rejected.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use archimedes_lib::agent::{FsBackend, FsError};
 
-/// Create a fresh temp directory to act as the sandbox root.
-fn temp_root() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("fs-backend-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// Create a fresh temp directory to act as the sandbox root, OWNED (#96 task
+/// 06): the guard removes the root and everything under it — including the
+/// symlinks the two `#[cfg(unix)]` tests plant inside — when it drops.
+fn temp_root() -> archimedes_lib::test_support::ScratchDir {
+    archimedes_lib::test_support::ScratchDir::in_env_temp("fs-backend-", "root")
 }
 
 /// A single-root backend (the pre-ADR-0030 shape: `roots == vec![cwd]`).
@@ -42,8 +42,6 @@ fn read_write_round_trip_inside_root() {
         .read(&file)
         .expect("read inside root should succeed");
     assert_eq!(content, "hello world\n");
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -61,8 +59,6 @@ fn write_new_file_under_root_succeeds() {
         .read(&new_file)
         .expect("reading the new file should succeed");
     assert_eq!(content, "fresh content");
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -89,8 +85,6 @@ fn path_escape_via_dotdot_is_rejected() {
         matches!(err, FsError::PathEscape { .. }),
         "dotdot write escape should be PathEscape, got {err:?}"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A symlink inside root that points to a file outside root.
@@ -119,8 +113,6 @@ fn path_escape_via_symlink_is_rejected() {
         matches!(err, FsError::PathEscape { .. }),
         "symlink escape should be PathEscape, got {err:?}"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -140,8 +132,6 @@ fn validate_resolves_valid_path() {
     backend
         .validate(&new_file)
         .expect("a new file under the root validates");
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -156,8 +146,6 @@ fn validate_rejects_escaping_path() {
         matches!(err, FsError::PathEscape { .. }),
         "an escaping path should be PathEscape, got {err:?}"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -180,8 +168,6 @@ fn read_bytes_round_trip_and_rejects_escape() {
         matches!(err, FsError::PathEscape { .. }),
         "an escaping path should be PathEscape, got {err:?}"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 // ── the root SET (ADR 0030) ───────────────────────────────────────────────
@@ -194,7 +180,7 @@ fn a_file_under_a_non_first_root_is_readable() {
     let a = temp_root();
     let b = temp_root();
     let backend = FsBackend {
-        roots: vec![a.clone(), b.clone()],
+        roots: vec![a.to_path_buf(), b.to_path_buf()],
     };
 
     let file = b.join("inside-b.txt");
@@ -206,9 +192,6 @@ fn a_file_under_a_non_first_root_is_readable() {
         .write(&new_file, "fresh")
         .expect("writing under root B should succeed");
     assert_eq!(backend.read(&new_file).unwrap(), "fresh");
-
-    let _ = std::fs::remove_dir_all(&a);
-    let _ = std::fs::remove_dir_all(&b);
 }
 
 /// A path under NEITHER root is still a `PathEscape` — adding roots does not
@@ -221,7 +204,7 @@ fn a_path_under_no_root_at_all_is_rejected() {
     let file = other.join("secret.txt");
     std::fs::write(&file, "secret").unwrap();
     let backend = FsBackend {
-        roots: vec![a.clone(), b.clone()],
+        roots: vec![a.to_path_buf(), b.to_path_buf()],
     };
 
     let err = backend
@@ -231,10 +214,6 @@ fn a_path_under_no_root_at_all_is_rejected() {
         matches!(err, FsError::PathEscape { .. }),
         "expected PathEscape, got {err:?}"
     );
-
-    let _ = std::fs::remove_dir_all(&a);
-    let _ = std::fs::remove_dir_all(&b);
-    let _ = std::fs::remove_dir_all(&other);
 }
 
 /// `..` from a root-B-rooted path into a directory that is NOT a root is
@@ -247,7 +226,7 @@ fn dotdot_from_a_root_into_a_non_root_is_rejected() {
     let sibling = temp_root();
     std::fs::write(sibling.join("secret.txt"), "secret").unwrap();
     let backend = FsBackend {
-        roots: vec![a.clone(), b.clone()],
+        roots: vec![a.to_path_buf(), b.to_path_buf()],
     };
 
     let err = backend
@@ -257,10 +236,6 @@ fn dotdot_from_a_root_into_a_non_root_is_rejected() {
         matches!(err, FsError::PathEscape { .. }),
         "expected PathEscape, got {err:?}"
     );
-
-    let _ = std::fs::remove_dir_all(&a);
-    let _ = std::fs::remove_dir_all(&b);
-    let _ = std::fs::remove_dir_all(&sibling);
 }
 
 /// A symlink INSIDE a non-first root that points outside every root is
@@ -276,7 +251,7 @@ fn a_symlink_inside_a_non_first_root_pointing_outside_is_rejected() {
     std::fs::write(&target, "HONEY").unwrap();
     std::os::unix::fs::symlink(&target, b.join("link")).unwrap();
     let backend = FsBackend {
-        roots: vec![a.clone(), b.clone()],
+        roots: vec![a.to_path_buf(), b.to_path_buf()],
     };
 
     let err = backend
@@ -286,10 +261,6 @@ fn a_symlink_inside_a_non_first_root_pointing_outside_is_rejected() {
         matches!(err, FsError::PathEscape { .. }),
         "expected PathEscape, got {err:?}"
     );
-
-    let _ = std::fs::remove_dir_all(&a);
-    let _ = std::fs::remove_dir_all(&b);
-    let _ = std::fs::remove_dir_all(&outside);
 }
 
 /// An EMPTY root set is a hard error, NOT "unrestricted": fail closed. (The
@@ -315,11 +286,10 @@ fn relative_paths_join_to_the_first_root() {
     let a = temp_root();
     let b = temp_root();
     let backend = FsBackend {
-        roots: vec![a.clone(), b],
+        roots: vec![a.to_path_buf(), b.to_path_buf()],
     };
     std::fs::write(a.join("base.txt"), "A").unwrap();
     assert_eq!(backend.read(Path::new("base.txt")).unwrap(), "A");
-    let _ = std::fs::remove_dir_all(&a);
 }
 
 #[test]
@@ -336,6 +306,4 @@ fn absolute_path_outside_root_is_rejected() {
         matches!(err, FsError::PathEscape { .. }),
         "absolute outside path should be PathEscape, got {err:?}"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }

@@ -93,24 +93,33 @@ fn fixture_path() -> std::path::PathBuf {
 }
 
 /// A temp config + data dir pair (the `settings.json` home + the
-/// `archimedes.db` home — the `setup_dirs` seam's dirs).
-#[derive(Clone)]
+/// `archimedes.db` home — the `setup_dirs` seam's dirs), OWNED (#96 task 06).
+///
+/// NOT `Clone` any more: `_base` is a `ScratchDir`, and a second owner would
+/// `remove_dir_all` the same path twice. The `Clone` this replaces was how 11
+/// dirs/run leaked — a struct that named dirs it did not own, so nothing was
+/// obliged to delete them.
 struct TestDirs {
     config_dir: std::path::PathBuf,
     app_data_dir: std::path::PathBuf,
+    /// The base dir BOTH paths point into, plus the `space` cwd inside it.
+    /// LAST field on purpose: struct fields drop in DECLARATION order, so the
+    /// paths (and anything holding a handle inside the dir) die first.
+    _base: archimedes_lib::test_support::ScratchDir,
 }
 
 impl TestDirs {
     fn new() -> Self {
-        let base = std::env::temp_dir().join(format!("ipc-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&base).unwrap();
+        let base = archimedes_lib::test_support::ScratchDir::in_env_temp("ipc-test-", "scratch");
         // The `cwd` (the Space) — it must EXIST (the `spaces` table is
-        // keyed by the canonical path).
+        // keyed by the canonical path). A subdir of the guard, so `Drop`
+        // takes it.
         let cwd = base.join("space");
         std::fs::create_dir_all(&cwd).unwrap();
         Self {
-            config_dir: base.clone(),
-            app_data_dir: base,
+            config_dir: base.to_path_buf(),
+            app_data_dir: base.to_path_buf(),
+            _base: base,
         }
     }
 
@@ -139,7 +148,11 @@ struct TestApp {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
-fn build_app(dirs: TestDirs) -> TestApp {
+fn build_app(dirs: &TestDirs) -> TestApp {
+    // Taken BEFORE the `'static` `setup` closure moves — the guard is not
+    // `Clone` and must not travel with the app; only the paths do.
+    let config_dir = dirs.config_dir.clone();
+    let app_data_dir = dirs.app_data_dir.clone();
     let app = mock_builder()
         .invoke_handler(tauri::generate_handler![
             archimedes_lib::commands::sessions::start_session,
@@ -161,8 +174,8 @@ fn build_app(dirs: TestDirs) -> TestApp {
         .setup(move |app| {
             setup_dirs_with_factory(
                 app,
-                dirs.config_dir.clone(),
-                dirs.app_data_dir.clone(),
+                config_dir.clone(),
+                app_data_dir.clone(),
                 Some(Arc::new(FixtureFactory)),
             )
         })
@@ -373,7 +386,7 @@ async fn seed_default_model(dirs: &TestDirs) -> tokio::task::JoinHandle<()> {
 async fn start_session_spawns_the_worker_and_send_prompt_re_emits_the_sink_frames() {
     let dirs = TestDirs::new();
     let _server = seed_default_model(&dirs).await;
-    let app = build_app(dirs.clone());
+    let app = build_app(&dirs);
     let webview = app.webview.clone();
     let collector = EventCollector::new(&app, &["session-update"]);
 
@@ -458,7 +471,7 @@ async fn start_session_spawns_the_worker_and_send_prompt_re_emits_the_sink_frame
 async fn a_crash_stalls_the_session_resolves_the_turn_and_resumes() {
     let dirs = TestDirs::new();
     let _server = seed_default_model(&dirs).await;
-    let app = build_app(dirs.clone());
+    let app = build_app(&dirs);
     let webview = app.webview.clone();
     let collector = EventCollector::new(&app, &["session-stalled"]);
 
@@ -538,7 +551,7 @@ async fn a_crash_stalls_the_session_resolves_the_turn_and_resumes() {
 async fn respond_permission_relays_to_the_worker_and_persists_the_trust_space() {
     let dirs = TestDirs::new();
     let _server = seed_default_model(&dirs).await;
-    let app = build_app(dirs.clone());
+    let app = build_app(&dirs);
     let webview = app.webview.clone();
     let collector = EventCollector::new(&app, &["permission-request"]);
 
@@ -621,7 +634,7 @@ async fn respond_permission_relays_to_the_worker_and_persists_the_trust_space() 
 async fn an_interactive_event_sink_frame_re_emits_verbatim() {
     let dirs = TestDirs::new();
     let _server = seed_default_model(&dirs).await;
-    let app = build_app(dirs.clone());
+    let app = build_app(&dirs);
     let webview = app.webview.clone();
     let collector = EventCollector::new(&app, &["interactive-event"]);
 
@@ -674,7 +687,7 @@ async fn an_interactive_event_sink_frame_re_emits_verbatim() {
 async fn a_clean_close_emits_session_closed_and_resolves_the_turn() {
     let dirs = TestDirs::new();
     let _server = seed_default_model(&dirs).await;
-    let app = build_app(dirs.clone());
+    let app = build_app(&dirs);
     let webview = app.webview.clone();
     let collector = EventCollector::new(&app, &["session-closed"]);
 
@@ -744,7 +757,7 @@ async fn a_clean_close_emits_session_closed_and_resolves_the_turn() {
 async fn set_space_trusted_pushes_a_config_to_the_running_workers() {
     let dirs = TestDirs::new();
     let _server = seed_default_model(&dirs).await;
-    let app = build_app(dirs.clone());
+    let app = build_app(&dirs);
     let webview = app.webview.clone();
     let collector = EventCollector::new(&app, &["config-ack"]);
 
@@ -797,7 +810,7 @@ async fn set_space_trusted_pushes_a_config_to_the_running_workers() {
 async fn a_subagent_transcript_persists_as_a_hidden_ephemeral_row() {
     let dirs = TestDirs::new();
     let _server = seed_default_model(&dirs).await;
-    let app = build_app(dirs.clone());
+    let app = build_app(&dirs);
     let webview = app.webview.clone();
     let collector = EventCollector::new(&app, &["subagent-session-started", "subagent-closed"]);
 
@@ -915,7 +928,7 @@ async fn a_subagent_transcript_persists_as_a_hidden_ephemeral_row() {
 #[tokio::test]
 async fn attention_disarm_resolves_through_the_real_ipc_surface() {
     let dirs = TestDirs::new();
-    let app = build_app(dirs);
+    let app = build_app(&dirs);
     // The managed state the command needs, put there by the SAME
     // `setup_dirs_with_factory` the app runs (not a test-local `manage`).
     assert!(
@@ -951,7 +964,7 @@ async fn attention_disarm_resolves_through_the_real_ipc_surface() {
 #[tokio::test]
 async fn the_list_order_commands_resolve_through_the_real_ipc_surface() {
     let dirs = TestDirs::new();
-    let app = build_app(dirs);
+    let app = build_app(&dirs);
     assert!(
         app.handle.try_state::<Arc<Db>>().is_some(),
         "the setup manages the `Arc<Db>` all three commands take"
@@ -1020,7 +1033,7 @@ async fn refreshing_a_provider_pushes_the_new_context_window_to_a_live_session()
     .expect("settings.json writes");
     let _server = serve_models_then_corrected(listener).await;
 
-    let app = build_app(dirs.clone());
+    let app = build_app(&dirs);
     let webview = app.webview.clone();
     let collector = EventCollector::new(&app, &["config-ack"]);
 
@@ -1145,7 +1158,7 @@ async fn refreshing_a_provider_with_unchanged_metadata_pushes_nothing() {
     )
     .await;
 
-    let app = build_app(dirs.clone());
+    let app = build_app(&dirs);
     let webview = app.webview.clone();
     let collector = EventCollector::new(&app, &["config-ack"]);
 
