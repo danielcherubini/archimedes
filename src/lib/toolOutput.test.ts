@@ -602,6 +602,48 @@ describe("subagent metadata and activity formatting helpers", () => {
     expect(formatCost(0.15)).toBe("$0.15");
   });
 
+  /**
+   * The sub-cliff band (issue #87). `toFixed(4)` rounds EVERY non-zero figure
+   * below `$0.00005` to the literal `"$0.0000"`, and both consumers print a
+   * truthy string — so a subagent whose four calls cost `≈$0.0000341` showed
+   * `$0.0000`: money spent, displayed as free. Every input below is a REAL
+   * measured per-call figure from the live proxy, all of which sit inside the
+   * band — that is why the two assertions this helper used to carry (`$0.0042`,
+   * `$0.15`) never caught it.
+   */
+  it("never renders a real non-zero sub-cliff figure as $0.0000", () => {
+    expect(formatCost(0.000011662)).toBe("$0.000012");
+    expect(formatCost(0.0000047597)).toBe("$0.0000048");
+    expect(formatCost(0.00001243)).toBe("$0.000012");
+    expect(formatCost(0.00002122)).toBe("$0.000021");
+    // A child's four priced calls summed — the roll-up's realistic figure.
+    expect(formatCost(0.000034115)).toBe("$0.000034");
+    // The band's upper edge, just below where `toFixed(4)` becomes truthful.
+    expect(formatCost(0.000049999)).toBe("$0.000050");
+  });
+
+  it("is byte-identical to its old output at and above the sub-cliff ceiling", () => {
+    // The ceiling is exactly where `toFixed(4)` stops rounding to zero, so at or
+    // above it NOTHING may change: two surfaces must not print two strings for
+    // the same money, and every existing consumer lives in this band.
+    expect(formatCost(0.00005)).toBe("$0.0001");
+    expect(formatCost(0.00009999)).toBe("$0.0001");
+    expect(formatCost(0.0001)).toBe("$0.0001");
+    expect(formatCost(0.0042)).toBe("$0.0042");
+    expect(formatCost(0.0099)).toBe("$0.0099");
+    expect(formatCost(0.01)).toBe("$0.01");
+    expect(formatCost(0.02)).toBe("$0.02");
+    expect(formatCost(0.035)).toBe("$0.04");
+    expect(formatCost(0.15)).toBe("$0.15");
+    // The zero rule is UNTOUCHED and it is not part of the fix: a non-positive
+    // figure renders the empty string, which is how the card's chip and the
+    // transcript's metrics line print nothing at all. `SessionCostLine` prints
+    // `$0.00` for a real zero — a different rule, on a surface that can tell a
+    // real zero from an unknown figure.
+    expect(formatCost(0)).toBe("");
+    expect(formatCost(-1)).toBe("");
+  });
+
   it("formats thinking indicators with glyphs", () => {
     expect(formatThinkingIndicator("high")).toBe("◕ high");
     expect(formatThinkingIndicator("medium")).toBe("◑ medium");
