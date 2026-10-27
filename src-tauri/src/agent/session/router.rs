@@ -33,9 +33,51 @@ impl SessionManager {
                 }
             }
             WorkerInboundEvent::SinkFrame { event, payload } => {
-                if !is_subagent && event == "interactive-event" {
-                    if let Some(p) = self.persister.get() {
-                        p.apply_interactive_event(session_id, &payload);
+                // The interactive-persistence gate, narrowed PER EVENT (issue
+                // #105). `!is_subagent` stays for `todos_update` /
+                // `todos_clear`: the todo panel is a MAIN-session surface, so
+                // a child's todo frames must never reach the DB (pinned by
+                // `sink_frame_interactive_event_todos_update_persists_for_main_not_subagent`).
+                // `cost_update` is the one exception — a child's spend is its
+                // OWN money and must land on the child's row, or the child's
+                // stored figure disagrees with its own card. The discriminator
+                // is the payload's inner `event` field, in scope here.
+                if event == "interactive-event" {
+                    let inner = payload.get("event").and_then(|v| v.as_str());
+                    if !is_subagent || inner == Some("cost_update") {
+                        // WHICH row owns the money. A subagent's frames are
+                        // delivered under the PARENT's delivery id (the pump
+                        // re-targets them so the child's UI lives in the
+                        // parent's scope — `pump.rs`'s `delivery_id`), but the
+                        // ROW belongs to the CHILD. This is the same
+                        // distinction `TranscriptPersister::apply` documents
+                        // for `StoreFrame`s, and it is load-bearing here:
+                        // writing a child's own `cost_update` to the delivery
+                        // id would put the child's per-call deltas on the
+                        // PARENT's row, and `finish_subagent`'s roll-up would
+                        // then add the child's SUM again — the parent's stored
+                        // figure double-counting every child. The payload's
+                        // `sessionId` is the emitting loop's own id (pinned
+                        // loop-side by
+                        // `a_priced_call_emits_one_cost_update_frame_carrying_that_calls_cost`),
+                        // so it is the child id for a child frame. The
+                        // roll-up frame is delivered with `is_subagent: false`
+                        // under the parent's id and so takes the `else` branch
+                        // — the parent's row, exactly once.
+                        //
+                        // Inert for `todos_*`: a subagent's todo frames never
+                        // reach this branch at all.
+                        let target = if is_subagent {
+                            payload
+                                .get("sessionId")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(session_id)
+                        } else {
+                            session_id
+                        };
+                        if let Some(p) = self.persister.get() {
+                            p.apply_interactive_event(target, is_subagent, &payload);
+                        }
                     }
                 }
                 // The ENTIRE UI contract — re-emitted VERBATIM (the same event name +
@@ -906,5 +948,207 @@ mod tests {
             assert_eq!(frames[1].0, "interactive-event");
             assert_eq!(frames[1].1, sub_payload);
         }
+    }
+
+    /// What `manager_with_rows` hands back. The scratch dir comes FIRST so a
+    /// caller that destructures it into a `_dir` binding declared first drops
+    /// it LAST — the `Db`'s SQLite file lives INSIDE the dir (the same
+    /// ordering rule the `persist.rs` `temp_db` doc records; Linux cannot show
+    /// the failure, Windows can). Named because a 4-tuple return trips
+    /// `clippy::type_complexity` and this crate runs clippy at 0 warnings.
+    type Harness = (
+        crate::test_support::ScratchDir,
+        SessionManager,
+        Arc<crate::storage::Db>,
+        Arc<StdMutex<Vec<(String, serde_json::Value)>>>,
+    );
+
+    /// A harness: a `SessionManager` over a real `Db` + a recording sink (its
+    /// `persister` wired by `attach_db`).
+    ///
+    /// Both session rows are pre-recorded so a test sees the ROUTER's gate
+    /// rather than the persister's row-ensure (the row-ensure has its own pin
+    /// in `persist.rs`).
+    fn manager_with_rows(tag: &str, main_sid: &str, sub_sid: &str) -> Harness {
+        let dir = crate::test_support::ScratchDir::in_env_temp(tag, "persist");
+        let db = Arc::new(crate::storage::Db::open(&dir.join("t.db")).unwrap());
+
+        struct LocalTestSink {
+            emitted: Arc<StdMutex<Vec<(String, serde_json::Value)>>>,
+        }
+        impl crate::agent::events::EventSink for LocalTestSink {
+            fn emit(&self, event: &str, payload: serde_json::Value) {
+                self.emitted
+                    .lock()
+                    .unwrap()
+                    .push((event.to_string(), payload));
+            }
+        }
+        let emitted = Arc::new(StdMutex::new(Vec::new()));
+
+        let mut manager = SessionManager::new(dir.to_path_buf());
+        manager.attach_db(db.clone());
+        manager.set_sink(Arc::new(LocalTestSink {
+            emitted: emitted.clone(),
+        }));
+
+        for (sid, is_subagent) in [(main_sid, false), (sub_sid, true)] {
+            db.record_session(&crate::agent::SessionInfo {
+                session_id: sid.to_string(),
+                cwd: dir.to_path_buf(),
+                capabilities: serde_json::Value::Null,
+                config_options: None,
+                archived: false,
+                title: None,
+                context_usage: None,
+                is_subagent,
+            })
+            .unwrap();
+        }
+        (dir, manager, db, emitted)
+    }
+
+    /// The gate is narrowed PER EVENT, not deleted: a subagent's own
+    /// `cost_update` now persists to the CHILD's row (a child's spend is its
+    /// own money, and issue #105 needs the child's stored figure to match its
+    /// card), while a subagent's `todos_update` STILL does not — the todo
+    /// panel is a main-session surface, and that half is pinned unmodified by
+    /// `sink_frame_interactive_event_todos_update_persists_for_main_not_subagent`.
+    /// Re-emission to the UI is unaffected either way (the sink arm is
+    /// unconditional).
+    ///
+    /// The delivery mirrors the PUMP's real shape, not a convenient one: a
+    /// subagent's frames arrive under the PARENT's delivery id (`pump.rs`'s
+    /// `delivery_id`) with the CHILD's id only in the payload's `sessionId`.
+    /// So this test also pins WHICH row the child's money lands on — the
+    /// child's. Getting that wrong is not cosmetic: the child's per-call
+    /// deltas would accumulate on the parent's row and `finish_subagent`'s
+    /// roll-up would add the child's sum a second time, double-counting every
+    /// child in the parent's stored figure.
+    #[test]
+    fn a_subagent_cost_frame_persists_but_a_subagent_todo_frame_still_does_not() {
+        let (main_sid, sub_sid) = ("main-session", "sub-session");
+        let (_dir, manager, db, emitted) = manager_with_rows("router-cost", main_sid, sub_sid);
+
+        // Delivered under the PARENT's id (what the pump does), payload keyed
+        // to the CHILD (what the emitting loop writes).
+        manager.route_event(
+            main_sid,
+            true,
+            WorkerInboundEvent::SinkFrame {
+                event: "interactive-event".to_string(),
+                payload: serde_json::json!({
+                    "sessionId": sub_sid,
+                    "seq": 0,
+                    "event": "cost_update",
+                    "payload": { "costUsd": 0.00001243, "source": "main" },
+                }),
+            },
+        );
+        assert_eq!(
+            db.session_cost(sub_sid).unwrap(),
+            Some(0.00001243),
+            "a child's own cost frame writes the CHILD's row"
+        );
+        assert_eq!(
+            db.session_cost(main_sid).unwrap(),
+            None,
+            "the child's money must NOT land on the delivery id's row — that id \
+             is the PARENT's, and the roll-up would add the child's sum again on top"
+        );
+
+        manager.route_event(
+            main_sid,
+            true,
+            WorkerInboundEvent::SinkFrame {
+                event: "interactive-event".to_string(),
+                payload: serde_json::json!({
+                    "sessionId": sub_sid,
+                    "seq": 0,
+                    "event": "todos_update",
+                    "payload": {
+                        "source": "native",
+                        "todos": [{ "content": "subagent work", "status": "pending" }],
+                    },
+                }),
+            },
+        );
+        assert_eq!(
+            db.session_todos(sub_sid).unwrap(),
+            None,
+            "todos persistence stays MAIN-ONLY — the gate must not be widened \
+             generically (this is the assertion the pre-existing gate test pins)"
+        );
+        assert_eq!(
+            db.session_todos(main_sid).unwrap(),
+            None,
+            "and a child's todo frame must not be redirected onto the parent's row either"
+        );
+
+        let frames = emitted.lock().unwrap();
+        assert_eq!(
+            frames.len(),
+            2,
+            "both frames are still re-emitted to the UI verbatim"
+        );
+        assert_eq!(frames[0].1["event"], "cost_update");
+        assert_eq!(frames[1].1["event"], "todos_update");
+    }
+
+    /// The roll-up's shape, proven where a `Db` is reachable.
+    ///
+    /// The frame synthesised below IS the envelope `finish_subagent`'s
+    /// roll-up now emits: `state.hooks.on_event(parent_session_id, false,
+    /// WorkerInboundEvent::SinkFrame { event: "interactive-event", payload })`
+    /// with `sessionId` = the PARENT, `seq: 0`, `event: "cost_update"`, and
+    /// `payload: { costUsd, source: "subagent" }`. Routing it instead of
+    /// emitting it straight to the parent's Tauri sink is what makes the
+    /// parent's STORED total agree with the figure under its own title.
+    ///
+    /// Why the assertion lives here and not in `subagent_flow.rs`'s
+    /// `rollup_tests`: `ManagerState` holds only `workers` / `factory` /
+    /// `hooks` / `drives` (`registry.rs`) — it has NO `db` field, so the
+    /// roll-up unit tests can prove the FRAME (shape, count, parent-keying)
+    /// but cannot assert a write at all. This test closes the link: that
+    /// frame, through this router, lands on the PARENT's row. The end-to-end
+    /// proof through the real IPC surface is `tests/ipc.rs` (Task 3).
+    #[test]
+    fn a_parent_keyed_cost_frame_from_the_router_writes_the_parents_row() {
+        let (main_sid, sub_sid) = ("parent-1", "child-1");
+        let (_dir, manager, db, emitted) = manager_with_rows("router-rollup", main_sid, sub_sid);
+
+        let rollup = serde_json::json!({
+            "sessionId": main_sid,
+            "seq": 0,
+            "event": "cost_update",
+            "payload": { "costUsd": 0.0000341, "source": "subagent" },
+        });
+        manager.route_event(
+            main_sid,
+            false,
+            WorkerInboundEvent::SinkFrame {
+                event: "interactive-event".to_string(),
+                payload: rollup.clone(),
+            },
+        );
+
+        assert_eq!(
+            db.session_cost(main_sid).unwrap(),
+            Some(0.0000341),
+            "the roll-up writes the PARENT's row — without this the parent's \
+             stored figure disagrees with its displayed one"
+        );
+        assert_eq!(
+            db.session_cost(sub_sid).unwrap(),
+            None,
+            "the roll-up is keyed to the parent: the child's row must stay clean"
+        );
+        let frames = emitted.lock().unwrap();
+        assert_eq!(frames.len(), 1, "the frame still reaches the UI");
+        assert_eq!(frames[0].0, "interactive-event");
+        assert_eq!(
+            frames[0].1, rollup,
+            "re-emitted VERBATIM — the frontend contract is unchanged"
+        );
     }
 }
