@@ -213,14 +213,184 @@ describe("wired-but-not-rendered state", () => {
     expect(useInteractive.getState().agentState[S1]).toBe("blocked");
   });
 
-  it("applyCost stores the cost payload", () => {
-    useInteractive.getState().applyCost(S1, { inputTokens: 10 });
-    expect(useInteractive.getState().cost[S1]).toEqual({ inputTokens: 10 });
-  });
-
   it("applySession stores the session payload", () => {
     useInteractive.getState().applySession(S1, { bridgeSession: "abc" });
     expect(useInteractive.getState().session[S1]).toEqual({ bridgeSession: "abc" });
+  });
+});
+
+/**
+ * `applyCost` — the session's money (issue #87).
+ *
+ * This describe used to be a case inside `wired-but-not-rendered state`,
+ * asserting `applyCost(S1, { inputTokens: 10 })` stored the payload back
+ * VERBATIM (`toEqual({ inputTokens: 10 })`). That assertion was the defect: a
+ * frame is not stored, it is NORMALISED and ADDED, and after #87 the figure is
+ * rendered. The case now lives here and asserts the normalised shape.
+ */
+describe("applyCost (the session's cumulative USD figure, #87)", () => {
+  it("normalises the first frame instead of storing it raw", () => {
+    useInteractive.getState().applyCost(S1, { inputTokens: 10 });
+    // Every field the entry type carries is present after ONE frame — the
+    // entry's shape must not depend on how many frames have arrived (rule R3).
+    expect(useInteractive.getState().cost[S1]).toEqual({
+      inputTokens: 10,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      cost: null,
+      costUsd: null,
+    });
+  });
+
+  it("two cost frames SUM — a frame is THIS CALL's money; if the emitter ever sends a running total, change combineSessionCost, not the renderer", () => {
+    useInteractive.getState().applyCost(S1, { costUsd: 0.02 });
+    useInteractive.getState().applyCost(S1, { costUsd: 0.05 });
+    const entry = useInteractive.getState().cost[S1] as { costUsd: number };
+    expect(entry.costUsd).toBeCloseTo(0.07, 10);
+  });
+
+  it("a frame with costUsd: null never becomes a real 0 — the session total stays null", () => {
+    // D5: `null` means "no call this session reported a cost" and renders
+    // NOTHING. The old arithmetic was `(prev.cost ?? 0) + (p?.cost ?? 0)`,
+    // which manufactured a numeric `0` out of two unknowns — the phantom
+    // `$0.00` #87 was filed to end.
+    useInteractive.getState().applyCost(S1, { costUsd: null });
+    useInteractive.getState().applyCost(S1, { costUsd: null });
+    const entry = useInteractive.getState().cost[S1] as {
+      costUsd: number | null;
+      cost: number | null;
+    };
+    expect(entry.costUsd).toBeNull();
+    // The alias cannot drift from the primary: both say "unknown".
+    expect(entry.cost).toBeNull();
+  });
+
+  it("a frame that carries no money key at all is unknown, not zero", () => {
+    // T09's emitter OMITS the key rather than sending `null` (its Decision 2),
+    // so absence must land in the same state as `null`.
+    useInteractive.getState().applyCost(S1, { inputTokens: 100, outputTokens: 20 });
+    const entry = useInteractive.getState().cost[S1] as {
+      costUsd: number | null;
+      cost: number | null;
+    };
+    expect(entry.costUsd).toBeNull();
+    expect(entry.cost).toBeNull();
+  });
+
+  it("an unknown frame followed by a priced frame yields the figure, not figure+0", () => {
+    useInteractive.getState().applyCost(S1, { costUsd: null });
+    useInteractive.getState().applyCost(S1, { costUsd: 0.03 });
+    const entry = useInteractive.getState().cost[S1] as {
+      costUsd: number | null;
+      cost: number | null;
+    };
+    expect(entry.costUsd).toBeCloseTo(0.03, 10);
+    expect(entry.cost).toBeCloseTo(0.03, 10);
+  });
+
+  it("a priced frame followed by an unknown frame keeps the figure (unknown is not a number to add)", () => {
+    useInteractive.getState().applyCost(S1, { costUsd: 0.03 });
+    useInteractive.getState().applyCost(S1, { costUsd: null });
+    const entry = useInteractive.getState().cost[S1] as { costUsd: number | null };
+    expect(entry.costUsd).toBeCloseTo(0.03, 10);
+  });
+
+  it("the legacy cost key still lands AND gains the costUsd alias (SubagentDelegatingCard reads cost)", () => {
+    // A REAL zero-cost `0` is a figure (D5: `$0.00`), so the state below is a
+    // figure and not an unknown.
+    //
+    // Applied to an EMPTY store on purpose: this is the FIRST frame, and the
+    // branch this pins away was `interactive.ts`'s
+    // `if (!prev) return { cost: { ...state.cost, [sessionId]: payload } }`,
+    // which stored the payload RAW and left it with NO `costUsd` key — so the
+    // renderer read nothing while money existed. Do not "fix" this case by
+    // seeding a second frame: that would route it around the branch again.
+    useInteractive.getState().applyCost(S1, { cost: 0.035 });
+    const entry = useInteractive.getState().cost[S1] as {
+      cost: number | null;
+      costUsd: number | null;
+    };
+    expect(entry.cost).toBeCloseTo(0.035, 10);
+    expect(entry.costUsd).toBeCloseTo(0.035, 10);
+  });
+
+  it("the FIRST costUsd frame is normalised too: the entry gains the cost alias on frame one", () => {
+    // The mirror of the case above (rule R3, other direction): a D5-shaped
+    // first frame stored raw carries NO `cost` key, and
+    // `SubagentDelegatingCard`'s `interactiveCost?.cost` link reads `undefined`
+    // for that session until a second frame arrives.
+    useInteractive.getState().applyCost(S1, { costUsd: 0.0042 });
+    const entry = useInteractive.getState().cost[S1] as {
+      cost: number | null;
+      costUsd: number | null;
+    };
+    expect(entry.costUsd).toBeCloseTo(0.0042, 10);
+    expect(entry.cost).toBeCloseTo(0.0042, 10);
+  });
+
+  it("a legacy frame and a costUsd frame SUM ONCE into one total, never twice", () => {
+    // Rule R4. `costUsd` and `cost` are ONE accumulator, not two sums: the
+    // frame's money is chosen ONCE (`costUsd` first, legacy `cost` second) and
+    // only then added. Adding both keys would report `0.02` for `0.01` spent —
+    // the double-count trap D4/D5 exist to stop, relocated into the store.
+    useInteractive.getState().applyCost(S1, { cost: 0.005 });
+    useInteractive.getState().applyCost(S1, { costUsd: 0.005 });
+    const entry = useInteractive.getState().cost[S1] as {
+      cost: number | null;
+      costUsd: number | null;
+    };
+    expect(entry.costUsd).toBeCloseTo(0.01, 10);
+    expect(entry.costUsd).not.toBeCloseTo(0.02, 10);
+    // And the alias tracks the primary, so the card cannot show a different
+    // figure from the session line.
+    expect(entry.cost).toBeCloseTo(0.01, 10);
+  });
+
+  it("costUsd wins when one frame carries both keys", () => {
+    // Rule R2: `costUsd` is D5's authoritative key; `cost` is the fallback for
+    // a pre-D5 emitter. A frame carrying both must count the D5 one ONCE.
+    useInteractive.getState().applyCost(S1, { cost: 0.005, costUsd: 0.007 });
+    const entry = useInteractive.getState().cost[S1] as { costUsd: number | null };
+    expect(entry.costUsd).toBeCloseTo(0.007, 10);
+  });
+
+  it("a malformed figure (string / NaN / negative) is unknown, never invented money", () => {
+    useInteractive.getState().applyCost(S1, { costUsd: "0.05" });
+    useInteractive.getState().applyCost(S1, { costUsd: Number.NaN });
+    useInteractive.getState().applyCost(S1, { costUsd: -1 });
+    useInteractive.getState().applyCost(S1, { costUsd: Number.POSITIVE_INFINITY });
+    const entry = useInteractive.getState().cost[S1] as {
+      costUsd: number | null;
+      cost: number | null;
+    };
+    expect(entry.costUsd).toBeNull();
+    expect(entry.cost).toBeNull();
+  });
+
+  it("a real zero figure is kept as 0, not collapsed into unknown", () => {
+    // D5: `0` is a real zero and renders `$0.00` — the opposite state from
+    // `null`. The store must not lose the difference.
+    useInteractive.getState().applyCost(S1, { costUsd: 0 });
+    const entry = useInteractive.getState().cost[S1] as {
+      costUsd: number | null;
+      cost: number | null;
+    };
+    expect(entry.costUsd).toBe(0);
+    expect(entry.cost).toBe(0);
+  });
+
+  it("keeps the token fields the SubagentDelegatingCard reads off the same entry", () => {
+    // The card's context-% chain (`interactiveCost.inputTokens/outputTokens`)
+    // and its `#85` test seed tokens with NO cost key at all.
+    useInteractive.getState().applyCost(S1, { inputTokens: 25000 });
+    useInteractive.getState().applyCost(S1, { outputTokens: 5000 });
+    const entry = useInteractive.getState().cost[S1] as {
+      inputTokens: number;
+      outputTokens: number;
+    };
+    expect(entry.inputTokens).toBe(25000);
+    expect(entry.outputTokens).toBe(5000);
   });
 });
 
