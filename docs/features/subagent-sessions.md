@@ -10,8 +10,10 @@ verified-by: feature/subagent-liveness-bound — cargo test 1067 + clippy 0 warn
 > the **liveness** rule (ADR 0055 — the drive's race, the `SubagentLiveness`
 > signal, the gate-close and failure-`reason` wiring) and the client half; it
 > does NOT redeem the **pre-ADR 0025** driver prose below. The intro paragraph,
-> the numbered list in "The driver task", the "Metrics are real" paragraph and
-> the "Trust inheritance" section still describe the IN-PROCESS driver — a
+> the numbered list in "The driver task", the CHILD-RESULT tail of the "Metrics
+> are real" paragraph (its cost half was corrected for issue #87 and describes
+> the SHIPPED mechanism) and the "Trust inheritance" section still describe the
+> IN-PROCESS driver — a
 > throwaway
 > `:memory:` `Db`, the `TempFileGuard`, `NativeDeps`, `ExternalClose`,
 > `agent/interactive.rs` — none of which exist under `src-tauri/src` any more
@@ -134,16 +136,42 @@ in-flight dispatch, and the driver task's select arm sees the flipped flag
 and tears the child down. A pre-aborted signal short-circuits the dispatch
 before it starts.
 
-**Metrics are real.** The child self-emits a per-turn `cost_update` (source
-`"main"`, from the model's `turn_end` usage — per-turn deltas, `reasoning`
-excluded as an `output` subset); the driver accumulates the subagent's
-`cost_update` payloads (sum, not last-payload) into `SubagentMetrics` (token
-/ cost fields are real when the session pushed usage, 0 otherwise;
-`durationMs` is the desktop's wall clock). The wire metrics shape is
-unchanged: `{ output, inputTokens, outputTokens, cost, durationMs }` (the
-cache fields flow in the payload but are not in the wire shape — YAGNI). The
-`subagent` tool's result to the main agent is the `Completed` output (or
-`subagent failed: {error}` / `cancelled`). A failed child TURN (an
+**Metrics are real; the cost is per model CALL, and it is the provider's own
+figure.** The child's own loop emits ONE `cost_update` frame for every provider
+call whose usage chunk carried a cost (the `ProviderEvent::Usage` arm of
+`loop/turn.rs` → `emit_cost_update` in `loop/emit.rs`; inner payload
+`{ costUsd, source: "main" }`, keyed to the CHILD). The figure is the
+PROVIDER's, read from the response BODY's `usage.cost` (then its two known
+variants, `usage.cost_details.upstream_inference_cost` and
+`usage.estimated_cost`) — never derived from tokens, never from a header (the
+roadmap's D4, `docs/roadmap/harness-trust-and-cost.md`). A call that reported no
+cost emits NOTHING at all: emitting a zero is what manufactures the phantom
+`$0.00`, so absence is the only honest spelling. The Supervisor's
+`SubagentCapture` SUMS those frames into `SubagentMetrics.cost` — a sum,
+deliberately NOT the `max` the token fields next door use, because per-message
+token usage is cumulative while money accumulates across calls — and
+`finish_subagent` then emits ONE parent-keyed roll-up frame (`source:
+"subagent"`) behind a `> 0.0` guard straight onto the parent's sink: a child
+that reported nothing contributes nothing, a priced child contributes exactly
+its total. `SubagentMetrics.cost` is an `f64`, so the capture's `Option` collapses
+at the hand-off and `0.0` means either "no figure
+arrived" or "a call reported a real zero" (promotion to optional is a named
+follow-up — it needs the TypeScript `metrics` declaration and the card's read in
+the same change). **Rust holds no accumulator**: the cumulative figure is the
+frontend store's (`useInteractive.cost[sessionId]`, summed by `applyCost`) and
+that store is in-memory, so the figure does NOT survive a reload. Nor is it a
+session's TOTAL spend: the compaction summarizer's own call sits OUTSIDE the
+loop's `Usage` arm — `compact.rs::summarize` drains its stream on `TextDelta` /
+`Done` / `Error` and drops the provider's `Usage` event — so no figure is ever
+observed for it and no frame is emitted. (Token fields are real when the session
+pushed usage, 0 otherwise; `durationMs` is the desktop's wall clock.) The wire
+metrics shape is
+unchanged: `{ output, inputTokens, outputTokens, cost, durationMs }` (no cache
+fields ride either shape: the emitter's pinned inner payload is exactly
+`{ costUsd, source }`, and the cache-token fields the frontend store still
+declares have no producer — YAGNI). The `subagent` tool's result to the main
+agent is the `Completed` output (or `subagent failed: {error}` / `cancelled`).
+A failed child TURN (an
 exhausted-retry model call) settles "successfully" via a bare
 `agent_settled` and reports `Completed { output: "" }` — a documented
 follow-up, not a bug to fix here.
