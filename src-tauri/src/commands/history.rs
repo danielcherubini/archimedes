@@ -153,6 +153,7 @@ mod tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         };
         let s_empty = SessionInfo {
@@ -163,6 +164,7 @@ mod tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         };
         db.record_session(&s1).unwrap();
@@ -236,6 +238,7 @@ mod tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         };
         db.record_session(&titled("s_rec")).expect("record s_rec");
@@ -346,6 +349,7 @@ mod tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         };
         for id in ["s_a", "s_b", "s_c"] {

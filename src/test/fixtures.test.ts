@@ -197,6 +197,11 @@ describe("makeSessionRow / makeSpaceRow (the sidebar's rows)", () => {
     expect("title" in row).toBe(false);
     expect("contextUsage" in row).toBe(false);
     expect("configOptions" in row).toBe(false);
+    // #105's fourth optional key: the fixture drops it, so this exercises the
+    // ABSENCE path (the key is not there at all), not the wire shape — the real
+    // row sends `"costUsd": null` for a `None` column, and `sessionFieldOf`
+    // treats null and absent identically.
+    expect("costUsd" in row).toBe(false);
   });
 
   it("applies overrides and accepts the optional fields when asked", () => {
@@ -207,6 +212,27 @@ describe("makeSessionRow / makeSpaceRow (the sidebar's rows)", () => {
     const withUsage = makeSessionRow({ contextUsage: { used: 10, window: 100 } });
     expect(withUsage.contextUsage).toEqual({ used: 10, window: 100 });
     expect("contextUsage" in withUsage).toBe(true);
+  });
+
+  it("drops an explicitly-`undefined` `costUsd` and keeps a real `0` (#105)", () => {
+    // `SessionInfo.costUsd` is the FOURTH optional key, and the fixture's
+    // allow-list has to name it so a caller passing `costUsd: undefined` gets a
+    // row WITHOUT the key. That is fixture hygiene, not a wire claim: the Rust
+    // side serialises a `None` column as `"costUsd": null` (present, null).
+    // Dropping the `undefined`-valued key keeps `Object.keys`/`in` and
+    // `toEqual` comparisons downstream predictable, and `sessionFieldOf` skips
+    // `null` and `undefined` alike, so no behaviour rides on which is sent.
+    // Nothing else pins this: unlike `APP_SETTINGS_FIELDS` above there is no
+    // `SESSION_*_FIELDS` const to compare against, so the assertion lives here.
+    const absent = makeSessionRow({ costUsd: undefined });
+    expect("costUsd" in absent).toBe(false);
+    expect(Object.keys(absent)).not.toContain("costUsd");
+    // A stored `0` is a FIGURE (D5: a real zero is not "unknown"), so the key
+    // must survive — dropping it would make a free session render nothing.
+    const zero = makeSessionRow({ costUsd: 0 });
+    expect("costUsd" in zero).toBe(true);
+    expect(zero.costUsd).toBe(0);
+    expect(makeSessionRow({ costUsd: 0.25 }).costUsd).toBe(0.25);
   });
 
   it("makeSpaceRow defaults a closed, untrusted space row", () => {

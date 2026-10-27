@@ -23,13 +23,18 @@ import type { SessionConfigSource } from "../../lib/sessionConfig";
 const DEFAULT_CWD = "/w/space";
 
 /**
- * A `SessionInfo` as the IPC layer delivers it.
+ * A `SessionInfo` row, shaped the way the store expects to receive one.
  *
- * The three OPTIONAL fields (`title`, `contextUsage`, `configOptions`) stay
- * ABSENT unless asked for — they are absent on the wire, and the store branches
- * on `info.configOptions ? … : …`, so setting them to `undefined` would seed a
- * shape the backend never sends (and would make `in`-checks answer differently
- * than production).
+ * The four OPTIONAL fields (`title`, `contextUsage`, `configOptions`, `costUsd`)
+ * stay ABSENT unless asked for. That is fixture hygiene, not a wire claim: the
+ * Rust side serialises a `None` for each of them as a PRESENT-AND-NULL key
+ * (`#[serde(default)]`, no `skip_serializing_if`), so the real row carries
+ * `"costUsd": null`. The fixture drops the key instead of seeding `undefined`,
+ * because the store branches on `info.configOptions ? … : …` and `costUsdOf`
+ * reads `costUsd` off the row — and every consumer treats `null` and a missing
+ * key the same way (`sessionFieldOf` skips both), so the absence keeps
+ * `Object.keys`/`in` and `toEqual` comparisons predictable without changing any
+ * behaviour.
  */
 export function makeSessionRow(
   overrides: Partial<SessionInfo> = {},
@@ -42,9 +47,16 @@ export function makeSessionRow(
     ...overrides,
   };
   // Drop an optional key a caller passed as explicitly-`undefined`, so the
-  // fixture matches the wire shape (`Object.keys` excludes it) rather than
-  // carrying a key with an `undefined` value.
-  for (const optional of ["title", "contextUsage", "configOptions"] as const) {
+  // fixture never carries an optional key with an `undefined` value
+  // (`Object.keys` excludes it) — the wire itself sends such a field as
+  // `null`, but a fixture key that reads as present-yet-`undefined` breaks
+  // `Object.keys`/`in`/`toEqual` expectations downstream.
+  for (const optional of [
+    "title",
+    "contextUsage",
+    "configOptions",
+    "costUsd",
+  ] as const) {
     if (optional in row && row[optional] === undefined) {
       delete row[optional];
     }

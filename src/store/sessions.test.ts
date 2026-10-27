@@ -23,6 +23,10 @@ import {
 import type { AcpSessionUpdate } from "../lib/tauri";
 import { useInteractive } from "./interactive";
 import { useSubagents } from "./subagents";
+// Driven (not mocked) by the close-path tests below: the figure has to be read
+// off `useInteractive.cost` BEFORE `dismissSession` deletes it, so the test must
+// run the real dismiss-then-file ORDER rather than call the reducer directly.
+import { onSessionClosed } from "../lib/sessionLifecycle";
 import { expandMentions } from "../lib/skills";
 import type { AgentDefinitionDto, HistoryPage, McpServerInfo } from "../lib/tauri";
 import {
@@ -1443,6 +1447,109 @@ describe("contextUsage (the context-percentage state)", () => {
   });
 });
 
+/**
+ * The cost figure a session accumulated DURING this app run must survive its
+ * close — the same retention the two tests above pin for `configOptions` and
+ * `contextUsage`, and for the same reason: the row the session is filed into is
+ * what `lib/sessionCost.ts`'s `costUsdOf` falls back to once the live
+ * accumulator is gone, and `SidePane` keeps rendering the cost line after a
+ * close.
+ *
+ * The two maps above live in THIS store, so `handleSessionClosed` keeps them by
+ * simply not touching them. Cost does not: it lives in `useInteractive.cost`,
+ * and `lib/sessionLifecycle.ts`'s `onSessionClosed` calls `dismissSession`,
+ * which DELETES the entry, before `handleSessionClosed` files the row. The
+ * figure therefore has to be captured before the dismiss and handed to the
+ * reducer — which is what these tests drive, through the real `onSessionClosed`
+ * so the dismiss-then-file ORDER is under test and not just the reducer's
+ * arithmetic.
+ */
+describe("closing a session in this app run carries its cost figure onto the filed row (#105)", () => {
+  beforeEach(() => resetStores());
+  afterEach(() => resetStores());
+
+  const filedRow = (sessionId: string): SessionInfo | undefined =>
+    useSessions.getState().historySessions.find((s) => s.sessionId === sessionId);
+
+  it("onSessionClosed files the session into historySessions carrying this run's costUsd", () => {
+    // A session STARTED this run: its row carries no `costUsd` at all (the
+    // fresh `start_session` reply has none), so the run's figure exists ONLY in
+    // `useInteractive.cost` — the map the close dismisses.
+    useSessions.setState({ sessions: [info("s1", "/x")] });
+    useInteractive.getState().applyCost("s1", { costUsd: 0.42 });
+
+    onSessionClosed("s1", "user");
+
+    expect(filedRow("s1")?.costUsd).toBe(0.42);
+  });
+
+  it("a close with NO live cost entry files the row UNCHANGED (no `costUsd: undefined` key appears)", () => {
+    // The guard is about the SHAPE THIS SIDE produces: a bare carry would
+    // introduce a `costUsd` key holding `undefined`, and nothing else carries
+    // that — a missing figure crosses IPC PRESENT and null (`cost_usd` is an
+    // `Option<f64>` with `#[serde(default)]` and NO `skip_serializing_if`,
+    // pinned in `src-tauri/src/agent/session/mod.rs`), and `makeSessionRow`
+    // models no-figure as `null` or as no key, never as `undefined`. Hence the
+    // guarded spread rather than a bare `{ ...closedInfo, costUsd: closedCost }`.
+    const row = info("s1", "/x");
+    useSessions.setState({ sessions: [row] });
+
+    onSessionClosed("s1", "user");
+
+    const filed = filedRow("s1");
+    expect(filed).toBeDefined();
+    expect("costUsd" in (filed as SessionInfo)).toBe(false);
+    expect(filed).toEqual(row);
+  });
+
+  it("a close with no live figure KEEPS a resume-time `costUsd` already on the row (an absent run figure is not a wipe)", () => {
+    useSessions.setState({
+      sessions: [{ ...info("s1", "/x"), costUsd: 0.1 }],
+    });
+
+    onSessionClosed("s1", "user");
+
+    expect(filedRow("s1")?.costUsd).toBe(0.1);
+  });
+
+  it("a closing ARCHIVED session's row in archivedSessions carries this run's costUsd too", () => {
+    // The archived branch has the same staleness, and it is WORSE: the row is
+    // never moved at all, so it keeps whatever `costUsd` the boot-time read put
+    // on it while the run's figure dies with the dismissed map.
+    useSessions.setState({
+      sessions: [info("s1", "/x")],
+      archivedSessions: [{ ...info("s1", "/x"), archived: true }],
+    });
+    useInteractive.getState().applyCost("s1", { costUsd: 0.42 });
+
+    onSessionClosed("s1", "user");
+
+    const st = useSessions.getState();
+    expect(st.historySessions.map((s) => s.sessionId)).not.toContain("s1");
+    expect(
+      st.archivedSessions.find((s) => s.sessionId === "s1")?.costUsd,
+    ).toBe(0.42);
+  });
+
+  it("an archived close with NO live figure leaves archivedSessions byte-for-byte unchanged", () => {
+    // No run figure ⇒ no copy, no key: the untouched list keeps its reference,
+    // which is what the reducer's `state.historySessions` passthrough already
+    // guarantees for the other list.
+    const archivedRow = { ...info("s1", "/x"), archived: true };
+    useSessions.setState({
+      sessions: [info("s1", "/x")],
+      archivedSessions: [archivedRow],
+    });
+
+    onSessionClosed("s1", "user");
+
+    const st = useSessions.getState();
+    expect(st.archivedSessions).toEqual([archivedRow]);
+    expect(st.archivedSessions[0]).toBe(archivedRow);
+    expect("costUsd" in (st.archivedSessions[0] as SessionInfo)).toBe(false);
+  });
+});
+
 describe("compacting (the working indicator's compaction state)", () => {
   // The store is global — reset the maps the previous test may have left
   // behind (and the `afterAll` cleans up AFTER this block, so the next
@@ -2055,6 +2162,71 @@ describe("configOptions state", () => {
     expect(useSessions.getState().configOptions.s1).toEqual([
       { id: "model", name: "Model", type: "select", currentValue: "gpt-4" },
     ]);
+  });
+
+  /**
+   * TRAP 3 (#105): the accumulator restarts at zero, the stored row does not.
+   *
+   * `dismissSession` drops `useInteractive.cost[id]` on close, so a resumed
+   * session's next priced frame would otherwise be THAT CALL's cost alone — the
+   * figure the user saw before the reload would silently drop to a fraction of
+   * itself. `resumeSession` therefore mirrors the `configOptions` seeding two
+   * tests above and hands the row's `costUsd` to `seedCostFromRow`, which writes
+   * the key DIRECTLY (never `applyCost`, which would add the total to itself).
+   *
+   * Both cases `resetStores()` first: this `describe` has no reset of its own, so
+   * without it the case below would inherit whatever `cost` a previous test left
+   * under `s1` and pass for the wrong reason.
+   */
+  it("seeds the cost accumulator from a resumed session's SessionInfo (#105)", async () => {
+    resetStores();
+    vi.mocked(resumeSession).mockResolvedValueOnce({
+      sessionId: "s1",
+      cwd: "/x",
+      capabilities: {},
+      archived: false,
+      costUsd: 0.5,
+    });
+    useSessions.setState({
+      historySessions: [info("s1", "/x")],
+    });
+
+    await useSessions.getState().resumeSession("s1");
+
+    const entry = useInteractive.getState().cost["s1"] as {
+      costUsd: number | null;
+    };
+    expect(entry.costUsd).toBe(0.5);
+    // The consequence the whole seeding exists for: the next priced frame ADDS
+    // to the stored figure instead of replacing it. 0.6, not 0.1 (no seed) and
+    // not 1.1 (the seed routed through `applyCost`).
+    useInteractive.getState().applyCost("s1", { costUsd: 0.1 });
+    expect(
+      (useInteractive.getState().cost["s1"] as { costUsd: number | null })
+        .costUsd,
+    ).toBeCloseTo(0.6, 10);
+    resetStores();
+  });
+
+  it("seeds NO cost entry for a resumed session whose row never reported one (#105)", async () => {
+    resetStores();
+    vi.mocked(resumeSession).mockResolvedValueOnce({
+      sessionId: "s1",
+      cwd: "/x",
+      capabilities: {},
+      archived: false,
+    });
+    useSessions.setState({
+      historySessions: [info("s1", "/x")],
+    });
+
+    await useSessions.getState().resumeSession("s1");
+
+    // No entry at all — and that is load-bearing, not tidiness. An entry holding
+    // `costUsd: null` reads as a REPORT ("live, reporting nothing") to
+    // `costUsdOf`, which would then suppress a figure the row does hold.
+    expect("s1" in useInteractive.getState().cost).toBe(false);
+    resetStores();
   });
 
 });

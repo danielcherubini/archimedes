@@ -286,6 +286,12 @@ struct ResumeCtx {
     /// so a resumed session's label survives the close/resume round-trip.
     title: Option<String>,
     context_usage: Option<ContextUsage>,
+    /// The stored running cost (#105) — the figure the resumed session's
+    /// next priced call ADDS to. Carried so the returned `SessionInfo` hands
+    /// it back to the Client, which seeds its live accumulator from it
+    /// (Trap 3: an unseeded accumulator restarts a resumed session's total at
+    /// that one call's cost).
+    cost_usd: Option<f64>,
 }
 
 /// The shared session-driver state. `SessionManager` (main sessions)
@@ -1024,7 +1030,8 @@ impl SessionManager {
         // The stored row must exist (a native session is recorded at start —
         // `record_session`; a missing row is unresumable). KEEP THE WHOLE ROW:
         // the resume carries the desktop's `archived` flag (ADR 0016) + the
-        // stored `title` + the stored `context_usage`.
+        // stored `title` + the stored `context_usage` + the stored
+        // `cost_usd` (#105 — the figure the next priced call adds to).
         let row =
             db.session(session_id)
                 .ok()
@@ -1060,6 +1067,10 @@ impl SessionManager {
                 archived: row.archived,
                 title: row.title,
                 context_usage,
+                // The stored figure passes straight through — the column is
+                // already typed `REAL`, so (unlike `context_usage_json`)
+                // there is nothing to parse.
+                cost_usd: row.cost_usd,
             }),
             sink,
         )
@@ -1095,24 +1106,29 @@ impl SessionManager {
         let catalog = self.effective_catalog(None).await;
         let settings = load_settings(&self.config_dir);
         let is_resume = resume.is_some();
-        let (session_id, model, stored_level, archived, title, context_usage) = match resume {
-            Some(ctx) => (
-                ctx.session_id,
-                ctx.model,
-                ctx.stored_level,
-                ctx.archived,
-                ctx.title,
-                ctx.context_usage,
-            ),
-            None => (
-                mint_session_id(),
-                resolve_native_model(&catalog, &settings.default_model)?,
-                None,
-                false,
-                None,
-                None,
-            ),
-        };
+        let (session_id, model, stored_level, archived, title, context_usage, cost_usd) =
+            match resume {
+                Some(ctx) => (
+                    ctx.session_id,
+                    ctx.model,
+                    ctx.stored_level,
+                    ctx.archived,
+                    ctx.title,
+                    ctx.context_usage,
+                    ctx.cost_usd,
+                ),
+                None => (
+                    mint_session_id(),
+                    resolve_native_model(&catalog, &settings.default_model)?,
+                    None,
+                    false,
+                    None,
+                    None,
+                    // A FRESH session has never had a priced call: `None`,
+                    // which is NOT `Some(0.0)` (D5 / ADR 0082).
+                    None,
+                ),
+            };
         // (live `/v1/models` discovery) Best-effort refresh the model's metadata
         // (the same as before; a failure degrades to the static metadata).
         let model = self.refresh_model_metadata(&model).await;
@@ -1199,6 +1215,10 @@ impl SessionManager {
             // run yet).
             title,
             context_usage,
+            // The stored figure on a resume (`None` on a fresh start) — the
+            // Client seeds its live accumulator from this, so a resumed
+            // session continues its total instead of restarting it.
+            cost_usd,
             is_subagent: false,
         };
         // The `sessions` row (the FK source for the Worker's `native_messages`
@@ -1255,7 +1275,10 @@ impl SessionManager {
     /// `SessionInfo` is long gone), and `context_usage` read from the row's
     /// `context_usage_json` (the last known usage — the frontend's store
     /// drops it on close, so the row is the source of truth for the stored
-    /// session's context bar).
+    /// session's context bar), and `cost_usd` read straight from the row's
+    /// typed `cost_usd` column (#105 — the same reason: the store drops its
+    /// cost entry on close, so the row is the only source a CLOSED session's
+    /// figure has).
     pub async fn list_sessions(
         &self,
         include_archived: bool,
@@ -1330,6 +1353,12 @@ impl SessionManager {
                                 ..usage
                             }
                         }),
+                    // (#105) The stored running cost, straight off the typed
+                    // column — no parsing, no derivation. `None` stays `None`
+                    // (a session that never reported a cost has no figure,
+                    // which the renderer spells as no element; `Some(0.0)` is
+                    // a real zero and renders `$0.00` — D5 / ADR 0082).
+                    cost_usd: row.cost_usd,
                 }
             })
             .collect())
@@ -2322,12 +2351,78 @@ mod session_tests {
             archived: true,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         };
         let json = serde_json::to_string(&info).unwrap();
         assert!(json.contains("\"archived\":true"), "got: {json}");
         let back: SessionInfo = serde_json::from_str(&json).unwrap();
         assert!(back.archived);
+    }
+
+    /// (#105 / D5 / ADR 0082) The `SessionInfo` SERDE boundary for the cost
+    /// field: it crosses as `costUsd` (the struct's `camelCase` rename), and
+    /// `None` vs `Some(0.0)` stay two different payloads — `null` and `0`.
+    /// The renderer prints nothing for the first and `$0.00` for the second,
+    /// so a projection or a deserialisation that collapses them is the exact
+    /// phantom-`$0.00` defect; this is the same distinction
+    /// `a_session_that_never_reported_cost_has_no_cost_field` pins through
+    /// the real IPC surface, asserted here at the type so a break in serde
+    /// config (not just in the projection) is attributable.
+    #[test]
+    fn session_info_serialises_the_cost_as_cost_usd_and_keeps_zero_distinct() {
+        let base = SessionInfo {
+            session_id: "s1".to_string(),
+            cwd: PathBuf::from("/tmp/proj"),
+            capabilities: serde_json::json!({ "loadSession": true }),
+            config_options: None,
+            archived: false,
+            title: None,
+            context_usage: None,
+            is_subagent: false,
+            cost_usd: None,
+        };
+
+        let absent = serde_json::to_value(&base).unwrap();
+        assert!(
+            absent.get("costUsd").is_some(),
+            "the key is the camelCase `costUsd`, got: {absent}"
+        );
+        assert!(
+            absent["costUsd"].is_null(),
+            "`None` serialises as null — never as a number"
+        );
+
+        let zero = SessionInfo {
+            cost_usd: Some(0.0),
+            ..base.clone()
+        };
+        let zero_json = serde_json::to_value(&zero).unwrap();
+        assert_eq!(
+            zero_json["costUsd"],
+            serde_json::json!(0.0),
+            "a REAL zero serialises as 0 — the two are different payloads"
+        );
+        assert_ne!(
+            absent["costUsd"], zero_json["costUsd"],
+            "the wire must keep 'never reported' and 'reported zero' apart"
+        );
+
+        // `#[serde(default)]`: a payload written before the field existed
+        // still deserialises, as `None`.
+        let pre_feature: SessionInfo = serde_json::from_value(serde_json::json!({
+            "sessionId": "s1",
+            "cwd": "/tmp/proj",
+            "capabilities": { "loadSession": true },
+            "configOptions": null,
+            "archived": false,
+            "contextUsage": null,
+        }))
+        .expect("a pre-cost SessionInfo deserialises");
+        assert_eq!(
+            pre_feature.cost_usd, None,
+            "an absent key reads back as None, not 0"
+        );
     }
 
     /// Write a `settings.json` with the given `defaultModel` (the
@@ -2971,6 +3066,7 @@ mod session_tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         })
         .expect("record_session should succeed");
@@ -3023,6 +3119,7 @@ mod session_tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         })
         .expect("record_session should succeed");
@@ -3106,6 +3203,7 @@ mod session_tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         })
         .expect("record_session should succeed");
@@ -3166,6 +3264,7 @@ mod session_tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         })
         .expect("record_session should succeed");
@@ -3218,6 +3317,7 @@ mod session_tests {
                 archived: false,
                 title: None,
                 context_usage: None,
+                cost_usd: None,
                 is_subagent: false,
             })
             .expect("record_session should succeed");
@@ -3275,6 +3375,7 @@ mod session_tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         })
         .expect("record_session should succeed");

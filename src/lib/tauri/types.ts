@@ -74,6 +74,28 @@ export interface SessionInfo {
   title?: string | null;
   /** The session's last known context usage (the `context_usage_update` frame's values — the provider's `input_tokens` vs the model's window). Persisted on the `sessions` row on every frame, so a CLOSED session's context survives (the store drops the entry on close — the row is the source of truth for the stored session's context bar). `undefined` until the first frame. */
   contextUsage?: { used: number; window: number };
+  /**
+   * The session's provider-reported running cost in USD (issue #105).
+   *
+   * `null`/`undefined` means no call ever reported a cost — which is NOT the
+   * same as `0`, a call that reported a genuine zero (D5, ADR 0082). The
+   * renderer prints nothing for the first and `$0.00` for the second.
+   *
+   * Persisted on the `sessions` row from every `cost_update` frame, so a CLOSED
+   * session keeps its figure: the store drops its entry on close, and the row is
+   * the source of truth for a stored session. MONEY ONLY — there are no token
+   * fields here on purpose (see the plan's fact 3): `SubagentDelegatingCard`'s
+   * context-% chain must keep falling through to its own sources.
+   *
+   * OPTIONAL TS-side, like `title` / `contextUsage`: a required field would
+   * break `tsc` at every fixture that builds a `SessionInfo`. It is optional
+   * because a row may carry no figure — NOT because the wire withholds the
+   * key: the Rust field is `Option<f64>` with `#[serde(default)]` and no
+   * `skip_serializing_if`, so a `None` column arrives as `"costUsd": null`
+   * (PRESENT AND NULL). Read the value, never the key's presence: both `null`
+   * and a missing key mean "no figure" to `sessionFieldOf`.
+   */
+  costUsd?: number | null;
 }
 
 

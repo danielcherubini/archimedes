@@ -76,7 +76,15 @@ describe("onSessionClosed", () => {
 
     expect(dismissInteractiveSpy).toHaveBeenCalledWith("test-session-123");
     expect(dismissPermissionsSpy).toHaveBeenCalledWith("test-session-123");
-    expect(handleSessionClosedSpy).toHaveBeenCalledWith("test-session-123", "user");
+    // The third argument is the run's figure, and a run with no figure hands
+    // over `undefined` — vitest v5 counts a trailing explicit `undefined` as an
+    // argument, so the expectation must name all three (asserting only the first
+    // two would fail on arity, not on meaning).
+    expect(handleSessionClosedSpy).toHaveBeenCalledWith(
+      "test-session-123",
+      "user",
+      undefined,
+    );
     expect(discardSessionMessagesSpy).toHaveBeenCalledWith("test-session-123");
 
     dismissInteractiveSpy.mockRestore();

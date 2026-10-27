@@ -63,7 +63,7 @@ use tauri::webview::InvokeRequest;
 use tauri::Listener;
 use tauri::Manager;
 
-use archimedes_lib::agent::worker::client::WorkerHandle;
+use archimedes_lib::agent::worker::client::{WorkerHandle, WorkerInboundEvent};
 use archimedes_lib::agent::worker::manager::{WorkerFactory, WorkerManager};
 use archimedes_lib::agent::SessionInfo;
 use archimedes_lib::setup_dirs_with_factory;
@@ -166,6 +166,7 @@ fn build_app(dirs: &TestDirs) -> TestApp {
             archimedes_lib::commands::sessions::get_stalled_info,
             archimedes_lib::commands::spaces::set_space_trusted,
             archimedes_lib::commands::spaces::reorder_spaces,
+            archimedes_lib::commands::history::list_sessions,
             archimedes_lib::commands::history::session_recency,
             archimedes_lib::commands::history::reorder_sessions,
             archimedes_lib::commands::settings::list_models,
@@ -903,6 +904,428 @@ async fn a_subagent_transcript_persists_as_a_hidden_ephemeral_row() {
     assert!(
         !native.is_empty(),
         "the child's transcript rows are persisted (the `native_messages` FK held)"
+    );
+
+    // (f4) THE CHILD'S OWN MONEY (#105, Task 3): the child's row carries its
+    // own figure. Delivered the way the PUMP delivers a child frame — under
+    // the PARENT's delivery id with `is_subagent: true` and the child's id in
+    // the payload's `sessionId` — through the app's REAL `WorkerHooks`
+    // (`SessionWorkerHooks` → `SessionManager::route_event` → the persister).
+    let hooks = worker_manager(&app).hooks().clone();
+    hooks.on_event(
+        &info.session_id,
+        true,
+        WorkerInboundEvent::SinkFrame {
+            event: "interactive-event".to_string(),
+            payload: json!({
+                "sessionId": child_id,
+                "seq": 0,
+                "event": "cost_update",
+                "payload": { "costUsd": 0.00001243, "source": "main" },
+            }),
+        },
+    );
+    assert_eq!(
+        d.session_cost(&child_id).expect("the child cost read"),
+        Some(0.00001243),
+        "a child's own priced frame lands on the CHILD's row through the \
+         real hooks (its stored figure matches its own card)"
+    );
+    assert_eq!(
+        d.session_cost(&info.session_id)
+            .expect("the parent cost read"),
+        None,
+        "the child's own deltas must NOT land on the delivery id's row — the \
+         roll-up adds the child's SUM on top, so writing both double-counts"
+    );
+}
+
+// ── The stored cost on the wire (issue #105, Task 3) ───────────────────────
+//
+// HOW these tests drive a `cost_update` frame, and what that does and does not
+// prove. `fake_worker` has NO priced scenario — its canned turn emits no
+// `cost_update` frame and never calls a provider, so a real dispatch's
+// `SubagentMetrics.cost` is `0.0` and `finish_subagent`'s `> 0.0`
+// frame-existence gate suppresses the roll-up. Adding a priced fixture
+// scenario means editing `src/bin/fake_worker.rs`, which is outside this
+// task's files. So these tests inject the frame through
+// `WorkerManager::hooks()` — the app's OWN `SessionWorkerHooks`, built by the
+// same `SessionManagerBuilder::build` the production `setup_dirs` runs — which
+// is EXACTLY the call `finish_subagent` makes for the roll-up
+// (`hooks.on_event(parent, false, SinkFrame { … })`). Everything downstream of
+// that call is production code and production wiring: the router's gate,
+// `apply_interactive_event`, `Db::record_session_cost`, the `TauriSink`
+// re-emission, and the `list_sessions` / `resume_session` command surface.
+// What is NOT proven here is that `finish_subagent` builds that envelope —
+// `subagent_flow.rs`'s `rollup_tests` pin the frame's shape and that it now
+// travels through `on_event`, and the payload below is copied from it
+// byte-for-byte.
+
+/// One `cost_update` `SinkFrame` payload in the shape `finish_subagent`'s
+/// roll-up emits (`sessionId` = the session the money belongs to).
+fn cost_frame(session_id: &str, cost_usd: f64, source: &str) -> WorkerInboundEvent {
+    WorkerInboundEvent::SinkFrame {
+        event: "interactive-event".to_string(),
+        payload: json!({
+            "sessionId": session_id,
+            "seq": 0,
+            "event": "cost_update",
+            "payload": { "costUsd": cost_usd, "source": source },
+        }),
+    }
+}
+
+/// (issue #105) A session that showed a cost figure STILL SHOWS THE SAME
+/// FIGURE after a close: the `cost_update` frames reach the row (the router →
+/// `apply_interactive_event` → `record_session_cost` path, driven through the
+/// app's real hooks) and `list_sessions` — the boot fetch a CLOSED session's
+/// figure has — projects it back out as `costUsd`. The frames are also still
+/// re-emitted to the UI exactly once each (persisting must not eat the live
+/// frame).
+#[tokio::test]
+async fn a_stored_cost_survives_a_close_and_a_list() {
+    let dirs = TestDirs::new();
+    let _server = seed_default_model(&dirs).await;
+    let app = build_app(&dirs);
+    let webview = app.webview.clone();
+    let collector = EventCollector::new(&app, &["interactive-event"]);
+
+    let info: SessionInfo = value_to(
+        invoke_ok(
+            &webview,
+            "start_session",
+            json!({ "cwd": dirs.cwd().display().to_string() }),
+        )
+        .await,
+    );
+
+    // Two priced frames (the loop emits one per priced call).
+    let hooks = worker_manager(&app).hooks().clone();
+    hooks.on_event(
+        &info.session_id,
+        false,
+        cost_frame(&info.session_id, 0.00001243, "main"),
+    );
+    hooks.on_event(
+        &info.session_id,
+        false,
+        cost_frame(&info.session_id, 0.00002, "main"),
+    );
+
+    // The UI still gets BOTH frames verbatim (the persistence arm is a
+    // side effect, not a replacement).
+    let frames = collector.find("interactive-event");
+    assert_eq!(
+        frames.len(),
+        2,
+        "each priced frame is still re-emitted to the UI exactly once"
+    );
+    assert!(
+        frames
+            .iter()
+            .all(|f| f["event"] == "cost_update" && f["payload"]["source"] == "main"),
+        "the frames ride verbatim: {frames:?}"
+    );
+
+    // The close (the frontend's store drops its entry here — the row is what
+    // survives).
+    invoke_ok(
+        &webview,
+        "close_session",
+        json!({ "sessionId": info.session_id }),
+    )
+    .await;
+
+    // The boot fetch: the CLOSED session's row carries the SUMMED figure.
+    let rows = invoke_ok(
+        &webview,
+        "list_sessions",
+        json!({ "includeArchived": true }),
+    )
+    .await;
+    let row = rows
+        .as_array()
+        .expect("list_sessions returns an array")
+        .iter()
+        .find(|r| r["sessionId"] == info.session_id.as_str())
+        .expect("the closed session is in list_sessions");
+    let stored = row["costUsd"]
+        .as_f64()
+        .expect("a priced session's list row carries costUsd");
+    assert!(
+        (stored - 0.00003243).abs() < 1e-12,
+        "the listed costUsd is the summed figure, got {stored}"
+    );
+    // The row itself agrees (the same column, read without the projection).
+    let d = db(&app);
+    let raw = d
+        .session(&info.session_id)
+        .expect("the row load")
+        .expect("the row exists");
+    let raw = raw.cost_usd.expect("the column carries the figure");
+    assert!(
+        (raw - 0.00003243).abs() < 1e-12,
+        "the projection reports the stored column, not a recomputed figure"
+    );
+}
+
+/// (issue #105 / D5 / ADR 0082) THE IPC BOUNDARY PIN: a session whose
+/// provider never reported a cost has NO cost — `costUsd` is `null` (or
+/// absent), NEVER `0`. `0` and "unknown" are different claims, and collapsing
+/// them is the phantom-`$0.00` defect this field exists to avoid.
+#[tokio::test]
+async fn a_session_that_never_reported_cost_has_no_cost_field() {
+    let dirs = TestDirs::new();
+    let _server = seed_default_model(&dirs).await;
+    let app = build_app(&dirs);
+    let webview = app.webview.clone();
+
+    let info: SessionInfo = value_to(
+        invoke_ok(
+            &webview,
+            "start_session",
+            json!({ "cwd": dirs.cwd().display().to_string() }),
+        )
+        .await,
+    );
+    // `start_session`'s own payload — the fresh session reports nothing.
+    assert!(
+        info.cost_usd.is_none(),
+        "a fresh session's SessionInfo has no cost, got {:?}",
+        info.cost_usd
+    );
+
+    // An UNPRICED turn (the canned stream carries no `cost_update` frame).
+    let stop = invoke_ok(
+        &webview,
+        "send_prompt",
+        json!({ "sessionId": info.session_id, "text": "hello" }),
+    )
+    .await;
+    assert_eq!(stop, json!("end_turn"), "the turn settles");
+
+    invoke_ok(
+        &webview,
+        "close_session",
+        json!({ "sessionId": info.session_id }),
+    )
+    .await;
+
+    let rows = invoke_ok(
+        &webview,
+        "list_sessions",
+        json!({ "includeArchived": true }),
+    )
+    .await;
+    let row = rows
+        .as_array()
+        .expect("list_sessions returns an array")
+        .iter()
+        .find(|r| r["sessionId"] == info.session_id.as_str())
+        .expect("the closed session is in list_sessions");
+    match row.get("costUsd") {
+        // Absent is fine (`None` may be elided), `null` is fine (what serde
+        // emits today) — but a NUMBER is the D5 defect.
+        None | Some(Value::Null) => {}
+        Some(other) => panic!(
+            "a session that never reported a cost must never carry a number \
+             for costUsd — `0` means 'a call reported a real zero' and the \
+             renderer would print $0.00, got {other}"
+        ),
+    }
+    // The typed read agrees (the same distinction on the Rust side).
+    let json_row = serde_json::to_value(&info).expect("SessionInfo serializes");
+    assert!(
+        json_row["costUsd"].is_null(),
+        "the fresh session's payload spells absence as null/absent, got {:?}",
+        json_row.get("costUsd")
+    );
+}
+
+/// (issue #105) A RESUMED session is handed its stored figure back: the
+/// resume's `SessionInfo` (the payload `resume_session` returns, which the
+/// frontend seeds its live accumulator from) carries the row's `costUsd`, so
+/// the next priced call ADDS to the stored total instead of restarting it.
+/// The resume's own `record_session` re-record must not clobber the column.
+#[tokio::test]
+async fn a_resumed_session_is_handed_back_the_stored_cost() {
+    let dirs = TestDirs::new();
+    let _server = seed_default_model(&dirs).await;
+    let app = build_app(&dirs);
+    let webview = app.webview.clone();
+
+    let info: SessionInfo = value_to(
+        invoke_ok(
+            &webview,
+            "start_session",
+            json!({ "cwd": dirs.cwd().display().to_string() }),
+        )
+        .await,
+    );
+    let hooks = worker_manager(&app).hooks().clone();
+    hooks.on_event(
+        &info.session_id,
+        false,
+        cost_frame(&info.session_id, 0.5, "main"),
+    );
+    invoke_ok(
+        &webview,
+        "close_session",
+        json!({ "sessionId": info.session_id }),
+    )
+    .await;
+
+    let resumed: SessionInfo = value_to(
+        invoke_ok(
+            &webview,
+            "resume_session",
+            json!({ "sessionId": info.session_id, "cwd": dirs.cwd().display().to_string() }),
+        )
+        .await,
+    );
+    assert_eq!(
+        resumed.session_id, info.session_id,
+        "the resume re-uses the stored id"
+    );
+    let seeded = resumed
+        .cost_usd
+        .expect("the resume carries the stored figure (Trap 3's seed source)");
+    assert!(
+        (seeded - 0.5).abs() < 1e-12,
+        "the resume hands back the stored total, got {seeded}"
+    );
+    // The resume's own `record_session` did not wipe the column.
+    let d = db(&app);
+    assert!(
+        (d.session_cost(&info.session_id)
+            .expect("the cost read")
+            .expect("the figure survives the resume's re-record")
+            - 0.5)
+            .abs()
+            < 1e-12,
+        "resuming does not reset the stored figure"
+    );
+}
+
+/// (issue #105) THE ROLL-UP THROUGH THE REAL IPC SURFACE: a child's roll-up
+/// frame (the envelope `finish_subagent` emits, byte-for-byte) lands on the
+/// PARENT's row AND is still re-emitted to the UI verbatim exactly once — the
+/// end-to-end half of the link Task 2 could only assert at the router
+/// (`a_parent_keyed_cost_frame_from_the_router_writes_the_parents_row` defers
+/// to this). It runs against a REAL dispatched child (the `__subagent__`
+/// fixture — the child's own hidden row exists) so the two rows the roll-up
+/// must NOT confuse are both present, and the parent's STORED figure equals
+/// the figure under its own title.
+#[tokio::test]
+async fn the_subagent_roll_up_lands_on_the_parents_row_and_still_re_emits() {
+    let dirs = TestDirs::new();
+    let _server = seed_default_model(&dirs).await;
+    let app = build_app(&dirs);
+    let webview = app.webview.clone();
+    let collector = EventCollector::new(&app, &["subagent-session-started", "interactive-event"]);
+
+    let info: SessionInfo = value_to(
+        invoke_ok(
+            &webview,
+            "start_session",
+            json!({ "cwd": dirs.cwd().display().to_string() }),
+        )
+        .await,
+    );
+    let stop = invoke_ok(
+        &webview,
+        "send_prompt",
+        json!({ "sessionId": info.session_id, "text": "__subagent__" }),
+    )
+    .await;
+    assert_eq!(stop, json!("end_turn"), "the parent's turn settles");
+    let started = collector
+        .wait_for("subagent-session-started", Duration::from_secs(30))
+        .await
+        .expect("the child was dispatched for real");
+    let child_id = started["sessionId"]
+        .as_str()
+        .expect("the child id")
+        .to_string();
+
+    // WHY the roll-up frame is injected below rather than produced by that
+    // real dispatch: the `fake_worker` fixture never calls a provider and
+    // emits no `cost_update` frame, so the dispatched child's
+    // `SubagentMetrics.cost` is `0.0` and `finish_subagent`'s `> 0.0`
+    // frame-existence gate correctly emits NO roll-up. Asserted here so the
+    // substitution is visible AT the assertion and not only in a comment.
+    let d = db(&app);
+    assert_eq!(
+        d.session_cost(&info.session_id)
+            .expect("the parent cost read"),
+        None,
+        "the fixture's child reported nothing, so the real dispatch rolled up \
+         nothing; the frame injected below is the envelope `finish_subagent` \
+         emits when the child DID spend (its shape and its new `on_event` \
+         route are pinned in `subagent_flow.rs`'s `rollup_tests`)"
+    );
+
+    // The roll-up, exactly as `finish_subagent` emits it: the PARENT's id,
+    // `is_subagent: false`, `source: "subagent"`, `seq: 0`.
+    let hooks = worker_manager(&app).hooks().clone();
+    hooks.on_event(
+        &info.session_id,
+        false,
+        cost_frame(&info.session_id, 0.0000341, "subagent"),
+    );
+
+    assert_eq!(
+        d.session_cost(&info.session_id)
+            .expect("the parent cost read"),
+        Some(0.0000341),
+        "the roll-up writes the PARENT's row (the parent's stored figure now \
+         agrees with the figure under its own title)"
+    );
+    assert_eq!(
+        d.session_cost(&child_id).expect("the child cost read"),
+        None,
+        "the roll-up is the PARENT's money — it must not touch the child's row"
+    );
+
+    // The UI half: the frame is re-emitted verbatim, exactly once.
+    let rollups: Vec<Value> = collector
+        .find("interactive-event")
+        .into_iter()
+        .filter(|f| f["event"] == "cost_update")
+        .collect();
+    assert_eq!(
+        rollups.len(),
+        1,
+        "the roll-up reaches the UI exactly once (persisting does not eat it)"
+    );
+    assert_eq!(rollups[0]["sessionId"], info.session_id.as_str());
+    assert_eq!(rollups[0]["seq"], json!(0));
+    assert_eq!(rollups[0]["payload"]["source"], "subagent");
+    assert_eq!(rollups[0]["payload"]["costUsd"], json!(0.0000341));
+
+    // And it survives the close, on the list the frontend reads at boot.
+    invoke_ok(
+        &webview,
+        "close_session",
+        json!({ "sessionId": info.session_id }),
+    )
+    .await;
+    let rows = invoke_ok(
+        &webview,
+        "list_sessions",
+        json!({ "includeArchived": true }),
+    )
+    .await;
+    let row = rows
+        .as_array()
+        .expect("list_sessions returns an array")
+        .iter()
+        .find(|r| r["sessionId"] == info.session_id.as_str())
+        .expect("the closed session is in list_sessions");
+    assert_eq!(
+        row["costUsd"],
+        json!(0.0000341),
+        "the parent's LISTED figure includes the child roll-up"
     );
 }
 

@@ -752,7 +752,44 @@ interface SessionsState {
   applyConfigOptions: (sessionId: string, options: SessionConfigOption[]) => void;
   applySessionUpdate: (sessionId: string, update: AcpSessionUpdate) => void;
   applySessionUpdates: (updates: SessionUpdateBatchItem[]) => void;
-  handleSessionClosed: (sessionId: string, reason: CloseReasonStr) => void;
+  /**
+   * A `session-closed` push: the Worker is gone, so the live row moves to the
+   * history list (a PAUSE, not a discard — see the reducer's own notes).
+   *
+   * `closedCostUsd` carries the figure this app run accumulated
+   * (`useInteractive.cost[id].costUsd`), which the CALLER must read BEFORE it
+   * dismisses that map: `lib/sessionLifecycle.ts`'s `onSessionClosed` calls
+   * `dismissSession`, which DELETES the cost entry, and only then lands here, so
+   * by the time this reducer runs the run's money exists nowhere else. Without
+   * the argument the filed row keeps no figure (a session started this run) or
+   * the stale resume-time one, and `costUsdOf`'s row fallback — the ONLY place a
+   * stored session's money lives — reads nothing, so the cost line under the
+   * title goes blank until a reload. Same retention precedent as the
+   * `configOptions` / `contextUsage` the reducer deliberately keeps.
+   *
+   * OPTIONAL, and it stays optional on purpose: a caller with no figure to hand
+   * (a close that did not come through `onSessionClosed`) files the row exactly
+   * as before — no `costUsd` key is introduced for a session whose figure is
+   * unknown. NOT because absence arrives as absence: `SessionInfo.cost_usd` is
+   * an `Option<f64>` with `#[serde(default)]` and NO `skip_serializing_if`, so a
+   * `None` crosses IPC as `"costUsd": null` — PRESENT and null (pinned by the
+   * serde-boundary test in `src-tauri/src/agent/session/mod.rs`). The guard is
+   * about the SHAPE THIS SIDE produces: an unconditional carry would introduce a
+   * `costUsd` key holding `undefined`, which is neither what the wire sends
+   * (`null`) nor what the store's own rows ever hold, and `costUsdOf`'s row
+   * fallback reads the key either way — `undefined` and `null` both mean "no
+   * figure" there.
+   *
+   * A `number`, not `number | null`: `useInteractive.cost[id].costUsd` is
+   * nullable, and `null` there is the live "frames arrived, none carried a
+   * figure" REPORT rather than a figure to file, so a caller must resolve that
+   * (the way `onSessionClosed` does) instead of handing the ambiguity over.
+   */
+  handleSessionClosed: (
+    sessionId: string,
+    reason: CloseReasonStr,
+    closedCostUsd?: number,
+  ) => void;
   turnCompleted: (sessionId: string, stopReason: StopReason) => void;
 }
 
@@ -1744,6 +1781,22 @@ export const useSessions = create<SessionsState>((set, get) => ({
         ? { ...st.configOptions, [sessionId]: info.configOptions }
         : st.configOptions,
     }));
+    // Seed the cost accumulator from the row (issue #105, Trap 3). The map lost
+    // this session's entry when it closed (`dismissSession`), so without this
+    // the next priced frame after a resume is THAT CALL's cost alone and the
+    // figure the user saw before the reload silently drops. `seedCostFromRow`
+    // writes the key DIRECTLY — never `applyCost`, which normalises AND SUMS and
+    // would add a stored TOTAL to itself. Cross-store writes are already the
+    // pattern here (`sessionLifecycle.ts` reaches `dismissSession` the same way).
+    //
+    // `!= null`, not a truthiness test: a stored `0` is a FIGURE (D5) and must
+    // seed `$0.00`; only `null`/absent ("no call ever reported a cost") seeds
+    // nothing — and seeding nothing matters, because an entry holding
+    // `costUsd: null` is a live REPORT that `costUsdOf` treats as "render
+    // nothing", which would suppress the row figure it just read.
+    if (info.costUsd != null) {
+      useInteractive.getState().seedCostFromRow(sessionId, info.costUsd);
+    }
     // ACP `session/load` does not re-stream the transcript — reload it from
     // the persisted history so the pane shows the conversation on resume.
     void (async () => {
@@ -2186,26 +2239,71 @@ export const useSessions = create<SessionsState>((set, get) => ({
       };
     }),
 
-  handleSessionClosed: (sessionId, reason) => {
+  handleSessionClosed: (sessionId, reason, closedCostUsd) => {
     const closedInfo = useSessions
       .getState()
       .sessions.find((s) => s.sessionId === sessionId);
+    // The run's figure, carried onto the object this reducer files (the caller
+    // read it before dismissing `useInteractive.cost` — see the action's doc).
+    //
+    // A COPY, and only when there IS a figure: `closedInfo` is the live row
+    // object, so mutating it in place would write money into `state.sessions` —
+    // a list that is about to stop holding it — while an unconditional
+    // `{ ...closedInfo, costUsd: closedCostUsd }` would introduce a `costUsd` key
+    // for every session with no figure: the spread's value would be
+    // `closedCostUsd ?? closedInfo.costUsd`, i.e. `undefined` for a row that
+    // never had one, and a key holding `undefined` is a shape NOTHING else in
+    // this pipeline carries — the wire spells a `None` column as `"costUsd":
+    // null` (`Option<f64>` + `#[serde(default)]`, no `skip_serializing_if`, so
+    // it serialises the null), and `makeSessionRow`-style wire-shape
+    // expectations model the row with `null` or no key at all, never `undefined`.
+    //
+    // So an ABSENT run figure files the row exactly as it stands — which is the
+    // `??` the carry needs, expressed as a guard rather than as a spread value so
+    // the key stays absent: an absent figure must not WIPE a resume-time figure
+    // the row already carries (`resumeSession` seeds `useInteractive.cost` from
+    // precisely that value, so on a resume-then-close-with-no-new-frames path the
+    // row is the surviving copy of it). The `== null` (not `=== undefined`) also
+    // rejects a `null` a non-typed caller could hand over — `null` there means
+    // "frames arrived, none carried a figure", which is not money to file.
+    const filedInfo =
+      closedInfo === undefined || closedCostUsd == null
+        ? closedInfo
+        : { ...closedInfo, costUsd: closedCostUsd };
     set((state) => {
+      // The archived branch (sticky, ADR 0016) holds the id ONLY in
+      // `archivedSessions` — the row is never moved on a close, so without this
+      // it keeps the boot-time `costUsd` while the run's figure dies with the
+      // dismissed map. Same staleness as the history branch, hence the same
+      // carry, and the same "no figure ⇒ no copy" rule (the untouched list keeps
+      // its reference, which is what the passthrough below already means).
+      const archivedIndex = state.archivedSessions.findIndex(
+        (s) => s.sessionId === sessionId,
+      );
+      const isArchived = archivedIndex >= 0;
+      const archivedSessions =
+        isArchived && closedCostUsd != null
+          ? state.archivedSessions.map((s, i) =>
+              i === archivedIndex ? { ...s, costUsd: closedCostUsd } : s,
+            )
+          : state.archivedSessions;
       return {
         sessions: state.sessions.filter((s) => s.sessionId !== sessionId),
         // The session remains in the database: it moves to the history
         // list — UNLESS it is archived (sticky, ADR 0016): a closing
         // archived session stays ONLY in `archivedSessions`.
         historySessions:
-          closedInfo &&
-          !state.archivedSessions.some((s) => s.sessionId === sessionId)
+          filedInfo && !isArchived
             ? [
                 ...state.historySessions.filter(
                   (s) => s.sessionId !== sessionId,
                 ),
-                closedInfo,
+                filedInfo,
               ]
             : state.historySessions,
+        // A closing archived session keeps its sticky membership; only its
+        // figure is refreshed (see the note above).
+        archivedSessions,
         // A close is a PAUSE, not a discard: the conversation moves to the
         // history list but STAYS the displayed one, so `ChatStream` renders
         // its stored/paused banner instead of the `No active session` empty

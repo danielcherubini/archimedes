@@ -267,8 +267,11 @@ describe("applyCost (the session's cumulative USD figure, #87)", () => {
   });
 
   it("a frame that carries no money key at all is unknown, not zero", () => {
-    // T09's emitter OMITS the key rather than sending `null` (its Decision 2),
-    // so absence must land in the same state as `null`.
+    // T09's emitter never emits a no-figure frame at all — it returns early
+    // before building one — so in practice this key is always present on a frame
+    // that reaches the store. Absence is still a state the reducer must handle
+    // (a malformed or foreign frame), and it must land in the SAME unknown state
+    // as `null`, never a manufactured `0`.
     useInteractive.getState().applyCost(S1, { inputTokens: 100, outputTokens: 20 });
     const entry = useInteractive.getState().cost[S1] as {
       costUsd: number | null;
@@ -391,6 +394,107 @@ describe("applyCost (the session's cumulative USD figure, #87)", () => {
     };
     expect(entry.inputTokens).toBe(25000);
     expect(entry.outputTokens).toBe(5000);
+  });
+});
+
+/**
+ * TRAP 3 — the accumulator restarts at zero, the stored row does not.
+ *
+ * `dismissSession` deletes `cost[sessionId]` on close, so after a resume the map
+ * is empty and the first priced frame yields THAT CALL's cost only. The fix is
+ * to seed the accumulator from the row at resume, and the store's own doc on the
+ * `cost` field names the one way to get that wrong: `applyCost` normalises AND
+ * SUMS (`combineSessionCost` is pure addition), so feeding it a stored TOTAL
+ * adds the total to itself. `seedCostFromRow` therefore writes the key DIRECTLY.
+ *
+ * The 0.5 + 0.1 = 0.6 assertion below is the anti-double-count pin: the wrong
+ * implementation yields 1.1, and every other test in this file stays green
+ * either way. Do not soften it into "the figure is present".
+ */
+describe("seedCostFromRow (a resumed session continues its stored total, #105)", () => {
+  it("seeds the accumulator so the next priced frame ADDS to the stored figure (0.5 + 0.1 = 0.6, NOT 1.1)", () => {
+    useInteractive.getState().seedCostFromRow(S1, 0.5);
+    useInteractive.getState().applyCost(S1, { costUsd: 0.1 });
+    const entry = useInteractive.getState().cost[S1] as {
+      costUsd: number | null;
+      cost: number | null;
+    };
+    // 0.6 — the stored total plus this call's money.
+    expect(entry.costUsd).toBeCloseTo(0.6, 10);
+    // 1.1 would mean the seed was routed through `applyCost` and added itself
+    // (0.5 + 0.5) before the frame landed. That is the bug this line exists to
+    // catch, so it is asserted explicitly rather than left to the number above.
+    expect(entry.costUsd).not.toBeCloseTo(1.1, 10);
+    // Rule R1: one total under BOTH names, so the card's `cost` alias link sees
+    // the seeded figure too.
+    expect(entry.cost).toBeCloseTo(0.6, 10);
+  });
+
+  it("seeding twice does NOT accumulate (it is a seed, not a delta)", () => {
+    useInteractive.getState().seedCostFromRow(S1, 0.5);
+    useInteractive.getState().seedCostFromRow(S1, 0.5);
+    const entry = useInteractive.getState().cost[S1] as {
+      costUsd: number | null;
+    };
+    expect(entry.costUsd).toBe(0.5);
+  });
+
+  it("seeds nothing for a session whose row never reported a figure (no entry, so `null` is not `0`)", () => {
+    // A `NULL` column means "no call ever reported a cost". Creating an entry
+    // for it would write `costUsd: null` into the map, which `costUsdOf` reads
+    // as a REPORT ("live and reporting nothing") and would then suppress the
+    // row figure — the exact precedence the selector documents.
+    useInteractive.getState().seedCostFromRow(S1, null);
+    expect(S1 in useInteractive.getState().cost).toBe(false);
+    useInteractive.getState().seedCostFromRow(S1, undefined);
+    expect(S1 in useInteractive.getState().cost).toBe(false);
+  });
+
+  it("does NOT clobber an entry the live frames already wrote", () => {
+    // A resume racing an in-flight frame: the map is fresher than the row this
+    // seed came from, so the seed stands down.
+    useInteractive.getState().applyCost(S1, { costUsd: 0.9 });
+    useInteractive.getState().seedCostFromRow(S1, 0.5);
+    const entry = useInteractive.getState().cost[S1] as {
+      costUsd: number | null;
+    };
+    expect(entry.costUsd).toBe(0.9);
+  });
+
+  it("seeds a stored REAL zero as 0 (D5: a free session renders $0.00, not nothing)", () => {
+    useInteractive.getState().seedCostFromRow(S1, 0);
+    const entry = useInteractive.getState().cost[S1] as {
+      costUsd: number | null;
+      cost: number | null;
+    };
+    expect(entry.costUsd).toBe(0);
+    expect(entry.cost).toBe(0);
+  });
+
+  it("writes MONEY ONLY — no token keys on the seeded entry (plan fact 3)", () => {
+    // `applyCost` always writes the four token fields; a seeded entry must NOT
+    // carry them. `SubagentDelegatingCard`'s context-% chain tests
+    // `inputTokens !== undefined || outputTokens !== undefined || tokens !==
+    // undefined` before using the store entry, and tokens are never persisted —
+    // so a seeded `0` would win that chain and drive the child's bar to 0% (and,
+    // once real tokens existed, past 100%: `calculatedPct` has no clamp).
+    useInteractive.getState().seedCostFromRow(S1, 0.5);
+    const entry = useInteractive.getState().cost[S1] as Record<string, unknown>;
+    expect("inputTokens" in entry).toBe(false);
+    expect("outputTokens" in entry).toBe(false);
+    expect("cacheReadTokens" in entry).toBe(false);
+    expect("cacheWriteTokens" in entry).toBe(false);
+    expect("tokens" in entry).toBe(false);
+    expect(Object.keys(entry).sort()).toEqual(["cost", "costUsd"]);
+  });
+
+  it("leaves other sessions' entries alone", () => {
+    useInteractive.getState().applyCost(S2, { costUsd: 0.2 });
+    useInteractive.getState().seedCostFromRow(S1, 0.5);
+    const other = useInteractive.getState().cost[S2] as {
+      costUsd: number | null;
+    };
+    expect(other.costUsd).toBe(0.2);
   });
 });
 

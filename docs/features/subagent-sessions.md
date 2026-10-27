@@ -151,15 +151,32 @@ cost emits NOTHING at all: emitting a zero is what manufactures the phantom
 deliberately NOT the `max` the token fields next door use, because per-message
 token usage is cumulative while money accumulates across calls — and
 `finish_subagent` then emits ONE parent-keyed roll-up frame (`source:
-"subagent"`) behind a `> 0.0` guard straight onto the parent's sink: a child
-that reported nothing contributes nothing, a priced child contributes exactly
-its total. `SubagentMetrics.cost` is an `f64`, so the capture's `Option` collapses
+"subagent"`) behind a `> 0.0` guard: a child that reported nothing contributes
+nothing, a priced child contributes exactly its total. `SubagentMetrics.cost` is an `f64`, so the capture's `Option` collapses
 at the hand-off and `0.0` means either "no figure
 arrived" or "a call reported a real zero" (promotion to optional is a named
 follow-up — it needs the TypeScript `metrics` declaration and the card's read in
-the same change). **Rust holds no accumulator**: the cumulative figure is the
-frontend store's (`useInteractive.cost[sessionId]`, summed by `applyCost`) and
-that store is in-memory, so the figure does NOT survive a reload. Nor is it a
+the same change). **The figure survives a reload** (#105): the Supervisor — the
+sole DB writer, since the Worker holds no `Db` — accumulates every `cost_update`
+frame it already routes into `sessions.cost_usd`, a nullable `REAL` with no
+`DEFAULT` so `NULL` ("no call ever reported a cost") stays distinct from `0.0`
+("a call reported a real zero"), which is the D5 distinction at rest. A child's
+own frames land on the CHILD's row: the pump re-targets them to the parent's
+delivery id, so the router keys the write off the payload's `sessionId` instead
+— writing them to the delivery id would put a child's per-call deltas on the
+parent's row and the roll-up would add the child's SUM again. The roll-up itself
+no longer bypasses persistence: it goes through `route_event`, which persists it
+and re-emits it verbatim, so the parent's stored figure equals the number under
+its own title. The frontend reads map-first-then-row (`lib/sessionCost.ts`) and
+seeds the live accumulator from the row at resume — DIRECTLY, never through
+`applyCost`, which normalises AND sums and would add a stored total to itself.
+Two limits are deliberate: the write is **not idempotent** (frames carry no
+identity — `"seq": 0` — so a replayed frame doubles the figure; bounded by
+`emit_cost_update`'s single call site and pinned as a hazard, not prevented), and
+**no token fields are persisted**, because the frame never carried them, so
+`applyCost`'s token accumulation is provably `0 + 0` and `SubagentDelegatingCard`'s
+context-% chain has never run — widening the frame would activate it, unclamped
+and fed by a SUMMED field whose values are cumulative per call. Nor is it a
 session's TOTAL spend: the compaction summarizer's own call sits OUTSIDE the
 loop's `Usage` arm — `compact.rs::summarize` drains its stream on `TextDelta` /
 `Done` / `Error` and drops the provider's `Usage` event — so no figure is ever
