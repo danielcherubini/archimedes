@@ -275,6 +275,7 @@ mod tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         })
         .expect("record_session");

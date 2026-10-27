@@ -864,6 +864,7 @@ mod tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         })
         .unwrap();
@@ -876,6 +877,7 @@ mod tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: true,
         })
         .unwrap();
@@ -1001,6 +1003,7 @@ mod tests {
                 archived: false,
                 title: None,
                 context_usage: None,
+                cost_usd: None,
                 is_subagent,
             })
             .unwrap();

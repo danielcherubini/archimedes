@@ -98,6 +98,24 @@ pub struct SessionInfo {
     /// (and the `Value::Null`-ish ephemeral envelope) deserialize `false`.
     #[serde(default)]
     pub is_subagent: bool,
+    /// The session's provider-reported running cost in USD (issue #105).
+    ///
+    /// `None` means no call ever reported a cost — which is NOT the same as
+    /// `Some(0.0)`, a call that reported a genuine zero. The renderer prints
+    /// nothing for the first and `$0.00` for the second; collapsing them is
+    /// the D5 defect this field exists to avoid (ADR 0082).
+    ///
+    /// Read straight off the row's typed `cost_usd` column (no parsing —
+    /// unlike `context_usage_json`, which stores a JSON blob) at the resume
+    /// and list projections, so a CLOSED session keeps its figure: the
+    /// frontend's store drops its entry on close, and the row is the source
+    /// of truth for the stored session's figure.
+    ///
+    /// `serde(default)` so a `SessionInfo` built without it still
+    /// deserialises; crosses IPC as `costUsd` (the struct's
+    /// `rename_all = "camelCase"`).
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
 }
 
 /// A session's last known context usage (the `context_usage_update` frame's

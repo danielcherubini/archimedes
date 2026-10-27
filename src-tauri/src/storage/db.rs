@@ -1820,6 +1820,7 @@ mod tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         };
         // Two sessions; one of them gets archived.
@@ -2240,6 +2241,7 @@ mod tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: true,
         };
         db.record_session(&sub).expect("record subagent");
@@ -2427,6 +2429,7 @@ mod tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         }
     }
@@ -2568,6 +2571,7 @@ mod tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         };
         db.record_session(&session)
@@ -2608,6 +2612,7 @@ mod tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         };
         db.record_session(&main).expect("record main");
@@ -2620,6 +2625,7 @@ mod tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: true,
         };
         db.record_session(&sub).expect("record subagent");
@@ -2827,6 +2833,7 @@ mod tests {
             }),
             config_options: None,
             context_usage: None,
+            cost_usd: None,
             archived: false,
             title: None,
             is_subagent: false,
@@ -2887,6 +2894,7 @@ mod tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         };
         db.record_session(&mk("sess-1"))
@@ -2979,6 +2987,7 @@ mod tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         };
         db.record_session(&info).unwrap();
@@ -3019,6 +3028,7 @@ mod tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         };
         db.record_session(&info).unwrap();
@@ -3077,6 +3087,7 @@ mod tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         };
         db.record_session(&info).unwrap();
@@ -3134,6 +3145,7 @@ mod tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         };
         db.record_session(&info).unwrap();
@@ -3428,6 +3440,7 @@ mod tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent,
         }
     }

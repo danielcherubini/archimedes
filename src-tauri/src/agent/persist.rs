@@ -262,6 +262,10 @@ impl TranscriptPersister {
             // write `title` anyway.
             title: None,
             context_usage: None,
+            // A row created HERE is brand new — nothing has reported a cost
+            // yet, and `record_session`'s conflict arm never touches
+            // `cost_usd`, so this `None` can only ever land on a fresh row.
+            cost_usd: None,
             is_subagent,
         };
         if let Err(e) = self.db.record_session(&info) {
@@ -514,6 +518,7 @@ mod tests {
             archived: false,
             title: None,
             context_usage: None,
+            cost_usd: None,
             is_subagent: false,
         };
         db.record_session(&info).unwrap();

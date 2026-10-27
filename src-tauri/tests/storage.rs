@@ -116,6 +116,7 @@ fn sample_session() -> SessionInfo {
         archived: false,
         title: None,
         context_usage: None,
+        cost_usd: None,
         is_subagent: false,
     }
 }
@@ -501,6 +502,7 @@ fn open_backfills_space_rows_from_existing_sessions() {
         archived: false,
         title: None,
         context_usage: None,
+        cost_usd: None,
         is_subagent: false,
     };
 
@@ -816,6 +818,7 @@ fn the_session_cwd_string_and_the_space_path_key_are_the_same_string() {
         archived: false,
         title: None,
         context_usage: None,
+        cost_usd: None,
         is_subagent: false,
     };
 

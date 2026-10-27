@@ -145,6 +145,7 @@ async fn build_harness(
         archived: false,
         title: None,
         context_usage: None,
+        cost_usd: None,
         is_subagent: false,
     })
     .unwrap();

@@ -458,6 +458,7 @@ async fn resuming_legacy_bare_uuid_session_preserves_id() {
         archived: false,
         title: None,
         context_usage: None,
+        cost_usd: None,
         is_subagent: false,
     };
     db.record_session(&info).unwrap();
