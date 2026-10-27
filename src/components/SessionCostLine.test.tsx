@@ -163,8 +163,18 @@ describe("the stored figure renders with no live store entry (issue #105)", () =
     expect(screen.getByTestId("session-cost").textContent).toBe("$0.00");
   });
 
-  it("renders NOTHING for a row whose costUsd key is absent (the wire omits a NULL column)", () => {
+  it("renders NOTHING when the row's costUsd is null or absent", () => {
+    // `null` is what the wire actually sends for a `None` column; the key being
+    // missing entirely is what the fixture builds. `sessionFieldOf` skips both,
+    // so the row reports "no figure" either way.
     seedRow("s1", undefined);
+    const { container } = render(<SessionCostLine sessionId="s1" />);
+    expect(container.firstChild).toBeNull();
+    expect(screen.queryByText(/\$/)).toBeNull();
+  });
+
+  it("renders NOTHING when the row's costUsd is explicitly null (what the wire sends for a None column)", () => {
+    seedRow("s1", null);
     const { container } = render(<SessionCostLine sessionId="s1" />);
     expect(container.firstChild).toBeNull();
     expect(screen.queryByText(/\$/)).toBeNull();

@@ -197,7 +197,10 @@ describe("makeSessionRow / makeSpaceRow (the sidebar's rows)", () => {
     expect("title" in row).toBe(false);
     expect("contextUsage" in row).toBe(false);
     expect("configOptions" in row).toBe(false);
-    // #105's fourth optional key: a `None` cost column is absent on the wire.
+    // #105's fourth optional key: the fixture drops it, so this exercises the
+    // ABSENCE path (the key is not there at all), not the wire shape — the real
+    // row sends `"costUsd": null` for a `None` column, and `sessionFieldOf`
+    // treats null and absent identically.
     expect("costUsd" in row).toBe(false);
   });
 
@@ -211,12 +214,14 @@ describe("makeSessionRow / makeSpaceRow (the sidebar's rows)", () => {
     expect("contextUsage" in withUsage).toBe(true);
   });
 
-  it("drops an explicitly-`undefined` `costUsd` and keeps a real `0` (the wire shape, #105)", () => {
-    // `SessionInfo.costUsd` is the FOURTH optional wire key, and the fixture's
-    // allow-list has to name it: the Rust side serialises a `None` column as
-    // ABSENT, so a fixture that kept the key with an `undefined` value would not
-    // be the wire shape — `Object.keys`/`in` would answer differently than
-    // production, and `costUsdOf`'s row fallback reads exactly that key.
+  it("drops an explicitly-`undefined` `costUsd` and keeps a real `0` (#105)", () => {
+    // `SessionInfo.costUsd` is the FOURTH optional key, and the fixture's
+    // allow-list has to name it so a caller passing `costUsd: undefined` gets a
+    // row WITHOUT the key. That is fixture hygiene, not a wire claim: the Rust
+    // side serialises a `None` column as `"costUsd": null` (present, null).
+    // Dropping the `undefined`-valued key keeps `Object.keys`/`in` and
+    // `toEqual` comparisons downstream predictable, and `sessionFieldOf` skips
+    // `null` and `undefined` alike, so no behaviour rides on which is sent.
     // Nothing else pins this: unlike `APP_SETTINGS_FIELDS` above there is no
     // `SESSION_*_FIELDS` const to compare against, so the assertion lives here.
     const absent = makeSessionRow({ costUsd: undefined });

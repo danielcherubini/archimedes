@@ -79,6 +79,17 @@ describe("costUsdOf (the session's money: live entry first, then the stored row,
     expect(costUsdOf(undefined, s, "s1")).toBe(0);
   });
 
+  it("is null for a row whose costUsd is explicitly null (the wire's None encoding)", () => {
+    // The real row for a `None` column is `{"costUsd": null, …}` — the Rust
+    // field has `#[serde(default)]` and NO `skip_serializing_if`, so the key is
+    // present and null. `sessionFieldOf`'s gap test skips `null` as well as a
+    // missing key, so the walk reports "nothing knows" here too.
+    const s = source({
+      historySessions: [makeSessionRow({ sessionId: "s1", costUsd: null })],
+    });
+    expect(costUsdOf(undefined, s, "s1")).toBeNull();
+  });
+
   it("walks live → history → archived for the row (an archived session lives ONLY in the last list)", () => {
     const archived = source({
       archivedSessions: [makeSessionRow({ sessionId: "s1", costUsd: 0.4 })],
@@ -92,10 +103,11 @@ describe("costUsdOf (the session's money: live entry first, then the stored row,
     expect(costUsdOf(undefined, both, "s1")).toBe(0.1);
   });
 
-  it("is null for a row that exists but carries no costUsd key at all", () => {
-    // The wire omits the key entirely when the column is NULL, so the fixture
-    // must omit it too (see `makeSessionRow`'s allow-list) — and the walk then
-    // reports "nothing knows", which renders nothing.
+  it("is null for a row that exists but carries no costUsd figure", () => {
+    // The fixture builds a row WITHOUT the key (see `makeSessionRow`'s
+    // allow-list); the real row sends `"costUsd": null` for a `None` column.
+    // `sessionFieldOf` skips `null` and `undefined` alike, so the walk reports
+    // "nothing knows" either way, which renders nothing.
     const s = source({
       historySessions: [makeSessionRow({ sessionId: "s1" })],
     });

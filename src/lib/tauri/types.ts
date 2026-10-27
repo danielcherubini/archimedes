@@ -87,9 +87,13 @@ export interface SessionInfo {
    * fields here on purpose (see the plan's fact 3): `SubagentDelegatingCard`'s
    * context-% chain must keep falling through to its own sources.
    *
-   * OPTIONAL, like `title` / `contextUsage`: a required field would break
-   * `tsc` at every fixture that builds a `SessionInfo`, and the wire OMITS the
-   * key (a `None` column serialises as absent) rather than sending `null`.
+   * OPTIONAL TS-side, like `title` / `contextUsage`: a required field would
+   * break `tsc` at every fixture that builds a `SessionInfo`. It is optional
+   * because a row may carry no figure — NOT because the wire withholds the
+   * key: the Rust field is `Option<f64>` with `#[serde(default)]` and no
+   * `skip_serializing_if`, so a `None` column arrives as `"costUsd": null`
+   * (PRESENT AND NULL). Read the value, never the key's presence: both `null`
+   * and a missing key mean "no figure" to `sessionFieldOf`.
    */
   costUsd?: number | null;
 }
