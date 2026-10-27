@@ -1484,11 +1484,13 @@ describe("closing a session in this app run carries its cost figure onto the fil
   });
 
   it("a close with NO live cost entry files the row UNCHANGED (no `costUsd: undefined` key appears)", () => {
-    // The wire OMITS a missing figure rather than sending `null`
-    // (`makeSessionRow`'s rule, and `costUsdOf`'s presence test), so a filed
-    // row must not gain a key holding `undefined` — a `makeSessionRow`-style
-    // wire-shape expectation, and the reason the carry is a guarded spread and
-    // not a bare `{ ...closedInfo, costUsd: closedCost }`.
+    // The guard is about the SHAPE THIS SIDE produces: a bare carry would
+    // introduce a `costUsd` key holding `undefined`, and nothing else carries
+    // that — a missing figure crosses IPC PRESENT and null (`cost_usd` is an
+    // `Option<f64>` with `#[serde(default)]` and NO `skip_serializing_if`,
+    // pinned in `src-tauri/src/agent/session/mod.rs`), and `makeSessionRow`
+    // models no-figure as `null` or as no key, never as `undefined`. Hence the
+    // guarded spread rather than a bare `{ ...closedInfo, costUsd: closedCost }`.
     const row = info("s1", "/x");
     useSessions.setState({ sessions: [row] });
 
