@@ -1019,6 +1019,60 @@ describe("SettingsPage (the ZCode port — sections + immediate save)", () => {
     expect(rowOf("Reads").textContent ?? "").toContain("outside the boundary");
   });
 
+  it("the_writes_row_discloses_the_carve_out_is_a_guard_rail_not_a_boundary (the copy is the only disclosure surface)", async () => {
+    // Issue #92 Bug 1. The protected-dir REFUSAL is forbidden from naming the
+    // route that bypasses it (issue #33), so this row is the one place a human
+    // learns the carve-out is not absolute. It used to say the opposite — and
+    // NO test pinned it, which is how. This test pins the MEANING, not the
+    // punctuation: tolerant matchers, so rewording is free and an absolute is
+    // not.
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    const text = rowOf("Writes").textContent ?? "";
+
+    // (a) It names what the carve-out IS, in ADR 0030's words.
+    expect(text).toMatch(/guard.?rail/i);
+    // (b) It says, in as many words, that it is NOT the thing a user will
+    //     assume it is. (`.*?` so "not a security boundary" and "not a hard
+    //     security boundary" both pass; a bare `not a boundary` would not.)
+    expect(text).toMatch(/not a .*boundary/i);
+    // (c) It names the two routes the carve-out does not govern — the whole
+    //     content of the disclosure. `sudo_exec` in lowercase is the tool's
+    //     own name as the Shell row already spells it.
+    expect(text).toMatch(/shell/i);
+    expect(text).toContain("sudo_exec");
+    // (d) The overclaim is dead: no absolute survives. This is the pin's
+    //     teeth, and it is TIGHTENED from the first draft of this plan. The
+    //     draft vetoed only /can ?not|never rewrite|always (refuse|protect)|
+    //     cannot be rewritten/, which PASSED the plan's own replacement
+    //     sentence ("… refuse to rewrite them under any policy") — a pin that
+    //     passes on the copy it exists to police is worse than no pin, so the
+    //     "under any policy" / "in every policy" family is now in here too.
+    //     THREE-WAY CHECK, and all three legs are mandatory: (d) must FAIL on
+    //     the OLD copy (it matches "never rewrite"), must FAIL on the
+    //     overclaiming DRAFT (it matches "under any policy"), and must PASS on
+    //     the FINAL copy below (it matches nothing). A change to (d) that
+    //     breaks any leg makes the matcher decorative — re-run all three.
+    expect(text).not.toMatch(
+      /can ?not|never rewrite|cannot be rewritten|always (refuse|protect)|(under|in|for) (any|every|all) (the )?polic|every (single )?polic|whatever (the )?polic|regardless of (any |the )?polic/i,
+    );
+    // (e) Descriptive, not instructional (#33's rule, moved to the UI): no
+    //     second-person permission, no invitation. These two are kept — they
+    //     are well-scoped to how a human addresses a human, and the copy
+    //     passes them. The third matcher the draft carried, the command/path
+    //     needle /\bcp\b|rm -rf|~\/\.(agents|pi)\b/, is DROPPED: see "Ruling
+    //     on matcher (e)" below the rules — it cannot catch the real hazard
+    //     (a residual absolute) and would reject a future disclosure that has
+    //     to name a real path. Rule 2's ban on command and path examples
+    //     still binds the copy; it is simply not policed by a regex here.
+    expect(text).not.toMatch(/\byou (can|could|should|may)\b/i);
+    expect(text).not.toMatch(/\b(just|simply|if needed|to work around)\b/i);
+
+    // CONTRAST so (a)-(c) cannot pass vacuously on some unrelated sentence:
+    // the Reads row keeps its own story and is NOT the disclosure surface.
+    expect(rowOf("Reads").textContent ?? "").not.toMatch(/guard.?rail/i);
+  });
+
   it("changing_the_reads_select_to_ask_me_saves_the_complete_document", async () => {
     render(<SettingsPage onBack={vi.fn()} />);
     await loaded();

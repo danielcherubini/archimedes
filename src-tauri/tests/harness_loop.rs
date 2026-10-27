@@ -635,10 +635,13 @@ async fn context_threshold_triggers_compaction() {
         MockProvider::with(vec![
             MockResponse::Stream(vec![
                 ProviderEvent::TextDelta("one".to_string()),
-                ProviderEvent::Usage(Usage {
-                    input_tokens: 100,
-                    output_tokens: 50,
-                }),
+                ProviderEvent::Usage(
+                    Usage {
+                        input_tokens: 100,
+                        output_tokens: 50,
+                    },
+                    None,
+                ),
                 ProviderEvent::Done(FinishReason::Stop),
             ]),
             // The summary call (the older messages).

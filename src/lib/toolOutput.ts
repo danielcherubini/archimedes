@@ -174,8 +174,47 @@ export function formatTokens(n: number): string {
   return String(n);
 }
 
+/**
+ * A money figure for the surfaces that route through this helper (the subagent
+ * card's cost chip, the subagent transcript's metrics line).
+ *
+ * The zero rule is deliberate and load-bearing: `0` (and anything non-positive)
+ * renders the EMPTY string, which is how "no figure to show" becomes "prints
+ * nothing" at both consumers (the card also gates on `row.cost > 0`). Do not
+ * "help" by returning `$0.00` — that is a different surface's rule
+ * (`SessionCostLine` prints `$0.00` for a real zero, because it distinguishes a
+ * real zero from an unknown figure and this helper never did).
+ *
+ * The sub-cliff band is the fix below, and it exists because `toFixed(4)` is a
+ * LIE below `$0.00005`: every non-zero figure under that ceiling rounds to the
+ * literal `"$0.0000"`, and both consumers happily print a truthy string — so a
+ * child whose four calls cost `≈$0.0000341` in total displayed `$0.0000`, i.e.
+ * "free", for money that was genuinely spent. That is issue #87's own defect
+ * class (reporting an outcome that was not observed) arriving through the
+ * formatter, and the band is not hypothetical: the measured per-call figures on
+ * the live proxy are `0.000011662`, `0.0000047597`, `0.00001243` and `0.00002122`
+ * — ALL of them inside it.
+ *
+ * So below the ceiling: two significant digits (`$0.000012`). AT or ABOVE it the
+ * output is byte-identical to what this helper has always produced — the ceiling
+ * is exactly the point where `toFixed(4)` stops rounding to zero (`0.000049999`
+ * used to print `$0.0000`; `0.00005` printed `$0.0001` and still does), so the
+ * patch cannot change any figure that was being rendered truthfully. Measured:
+ * every change falls strictly below the ceiling, and every value the existing
+ * tests seed (`0`, `0.0042`, `0.035`, `0.15`, `0.02`) is unchanged.
+ *
+ * Known residue of this shape: below `1e-6` `toPrecision` switches to
+ * exponential, so a figure that small prints e.g. `$9.9e-7` — ugly, but never a
+ * false zero. No observed provider figure lands there, and a `<$0.000001` form
+ * was deliberately NOT added here: this helper's consumers are chips, and
+ * inventing a second rule for a band nothing produces is how the next rounding
+ * lie gets written. (`SessionCostLine` owns that form for the session line,
+ * where the accumulation matters.)
+ */
 export function formatCost(cost: number): string {
   if (!cost || cost <= 0) return "";
+  // Below the point where `toFixed(4)` would round a real figure to `$0.0000`.
+  if (cost < 0.00005) return "$" + Number(cost).toPrecision(2);
   if (cost < 0.01) return "$" + cost.toFixed(4);
   return "$" + cost.toFixed(2);
 }

@@ -1709,4 +1709,78 @@ describe("SidePane (the status panel)", () => {
     // Both are direct children of the frame.
     expect(block.parentElement).toBe(scroller.parentElement);
   });
+
+  // --- The session's cost line (issue #87) ---
+  //
+  // Both cases reset `cost` THEMSELVES, as their first statement, and seed under
+  // `main1`. The reset is the load-bearing half: the file-level `beforeEach`
+  // happens to dismiss `main1` (and NOT `s1`, the id `seedLiveSession` uses), so
+  // relying on that cleanup would make these cases correct only while nobody
+  // reorders or re-scopes it. Seeding under `main1` is the second line of defence.
+
+  it("shows the session's cost line UNDER the session title and ABOVE the todo board (#87)", () => {
+    useInteractive.setState({ cost: {} });
+    useSessions.setState({
+      activeSessionId: "main1",
+      messages: { main1: [{ kind: "user", text: "the prompt", at: 1 }] },
+    });
+    useInteractive.getState().applyTodoUpdate("main1", {
+      source: "main",
+      todos: [{ content: "a", status: "pending" }],
+    });
+    // A figure the provider reported (0.15 sits above the sub-cliff band, so the
+    // two-decimal form is what the line prints).
+    useInteractive.getState().applyCost("main1", { costUsd: 0.15 });
+    const { container } = render(<SidePane />);
+
+    const cost = container.querySelector(
+      '[data-testid="session-cost"]',
+    ) as HTMLElement;
+    expect(cost).toBeTruthy();
+    expect(cost.textContent).toBe("$0.15");
+
+    // DOM ORDER among the scroll column's children: title → cost → todos.
+    const column = cost.parentElement as HTMLElement;
+    const children = Array.from(column.children);
+    const title = screen.getByText("the prompt");
+    const todos = screen.getByText("Todos");
+    const titleIndex = children.findIndex((el) => el.contains(title));
+    const costIndex = children.indexOf(cost);
+    const todosIndex = children.findIndex((el) => el.contains(todos));
+    expect(titleIndex).toBeGreaterThanOrEqual(0);
+    expect(costIndex).toBeGreaterThanOrEqual(0);
+    expect(todosIndex).toBeGreaterThanOrEqual(0);
+    expect(titleIndex).toBeLessThan(costIndex);
+    expect(costIndex).toBeLessThan(todosIndex);
+    // And the line is a direct child of the column, not nested inside the todo
+    // section (a line that rode inside the board would vanish with the board's
+    // data gate — the figure is not gated on todos).
+    expect(costIndex).toBe(titleIndex + 1);
+  });
+
+  it("renders NO cost element when the session has no figure (no $0.00, no extra gap-child) (#87)", () => {
+    useInteractive.setState({ cost: {} });
+    useSessions.setState({
+      activeSessionId: "main1",
+      messages: { main1: [{ kind: "user", text: "the prompt", at: 1 }] },
+    });
+    useInteractive.getState().applyTodoUpdate("main1", {
+      source: "main",
+      todos: [{ content: "a", status: "pending" }],
+    });
+    // Frames that carried NO figure — the ordinary live case (T08's probe P6:
+    // absence is per-call). This must NOT become a `$0.00` row.
+    useInteractive.getState().applyCost("main1", { costUsd: null });
+    const { container } = render(<SidePane />);
+
+    expect(container.querySelector('[data-testid="session-cost"]')).toBeNull();
+    // No dollar text anywhere in the pane (the config block carries none), so a
+    // phantom `$0.00` cannot hide behind a wrapper.
+    expect(screen.queryByText(/\$/)).toBeNull();
+    // And the scroll column gained NO child: with a title and a todo board it
+    // holds exactly the two it always held. This is the issue-#86 class of bug —
+    // an empty child that still eats a `gap-4` slot.
+    const column = container.querySelector(".overflow-y-auto > div") as HTMLElement;
+    expect(column.children).toHaveLength(2);
+  });
 });

@@ -14,6 +14,7 @@ import TodoBoardPanel, { useBoardOpenCount, useMainTodoItems } from "./TodoBoard
 import { cn } from "./lib/utils";
 import TodoRail from "./TodoRail";
 import SessionConfigBlock from "./SessionConfigBlock";
+import { SessionCostLine } from "./SessionCostLine";
 
 const WIDTH_KEY = "side-pane-width";
 const MIN_WIDTH = 240;
@@ -430,6 +431,12 @@ export default function SidePane() {
               {sessionTitle}
             </div>
           )}
+          {/* The session's cumulative USD figure (#87), directly under the title
+              and above the todo board. It renders NOTHING — no element, so no
+              `gap-4` slot either — unless some call this session made reported a
+              cost, which is the ordinary case (absence is per-CALL). The line
+              itself owns the money rules; nothing is decided here. */}
+          <SessionCostLine sessionId={activeSessionId} />
           {/* The todo boards (data-gated by `TodoBoardPanel` — it renders
               `null` while NO board (the parent's list or a child's) has an open
               item, the same rule `boardCount` above reads). */}
