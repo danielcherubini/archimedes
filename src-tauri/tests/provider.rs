@@ -190,7 +190,9 @@ async fn usage_chunk_emits_usage_event() {
     let usage = events
         .iter()
         .find_map(|e| match e {
-            ProviderEvent::Usage(u) => Some(*u),
+            // The cost is the event's SECOND element; this pin reads the
+            // counts, so the carrier is bound and ignored.
+            ProviderEvent::Usage(u, _cost) => Some(*u),
             _ => None,
         })
         .expect("a Usage event is emitted");
