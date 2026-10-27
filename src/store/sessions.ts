@@ -1744,6 +1744,22 @@ export const useSessions = create<SessionsState>((set, get) => ({
         ? { ...st.configOptions, [sessionId]: info.configOptions }
         : st.configOptions,
     }));
+    // Seed the cost accumulator from the row (issue #105, Trap 3). The map lost
+    // this session's entry when it closed (`dismissSession`), so without this
+    // the next priced frame after a resume is THAT CALL's cost alone and the
+    // figure the user saw before the reload silently drops. `seedCostFromRow`
+    // writes the key DIRECTLY — never `applyCost`, which normalises AND SUMS and
+    // would add a stored TOTAL to itself. Cross-store writes are already the
+    // pattern here (`sessionLifecycle.ts` reaches `dismissSession` the same way).
+    //
+    // `!= null`, not a truthiness test: a stored `0` is a FIGURE (D5) and must
+    // seed `$0.00`; only `null`/absent ("no call ever reported a cost") seeds
+    // nothing — and seeding nothing matters, because an entry holding
+    // `costUsd: null` is a live REPORT that `costUsdOf` treats as "render
+    // nothing", which would suppress the row figure it just read.
+    if (info.costUsd != null) {
+      useInteractive.getState().seedCostFromRow(sessionId, info.costUsd);
+    }
     // ACP `session/load` does not re-stream the transcript — reload it from
     // the persisted history so the pane shows the conversation on resume.
     void (async () => {

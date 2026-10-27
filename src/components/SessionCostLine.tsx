@@ -1,6 +1,8 @@
 import { MutedCaption } from "./MutedCaption";
 import { useInteractive } from "../store/interactive";
 import type { CostUpdatePayload } from "../store/interactive";
+import { useSessions } from "../store/sessions";
+import { costUsdOf } from "../lib/sessionCost";
 
 /**
  * The session's cumulative USD figure, one line under the session name.
@@ -13,8 +15,10 @@ import type { CostUpdatePayload } from "../store/interactive";
  * the summariser's own call is uncosted by design and a grandchild's money stops
  * at its own parent.
  *
- * It reads ONE store key and calls no IPC, which is what keeps it out of the
- * `lib/tauri` mock surface every pane test would otherwise have to carry.
+ * It calls no IPC, which is what keeps it out of the `lib/tauri` mock surface
+ * every pane test would otherwise have to carry. It reads TWO stores — the live
+ * accumulator and the session lists — joined by `lib/sessionCost.ts`'s `costUsdOf`
+ * (see the selector note below for why the row joined the read in #105).
  */
 
 /**
@@ -68,18 +72,42 @@ function moneyOf(total: number | null): string | null {
 }
 
 export function SessionCostLine({ sessionId }: { sessionId: string | null }) {
-  // The same selector shape `SubagentDelegatingCard` uses. No `useSessions`
-  // read: the figure lives with the frames that produced it.
+  // THE READ — and it now spans BOTH stores, which overturns this file's
+  // original rule ("No `useSessions` read: the figure lives with the frames that
+  // produced it"). That rule was correct while the frames were the only place
+  // the money existed, and it is also precisely what made the figure evaporate:
+  // `dismissSession` deletes `cost[sessionId]` on close, nothing persists the
+  // map, and boot hydrates no cost maps at all (`mergeRefreshedSessionRows` runs
+  // only from Settings' provider refresh) — so a stored session's figure lives on
+  // its ROW and nowhere else, and issue #105 is the number vanishing on reload.
+  // The row is now consulted, through the shared `costUsdOf` — the same
+  // map-first/row-fallback shape `contextUsageOf` uses, with ONE deliberate
+  // difference in precedence (an entry that exists holding `null` is a live
+  // REPORT and renders nothing rather than falling through to a stored figure),
+  // documented on the selector itself.
+  //
+  // The three lists are read as three separate selectors because each returns the
+  // store's OWN array (a stable reference — the invariant `sessionLookup.ts`
+  // states: a selector handing back a fresh object re-renders forever). The
+  // source object `costUsdOf` walks is assembled in the render body, where no
+  // subscription is involved, so it costs a re-render nothing.
   const entry = useInteractive((s) =>
-    sessionId === null ? undefined : (s.cost[sessionId] as CostUpdatePayload | undefined),
+    sessionId === null
+      ? undefined
+      : (s.cost[sessionId] as CostUpdatePayload | undefined),
   );
+  const sessions = useSessions((s) => s.sessions);
+  const historySessions = useSessions((s) => s.historySessions);
+  const archivedSessions = useSessions((s) => s.archivedSessions);
 
-  // The store normalises every frame, so `costUsd` is either a number or
-  // `null`, and it is present after the FIRST frame. There is deliberately no
-  // `entry.costUsd ?? entry.cost` fallback here: normalisation is the store's
-  // job, and a second fallback in the renderer would be a second source of
-  // truth that keeps a store bug invisible.
-  const money = moneyOf(entry?.costUsd ?? null);
+  // The store normalises every frame, so a live entry's `costUsd` is either a
+  // number or `null`, and it is present after the FIRST frame. There is
+  // deliberately no `entry.costUsd ?? entry.cost` fallback here: normalisation is
+  // the store's job, and a second fallback in the renderer would be a second
+  // source of truth that keeps a store bug invisible.
+  const money = moneyOf(
+    costUsdOf(entry, { sessions, historySessions, archivedSessions }, sessionId),
+  );
   if (money === null) return null;
 
   // The wrapper exists exactly when there is a figure, so it is the element

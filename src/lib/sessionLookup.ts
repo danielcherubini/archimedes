@@ -55,6 +55,9 @@ import type { SessionConfigOption, SessionInfo } from "./tauri";
  *  - `capabilities` — what `ChatStream.tsx` walks for (its image gate and its
  *    `loadSession` resume gate). It replaces a selector that returned the whole
  *    ROW, the exact shape invariant 2 forbids.
+ *  - `costUsd` — what `lib/sessionCost.ts`'s `costUsdOf` walks for (issue #105:
+ *    a stored session's figure exists ONLY on its row until a resume seeds the
+ *    live map, so this is the half that makes the figure survive a reload).
  *
  * `archived` stays OUT: no walk reads it, and leaving it out is what lets a test
  * build a row without inventing flags it does not care about. Structurally
@@ -69,6 +72,7 @@ export type SessionRow = Pick<
   | "title"
   | "configOptions"
   | "contextUsage"
+  | "costUsd"
 >;
 
 /**

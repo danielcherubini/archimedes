@@ -3,6 +3,8 @@ import { render, screen } from "@testing-library/react";
 
 import { SessionCostLine } from "./SessionCostLine";
 import { useInteractive } from "../store/interactive";
+import { useSessions } from "../store/sessions";
+import { makeSessionRow } from "../test/fixtures";
 import { formatCost } from "../lib/toolOutput";
 
 /**
@@ -10,6 +12,10 @@ import { formatCost } from "../lib/toolOutput";
  * store's normalisation (`frameCost` → `combineSessionCost` → write-both-keys)
  * is part of the contract this line depends on, and a test that bypassed it
  * would pass while the store manufactured a phantom `0`.
+ *
+ * The `#105` cases below are the exception, and deliberately so: a STORED figure
+ * never came through `applyCost` in this app run — it is read off the session
+ * row, which is the whole point of the issue.
  */
 function seed(sessionId: string, frames: unknown[]): void {
   for (const frame of frames) {
@@ -17,11 +23,30 @@ function seed(sessionId: string, frames: unknown[]): void {
   }
 }
 
+/** Put a STORED row (with a figure) in the list the walk reads, live first. */
+function seedRow(
+  sessionId: string,
+  costUsd: number | null | undefined,
+  list: "sessions" | "historySessions" | "archivedSessions" = "historySessions",
+): void {
+  useSessions.setState({
+    [list]: [makeSessionRow({ sessionId, costUsd })],
+  });
+}
+
 beforeEach(() => {
   // NOT `dismissSession("s1")`: the file's own id is `s1`, and a self-reset in
   // each place keeps the cases order-independent rather than relying on a hook
   // that a later edit could scope differently.
   useInteractive.setState({ cost: {} });
+  // #105 added the row half of the read, so the lists are part of this file's
+  // isolation now — a row left standing by a previous case would make a "no
+  // figure" case render a figure.
+  useSessions.setState({
+    sessions: [],
+    historySessions: [],
+    archivedSessions: [],
+  });
 });
 
 describe("SessionCostLine (the session's cumulative USD figure under its name, #87)", () => {
@@ -95,6 +120,77 @@ describe("SessionCostLine (the session's cumulative USD figure under its name, #
   it("reads ONLY its own session's entry", () => {
     seed("other", [{ costUsd: 0.5 }]);
     const { container } = render(<SessionCostLine sessionId="s1" />);
+    expect(container.firstChild).toBeNull();
+  });
+});
+
+/**
+ * ISSUE #105 — THE FIGURE NOW SURVIVES A RELOAD.
+ *
+ * The line used to read ONE store key and no `useSessions`, on the stated ground
+ * that "the figure lives with the frames that produced it". That is exactly why
+ * the number vanished on reload: `dismissSession` deletes the entry on close and
+ * nothing persists the map, so a stored session's money exists only on its row.
+ * These cases are the row half of the read.
+ */
+describe("the stored figure renders with no live store entry (issue #105)", () => {
+  it("renders the figure off the session row when the store has no entry (the boot case)", () => {
+    // Boot hydrates no cost maps at all (`mergeRefreshedSessionRows` runs only
+    // from Settings' provider refresh), so this is the state a reload leaves the
+    // app in. The row is the only place the money is.
+    seedRow("s1", 0.15);
+    render(<SessionCostLine sessionId="s1" />);
+    expect(screen.getByTestId("session-cost").textContent).toBe("$0.15");
+  });
+
+  it("renders the ARCHIVED row's figure (a session opened from Archived lives ONLY in that list)", () => {
+    seedRow("s1", 0.15, "archivedSessions");
+    render(<SessionCostLine sessionId="s1" />);
+    expect(screen.getByTestId("session-cost").textContent).toBe("$0.15");
+  });
+
+  it("renders NOTHING when neither the store nor the row has a figure", () => {
+    const { container } = render(<SessionCostLine sessionId="s1" />);
+    expect(container.firstChild).toBeNull();
+    expect(screen.queryByText(/\$/)).toBeNull();
+  });
+
+  it("renders a row figure of 0 as $0.00 (a stored real zero is not 'unknown', D5)", () => {
+    // The `NULL` column and the `0.0` column reach the DOM as two different
+    // things — the distinction the whole feature is built on.
+    seedRow("s1", 0);
+    render(<SessionCostLine sessionId="s1" />);
+    expect(screen.getByTestId("session-cost").textContent).toBe("$0.00");
+  });
+
+  it("renders NOTHING for a row whose costUsd key is absent (the wire omits a NULL column)", () => {
+    seedRow("s1", undefined);
+    const { container } = render(<SessionCostLine sessionId="s1" />);
+    expect(container.firstChild).toBeNull();
+    expect(screen.queryByText(/\$/)).toBeNull();
+  });
+
+  it("prefers the LIVE entry over the row (a resumed session's continued total wins)", () => {
+    seed("s1", [{ costUsd: 0.15 }]);
+    seedRow("s1", 0.9, "sessions");
+    render(<SessionCostLine sessionId="s1" />);
+    expect(screen.getByTestId("session-cost").textContent).toBe("$0.15");
+  });
+
+  it("renders NOTHING for a live entry that reports no figure, even when the row has one (#105's precedence)", () => {
+    // The entry means "frames arrived this session, none carried a figure" — a
+    // live session reporting nothing TODAY. Resurrecting the stored figure over
+    // that report would print money the provider did not send this run.
+    seed("s1", [{ costUsd: null }]);
+    seedRow("s1", 0.15);
+    const { container } = render(<SessionCostLine sessionId="s1" />);
+    expect(container.firstChild).toBeNull();
+    expect(screen.queryByText(/\$/)).toBeNull();
+  });
+
+  it("renders NOTHING for a stored figure with a null session id (no active session)", () => {
+    seedRow("s1", 0.15);
+    const { container } = render(<SessionCostLine sessionId={null} />);
     expect(container.firstChild).toBeNull();
   });
 });

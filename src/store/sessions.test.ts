@@ -2057,6 +2057,71 @@ describe("configOptions state", () => {
     ]);
   });
 
+  /**
+   * TRAP 3 (#105): the accumulator restarts at zero, the stored row does not.
+   *
+   * `dismissSession` drops `useInteractive.cost[id]` on close, so a resumed
+   * session's next priced frame would otherwise be THAT CALL's cost alone — the
+   * figure the user saw before the reload would silently drop to a fraction of
+   * itself. `resumeSession` therefore mirrors the `configOptions` seeding two
+   * tests above and hands the row's `costUsd` to `seedCostFromRow`, which writes
+   * the key DIRECTLY (never `applyCost`, which would add the total to itself).
+   *
+   * Both cases `resetStores()` first: this `describe` has no reset of its own, so
+   * without it the case below would inherit whatever `cost` a previous test left
+   * under `s1` and pass for the wrong reason.
+   */
+  it("seeds the cost accumulator from a resumed session's SessionInfo (#105)", async () => {
+    resetStores();
+    vi.mocked(resumeSession).mockResolvedValueOnce({
+      sessionId: "s1",
+      cwd: "/x",
+      capabilities: {},
+      archived: false,
+      costUsd: 0.5,
+    });
+    useSessions.setState({
+      historySessions: [info("s1", "/x")],
+    });
+
+    await useSessions.getState().resumeSession("s1");
+
+    const entry = useInteractive.getState().cost["s1"] as {
+      costUsd: number | null;
+    };
+    expect(entry.costUsd).toBe(0.5);
+    // The consequence the whole seeding exists for: the next priced frame ADDS
+    // to the stored figure instead of replacing it. 0.6, not 0.1 (no seed) and
+    // not 1.1 (the seed routed through `applyCost`).
+    useInteractive.getState().applyCost("s1", { costUsd: 0.1 });
+    expect(
+      (useInteractive.getState().cost["s1"] as { costUsd: number | null })
+        .costUsd,
+    ).toBeCloseTo(0.6, 10);
+    resetStores();
+  });
+
+  it("seeds NO cost entry for a resumed session whose row never reported one (#105)", async () => {
+    resetStores();
+    vi.mocked(resumeSession).mockResolvedValueOnce({
+      sessionId: "s1",
+      cwd: "/x",
+      capabilities: {},
+      archived: false,
+    });
+    useSessions.setState({
+      historySessions: [info("s1", "/x")],
+    });
+
+    await useSessions.getState().resumeSession("s1");
+
+    // No entry at all — and that is load-bearing, not tidiness. An entry holding
+    // `costUsd: null` reads as a REPORT ("live, reporting nothing") to
+    // `costUsdOf`, which would then suppress a figure the row does hold.
+    expect("s1" in useInteractive.getState().cost).toBe(false);
+    resetStores();
+  });
+
 });
 
 describe("applySessionUpdates (batch)", () => {

@@ -196,11 +196,13 @@ interface InteractiveState {
   /**
    * One session's cumulative money + tokens, keyed by session id (issue #87).
    * **Rendered** — `SessionCostLine` reads this entry and prints the figure
-   * under the session title. Written ONLY by `applyCost`, from `cost_update`
-   * FRAMES: it is a sum, so a future hydrator holding a stored TOTAL must write
-   * the key directly (the way `sessions.ts` copies `contextUsage` off the DB
-   * row) and never route it through `applyCost`, or the stored figure is added
-   * to itself.
+   * under the session title (via `lib/sessionCost.ts`, which falls back to the
+   * session ROW's `costUsd` when this map holds no entry). Written by
+   * `applyCost`, from `cost_update` FRAMES, and by `seedCostFromRow`, which
+   * copies a stored TOTAL off the DB row at resume: this map is a sum, so a
+   * stored figure must be WRITTEN DIRECTLY (the way `sessions.ts` copies
+   * `contextUsage` off the row) and never routed through `applyCost`, or the
+   * stored figure is added to itself.
    */
   cost: Record<string, unknown>;
   /** The last `session` push payload — wired, not rendered in v1. */
@@ -232,6 +234,27 @@ interface InteractiveState {
    * Frames only: a stored total must never come through here.
    */
   applyCost: (sessionId: string, payload: unknown) => void;
+  /**
+   * Seed a resumed session's accumulator from its stored row (issue #105).
+   *
+   * Writes the key DIRECTLY and never routes through `applyCost`, which
+   * normalises AND SUMS — feeding it a stored TOTAL would add it to itself.
+   * Seeds only when no entry exists, so live frames already in the map are
+   * never clobbered. Writes BOTH `costUsd` and `cost` (rule R1) so the card's
+   * alias link sees the figure too, and leaves the token fields absent —
+   * they are not persisted and the card's context-% chain must keep falling
+   * through to its own sources (see the plan's fact 3).
+   *
+   * `costUsd == null` (a `NULL` column: no call ever reported a cost) seeds
+   * NOTHING. An entry holding `costUsd: null` is a REPORT — "frames arrived,
+   * none carried a figure" — which `lib/sessionCost.ts`'s `costUsdOf` reads as
+   * "render nothing", so writing one for an unknown stored figure would suppress
+   * the very row this seed reads.
+   */
+  seedCostFromRow: (
+    sessionId: string,
+    costUsd: number | null | undefined,
+  ) => void;
   /** A `session` push — store, don't render in v1. */
   applySession: (sessionId: string, payload: unknown) => void;
   /** Clear everything for a session (called on `session-closed`). */
@@ -334,6 +357,31 @@ export const useInteractive = create<InteractiveState>((set) => ({
 
   applySession: (sessionId, payload) =>
     set((state) => ({ session: { ...state.session, [sessionId]: payload } })),
+
+  seedCostFromRow: (sessionId, costUsd) =>
+    set((state) => {
+      // `null` / `undefined` is "the row never reported a figure" — NOT a zero.
+      // No entry is created (see the action's doc: an entry holding `null` is a
+      // report, and this is the absence case).
+      if (costUsd === null || costUsd === undefined) return state;
+      // A live entry wins: the map holds this run's frames, which are fresher
+      // than the row this seed was read from. (The `in` test, not a truthiness
+      // test — an entry that exists holding `null` is still an entry.)
+      if (sessionId in state.cost) return state;
+      // THE DIRECT WRITE. `applyCost` is the other door into this key and it is
+      // the WRONG one for a stored total: `combineSessionCost` is pure addition,
+      // so `applyCost(id, { costUsd: 0.5 })` on a seeded 0.5 yields 1.0 — the
+      // stored figure added to itself. Pinned by the 0.6-not-1.1 case in
+      // `interactive.test.ts`.
+      //
+      // MONEY ONLY, and that is a decision rather than an omission: the token
+      // fields are not persisted, and `SubagentDelegatingCard`'s context-% chain
+      // only consults this entry when one of them is `defined`. Leaving them
+      // absent keeps that chain falling through to the card's own (correct)
+      // sources — see the plan's fact 3 and ADR 0082's `$0.0000` lesson.
+      const next: CostUpdatePayload = { cost: costUsd, costUsd };
+      return { cost: { ...state.cost, [sessionId]: next } };
+    }),
 
   dismissSession: (sessionId) =>
     set((state) => {

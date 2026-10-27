@@ -25,11 +25,12 @@ const DEFAULT_CWD = "/w/space";
 /**
  * A `SessionInfo` as the IPC layer delivers it.
  *
- * The three OPTIONAL fields (`title`, `contextUsage`, `configOptions`) stay
- * ABSENT unless asked for — they are absent on the wire, and the store branches
- * on `info.configOptions ? … : …`, so setting them to `undefined` would seed a
- * shape the backend never sends (and would make `in`-checks answer differently
- * than production).
+ * The four OPTIONAL fields (`title`, `contextUsage`, `configOptions`, `costUsd`)
+ * stay ABSENT unless asked for — they are absent on the wire, and the store
+ * branches on `info.configOptions ? … : …` while `costUsdOf` reads `costUsd`'s
+ * PRESENCE off the row, so setting them to `undefined` would seed a shape the
+ * backend never sends (and would make `in`-checks answer differently than
+ * production).
  */
 export function makeSessionRow(
   overrides: Partial<SessionInfo> = {},
@@ -44,7 +45,12 @@ export function makeSessionRow(
   // Drop an optional key a caller passed as explicitly-`undefined`, so the
   // fixture matches the wire shape (`Object.keys` excludes it) rather than
   // carrying a key with an `undefined` value.
-  for (const optional of ["title", "contextUsage", "configOptions"] as const) {
+  for (const optional of [
+    "title",
+    "contextUsage",
+    "configOptions",
+    "costUsd",
+  ] as const) {
     if (optional in row && row[optional] === undefined) {
       delete row[optional];
     }
