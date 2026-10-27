@@ -2552,6 +2552,57 @@ mod tests {
         );
     }
 
+    /// A re-`record_session` (the resume re-record) never resets the accumulated
+    /// `cost_usd` — the `ON CONFLICT … DO UPDATE` branch touches only `cwd` /
+    /// `capabilities_json` / `is_subagent`, so a session that has spent money
+    /// keeps its figure across a resume.
+    ///
+    /// This is load-bearing and was pinned only in prose: `record_session`'s doc
+    /// and `record_session_cost`'s both lean on the DO UPDATE list being narrow.
+    /// A future column added to that list (or the cost moved into the INSERT
+    /// column list with a `excluded.cost_usd` update) would silently zero a
+    /// resumed session's total — the figure the user sees in the sidebar would
+    /// reset under a reopen while the provider keeps billing, and the roll-up
+    /// would then add the children's sums to a reset base. Mirrors
+    /// `record_session_preserves_the_title` /
+    /// `record_session_preserves_the_archived_flag` for the cost column.
+    #[test]
+    fn record_session_preserves_the_cost() {
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-cost-test-", "scratch");
+        let path = dir.join("t.db");
+        let db = Db::open(&path).expect("db should open");
+        let session = title_session("sess-1");
+        db.record_session(&session)
+            .expect("record_session should succeed");
+        // The accumulated figure (two frames' worth, so the assertion is not
+        // accidentally pinning "one write" rather than "no clobber").
+        db.record_session_cost("sess-1", 0.00001243)
+            .expect("record_session_cost should succeed");
+        db.record_session_cost("sess-1", 0.00002)
+            .expect("record_session_cost should succeed");
+        // The resume re-record (the same upsert, a refreshed row).
+        db.record_session(&session)
+            .expect("re-record should succeed");
+        assert_eq!(
+            db.session("sess-1")
+                .expect("session should succeed")
+                .expect("the row exists")
+                .cost_usd,
+            Some(0.00003243),
+            "a re-record never resets the accumulated cost"
+        );
+        // And through the LIST read the sidebar / resume path actually uses.
+        let all = db
+            .list_sessions(true)
+            .expect("list_sessions(true) should succeed");
+        assert_eq!(all.len(), 1);
+        assert_eq!(
+            all[0].cost_usd,
+            Some(0.00003243),
+            "the figure survives a re-record on the list read too"
+        );
+    }
+
     /// (ADR 0016) A re-`record_session` (the resume re-record) never clears
     /// the archived flag — the `ON CONFLICT … DO UPDATE` branch must not
     /// touch `archived` (no retroactive un-archive).

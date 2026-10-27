@@ -71,6 +71,17 @@ impl SessionManager {
                             payload
                                 .get("sessionId")
                                 .and_then(|v| v.as_str())
+                                // ⚠ This fallback is DELIBERATELY UNREACHABLE:
+                                // the loop always stamps its own id on the frame
+                                // (pinned loop-side by
+                                // `a_priced_call_emits_one_cost_update_frame_carrying_that_calls_cost`),
+                                // so a child frame never arrives WITHOUT
+                                // `sessionId`. Do not read it as a safe default —
+                                // it writes the child's money to the PARENT's row,
+                                // which is precisely the double-count the branch
+                                // above exists to prevent. If the loop ever stops
+                                // stamping, this must SKIP the write (a frame with
+                                // no owner is unpersistable), NOT fall back.
                                 .unwrap_or(session_id)
                         } else {
                             session_id
@@ -966,12 +977,14 @@ mod tests {
     );
 
     /// A harness: a `SessionManager` over a real `Db` + a recording sink (its
-    /// `persister` wired by `attach_db`).
+    /// `persister` wired by `attach_db`), with EXACTLY the rows `rows` names
+    /// pre-recorded (`(session_id, is_subagent)`).
     ///
-    /// Both session rows are pre-recorded so a test sees the ROUTER's gate
-    /// rather than the persister's row-ensure (the row-ensure has its own pin
-    /// in `persist.rs`).
-    fn manager_with_rows(tag: &str, main_sid: &str, sub_sid: &str) -> Harness {
+    /// Which rows exist is the caller's business on purpose: a test that wants
+    /// the ROUTER's gate alone pre-seeds both rows (`manager_with_rows`), while
+    /// a test that wants the row-ensure in the frame — the shape a cold child
+    /// really has — seeds only the parent.
+    fn manager_seeded(tag: &str, rows: &[(&str, bool)]) -> Harness {
         let dir = crate::test_support::ScratchDir::in_env_temp(tag, "persist");
         let db = Arc::new(crate::storage::Db::open(&dir.join("t.db")).unwrap());
 
@@ -994,7 +1007,7 @@ mod tests {
             emitted: emitted.clone(),
         }));
 
-        for (sid, is_subagent) in [(main_sid, false), (sub_sid, true)] {
+        for (sid, is_subagent) in rows {
             db.record_session(&crate::agent::SessionInfo {
                 session_id: sid.to_string(),
                 cwd: dir.to_path_buf(),
@@ -1004,11 +1017,19 @@ mod tests {
                 title: None,
                 context_usage: None,
                 cost_usd: None,
-                is_subagent,
+                is_subagent: *is_subagent,
             })
             .unwrap();
         }
         (dir, manager, db, emitted)
+    }
+
+    /// The both-rows harness: parent AND child rows pre-recorded, so the test
+    /// sees the ROUTER's gate and its target extraction with the persister's
+    /// row-ensure already out of the way (the row-ensure has its own pin in
+    /// `persist.rs`).
+    fn manager_with_rows(tag: &str, main_sid: &str, sub_sid: &str) -> Harness {
+        manager_seeded(tag, &[(main_sid, false), (sub_sid, true)])
     }
 
     /// The gate is narrowed PER EVENT, not deleted: a subagent's own
@@ -1096,6 +1117,90 @@ mod tests {
         );
         assert_eq!(frames[0].1["event"], "cost_update");
         assert_eq!(frames[1].1["event"], "todos_update");
+    }
+
+    /// A COLD child's first cost frame — the row does not exist yet — still
+    /// lands on the CHILD's row, created by the persister's `ensure_session_row`,
+    /// under the PARENT's delivery id.
+    ///
+    /// Why this needs a router-level pin at all: `persist.rs`'s
+    /// `a_cost_frame_for_a_session_with_no_row_yet_still_persists` proves the
+    /// no-row case by calling `apply_interactive_event` DIRECTLY with the child
+    /// id — so the target the router computes is never involved. And the two
+    /// sibling router pins pre-record BOTH rows, so the row-ensure is never
+    /// involved. Neither half covers the combination, which is exactly what the
+    /// real wire delivers: the pump re-targets a child frame's delivery id to
+    /// the PARENT (`pump.rs`'s `delivery_id`) while the loop stamps the payload
+    /// with the CHILD's `sessionId`, and the child's row is created by THIS
+    /// frame.
+    ///
+    /// The combination is load-bearing in both directions. If the router keyed
+    /// the write off the delivery id (`session_id`) instead of extracting the
+    /// payload's id, the money would land on the parent's row — and here it
+    /// would ALSO create the parent's `cost_usd` before the parent had spent
+    /// anything, so `finish_subagent`'s roll-up would add the child's sum a
+    /// second time on top. And if the row-ensure were dropped for this path,
+    /// `record_session_cost`'s silent no-op on a missing row would discard the
+    /// child's first figure without a sound — the child's card would show a
+    /// cost its row never had.
+    #[test]
+    fn a_childs_first_cost_frame_under_the_parents_delivery_id_creates_and_writes_the_childs_row() {
+        let (main_sid, sub_sid) = ("parent-cold", "child-cold");
+        // ONLY the parent's row exists — the child is COLD (no `StoreFrame` has
+        // created its row yet, which is the real ordering for a fast first call).
+        let (_dir, manager, db, emitted) =
+            manager_seeded("router-cold-child", &[(main_sid, false)]);
+        assert!(
+            db.session(sub_sid).unwrap().is_none(),
+            "precondition: the child has NO row at all"
+        );
+
+        // Delivered under the PARENT's id (what the pump does), payload keyed
+        // to the CHILD (what the emitting loop writes) — `is_subagent: true`.
+        manager.route_event(
+            main_sid,
+            true,
+            WorkerInboundEvent::SinkFrame {
+                event: "interactive-event".to_string(),
+                payload: serde_json::json!({
+                    "sessionId": sub_sid,
+                    "seq": 0,
+                    "event": "cost_update",
+                    "payload": { "costUsd": 0.00001243, "source": "main" },
+                }),
+            },
+        );
+
+        // The row now exists — created by THIS frame — and carries the flag.
+        let row = db
+            .session(sub_sid)
+            .unwrap()
+            .expect("the router must reach the persister's ensure_session_row for a no-row child");
+        assert!(
+            row.is_subagent,
+            "the row the router's target created is the ephemeral CHILD row"
+        );
+        assert_eq!(
+            db.session_cost(sub_sid).unwrap(),
+            Some(0.00001243),
+            "the child's first figure lands on the CHILD's row, not into the void"
+        );
+        assert_eq!(
+            db.session_cost(main_sid).unwrap(),
+            None,
+            "the delivery id is the PARENT's: nothing of the child's money may \
+             touch its row (that id has no figure yet, and the roll-up would \
+             then add the child's sum again on top of it)"
+        );
+
+        let frames = emitted.lock().unwrap();
+        assert_eq!(
+            frames.len(),
+            1,
+            "re-emission is unaffected — the UI still sees the frame verbatim"
+        );
+        assert_eq!(frames[0].0, "interactive-event");
+        assert_eq!(frames[0].1["sessionId"], sub_sid);
     }
 
     /// The roll-up's shape, proven where a `Db` is reachable.
