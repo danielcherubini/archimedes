@@ -267,8 +267,11 @@ describe("applyCost (the session's cumulative USD figure, #87)", () => {
   });
 
   it("a frame that carries no money key at all is unknown, not zero", () => {
-    // T09's emitter OMITS the key rather than sending `null` (its Decision 2),
-    // so absence must land in the same state as `null`.
+    // T09's emitter never emits a no-figure frame at all — it returns early
+    // before building one — so in practice this key is always present on a frame
+    // that reaches the store. Absence is still a state the reducer must handle
+    // (a malformed or foreign frame), and it must land in the SAME unknown state
+    // as `null`, never a manufactured `0`.
     useInteractive.getState().applyCost(S1, { inputTokens: 100, outputTokens: 20 });
     const entry = useInteractive.getState().cost[S1] as {
       costUsd: number | null;

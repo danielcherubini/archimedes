@@ -35,15 +35,13 @@ export function onSessionClosed(sessionId: string, reason: CloseReasonStr): void
   // arrive — the queue goes with the close, which is also what owns (and so
   // releases) the queued attachments' object URLs.
   useQueuedPrompts.getState().clearSession(sessionId);
-  // A figure this run never produced is passed as NO THIRD ARGUMENT rather than
-  // as `undefined`: `handleSessionClosed` treats an absent argument as "file the
-  // row exactly as it stands", and `lib/sessionLifecycle.test.ts` pins this
-  // call's argument list byte-for-byte (`toHaveBeenCalledWith(id, reason)`, which
-  // a trailing explicit `undefined` fails). One call site, one shape.
-  if (closedCostUsd === undefined) {
-    useSessions.getState().handleSessionClosed(sessionId, reason);
-  } else {
-    useSessions.getState().handleSessionClosed(sessionId, reason, closedCostUsd);
-  }
+  // One call, one shape: the figure goes as the third argument whether or not
+  // there is one — `undefined` when this run produced none. The reducer's own
+  // `closedCostUsd == null` guard is what decides the outcome (an absent OR null
+  // figure files the row exactly as it stands, so an absent run figure neither
+  // introduces a `costUsd` key nor wipes a resume-time one); do not reintroduce
+  // a call-site `if` to keep a spy assertion byte-exact — the assertion follows
+  // the call, not the other way round.
+  useSessions.getState().handleSessionClosed(sessionId, reason, closedCostUsd);
   discardSessionMessages(sessionId);
 }

@@ -770,8 +770,15 @@ interface SessionsState {
    * OPTIONAL, and it stays optional on purpose: a caller with no figure to hand
    * (a close that did not come through `onSessionClosed`) files the row exactly
    * as before — no `costUsd` key is introduced for a session whose figure is
-   * unknown, because the wire OMITS a missing figure rather than sending `null`
-   * and `costUsdOf` reads the key's PRESENCE.
+   * unknown. NOT because absence arrives as absence: `SessionInfo.cost_usd` is
+   * an `Option<f64>` with `#[serde(default)]` and NO `skip_serializing_if`, so a
+   * `None` crosses IPC as `"costUsd": null` — PRESENT and null (pinned by the
+   * serde-boundary test in `src-tauri/src/agent/session/mod.rs`). The guard is
+   * about the SHAPE THIS SIDE produces: an unconditional carry would introduce a
+   * `costUsd` key holding `undefined`, which is neither what the wire sends
+   * (`null`) nor what the store's own rows ever hold, and `costUsdOf`'s row
+   * fallback reads the key either way — `undefined` and `null` both mean "no
+   * figure" there.
    *
    * A `number`, not `number | null`: `useInteractive.cost[id].costUsd` is
    * nullable, and `null` there is the live "frames arrived, none carried a
@@ -2245,9 +2252,11 @@ export const useSessions = create<SessionsState>((set, get) => ({
     // `{ ...closedInfo, costUsd: closedCostUsd }` would introduce a `costUsd` key
     // for every session with no figure: the spread's value would be
     // `closedCostUsd ?? closedInfo.costUsd`, i.e. `undefined` for a row that
-    // never had one, and a key holding `undefined` is a shape the wire never
-    // produces (a `None` column is ABSENT, not `null`) that `makeSessionRow`-style
-    // wire-shape expectations reject.
+    // never had one, and a key holding `undefined` is a shape NOTHING else in
+    // this pipeline carries — the wire spells a `None` column as `"costUsd":
+    // null` (`Option<f64>` + `#[serde(default)]`, no `skip_serializing_if`, so
+    // it serialises the null), and `makeSessionRow`-style wire-shape
+    // expectations model the row with `null` or no key at all, never `undefined`.
     //
     // So an ABSENT run figure files the row exactly as it stands — which is the
     // `??` the carry needs, expressed as a guard rather than as a spread value so
