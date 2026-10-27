@@ -55,6 +55,19 @@ pub struct SessionRow {
     /// session (hidden from `list_sessions` — `is_subagent = 0` filter).
     /// `false` for a main session.
     pub is_subagent: bool,
+    /// The session's provider-reported running cost in USD (issue #105):
+    /// the SUM of every `cost_update` frame's per-call delta, accumulated by
+    /// `record_session_cost` so a CLOSED session keeps its figure (the
+    /// frontend's store drops its entry on close — the row is the source of
+    /// truth for the stored figure) and a RESUMED session continues its total
+    /// instead of restarting it.
+    ///
+    /// `None` means NO model call ever reported a cost — which is NOT the same
+    /// as `Some(0.0)`, a call that reported a genuine zero. The renderer prints
+    /// nothing for the first and `$0.00` for the second; collapsing them is the
+    /// D5 defect this column exists to avoid (ADR 0082). The column therefore
+    /// has no `DEFAULT` (see the migration in `Db::open`).
+    pub cost_usd: Option<f64>,
 }
 
 /// A row from the `messages` table.
@@ -269,6 +282,29 @@ impl Db {
             let tx = conn.unchecked_transaction()?;
             tx.execute("ALTER TABLE sessions ADD COLUMN todos_json TEXT", [])?;
             backfill_session_todos(&tx)?;
+            tx.commit()?;
+        }
+        // One-time migration for pre-existing databases: add `cost_usd` to
+        // `sessions` (fresh databases already have it from SCHEMA). The same
+        // pragma-gated pattern as the `todos_json` migration above.
+        //
+        // NO `DEFAULT` and NO backfill, and that is the load-bearing part of
+        // this gate (issue #105, D5 / ADR 0082): `NULL` means "no model call
+        // ever reported a cost" and renders NOTHING, while `0.0` means "a call
+        // reported a real zero" and renders `$0.00`. A `DEFAULT 0` would
+        // migrate every pre-existing row into the second meaning — a figure
+        // the provider never reported — which is exactly the phantom-`$0.00`
+        // defect this column exists to avoid. The `todos_json` precedent has a
+        // backfill because todo data existed elsewhere; cost data never existed
+        // anywhere, so `NULL` is the only honest value for an old row.
+        let has_cost_usd: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'cost_usd'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_cost_usd == 0 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute("ALTER TABLE sessions ADD COLUMN cost_usd REAL", [])?;
             tx.commit()?;
         }
         // One-time migration for pre-existing databases: add `sort_order` to
@@ -486,6 +522,79 @@ impl Db {
         Ok(found)
     }
 
+    /// Add one call's cost to the session's running figure (issue #105).
+    ///
+    /// NOT an upsert and NOT idempotent: this ADDS `delta` to whatever is
+    /// stored, so a re-delivered frame doubles the figure. That is a property
+    /// of the wire, not an oversight — `cost_update` frames carry no identity
+    /// (`emit_cost_update` sends `"seq": 0`), so there is nothing to dedupe
+    /// on. Bounded today by `emit_cost_update` having exactly one production
+    /// call site (`turn.rs:207`, the `Usage` arm), so a Resume cannot re-emit
+    /// history. Pinned by `a_replayed_cost_frame_doubles_the_stored_figure`,
+    /// which must be DELETED — not adjusted — if idempotency is ever added.
+    ///
+    /// `NULL + x = x`: the first frame turns "never reported" into a figure.
+    /// A `None` column and a stored `0.0` therefore both accumulate correctly
+    /// and the distinction is only ever lost by a frame existing — which is
+    /// exactly when it should be lost (D5 / ADR 0082).
+    ///
+    /// The read-modify-write holds the connection lock ONCE. The sibling
+    /// methods lock per statement, but they are single writes; splitting this
+    /// SELECT and its UPDATE across two locks would let a frame that lands in
+    /// the gap be read as absent by the second read and lose its increment.
+    /// The lock is released before anything is printed or returned — nothing
+    /// slow (and no `eprintln!`) ever runs under it.
+    ///
+    /// A missing session row is a silent no-op returning `Ok(())` (the same
+    /// shape `record_session_todos` has, pinned there by
+    /// `record_session_todos_roundtrips_and_clears` and here by
+    /// `record_session_cost_on_a_missing_row_is_a_silent_no_op`). That silence
+    /// is the reason the CALLER must ensure the row first — see Trap 1: a
+    /// subagent's first `cost_update` can arrive before any `StoreFrame` has
+    /// created its row, so `apply_interactive_event` calls `ensure_session_row`
+    /// before reaching here. Do not "fix" this into an error.
+    pub fn record_session_cost(&self, id: &str, delta: f64) -> Result<(), DbError> {
+        let guard = self.conn.lock().expect("db mutex poisoned");
+        // The row's current figure. `QueryReturnedNoRows` means the session has
+        // no row at all — a no-op, NOT a row we create (see the doc above).
+        let stored: Option<f64> = {
+            let mut stmt = guard.prepare("SELECT cost_usd FROM sessions WHERE id = ?1")?;
+            match stmt.query_row(params![id], |row| row.get::<_, Option<f64>>(0)) {
+                Ok(val) => val,
+                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(()),
+                Err(e) => return Err(e.into()),
+            }
+        };
+        // The arithmetic is deliberately in RUST, not a SQL
+        // `COALESCE(cost_usd, 0) + ?2`: the `NULL`-means-absence rule is the
+        // whole point of the column, and `unwrap_or(0.0)` puts that rule where
+        // a reader (and a test) can see it.
+        let next = stored.unwrap_or(0.0) + delta;
+        guard.execute(
+            "UPDATE sessions SET cost_usd = ?2 WHERE id = ?1",
+            params![id, next],
+        )?;
+        Ok(())
+    }
+
+    /// Read a session's persisted running cost (`None` when no figure is
+    /// stored).
+    ///
+    /// `None` covers TWO cases that are indistinguishable here — "no such row"
+    /// and "a row that has never had a cost frame" — and callers do not need to
+    /// tell them apart: both render nothing. A `Some(0.0)` is different from
+    /// both: a call reported a genuine zero (D5 / ADR 0082).
+    pub fn session_cost(&self, id: &str) -> Result<Option<f64>, DbError> {
+        let guard = self.conn.lock().expect("db mutex poisoned");
+        let mut stmt = guard.prepare("SELECT cost_usd FROM sessions WHERE id = ?1")?;
+        let found = match stmt.query_row(params![id], |row| row.get::<_, Option<f64>>(0)) {
+            Ok(val) => val,
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(e.into()),
+        };
+        Ok(found)
+    }
+
     /// Insert or update a message.
     ///
     /// `INSERT ... ON CONFLICT(session_id, kind, message_key) DO UPDATE` —
@@ -515,7 +624,7 @@ impl Db {
     pub fn session(&self, id: &str) -> Result<Option<SessionRow>, DbError> {
         let guard = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = guard.prepare(
-            "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent \
+            "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent, cost_usd \
              FROM sessions WHERE id = ?1",
         )?;
         let row = stmt
@@ -529,6 +638,7 @@ impl Db {
                     archived: row.get::<_, i64>(5)? != 0,
                     context_usage_json: row.get(6)?,
                     is_subagent: row.get::<_, i64>(7)? != 0,
+                    cost_usd: row.get(8)?,
                 })
             })?
             .next()
@@ -561,12 +671,12 @@ impl Db {
     pub fn list_sessions(&self, include_archived: bool) -> Result<Vec<SessionRow>, DbError> {
         let guard = self.conn.lock().expect("db mutex poisoned");
         let sql = if include_archived {
-            "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent
+            "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent, cost_usd
              FROM sessions
              WHERE is_subagent = 0
              ORDER BY sort_order ASC, id DESC"
         } else {
-            "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent
+            "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent, cost_usd
              FROM sessions
              WHERE archived = 0 AND is_subagent = 0
              ORDER BY sort_order ASC, id DESC"
@@ -583,6 +693,7 @@ impl Db {
                     archived: row.get::<_, i64>(5)? != 0,
                     context_usage_json: row.get(6)?,
                     is_subagent: row.get::<_, i64>(7)? != 0,
+                    cost_usd: row.get(8)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1197,6 +1308,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     context_usage_json TEXT,
     is_subagent INTEGER NOT NULL DEFAULT 0,
     todos_json TEXT,
+    cost_usd REAL,
     sort_order INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS messages (
@@ -2589,6 +2701,113 @@ mod tests {
         );
     }
 
+    /// A pre-existing database whose `sessions` table predates the
+    /// `cost_usd` column must open CLEANLY (the one-time migration adds the
+    /// column) and the pre-existing rows must read `cost_usd == None`
+    /// (issue #105).
+    ///
+    /// `None` — not `0.0` — is the load-bearing half of this test: a column
+    /// `DEFAULT 0` would migrate every old row to "this session spent
+    /// nothing", which is a FIGURE the provider never reported, and the
+    /// renderer would print `$0.00` under sessions that were never priced
+    /// (the D5 defect, ADR 0082). The migration therefore has no `DEFAULT`
+    /// and NO backfill — cost data never existed anywhere, so there is
+    /// nothing honest to backfill.
+    #[test]
+    fn cost_usd_column_migration_on_a_preexisting_db() {
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-cost-test-", "scratch");
+        let path = dir.join("t.db");
+        // A pre-existing database: the `sessions` table WITHOUT `cost_usd`.
+        // Every OTHER current column IS present, so this test isolates the
+        // `cost_usd` gate (the sibling migrations are no-ops here) — the same
+        // isolation the `context_usage_json` migration test above practices.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                cwd TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                title TEXT,
+                capabilities_json TEXT NOT NULL,
+                archived INTEGER NOT NULL DEFAULT 0,
+                context_usage_json TEXT,
+                is_subagent INTEGER NOT NULL DEFAULT 0,
+                todos_json TEXT,
+                sort_order INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO sessions (id, cwd, created_at, capabilities_json)
+            VALUES ('s1', '/tmp', 1, '{}');",
+        )
+        .unwrap();
+        drop(conn);
+        // The next `Db::open` must SUCCEED (the migration adds the column).
+        let db = Db::open(&path).expect("the cost_usd migration is one-time and idempotent");
+        // ...and the column is in place now.
+        let has: i64 = db
+            .conn
+            .lock()
+            .expect("db mutex poisoned")
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'cost_usd'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            has, 1,
+            "the cost_usd column is in place after the migration"
+        );
+        // And it has NO default. A `DEFAULT 0` would pass the assertion below
+        // only by lying — every migrated row would read "spent nothing", a
+        // figure the provider never reported (the phantom-`$0.00` defect, D5 /
+        // ADR 0082). Pinned directly, because the `None` assertions below would
+        // ALSO pass under a `DEFAULT NULL` that someone later "improves".
+        let default_value: Option<String> = db
+            .conn
+            .lock()
+            .expect("db mutex poisoned")
+            .query_row(
+                "SELECT dflt_value FROM pragma_table_info('sessions') WHERE name = 'cost_usd'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            default_value, None,
+            "`cost_usd` has NO column DEFAULT — NULL means 'never reported', 0 means 'reported zero'"
+        );
+        // ...and the pre-existing row reads `cost_usd == None` — never `0.0`.
+        let rows = db
+            .list_sessions(true)
+            .expect("list_sessions should succeed");
+        assert_eq!(rows.len(), 1, "the pre-existing row survived");
+        assert_eq!(
+            rows[0].cost_usd, None,
+            "a pre-existing row reads cost_usd == None (no figure was ever reported)"
+        );
+        // `session()` reads it the same way (the two queries stay in lockstep).
+        let row = db
+            .session("s1")
+            .expect("session should succeed")
+            .expect("the pre-existing row is there");
+        assert_eq!(
+            row.cost_usd, None,
+            "the resume read agrees with the list read"
+        );
+        // ...and a SECOND open of the already-migrated database is a clean
+        // no-op (the `pragma_table_info` gate skips the ALTER) — the
+        // migration is idempotent.
+        drop(db);
+        let db = Db::open(&path).expect("a re-open of the migrated db must succeed");
+        let rows = db
+            .list_sessions(true)
+            .expect("list_sessions should succeed on the second open");
+        assert_eq!(
+            rows[0].cost_usd, None,
+            "the re-opened row still reads cost_usd == None"
+        );
+    }
+
     /// `record_session_context_usage` persists the session's last known
     /// context usage (the frontend's context-percentage display for a
     /// CLOSED session — the store drops it on close, but the row keeps
@@ -2779,6 +2998,193 @@ mod tests {
         // Missing session id is a no-op returning Ok(()) and session_todos returns None
         db.record_session_todos("nonexistent", Some(todos)).unwrap();
         assert_eq!(db.session_todos("nonexistent").unwrap(), None);
+    }
+
+    /// A `cost_update` frame's per-call delta ADDS to the stored figure
+    /// (issue #105): two frames of `0.0001` accumulate to `0.0002`, and the
+    /// first frame turns the row's `NULL` ("never reported") into a figure.
+    ///
+    /// The accumulation happens in Rust (`stored.unwrap_or(0.0) + delta`), not
+    /// in a SQL `COALESCE`, so the `NULL` handling is visible at the write site.
+    #[test]
+    fn a_cost_frame_accumulates_into_the_stored_figure() {
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-cost-test-", "scratch");
+        let path = dir.join("t.db");
+        let db = Db::open(&path).expect("db should open");
+        let info = SessionInfo {
+            session_id: "s1".to_string(),
+            cwd: std::path::PathBuf::from("/tmp/proj"),
+            capabilities: serde_json::json!({}),
+            config_options: None,
+            archived: false,
+            title: None,
+            context_usage: None,
+            is_subagent: false,
+        };
+        db.record_session(&info).unwrap();
+
+        // Before any frame: no figure at all (NOT a zero).
+        assert_eq!(db.session_cost("s1").unwrap(), None);
+
+        // One frame: `NULL + delta = delta` — the first frame creates the figure.
+        db.record_session_cost("s1", 0.0001).unwrap();
+        let after_one = db.session_cost("s1").unwrap().expect("a figure exists");
+        assert!(
+            (after_one - 0.0001).abs() < 1e-12,
+            "the first frame stores its own delta, got {after_one}"
+        );
+
+        // A second frame ADDS to it (the wire carries DELTAS, never totals).
+        db.record_session_cost("s1", 0.0001).unwrap();
+        let after_two = db.session_cost("s1").unwrap().expect("a figure exists");
+        assert!(
+            (after_two - 0.0002).abs() < 1e-12,
+            "two frames accumulate to their sum, got {after_two}"
+        );
+
+        // The stored figure is the row's own column — `session()` and
+        // `list_sessions()` both project it (the two queries stay in lockstep),
+        // which is what lets a CLOSED session keep its figure (issue #105).
+        let row = db.session("s1").unwrap().expect("the row is there");
+        let stored = row.cost_usd.expect("the row carries the figure");
+        assert!(
+            (stored - 0.0002).abs() < 1e-12,
+            "`session()` reads the accumulated figure, got {stored}"
+        );
+        let listed = db.list_sessions(true).expect("list_sessions").remove(0);
+        let listed = listed.cost_usd.expect("the listed row carries the figure");
+        assert!(
+            (listed - 0.0002).abs() < 1e-12,
+            "`list_sessions()` reads the accumulated figure, got {listed}"
+        );
+    }
+
+    /// `NULL` and `Some(0.0)` are DIFFERENT stored values (issue #105, D5,
+    /// ADR 0082). This is the D5 pin: "no call ever reported a cost" renders
+    /// NOTHING and "a call reported a real zero" renders `$0.00` — collapsing
+    /// them is the phantom-`$0.00` defect, so the distinction has to survive
+    /// the write → read round-trip, not just the wire.
+    #[test]
+    fn a_null_cost_and_a_real_zero_are_different() {
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-cost-test-", "scratch");
+        let path = dir.join("t.db");
+        let db = Db::open(&path).expect("db should open");
+        let info = SessionInfo {
+            session_id: "s1".to_string(),
+            cwd: std::path::PathBuf::from("/tmp/proj"),
+            capabilities: serde_json::json!({}),
+            config_options: None,
+            archived: false,
+            title: None,
+            context_usage: None,
+            is_subagent: false,
+        };
+        db.record_session(&info).unwrap();
+
+        // A fresh row: NO figure. Not `Some(0.0)` — `None`.
+        assert_eq!(
+            db.session_cost("s1").unwrap(),
+            None,
+            "a session that never reported a cost reads None, not 0.0"
+        );
+        let row = db.session("s1").unwrap().expect("the row is there");
+        assert_eq!(
+            row.cost_usd, None,
+            "`session()` reports absence, not a fabricated zero"
+        );
+
+        // A call that reported a REAL zero turns `NULL` into `Some(0.0)` — a
+        // figure, distinguishable from the absence above.
+        db.record_session_cost("s1", 0.0).unwrap();
+        assert_eq!(
+            db.session_cost("s1").unwrap(),
+            Some(0.0),
+            "a reported zero is a figure and must survive the round-trip as Some(0.0)"
+        );
+        let row = db.session("s1").unwrap().expect("the row is there");
+        assert_eq!(row.cost_usd, Some(0.0), "`session()` agrees");
+        let listed = db.list_sessions(true).expect("list_sessions").remove(0);
+        assert_eq!(listed.cost_usd, Some(0.0), "`list_sessions()` agrees");
+    }
+
+    /// A REPLAYED `cost_update` frame DOUBLES the stored figure.
+    ///
+    /// THIS TEST PINS A HAZARD, NOT A FEATURE (plan Trap 2). The increment is
+    /// deliberately non-idempotent because the wire gives a frame nothing to
+    /// dedupe on — `emit_cost_update` hardcodes `"seq": 0`, so a re-delivered
+    /// frame is indistinguishable from a second priced call. Prevention was
+    /// rejected as out of scope; VISIBILITY is the requirement, so the doubling
+    /// is asserted rather than hidden.
+    ///
+    /// **If a future change makes this idempotent, this test must be DELETED,
+    /// not adjusted.** An adjusted assertion would hide the fact that the
+    /// hazard was designed away, and the plan's honest-limits section (and
+    /// `persist.rs`'s module doc, which names `cost_update` as the one
+    /// non-idempotent arm) would need rewriting in the same change.
+    #[test]
+    fn a_replayed_cost_frame_doubles_the_stored_figure() {
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-cost-test-", "scratch");
+        let path = dir.join("t.db");
+        let db = Db::open(&path).expect("db should open");
+        let info = SessionInfo {
+            session_id: "s1".to_string(),
+            cwd: std::path::PathBuf::from("/tmp/proj"),
+            capabilities: serde_json::json!({}),
+            config_options: None,
+            archived: false,
+            title: None,
+            context_usage: None,
+            is_subagent: false,
+        };
+        db.record_session(&info).unwrap();
+
+        let frame = 0.0000341;
+        db.record_session_cost("s1", frame).unwrap();
+        let once = db.session_cost("s1").unwrap().expect("a figure exists");
+
+        // The SAME frame delivered twice: the figure doubles. Loudly.
+        db.record_session_cost("s1", frame).unwrap();
+        let twice = db.session_cost("s1").unwrap().expect("a figure exists");
+        assert!(
+            (twice - once * 2.0).abs() < 1e-12,
+            "a replayed frame doubles the stored figure (the pinned hazard): \
+             once={once}, twice={twice}"
+        );
+        assert!(
+            twice > once,
+            "the hazard is a GROWTH, not a no-op — if this ever reads equal, \
+             idempotency was added and this test must be deleted, not adjusted"
+        );
+    }
+
+    /// `record_session_cost` on a MISSING row is a silent `Ok(())` and writes
+    /// nothing (issue #105, Trap 1's evidence).
+    ///
+    /// This mirrors `record_session_todos_roundtrips_and_clears`'s last two
+    /// lines for the sibling method, and it is NOT an oversight to be "fixed"
+    /// into an error: it is the proof that the CALLER — `apply_interactive_event`,
+    /// via `ensure_session_row` — is responsible for the row's existence. A
+    /// subagent's first `cost_update` can arrive before any `StoreFrame` has
+    /// created its row, and a bare `UPDATE … WHERE id = ?1` would then discard
+    /// the money without a sound. This method's silence is why the cost arm has
+    /// to ensure the row first.
+    #[test]
+    fn record_session_cost_on_a_missing_row_is_a_silent_no_op() {
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-cost-test-", "scratch");
+        let path = dir.join("t.db");
+        let db = Db::open(&path).expect("db should open");
+
+        // No `record_session`, no row. The write succeeds and touches nothing.
+        db.record_session_cost("nonexistent", 0.0001)
+            .expect("a missing row is a no-op returning Ok(())");
+        assert_eq!(
+            db.session_cost("nonexistent").unwrap(),
+            None,
+            "nothing was written for a row that does not exist"
+        );
+        // And no row was CREATED by the attempt (an upsert here would be the
+        // wrong fix — `ensure_session_row` owns row creation).
+        assert!(db.list_sessions(true).expect("list_sessions").is_empty());
     }
 
     #[test]
