@@ -23,6 +23,10 @@ import {
 import type { AcpSessionUpdate } from "../lib/tauri";
 import { useInteractive } from "./interactive";
 import { useSubagents } from "./subagents";
+// Driven (not mocked) by the close-path tests below: the figure has to be read
+// off `useInteractive.cost` BEFORE `dismissSession` deletes it, so the test must
+// run the real dismiss-then-file ORDER rather than call the reducer directly.
+import { onSessionClosed } from "../lib/sessionLifecycle";
 import { expandMentions } from "../lib/skills";
 import type { AgentDefinitionDto, HistoryPage, McpServerInfo } from "../lib/tauri";
 import {
@@ -1440,6 +1444,107 @@ describe("contextUsage (the context-percentage state)", () => {
       window: 128000,
     });
     expect(useSessions.getState().configOptions["s1"]?.[0]?.id).toBe("model");
+  });
+});
+
+/**
+ * The cost figure a session accumulated DURING this app run must survive its
+ * close — the same retention the two tests above pin for `configOptions` and
+ * `contextUsage`, and for the same reason: the row the session is filed into is
+ * what `lib/sessionCost.ts`'s `costUsdOf` falls back to once the live
+ * accumulator is gone, and `SidePane` keeps rendering the cost line after a
+ * close.
+ *
+ * The two maps above live in THIS store, so `handleSessionClosed` keeps them by
+ * simply not touching them. Cost does not: it lives in `useInteractive.cost`,
+ * and `lib/sessionLifecycle.ts`'s `onSessionClosed` calls `dismissSession`,
+ * which DELETES the entry, before `handleSessionClosed` files the row. The
+ * figure therefore has to be captured before the dismiss and handed to the
+ * reducer — which is what these tests drive, through the real `onSessionClosed`
+ * so the dismiss-then-file ORDER is under test and not just the reducer's
+ * arithmetic.
+ */
+describe("closing a session in this app run carries its cost figure onto the filed row (#105)", () => {
+  beforeEach(() => resetStores());
+  afterEach(() => resetStores());
+
+  const filedRow = (sessionId: string): SessionInfo | undefined =>
+    useSessions.getState().historySessions.find((s) => s.sessionId === sessionId);
+
+  it("onSessionClosed files the session into historySessions carrying this run's costUsd", () => {
+    // A session STARTED this run: its row carries no `costUsd` at all (the
+    // fresh `start_session` reply has none), so the run's figure exists ONLY in
+    // `useInteractive.cost` — the map the close dismisses.
+    useSessions.setState({ sessions: [info("s1", "/x")] });
+    useInteractive.getState().applyCost("s1", { costUsd: 0.42 });
+
+    onSessionClosed("s1", "user");
+
+    expect(filedRow("s1")?.costUsd).toBe(0.42);
+  });
+
+  it("a close with NO live cost entry files the row UNCHANGED (no `costUsd: undefined` key appears)", () => {
+    // The wire OMITS a missing figure rather than sending `null`
+    // (`makeSessionRow`'s rule, and `costUsdOf`'s presence test), so a filed
+    // row must not gain a key holding `undefined` — a `makeSessionRow`-style
+    // wire-shape expectation, and the reason the carry is a guarded spread and
+    // not a bare `{ ...closedInfo, costUsd: closedCost }`.
+    const row = info("s1", "/x");
+    useSessions.setState({ sessions: [row] });
+
+    onSessionClosed("s1", "user");
+
+    const filed = filedRow("s1");
+    expect(filed).toBeDefined();
+    expect("costUsd" in (filed as SessionInfo)).toBe(false);
+    expect(filed).toEqual(row);
+  });
+
+  it("a close with no live figure KEEPS a resume-time `costUsd` already on the row (an absent run figure is not a wipe)", () => {
+    useSessions.setState({
+      sessions: [{ ...info("s1", "/x"), costUsd: 0.1 }],
+    });
+
+    onSessionClosed("s1", "user");
+
+    expect(filedRow("s1")?.costUsd).toBe(0.1);
+  });
+
+  it("a closing ARCHIVED session's row in archivedSessions carries this run's costUsd too", () => {
+    // The archived branch has the same staleness, and it is WORSE: the row is
+    // never moved at all, so it keeps whatever `costUsd` the boot-time read put
+    // on it while the run's figure dies with the dismissed map.
+    useSessions.setState({
+      sessions: [info("s1", "/x")],
+      archivedSessions: [{ ...info("s1", "/x"), archived: true }],
+    });
+    useInteractive.getState().applyCost("s1", { costUsd: 0.42 });
+
+    onSessionClosed("s1", "user");
+
+    const st = useSessions.getState();
+    expect(st.historySessions.map((s) => s.sessionId)).not.toContain("s1");
+    expect(
+      st.archivedSessions.find((s) => s.sessionId === "s1")?.costUsd,
+    ).toBe(0.42);
+  });
+
+  it("an archived close with NO live figure leaves archivedSessions byte-for-byte unchanged", () => {
+    // No run figure ⇒ no copy, no key: the untouched list keeps its reference,
+    // which is what the reducer's `state.historySessions` passthrough already
+    // guarantees for the other list.
+    const archivedRow = { ...info("s1", "/x"), archived: true };
+    useSessions.setState({
+      sessions: [info("s1", "/x")],
+      archivedSessions: [archivedRow],
+    });
+
+    onSessionClosed("s1", "user");
+
+    const st = useSessions.getState();
+    expect(st.archivedSessions).toEqual([archivedRow]);
+    expect(st.archivedSessions[0]).toBe(archivedRow);
+    expect("costUsd" in (st.archivedSessions[0] as SessionInfo)).toBe(false);
   });
 });
 
