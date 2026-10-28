@@ -1,0 +1,204 @@
+---
+status: running
+mode: autonomous
+updated: 2026-10-28
+---
+
+# permissions-section — STATUS
+
+**READ THIS FIRST on every iteration. This file is the loop's only memory.**
+
+## Mission
+
+Ship the approved permissions model in `docs/roadmap/permissions-section.md` (`status: approved`, mirrored on
+GitHub issue **#112**): a `rules` list of `{path, direction, decision}` exceptions evaluated by longest
+canonical prefix, and the self-modification guard for agent-definition directories changing from an
+unconditional deny to an **ask** when no rule matches. Finished means: rule precedence enforced in one shared
+resolver, per-prompt guard options with no `trust-space` shortcut, `allow-directory` persisting exactly one
+rule via the Supervisor relay, a Settings → Permissions section with the rules list and the honest bash/trust
+copy, and ADR 0083 + the ADR 0030 amendment + `CONTEXT.md` + a `docs/features/` page recording it.
+
+## Operating mode
+
+The whole wave moves at once — planning fans out, it is not one task at a time.
+
+**On every resume, before dispatching anything:** run `git status --porcelain`. Uncommitted edits inside some
+task's Owns set mean the previous iteration died **mid-implementation** — that task is `implemented`, not
+`todo`, and its siblings may be half-written. Commit or set aside those edits first; never dispatch a new wave
+on a dirty tree. Then re-derive every task's state from the table's Status tests (plan file? changelog?
+commit?) — the tree outranks whatever value is written, so correct the column before acting on it.
+
+Loop protocol, per WAVE, repeat until `status: done`:
+1. Read this file. Take the FIRST wave containing a task whose Status is not `done`. Do not pick, reorder, or
+   skip. **Re-entering a half-finished wave resumes at the first incomplete step below — never re-dispatch a
+   step whose output already exists** (area already in the Grounding reports table → skip grounding it; plan
+   file already present → skip planning it).
+2. Verify each task in the wave against the tree. Trust the tree over the task text. Re-check the Owns sets
+   are still disjoint — the tree outranks this table.
+3. Ground: one `researcher` per area not yet grounded, all in one response, each WRITING
+   `docs/roadmap/permissions-section-ground-<area>.md`. Never ground per task.
+4. Plan: dispatch `specify` in CONSUMED MODE to `researcher` (`agentName: "researcher"`) for every todo task
+   in the wave that has NO plan file yet, all in one response — marker `SPECIFY CONSUMED MODE`, the task text,
+   its Owns set, the grounding FILE PATH (not its contents), and
+   `target: docs/roadmap/permissions-section-taskNN-<slug>.md`. Not capped at 4; planning is read-only.
+5. Vet: one `reviewer` per plan file in one response (max 3 rounds each), told to OPEN the files the plan
+   names; findings -> re-dispatch consumed specify to refine the SAME target.
+6. Commit the plan docs yourself, by pathspec — the child is forbidden from committing, so an uncommitted plan
+   gets re-planned by the next session. **`docs/roadmap/` is gitignored: use `git add -f` with explicit
+   pathspecs, never a directory.**
+7. Implement the wave per implement's wave protocol (children don't commit; you commit by pathspec; scoped
+   tests in-wave; <=4 implementers). In the SAME response, dispatch planning for the NEXT wave's tasks — only
+   for areas this wave's implementers do not touch.
+8. Run the gate (full suite once per wave). Green -> commit by pathspec -> mark `done` here -> one Changelog
+   line. Red -> re-dispatch; never fix by hand in the orchestrator.
+9. Update THIS FILE before starting the next wave. Then loop.
+
+## Gate — establish before task 1, re-run after every wave (and after each serial task)
+
+```
+# from src-tauri/
+cargo test
+cargo clippy --all-targets        # must be 0 warnings
+cargo fmt --check
+cargo check --target x86_64-pc-windows-gnu --all-targets   # only local Windows proof; #[cfg(windows)] never RUNS here
+# from the repo root
+pnpm test
+pnpm build
+```
+
+Baseline measured at `a17ba4b` (branch `main`, clean tree): **all legs green** — `cargo test` 1581 passed / 0
+failed; `clippy --all-targets` 0 warnings; `fmt --check` clean; `pnpm test` 153 files / 3240 tests passed;
+`pnpm build` green (chunk-size warning only, pre-existing). `cargo check --target …windows-gnu` was NOT run at
+baseline — run it with the first wave that touches Rust, and treat its first result as that leg's baseline.
+
+The spec's own Verification section says "152 files / 3203 tests" — **already stale at branch HEAD.** Trust the
+numbers above, and re-measure rather than copying either.
+
+## Dependency graph / waves
+
+```
+Wave 1: T01 (Rust policy core)  ∥  T05 (frontend prompt types/UI)   — disjoint, different languages
+Wave 2: T02 (Rust wire shape + prompt)  ∥  T06 (Settings section)   — T02 needs T01's rule resolver types
+Wave 3: T03 (gate + executor precedence)      width 1 — needs T01's resolver AND T02's Selected{value}
+Wave 4: T04 (Supervisor relay persists rules) width 1 — needs T02's Selected{value}
+Wave 5: T07 (ADRs / CONTEXT.md / feature doc) width 1 — records everything above
+```
+
+**Why the Rust spine is a chain, recorded so the next iteration does not re-litigate the cut:** `archimedes` is
+ONE compilation unit, so two Rust implementation tasks can never share a wave regardless of how the file sets
+are cut (established in this repo with a planted syntax error, not assumed). On top of that `gate.rs` is needed
+by three separate concerns — rule enforcement (T03), the approve predicate that today reads
+`option_id == "allow" || option_id == "trust-space"` (T02), and the guard prompt (T02) — so it cannot be
+parallelised by ownership either. The real parallelism in this run is **Rust ∥ Frontend**, and that is what
+waves 1 and 2 use. Width-1 for waves 3–5 is the honest shape of the work, not a failed cut.
+
+## Grounding reports
+
+| Area | Report | Grounded at |
+|---|---|---|
+| policy-core | `docs/roadmap/permissions-section-ground-policy-core.md` | `a17ba4b` |
+| frontend-prompt | `docs/roadmap/permissions-section-ground-frontend-prompt.md` | `a17ba4b` |
+| permission-wire | `docs/roadmap/permissions-section-ground-permission-wire.md` | `a17ba4b` |
+| gate-executor | `docs/roadmap/permissions-section-ground-gate-executor.md` | `a17ba4b` |
+| supervisor-relay | `docs/roadmap/permissions-section-ground-supervisor-relay.md` | `a17ba4b` |
+| docs | `docs/roadmap/permissions-section-ground-docs.md` | `a17ba4b` |
+
+`frontend-settings` is deliberately **not** grounded here: T05 (wave 1) mutates `src/lib/tauri/types.ts`,
+`src/store/permissions.ts` and the barrel, all of which the Settings planner must read. Ground it after wave 1
+lands, or its report will describe a tree that no longer exists.
+
+## Tasks
+
+| # | Task | Area | Plan file | Wave | Owns (file set — disjointness evidence) | Status |
+|---|------|------|-----------|------|------------------------------------------|--------|
+| T01 | Rule model + longest-prefix resolver; `protected_dirs()` becomes the default rule set | policy-core | `docs/roadmap/permissions-section-task01-rule-model-resolver.md` | 1 | `src-tauri/src/agent/policy.rs`, `src-tauri/src/agent/boundary.rs` (both + inline test mods) — **plus the 10-file `FilePolicy` blast-radius set ratified 2026-10-28**: `src-tauri/src/agent/harness/loop.rs`, `src-tauri/src/agent/harness/loop/tools.rs`, `src-tauri/src/config.rs`, `src-tauri/src/agent/web/tools.rs`, `src-tauri/src/agent/web/extract/tests.rs`, `src-tauri/src/agent/tools/exec/tests/support.rs`, `src-tauri/src/agent/tools/exec/tests/bash.rs`, `src-tauri/src/agent/tools/sandbox.rs`, `src-tauri/tests/skill_tools_boundary.rs`, `src-tauri/tests/worker_e2e.rs` | `vetted` |
+| T05 | Wire types + prompt store + guard-prompt UI (`value` echo, generic options) | frontend-prompt | `docs/roadmap/permissions-section-task05-wire-types-prompt-ui.md` | 1 | `src/lib/tauri/types.ts`, `src/lib/tauri.ts`, `src/lib/tauriBarrel.test.ts`, `src/lib/tauri/commands/gates.ts`, `src/store/permissions.ts`, `src/hooks/useChildGates.ts`, `src/hooks/useChildGates.test.ts`, `src/components/PermissionPrompt.tsx`, `src/components/PermissionPrompt.test.tsx` | `vetted` |
+| T02 | `PermissionOutcome::Selected { option_id, value }`, per-prompt option lists, approve predicate, drop `trust-space` from the guard prompt | permission-wire | `docs/roadmap/permissions-section-task02-wire-shape-guard-prompt.md` | 2 | `src-tauri/src/agent/permission.rs`, `src-tauri/src/agent/harness/loop/gate.rs`, `src-tauri/src/agent/worker/sink.rs`, `…/worker/protocol.rs`, `…/worker/client.rs`, `…/worker/core.rs`, `…/worker/manager/mod.rs`, `…/worker/manager/tests/mod.rs`, `src-tauri/src/bin/fake_worker.rs`, `src-tauri/src/agent/harness/loop/tests/policy_gate.rs`, `src-tauri/src/commands/sessions.rs`, `src-tauri/src/agent/mod.rs` (only if the re-export must change) | `todo` |
+| T06 | Settings → Permissions section: rules list, posture rows + trust toggle moved out of General, bash/trust copy | frontend-settings | `docs/roadmap/permissions-section-task06-settings-permissions-section.md` | 2 | `src/components/settings/SettingsPage.tsx`, `src/components/settings/SettingsPage.test.tsx`, `src/components/settings/GeneralSection.tsx`, `src/components/settings/PermissionsSection.tsx` (new), `src/components/settings/PermissionsSection.test.tsx` (new) | `todo` |
+| T03 | Enforce precedence rows 1–4 at the gate and in the executor; default rule set frozen per session | gate-executor | `docs/roadmap/permissions-section-task03-gate-executor-precedence.md` | 3 | `src-tauri/src/agent/harness/loop.rs`, `src-tauri/src/agent/tools/exec/access.rs`, `src-tauri/src/agent/tools/exec/tests/policy.rs`, `src-tauri/src/agent/tools/types.rs`, `src-tauri/src/agent/tools/sandbox.rs`, `src-tauri/src/agent/harness/loop/tests/param_rejection.rs` | `todo` |
+| T04 | Supervisor relay persists `allow-directory` as one rule; settings round-trip | supervisor-relay | `docs/roadmap/permissions-section-task04-relay-rule-persistence.md` | 4 | `src-tauri/src/agent/session/mod.rs`, `src-tauri/src/config.rs`, `src-tauri/src/storage/db.rs` | `todo` |
+| T07 | ADR 0083 + ADR 0030 amendment, `CONTEXT.md` terms, `docs/features/` permissions page | docs | `docs/roadmap/permissions-section-task07-adrs-docs.md` | 5 | `docs/decisions/0083-*.md` (new), `docs/decisions/0030-*.md` (append amendment only), `CONTEXT.md`, `docs/features/permissions-model.md` (new) | `todo` |
+
+**Status is exactly one of these, and each is checkable from the tree without asking anyone:**
+
+| Value | True when |
+|---|---|
+| `todo` | no plan file at the Plan path |
+| `planned` | plan file exists |
+| `vetted` | plan file exists **and** a Changelog line records the vet round for it |
+| `implemented` | the task's edits exist in the tree but are not committed |
+| `done` `<hash>` | committed, gate green |
+
+## Blockers / open questions
+
+Empty.
+
+## Decisions log
+
+- **2026-10-28** — **T01's Owns set extended to 12 files** (ratifying the plan's Blocker option b). Adding
+  `rules: Vec<AccessRule>` to `FilePolicy` removes its `Copy` derive, and I measured the unavoidable cost myself:
+  **17 full struct literals** (14 in `src/`, 3 in `tests/`) must name the new field, plus **2 Copy-move sites**
+  (`harness/loop.rs`'s per-turn refresh, `harness/loop/tools.rs`'s `ToolCtx` build) = **19 edits across 11 files**.
+  The plan's figure of 19/11 is correct; the round-1 reviewer's 20 double-counted. Survivors: 7 spread literals
+  using `..FilePolicy::default()` (all in `exec/tests/policy.rs`) and every scalar field read.
+- **2026-10-28** — **There is NO green intermediate state; T01's 19 edits land atomically in one step.** I tested
+  both phase-1 designs the plan proposed, in a scratch crate and against the real gate:
+  (a) inserting `rules: Vec::new(),` before the field exists → `error[E0560]: struct FilePolicy has no field
+  named rules`; (b) pre-converting the 17 literals to `..FilePolicy::default()` → compiles, but clippy emits
+  `useless_struct_update` ("struct update has no effect"), which is red at this repo's 0-warning gate.
+  So the plan's `## Steps:` two-phase ordering is **void** — ignore it and do the field flip plus all 19 sites in
+  a single compile. This is unavoidable in any representation that puts a collection on `FilePolicy`: a Rust
+  struct literal must name every field, so the blast radius is a property of the language, not of the design.
+- **2026-10-28** — **Deliberate cross-wave Owns overlap, do not "fix" it:** T01 (wave 1) now owns `config.rs`,
+  `harness/loop.rs`, `tools/sandbox.rs` and `exec/tests/bash.rs`, which T03 (wave 3) and T04 (wave 4) also own.
+  Disjointness is only required **within** a wave, and these are strictly sequential waves, so the sets never
+  collide at dispatch. T01's edits to those files are the mechanical `rules:` insertions only — no behaviour.
+- **2026-10-28** — `<feature>` = `permissions-section`, taken from the spec basename per roadmap Step 0, so the
+  branch is `feature/permissions-section` and NOT `feature/112-permissions-section`. The branch topic and the
+  spec basename must be the same string or `finish` deletes a family that does not exist.
+- **2026-10-28** — Spec's `status: approved` stays `approved`. Flipping it to `committed` would offer a
+  task-list-less spec to `implement` as an executable plan. The existence of this file marks the run in progress.
+- **2026-10-28** — T02 is 12 owned files, over the 8-file ceiling, merged deliberately: adding `value` to the
+  `Selected` variant breaks every match site (`gate.rs`, `worker/core.rs`, `worker/protocol.rs`,
+  `worker/client.rs`, `session/mod.rs`) plus the two verbatim three-option fixtures (`permission.rs`'s builder,
+  `worker/sink.rs`'s frame test) and `bin/fake_worker.rs`. Splitting it would end a task on a non-compiling
+  commit, and one compilation unit means that poisons the entire gate. Watch its implementer for compaction; if
+  it compacts, split at a file-set boundary rather than re-running the same oversized dispatch.
+- **2026-10-28** — Two spec gaps found by the pre-cut inventory, both assigned rather than left implicit:
+  (a) `tools/sandbox.rs` is a **third** consumer of `boundary::protected_dirs()` (confined `bash`), which the
+  spec's "gate and executor" framing does not mention → T03 must decide what rules mean there, since the spec
+  says rules never apply to `bash`; (b) `AgentLoop::new` freezes `protected` once per session, so the default
+  rule set must be frozen the same way or the gate and the executor disagree mid-session → T03.
+- **2026-10-28** — `PermissionPrompt` is not a Rust struct: the prompt payload is a `serde_json::json!` literal
+  in `agent/permission.rs` with a second verbatim copy in `worker/sink.rs`'s frame test. Any "add a field to the
+  prompt" step has two edit sites, not one.
+- **2026-10-28** — `commands/sessions.rs` (the `respond_permission` Tauri command wrapper) is owned by T02, not
+  T04: it is a pass-through of the same DTO the shape change touches, so it belongs with the shape, not with
+  the persistence. If it turns out to need no edit, T02 simply does not touch it.
+- **2026-10-28** — Triage of the wider backlog found six other open issues (#118, #108, #104, #101, #79, #28).
+  They are **not** in this run: none is an approved block, and #101/#104 hang off this spec's output — they were
+  filed from it. Do not widen this slice to include them.
+
+## Changelog
+
+One line per task: hash, what shipped, gate numbers at that moment.
+
+- `a17ba4b` — **gate baseline**: all legs green (see Gate section). No task shipped.
+- **VET round 1, T01** (`task01-rule-model-resolver.md`): REVISE. Reviewer found a real design defect — ranking
+  by `component_count` ties on sibling paths (`/tmp` vs `/tmpfoo`, both 2 components), so a non-prefix rule wins
+  by list order and longest-prefix is silently defeated. Also flagged the `Copy` blast radius, the unpinned
+  concat order, and the empty-home limit. All applied in round 2; the algorithm is now
+  filter-by-component-prefix → rank → tie-break-last-wins, with the `/tmpfoo` and `~`-vs-`/` pins added.
+  Two of the reviewer's own claims were checked and found wrong (the `Path::new(&r.path)` mechanism; "6 spread
+  literals" — it is 7), and the plan says so in place rather than silently relabelling.
+- **VET round 2, T01**: refined in place. Remaining Blocker (the `Copy` ordering) resolved by the orchestrator,
+  not the planner — see the two Decisions entries on the Owns extension and the absence of a green intermediate.
+  Now `vetted`.
+- **VET round 1, T05** (`task05-wire-types-prompt-ui.md`): PASS with issues. Reviewer confirmed the load-bearing
+  claim — `PermissionPrompt.tsx` is the ONLY place an option becomes a wire object, so the single S4 edit covers
+  the subagent path too. Fixed in round 2: wrong wire-casing prose (`selected` is the wire key, `option_id`/`value`
+  are fields inside it), a tautological backward-compat pin (`toHaveBeenCalledWith` is asymmetric equality and
+  passed even if the conditional spread were dropped — now `toStrictEqual` on the raw argument), the barrel needs
+  ONE literal array not two, and a triage note for the four unowned files (`App.test.tsx`, `ChatStream.test.tsx`,
+  `InlineGateRow.test.tsx`, `SubagentModals.test.tsx`) that seed `optionId: "allow"` fixtures and query by the
+  name "Allow". Now `vetted`.
