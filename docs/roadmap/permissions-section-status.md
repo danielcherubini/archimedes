@@ -115,8 +115,8 @@ lands, or its report will describe a tree that no longer exists.
 | T05 | Wire types + prompt store + guard-prompt UI (`value` echo, generic options) | frontend-prompt | `docs/roadmap/permissions-section-task05-wire-types-prompt-ui.md` | 1 | `src/lib/tauri/types.ts`, `src/lib/tauri.ts`, `src/lib/tauriBarrel.test.ts`, `src/lib/tauri/commands/gates.ts`, `src/store/permissions.ts`, `src/hooks/useChildGates.ts`, `src/hooks/useChildGates.test.ts`, `src/components/PermissionPrompt.tsx`, `src/components/PermissionPrompt.test.tsx`, **plus `src/components/settings/GeneralSection.tsx`** (2-line type narrowing, see Changelog) | `done` `6fd3740` |
 | T02 | `PermissionOutcome::Selected { option_id, value }`, per-prompt option lists, approve predicate, drop `trust-space` from the guard prompt | permission-wire | `docs/roadmap/permissions-section-task02-wire-shape-guard-prompt.md` | 2 | `src-tauri/src/agent/permission.rs`, `src-tauri/src/agent/harness/loop/gate.rs`, `src-tauri/src/agent/worker/sink.rs`, `…/worker/protocol.rs`, `…/worker/client.rs`, `…/worker/core.rs`, `…/worker/manager/mod.rs`, `…/worker/manager/tests/mod.rs`, `src-tauri/src/bin/fake_worker.rs`, `src-tauri/src/agent/harness/loop/tests/policy_gate.rs`, `src-tauri/src/commands/sessions.rs`, `src-tauri/src/agent/mod.rs` (only if the re-export must change) — **plus ratified: `src-tauri/src/agent/session/mod.rs` (ONE `..`-pattern line only), `src-tauri/tests/worker_e2e.rs`, `src-tauri/tests/harness_loop.rs`** | `done` `140c4a2` |
 | T06 | Settings → Permissions section: rules list, posture rows + trust toggle moved out of General, bash/trust copy | frontend-settings | `docs/roadmap/permissions-section-task06-settings-permissions-section.md` | 2 | `src/components/settings/SettingsPage.tsx`, `src/components/settings/SettingsPage.test.tsx`, `src/components/settings/GeneralSection.tsx`, `src/components/settings/PermissionsSection.tsx` (new), `src/components/settings/PermissionsSection.test.tsx` (new) | `done` `3cd6cfc` |
-| T03 | Enforce precedence rows 1–4 at the gate and in the executor; default rule set frozen per session | gate-executor | `docs/roadmap/permissions-section-task03-gate-executor-precedence.md` | 3 | `src-tauri/src/agent/harness/loop.rs`, `src-tauri/src/agent/tools/exec/access.rs`, `src-tauri/src/agent/tools/exec/tests/policy.rs`, `src-tauri/src/agent/tools/types.rs`, `src-tauri/src/agent/tools/sandbox.rs`, `src-tauri/src/agent/harness/loop/tests/param_rejection.rs` | `todo` |
-| T04 | Supervisor relay persists `allow-directory` as one rule; settings round-trip | supervisor-relay | `docs/roadmap/permissions-section-task04-relay-rule-persistence.md` | 4 | `src-tauri/src/agent/session/mod.rs`, `src-tauri/src/config.rs`, `src-tauri/src/storage/db.rs` | `todo` |
+| T03 | Enforce precedence rows 1–4 at the gate and in the executor; default rule set frozen per session | gate-executor | `docs/roadmap/permissions-section-task03-gate-executor-precedence.md` | 3 | `src-tauri/src/agent/harness/loop.rs`, `src-tauri/src/agent/tools/exec/access.rs`, `src-tauri/src/agent/tools/exec/tests/policy.rs`, `src-tauri/src/agent/tools/types.rs`, `src-tauri/src/agent/tools/sandbox.rs`, `src-tauri/src/agent/harness/loop/tests/param_rejection.rs`, `src-tauri/src/agent/harness/loop/tests/policy_gate.rs` — **plus ratified B1/B2 (2026-10-28): `src-tauri/src/agent/harness/loop/tools.rs`, `src-tauri/src/agent/tools/exec/tests/support.rs`, `src-tauri/src/agent/tools/exec/tests/bash.rs`, `src-tauri/src/agent/tools/exec/tests/skills.rs`, `src-tauri/src/agent/web/tools.rs`, `src-tauri/src/agent/web/extract/tests.rs` (ToolCtx construction churn only), and `src-tauri/src/agent/permission.rs` (ONE `options` parameter on `native_permission_gate` only — prompt content stays T02's) | `vetted` |
+| T04 | Supervisor relay persists `allow-directory` as one rule; settings round-trip | supervisor-relay | `docs/roadmap/permissions-section-task04-relay-rule-persistence.md` | 4 | `src-tauri/src/agent/session/mod.rs`, `src-tauri/src/config.rs`, `src-tauri/src/storage/db.rs` — **plus ratified (2026-10-28): `src-tauri/Cargo.toml` (move `tempfile` from `[dev-dependencies]` to `[dependencies]`, one line)** | `vetted` |
 | T07 | ADR 0083 + ADR 0030 amendment, `CONTEXT.md` terms, `docs/features/` permissions page | docs | `docs/roadmap/permissions-section-task07-adrs-docs.md` | 5 | `docs/decisions/0083-*.md` (new), `docs/decisions/0030-*.md` (append amendment only), `CONTEXT.md`, `docs/features/permissions-model.md` (new) | `todo` |
 
 **Status is exactly one of these, and each is checkable from the tree without asking anyone:**
@@ -286,3 +286,35 @@ One line per task: hash, what shipped, gate numbers at that moment.
 - **2026-10-28** — Wave 3 re-grounding required before planning T03: wave 2 edited `harness/loop/gate.rs`
   (predicate + seam comment), which is inside the gate-executor area; `supervisor-relay`'s `session/mod.rs`
   also moved. Re-ground both at the wave-2 commits, not at `a17ba4b`.
+
+- **2026-10-28** — **Ratified T03's Blockers B1/B2 after verifying both against the tree.** B1: `ToolCtx` gains
+  `rules` + `home`, and it has 8 construction sites — 6 outside T03's declared set (`loop/tools.rs` ×2,
+  `exec/tests/support.rs` ×4, `exec/tests/bash.rs` ×2, `exec/tests/skills.rs` ×3, `web/tools.rs` ×2,
+  `web/extract/tests.rs` ×2; `sandbox.rs` ×6 and `exec/tests/policy.rs` ×7 were already owned). B2:
+  `native_permission_gate` gains ONE `options` parameter — T03 may touch `permission.rs` for that signature and
+  nothing else; the prompt content belongs to T02, which landed it. Same class as T01's 12-file absorption:
+  mechanical churn, cross-wave overlap is harmless because disjointness is a within-wave requirement.
+- **2026-10-28** — **Ratified T04's `tempfile` Blocker.** Verified: `tempfile` sits in `[dev-dependencies]` and
+  every in-crate use is inside a `#[cfg(test)]` module, so production `config.rs` cannot import it. T04 may move
+  the one line to `[dependencies]`. Its refusal of Path C (a plain non-atomic `fs::write`) stands: a
+  whole-document overwrite that can tear is the failure this task exists to close.
+
+- **VET round 1, T03** (`task03-gate-executor-precedence.md`): REVISE, and the reviewer confirmed three things
+  the plan was RIGHT about (DD2 sandbox — `protected_dirs()` filters `default_rules()` alone, so a user `allow`
+  cannot widen bash; DD1 per-turn concat honours Deviation 4; `is_guard_path` non-circular). The real defect was
+  one root cause with two consequences: the guard ancestor was computed from the RAW path argument, so a
+  `~`-spelled write emitted a `~`-residue rule that `rule_for` can never match — the click that should stop the
+  prompting silently doesn't. Round 2 resolves the target ONCE via `canonicalize_lenient` and feeds the same
+  value to rule lookup, ancestor and executor; adds the seam pin
+  `a_tilde_spelled_guarded_write_yields_an_ancestor_rule_for_matches`. Also pinned: the `home: None` silent
+  no-op, the read-is-not-an-ask split, layer-differentiated refusal pins, and a genuinely load-bearing sandbox
+  pin (the old one was a tautology — it never fed user rules anywhere `protected_dirs()` could see).
+- **VET round 1, T04** (`task04-relay-rule-persistence.md`): REVISE on a false model — the flagship test
+  asserted `rules.len() == defaults.len() + 1` against the FILE, but `default_rules()` is runtime-only and
+  never serialized, so it fails on every machine. Round 2 asserts the file-side half (one rule appended after
+  the seeded user rules) and delegates the runtime concat to T03's site with a loud cross-task box. Also:
+  the plan's Windows worry was checked and put to rest (tempfile `persist` uses `MOVEFILE_REPLACE_EXISTING`,
+  verified at the 3.27.0 source) but it had missed the REAL mode issue — `NamedTempFile` is 0600 and the rename
+  takes the temp's mode, silently tightening `settings.json` from 0644. Round 2 preserves the existing mode
+  before persist, pinned `#[cfg(unix)]`. Concurrency limitation re-worded to "narrows, does not close" with
+  the concrete lost-update sequence.
