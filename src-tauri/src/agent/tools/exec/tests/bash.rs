@@ -265,6 +265,7 @@ async fn a_sandboxed_shell_runs_confined_or_fails_closed_visibly() {
             reads: AccessPolicy::Allow,
             writes: AccessPolicy::Allow,
             shell: AccessPolicy::Sandboxed,
+            rules: Vec::new(),
         },
     );
     let r = execute_tool(&confined, "bash", &json!({ "command": "touch marker.txt" })).await;
@@ -312,6 +313,7 @@ async fn a_sandboxed_shell_does_not_touch_the_path_tools() {
             reads: AccessPolicy::Allow,
             writes: AccessPolicy::Allow,
             shell: AccessPolicy::Sandboxed,
+            rules: Vec::new(),
         },
     );
     let r = execute_tool(&confined, "read", &json!({ "path": "a.txt" })).await;

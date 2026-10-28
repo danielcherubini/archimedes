@@ -31,7 +31,7 @@ async fn read_beyond_the_boundary_succeeds_when_reads_allow() {
         ..FilePolicy::default()
     };
     let r = execute_tool(
-        &ctx_policy(&cwd, policy),
+        &ctx_policy(&cwd, policy.clone()),
         "read",
         &json!({ "path": "../outside.txt" }),
     )

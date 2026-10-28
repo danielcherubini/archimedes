@@ -483,6 +483,7 @@ mod tests {
                 reads: crate::agent::policy::AccessPolicy::Sandboxed,
                 writes: crate::agent::policy::AccessPolicy::Sandboxed,
                 shell: crate::agent::policy::AccessPolicy::Allow,
+                rules: Vec::new(),
             },
             protected: vec![],
             web: crate::agent::web::config::WebConfig::default(),

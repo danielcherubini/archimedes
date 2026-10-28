@@ -606,7 +606,10 @@ impl AgentLoop {
         // be a policy the user never chose. `config_dir: None` → the
         // all-`Allow` default (no settings layer) + env-only web config.
         let settings = self.config_dir.as_deref().map(crate::config::load_settings);
-        self.file_policy = settings.as_ref().map(|s| s.file_policy).unwrap_or_default();
+        self.file_policy = settings
+            .as_ref()
+            .map(|s| s.file_policy.clone())
+            .unwrap_or_default();
         self.web = crate::agent::web::config::WebConfig::from_web_settings(
             settings.as_ref().map(|s| &s.web),
         );

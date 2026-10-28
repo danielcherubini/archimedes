@@ -38,6 +38,7 @@ pub(crate) fn ctx(cwd: &Path) -> ToolCtx {
             reads: crate::agent::policy::AccessPolicy::Sandboxed,
             writes: crate::agent::policy::AccessPolicy::Sandboxed,
             shell: crate::agent::policy::AccessPolicy::Allow,
+            rules: Vec::new(),
         },
         protected: Vec::new(),
         web: Default::default(),

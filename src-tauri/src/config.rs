@@ -966,6 +966,7 @@ mod tests {
             reads: AccessPolicy::Allow,
             writes: AccessPolicy::Allow,
             shell: AccessPolicy::Allow,
+            rules: Vec::new(),
         };
         assert_eq!(FilePolicy::default(), all_allow);
         assert_eq!(Settings::default().file_policy, all_allow);
@@ -997,6 +998,7 @@ mod tests {
                 reads: AccessPolicy::Sandboxed,
                 writes: AccessPolicy::Ask,
                 shell: AccessPolicy::Allow,
+                rules: Vec::new(),
             },
             ..Settings::default()
         };
@@ -1408,6 +1410,7 @@ mod tests {
                 reads: AccessPolicy::Sandboxed,
                 writes: AccessPolicy::Ask,
                 shell: AccessPolicy::Allow,
+                rules: Vec::new(),
             },
             web: WebSettings {
                 brave_api_key: "b".to_string(),
@@ -1473,6 +1476,7 @@ mod tests {
                 reads: AccessPolicy::Sandboxed,
                 writes: AccessPolicy::Ask,
                 shell: AccessPolicy::Allow,
+                rules: Vec::new(),
             },
             ..Settings::default()
         };

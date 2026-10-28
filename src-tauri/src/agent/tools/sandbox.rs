@@ -898,6 +898,7 @@ mod tests {
                 reads,
                 writes: AccessPolicy::Sandboxed,
                 shell: AccessPolicy::Sandboxed,
+                rules: Vec::new(),
             },
             protected: Vec::new(),
             web: Default::default(),
@@ -1547,6 +1548,7 @@ mod tests {
                 reads: AccessPolicy::Allow,
                 writes: AccessPolicy::Allow,
                 shell: AccessPolicy::Allow,
+                rules: Vec::new(),
             },
             ..confined_ctx(cwd.path(), AccessPolicy::Allow)
         };
@@ -1719,6 +1721,7 @@ mod tests {
                 reads: AccessPolicy::Allow,
                 writes: AccessPolicy::Allow,
                 shell: AccessPolicy::Allow,
+                rules: Vec::new(),
             },
             ..confined_ctx(cwd.path(), AccessPolicy::Allow)
         };
@@ -1754,6 +1757,7 @@ mod tests {
                 reads: AccessPolicy::Allow,
                 writes: AccessPolicy::Allow,
                 shell: AccessPolicy::Allow,
+                rules: Vec::new(),
             },
             ..confined_ctx(cwd.path(), AccessPolicy::Allow)
         };

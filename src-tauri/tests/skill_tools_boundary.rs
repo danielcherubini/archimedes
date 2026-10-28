@@ -129,6 +129,7 @@ fn ctx_roots(cwd: &Path, roots: &[&Path], boundary: &[PathBuf]) -> ToolCtx {
             reads: AccessPolicy::Sandboxed,
             writes: AccessPolicy::Sandboxed,
             shell: AccessPolicy::Allow,
+            rules: Vec::new(),
         },
         ..ctx(cwd, roots)
     }
@@ -583,6 +584,7 @@ THE-SKILL-BODY",
             reads: AccessPolicy::Allow,
             writes: AccessPolicy::Allow,
             shell: AccessPolicy::Allow,
+            rules: Vec::new(),
         },
         skill_roots: None,
         cwd: cwd.path().to_path_buf(),

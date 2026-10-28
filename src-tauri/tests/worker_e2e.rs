@@ -745,6 +745,7 @@ async fn permission_round_trip_real_worker() {
             reads: archimedes_lib::agent::policy::AccessPolicy::Ask,
             writes: archimedes_lib::agent::policy::AccessPolicy::Ask,
             shell: archimedes_lib::agent::policy::AccessPolicy::Ask,
+            rules: Vec::new(),
         }),
     );
     h.attach(env).await;

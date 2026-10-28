@@ -101,7 +101,7 @@ impl AgentLoop {
                         // — the SAME per-turn value, so the executor cannot
                         // re-decide differently from the gate (it enforces
                         // the `Sandboxed` floor and confines `bash`).
-                        file_policy: self.file_policy,
+                        file_policy: self.file_policy.clone(),
                         web: self.web.clone(),
                         render_requester: self.render_requester.clone(),
                     },

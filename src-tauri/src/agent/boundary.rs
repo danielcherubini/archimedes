@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::agent::policy::AccessPolicy;
+use crate::agent::policy::{default_rules, AccessPolicy, RuleDecision};
 
 /// The root-entry meaning "no containment" on UNIX (one floor of the
 /// `Ask`/`Allow` widening): every canonical absolute path is under `/`.
@@ -111,26 +111,6 @@ fn push_roots<T>(out: &mut Vec<PathBuf>, roots: Vec<(PathBuf, T)>) {
     }
 }
 
-/// Append the paths of a `user_roots` result to the write DENY-LIST,
-/// canonicalized LENIENTLY: a directory that does not exist yet is KEPT and
-/// contributes its canonical nearest-existing ancestor plus the components
-/// that lead to it. This is the reverse of [`push_roots`], deliberately, and
-/// it is a separate function rather than a flag on that one because the flag
-/// would select a SECURITY policy: a lenient READ root silently WIDENS what
-/// is readable, and a seventh `push_roots` call could opt into it by
-/// accident. Here the leniency only ever DENIES more. A path that cannot be
-/// resolved at all (`$HOME` relative and absent, a protected dir on an
-/// unmounted drive) comes back with its raw spelling — see
-/// `protected_dirs_keeps_an_unresolvable_entry_raw`.
-fn push_protected<T>(out: &mut Vec<PathBuf>, roots: Vec<(PathBuf, T)>) {
-    for (path, _scope) in roots {
-        let c = crate::agent::fs_backend::canonicalize_lenient(&path);
-        if !out.contains(&c) {
-            out.push(c);
-        }
-    }
-}
-
 /// The read boundary: `cwd` FIRST, then the discovery roots (user + space
 /// level, skills + agents). Every root is canonicalized; a root that fails
 /// to canonicalize (a missing dir) is simply not part of the boundary.
@@ -167,15 +147,29 @@ pub fn write_roots(cwd: &Path) -> Vec<PathBuf> {
 /// `~/.agents/skills/*/SKILL.md` rewrites its own instructions for every
 /// future session.
 ///
-/// Entries are canonicalized LENIENTLY (see `push_protected`), which
-/// REPLACES the sentence this task reversed — *"Canonicalized; a missing dir
-/// is dropped."* (issue #92). A missing dir is now KEPT as its canonical
-/// nearest-existing ancestor plus the components that lead to it, because
-/// this list is frozen for the Session's life (`AgentLoop::new`) and a
-/// dropped entry silently unprotects the agent's own instructions until
-/// restart. The READ roots keep the opposite, strict rule on purpose —
-/// leniency there would widen what is readable; see `read_roots` and
-/// `a_nonexistent_root_is_dropped`.
+/// This is no longer a hardcoded list: it is the DERIVED VIEW of the default
+/// rule set — every `Deny` rule in [`crate::agent::policy::default_rules`],
+/// canonicalized. One source of truth for the four dirs (the two feeders
+/// `skills::user_roots` and `agents::user_roots`), consumed two ways: as
+/// RULES by [`crate::agent::policy::rule_for`], and as this PATH LIST by the
+/// gate's deny, the executor's refusal wording, and the Landlock ruleset. The
+/// derivation is pinned against the LITERAL four-dir list — not just against
+/// `default_rules()` — so a derivation that drifted to an empty or wrong rule
+/// set cannot pass by agreeing with itself
+/// (`protected_dirs_are_the_derived_default_deny_rule_paths`).
+///
+/// Entries are canonicalized LENIENTLY, which REPLACES the sentence this task
+/// reversed — *"Canonicalized; a missing dir is dropped."* (issue #92). A
+/// missing dir is now KEPT as its canonical nearest-existing ancestor plus the
+/// components that lead to it, because this list is frozen for the Session's
+/// life (`AgentLoop::new`) and a dropped entry silently unprotects the agent's
+/// own instructions until restart. The leniency only ever DENIES more, which
+/// is why it is safe here and deliberately NOT applied to the read roots —
+/// leniency there would silently WIDEN what is readable; see [`read_roots`]
+/// and `a_nonexistent_root_is_dropped`. A path that cannot be resolved at all
+/// (`$HOME` relative and absent, a protected dir on an unmounted drive) comes
+/// back with its raw spelling — see
+/// `protected_dirs_keeps_an_unresolvable_entry_raw`.
 ///
 /// The leniency is only half the protection: the comparison that consumes
 /// these entries must canonicalize its ENTRY side leniently too, or a
@@ -183,10 +177,14 @@ pub fn write_roots(cwd: &Path) -> Vec<PathBuf> {
 /// `crate::agent::tools::exec::protected_refusal_text` and
 /// `a_write_into_a_still_missing_protected_dir_is_refused`.
 pub fn protected_dirs() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    push_protected(&mut out, crate::skills::user_roots());
-    push_protected(&mut out, crate::agents::user_roots());
-    out
+    default_rules()
+        .iter()
+        .filter(|r| r.decision == RuleDecision::Deny)
+        .map(|r| {
+            let raw = std::path::Path::new(r.path.as_str());
+            crate::agent::fs_backend::canonicalize_lenient(raw)
+        })
+        .collect()
 }
 
 /// The executor's root set for one direction, derived from the policy.
@@ -548,6 +546,148 @@ mod tests {
         );
 
         drop((restore, lock));
+    }
+
+    /// `protected_dirs()` is now the DERIVED VIEW of the default rule set,
+    /// and this pins the derivation TWICE over: against the LITERAL four-dir
+    /// list (the ground truth), and against `default_rules()`. The second
+    /// comparison alone would be self-referential — a derivation that drifted
+    /// to an empty or wrong rule set would still agree with itself — so the
+    /// literal half is what keeps the derivation honest.
+    #[test]
+    fn protected_dirs_are_the_derived_default_deny_rule_paths() {
+        let (lock, restore, home) = pin_home("protected-derived");
+        let dirs = protected_dirs();
+
+        // THE LITERAL PIN (ground truth): the four dirs, skills first, in
+        // exactly today's order — spelled here independently of the code.
+        let literal: Vec<PathBuf> = [
+            ".agents/skills",
+            ".pi/agent/skills",
+            ".agents/agents",
+            ".pi/agent/agents",
+        ]
+        .iter()
+        .map(|d| home.path().join(d).canonicalize().unwrap())
+        .collect();
+        assert_eq!(
+            dirs, literal,
+            "the derived list must equal the literal four dirs"
+        );
+
+        // THE RULE-SHAPE PIN: `default_rules()` is exactly these four paths,
+        // each a `Write`/`Deny` — the boundary floor, not a posture and never
+        // a prompt.
+        let rules = crate::agent::policy::default_rules();
+        assert_eq!(rules.len(), 4, "the floor is exactly four rules: {rules:?}");
+        assert!(
+            rules.iter().all(
+                |r| r.direction == crate::agent::policy::RuleDirection::Write
+                    && r.decision == crate::agent::policy::RuleDecision::Deny
+            ),
+            "every default rule is Write/Deny: {rules:?}"
+        );
+        let trailing: Vec<String> = rules
+            .iter()
+            .map(|r| {
+                std::path::Path::new(r.path.as_str())
+                    .strip_prefix(home.path())
+                    .unwrap_or(std::path::Path::new(r.path.as_str()))
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(
+            trailing,
+            vec![
+                ".agents/skills",
+                ".pi/agent/skills",
+                ".agents/agents",
+                ".pi/agent/agents"
+            ],
+            "the default rules name the four dirs, skills first"
+        );
+
+        // THE DERIVATION PIN: `protected_dirs()` is exactly the `Deny` rules
+        // of `default_rules()`, leniently canonicalized.
+        let derived: Vec<PathBuf> = crate::agent::policy::default_rules()
+            .iter()
+            .filter(|r| r.decision == crate::agent::policy::RuleDecision::Deny)
+            .map(|r| {
+                crate::agent::fs_backend::canonicalize_lenient(std::path::Path::new(
+                    r.path.as_str(),
+                ))
+            })
+            .collect();
+        assert_eq!(
+            dirs, derived,
+            "protected_dirs() IS the derived deny-rule list"
+        );
+        drop((restore, lock));
+    }
+
+    /// (the honest limit, recorded NOT hidden — and the PIN that replaces the
+    /// one that could not exist) When the home dir cannot be resolved there
+    /// are no default rules at all: `user_roots()` yields nothing, so
+    /// [`crate::agent::policy::default_rules`] is EMPTY.
+    ///
+    /// THE LIMIT ITSELF CANNOT BE PINNED FROM A TEST PROCESS, and that is
+    /// measured, not assumed: `skills::home_dir()`'s third link is
+    /// `std::env::home_dir()`, and on unix that falls back to the PASSWD
+    /// DATABASE — with both `HOME` and `USERPROFILE` removed this process
+    /// still resolves `Some("/home/<user>")`, so `user_roots()` is NON-empty.
+    /// Verified in standalone binaries running the identical three-link chain,
+    /// once with the two vars removed and once under a fully scrubbed
+    /// environment (`env -i`): both resolve the passwd home. On Windows the
+    /// third link is a known-folder query that does not read the environment
+    /// at all. So no environment manipulation available to an in-process test
+    /// can make it yield `None`; the earlier `#[ignore]`d attempt failed red
+    /// under `--ignored` and has been deleted rather than left as a landmine.
+    ///
+    /// WHAT THE LIMIT COSTS is what this test DOES pin, and it needs no home
+    /// trickery: an EMPTY rule set matches nothing, so `rule_for` answers
+    /// `None` and the caller falls through to the posture select (an ask under
+    /// the guard) — whereas an empty `protected_dirs()` means "deny nothing".
+    /// Recorded so anyone tempted to "fix" the empty case into a silent
+    /// fallback default has to do it as a visible decision. The practical
+    /// exposure is nil either way: a no-home process cannot write the four
+    /// user dirs — it has no home to write into.
+    ///
+    /// (`protected_dirs()`'s own no-home case is covered by the unchanged
+    /// residue test above; this nails the RULES side of the same edge.)
+    #[test]
+    fn an_empty_rule_set_matches_nothing_so_the_posture_select_decides() {
+        use crate::agent::policy::{rule_for, RuleDirection};
+        let home = Tmp::new("empty-rule-set");
+        let target = home.path().join(".pi/agent/agents/SKILL.md");
+
+        // THE LIMIT: no rules at all ⇒ no verdict, so the caller reaches the
+        // posture select (`decision_for`).
+        assert_eq!(
+            rule_for(&[], RuleDirection::Write, &target, Some(home.path())),
+            None,
+            "an empty rule set answers `None` — the absence of a verdict, \
+             which is what an unresolvable home dir hands the caller"
+        );
+
+        // NON-VACUITY: the SAME path with ONE rule naming its directory does
+        // get a verdict, so the `None` above came from the empty list and not
+        // from a fixture nothing can ever match.
+        let deny = crate::agent::policy::AccessRule {
+            path: home
+                .path()
+                .join(".pi/agent/agents")
+                .to_string_lossy()
+                .into_owned(),
+            direction: RuleDirection::Write,
+            decision: crate::agent::policy::RuleDecision::Deny,
+        };
+        let rules = [deny.clone()];
+        assert_eq!(
+            rule_for(&rules, RuleDirection::Write, &target, Some(home.path())),
+            Some(&deny),
+            "a non-empty rule set DOES answer this path (the contrast)"
+        );
     }
 
     #[test]
