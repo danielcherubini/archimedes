@@ -117,7 +117,7 @@ lands, or its report will describe a tree that no longer exists.
 | T06 | Settings → Permissions section: rules list, posture rows + trust toggle moved out of General, bash/trust copy | frontend-settings | `docs/roadmap/permissions-section-task06-settings-permissions-section.md` | 2 | `src/components/settings/SettingsPage.tsx`, `src/components/settings/SettingsPage.test.tsx`, `src/components/settings/GeneralSection.tsx`, `src/components/settings/PermissionsSection.tsx` (new), `src/components/settings/PermissionsSection.test.tsx` (new) | `done` `3cd6cfc` |
 | T03 | Enforce precedence rows 1–4 at the gate and in the executor; default rule set frozen per session | gate-executor | `docs/roadmap/permissions-section-task03-gate-executor-precedence.md` | 3 | `src-tauri/src/agent/harness/loop.rs`, `src-tauri/src/agent/tools/exec/access.rs`, `src-tauri/src/agent/tools/exec/tests/policy.rs`, `src-tauri/src/agent/tools/types.rs`, `src-tauri/src/agent/tools/sandbox.rs`, `src-tauri/src/agent/harness/loop/tests/param_rejection.rs`, `src-tauri/src/agent/harness/loop/tests/policy_gate.rs` — **plus ratified B1/B2 (2026-10-28): `src-tauri/src/agent/harness/loop/tools.rs`, `src-tauri/src/agent/tools/exec/tests/support.rs`, `src-tauri/src/agent/tools/exec/tests/bash.rs`, `src-tauri/src/agent/tools/exec/tests/skills.rs`, `src-tauri/src/agent/web/tools.rs`, `src-tauri/src/agent/web/extract/tests.rs` (ToolCtx construction churn only), and `src-tauri/src/agent/permission.rs` (ONE `options` parameter on `native_permission_gate` only — prompt content stays T02's) | `vetted` |
 | T04 | Supervisor relay persists `allow-directory` as one rule; settings round-trip | supervisor-relay | `docs/roadmap/permissions-section-task04-relay-rule-persistence.md` | 4 | `src-tauri/src/agent/session/mod.rs`, `src-tauri/src/config.rs`, `src-tauri/src/storage/db.rs` — **plus ratified (2026-10-28): `src-tauri/Cargo.toml` (move `tempfile` from `[dev-dependencies]` to `[dependencies]`, one line)** | `vetted` |
-| T07 | ADR 0083 + ADR 0030 amendment, `CONTEXT.md` terms, `docs/features/` permissions page | docs | `docs/roadmap/permissions-section-task07-adrs-docs.md` | 5 | `docs/decisions/0083-*.md` (new), `docs/decisions/0030-*.md` (append amendment only), `CONTEXT.md`, `docs/features/permissions-model.md` (new) | `todo` |
+| T07 | ADR 0083 + ADR 0030 amendment, `CONTEXT.md` terms, `docs/features/` permissions page | docs | `docs/roadmap/permissions-section-task07-adrs-docs.md` | 5 | `docs/decisions/0083-*.md` (new), `docs/decisions/0030-*.md` (append amendment only), `CONTEXT.md`, `docs/features/permissions-model.md` (new) | `planned` |
 
 **Status is exactly one of these, and each is checkable from the tree without asking anyone:**
 
@@ -385,3 +385,22 @@ One line per task: hash, what shipped, gate numbers at that moment.
   literals). Reconciled against the plan's `## Files` list, which had claimed ratification the dispatch never
   granted. T04's design is unaffected and its plan stands; it is downstream of T03's concat order, which the
   T04 plan already flags in a cross-task box.
+
+- **VET round 1, T07** (`task07-adrs-docs.md`): REVISE, and the finding is the most consequential of the run —
+  the plan's three DURABLE deliverables (ADR 0083, the ADR 0030 amendment, the `CONTEXT.md` corrections) were
+  drafted from reading (B), the model the ruling at `cd7553e` rejected. The plan's own scaffolding is sound
+  (0016's amendment idiom reproduced correctly, append-only enforced with a diff proof, 0083 verified free, all
+  four run deviations present and the settings.json limit kept apart from the agent-writable claim, the fourth
+  `CONTEXT.md` touch on **Trusted Space** justified as mandatory rather than optional). But an ADR is the
+  durable record: shipping one that documents a reversed decision is worse than shipping none, and the plan's
+  WAVE NOTE ("re-check at wave 5") cannot rescue drafts that are wrong at the premise. Two further MAJORs: the
+  amendment understates the relaxation (it must say a **Trusted Space proceeds silently at the shipped
+  defaults**, not merely "now an ask"), and Deliverable D would ship both readings side by side. One MINOR is a
+  false universal worth noting for any later docs task: `superseded-by:` is present in all 73 ADRs but EMPTY in
+  69 — four name a successor (0017, 0031, 0056, 0057).
+- **2026-10-28** — **T03 plan round 3 decided `default_rules()` returns EMPTY.** Accepted, and it is the
+  consequence the ruling implies: the spec's three pre-filled rules are written by the user via T06's
+  draft-prefill button, never by code, so nothing is left to emit as a default rule. The planner flagged this
+  for me rather than burying it, and recorded the rejected alternative. Consequence for T01's work: its
+  `protected_dirs_are_the_derived_default_deny_rule_paths` pin and the derivation seam change meaning — that
+  churn is now T03's, since T03 owns `policy.rs`/`boundary.rs`.
