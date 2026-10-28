@@ -40,6 +40,15 @@
 //!   frame with the SLOW child task; `__subagent_tools__` is the
 //!   frame with `launch.tools: Some(["subagent"])` — the
 //!   empties-out-after-the-guard-minus case).
+//! - a `prompt` whose text is `"__subagent_cost_0__"`: the CHILD-side
+//!   real-zero money turn (issue #107) — ONE `interactive-event`
+//!   `cost_update` `SinkFrame` carrying `costUsd: 0.0` (the shape
+//!   `emit_cost_update` writes, keyed to the CHILD's own session id),
+//!   then `agent_settled`. The e2e reads it as a child's task: the
+//!   Supervisor's `SubagentCapture` sums the frame to `Some(0.0)` — a
+//!   REAL zero, the other spelling of the `Option` hand-off — and the
+//!   test observes both the `subagent-closed` figure and the parent-keyed
+//!   roll-up frame.
 //! - a `prompt` whose text is `"__long_stream__"`: a LONG `SinkFrame`
 //!   `session-update` `agent_message_chunk` stream (the chunks land ~100 ms
 //!   apart for ~3.0 s of CONTINUOUS production) and ONLY then the canned
@@ -843,6 +852,38 @@ fn main() {
                     // fixture's simplified model — the `send_prompt`
                     // helper waits for the settle; the `SubagentResult`
                     // arrives later and is acked on receipt).
+                    emit(
+                        &mut stdout,
+                        &Outbound::Event {
+                            event: RpcEvent::agent_settled,
+                        },
+                    );
+                }
+                // (issue #107) The CHILD-side real-zero money turn. The e2e
+                // dispatches this as the CHILD's task, so `sid` is the CHILD's
+                // session id and the frame rides the child's own stream — the
+                // only stream the Supervisor's `SubagentCapture` reads
+                // (`pump.rs`'s `SinkFrame`-when-`is_subagent` arm →
+                // `observe_sink_frame`). The envelope is `emit_cost_update`'s
+                // shape verbatim (`{ sessionId, seq, event: "cost_update",
+                // payload: { costUsd, source } }`) and the figure is a REAL
+                // zero: the capture's `>= 0.0` filter keeps it, so the hand-off
+                // is `Some(0.0)` — the spelling that is a FIGURE, as against the
+                // never-priced child's `null`. BEFORE `agent_settled` (the
+                // invariant: nothing the capture reads arrives after it).
+                "__subagent_cost_0__" => {
+                    emit(
+                        &mut stdout,
+                        &Outbound::SinkFrame {
+                            event: "interactive-event".to_string(),
+                            payload: serde_json::json!({
+                                "sessionId": sid,
+                                "seq": 0,
+                                "event": "cost_update",
+                                "payload": { "costUsd": 0.0, "source": "main" },
+                            }),
+                        },
+                    );
                     emit(
                         &mut stdout,
                         &Outbound::Event {

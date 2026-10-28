@@ -223,19 +223,18 @@ describe("normalizeToolOutput (the subagent progress envelope)", () => {
     // Not a raw JSON dump (no `{"mode"` envelope marker).
     expect(out).not.toContain('{"mode"');
   });
-  // (issue #78) The frontend half of the unknown-param warning's delivery
-  // contract: `normalizeToolOutput` walks the WHOLE `content[]` array and joins
-  // the text items, so the appended warning block renders on a new line AFTER
-  // the child's output. Pinned so a later "simplification" to `content[0]`
-  // cannot silently swallow the warning the model was also given.
-  it("joins every content text item (the unknown-param warning rides alongside the output)", () => {
+  // `normalizeToolOutput` walks the WHOLE `content[]` array and joins every
+  // text item with "\n", so no item renders unless the tool result carries it.
+  // Pinned so a later "simplification" to `content[0]` cannot silently drop the
+  // other text items.
+  it("joins every content text item in order with a newline separator", () => {
     const out = normalizeToolOutput(
       {
         content: [
           { type: "text", text: "the child's answer" },
           {
             type: "text",
-            text: "⚠ unknown param(s) for `subagent`: `agent` (did you mean `agentName`?) — ignored.",
+            text: "subagent returned: 3 tool calls",
           },
         ],
         details: runningDetails,
@@ -244,7 +243,7 @@ describe("normalizeToolOutput (the subagent progress envelope)", () => {
       "subagent",
     );
     expect(out).toBe(
-      "the child's answer\n⚠ unknown param(s) for `subagent`: `agent` (did you mean `agentName`?) — ignored.",
+      "the child's answer\nsubagent returned: 3 tool calls",
     );
   });
   it("renders the LAST line of the subagent's streamed output when no current tool", () => {

@@ -7,7 +7,6 @@ import { useSessions, type ToolCallUiStatus } from "../store/sessions";
 import {
   cleanModelName,
   extractThinkingFromModel,
-  formatCost,
   formatDuration,
   formatThinkingIndicator,
   formatTokens,
@@ -21,6 +20,7 @@ import {
 } from "../lib/subagentActivity";
 import { StatusIcon } from "./SubagentStatusIcon";
 import { MutedCaption } from "./MutedCaption";
+import { moneyOf } from "./SessionCostLine";
 import { cn } from "./lib/utils";
 import { Button } from "./ui/button";
 import { ToolCallCardHeader } from "./ToolCallCardHeader";
@@ -263,7 +263,11 @@ export default function SubagentDelegatingCard({
               inputTokens?: number;
               outputTokens?: number;
               tokens?: number;
-              cost?: number;
+              // `null` is REACHABLE and MEANINGFUL here (issue #107): the
+              // interactive store's `CostUpdatePayload.cost` is
+              // `number | null | undefined`, and `null` means "frames arrived,
+              // none carried a figure" — see the chain below.
+              cost?: number | null;
               percent?: number;
               contextPercent?: number;
             }
@@ -307,11 +311,35 @@ export default function SubagentDelegatingCard({
       interactiveCost?.contextPercent ??
       calculatedPct;
 
+    // THE MONEY (issue #107). The four sources are NOT uniformly nullable:
+    // `progress.cost` / `result.usage.cost` are `number | undefined` (the tool
+    // envelope's detail stream), `interactiveCost.cost` is `number | null |
+    // undefined` (the interactive store, where `null` is a REACHABLE, MEANINGFUL
+    // value), and `storeEntry.metrics.cost` is `number | null` (the Rust
+    // `Option<f64>` hand-off). A bare `??` chain treats `null` and `undefined`
+    // alike, so it would fall THROUGH a live entry that deliberately reports
+    // "nothing" and print the CLOSED snapshot's figure instead — resurrecting an
+    // old number over a child that currently reports no figure, which is the
+    // exact collapse this task removes Rust-side.
+    //
+    // THE RULE (the tree's own — `lib/sessionCost.ts`'s `costUsdOf`, and
+    // `SessionCostLine.test.tsx`'s "#105's precedence" pin): a LIVE entry that
+    // EXISTS holding `null` is a REPORT, not a gap — it STOPS the chain and the
+    // row renders no money at all. Absence (`undefined` — no live entry at all)
+    // falls through exactly as it always has. The arm ORDER is untouched, so the
+    // evidence precedence (progress detail > live entry > result detail > closed
+    // snapshot) is byte-identical to before for every case but the live-`null`
+    // one, which renders nothing either way.
+    const liveCost =
+      interactiveCost !== undefined
+        ? (interactiveCost.cost ?? null) // a live `null` is a REPORT, not a gap
+        : undefined;
     const cost =
       progress?.cost ??
-      interactiveCost?.cost ??
-      result?.usage?.cost ??
-      storeEntry?.metrics?.cost;
+      liveCost ??
+      (liveCost === undefined
+        ? (result?.usage?.cost ?? storeEntry?.metrics?.cost)
+        : undefined);
 
     const sessionToolCount = sessionMessages
       ? sessionMessages.filter((m) => m.kind === "tool-call").length
@@ -437,8 +465,15 @@ export default function SubagentDelegatingCard({
                 className: "",
               });
             }
-            if (row.cost !== undefined && row.cost > 0) {
-              const formattedCost = formatCost(row.cost);
+            // The money segment (issue #107). The gate refuses `undefined` AND
+            // `null` alike — a `null` never reaches `moneyOf` (belt-and-braces
+            // behind the chain's live-`null` stop above) — and `moneyOf` (shared
+            // with `SessionCostLine`, so the rule has ONE owner) renders `$0.00`
+            // for a REAL zero and nothing else for `0`. The old
+            // `row.cost !== undefined && row.cost > 0` gate skipped `0`, which
+            // is what made a free child and an unpriced child render alike.
+            if (row.cost !== undefined && row.cost !== null) {
+              const formattedCost = moneyOf(row.cost);
               if (formattedCost) {
                 metadataParts.push({
                   text: formattedCost,

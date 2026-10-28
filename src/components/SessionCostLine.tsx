@@ -61,8 +61,15 @@ const SUB_CLIFF_CEILING = 0.00005;
  * The invariant this exists to hold: **a non-zero total NEVER renders as
  * `$0.0000`, `$0.00`, or nothing.** Pinned by the cliff cases in
  * `SessionCostLine.test.tsx`, at T08's real measured magnitudes.
+ *
+ * EXPORTED (issue #107) because a SECOND surface renders the same rule:
+ * `SubagentDelegatingCard`'s metadata line reads a child's now-nullable
+ * `SubagentMetrics.cost` and must print `$0.00` for a real zero and NOTHING for
+ * `null` — the identical rule, so the two surfaces (this session line and the
+ * subagent card) cannot drift. The rule stays owned HERE; the card imports it
+ * rather than copying it, and the exact pins below are the card's guarantees too.
  */
-function moneyOf(total: number | null): string | null {
+export function moneyOf(total: number | null): string | null {
   if (total === null || !Number.isFinite(total) || total < 0) return null;
   if (total === 0) return "$0.00";
   if (total >= 0.01) return "$" + total.toFixed(2);

@@ -187,7 +187,7 @@ pub struct Settings {
     /// so no migration runs. NOTE: that default is WIDER than the pre-feature
     /// hardcoded behavior — out of the box a session reads and writes anywhere
     /// and runs `bash` with no prompt, including in an untrusted Space (this
-    /// makes ADR 0010's prompt opt-in). Intentional; see the plan's Deviation 2.
+    /// makes ADR 0010's prompt opt-in). Intentional; see ADR 0030 Deviation 2.
     #[serde(default)]
     pub file_policy: FilePolicy,
     /// The web tools' configuration (ADR-less; see `docs/roadmap/web-search-and-fetch.md`).
@@ -960,7 +960,7 @@ mod tests {
     fn file_policy_defaults_to_allow_in_every_direction() {
         // (ADR 0030) All three policies default to `Allow` (pi's posture — the
         // UI's "Don't ask me"). This is WIDER than the pre-feature hardcoded
-        // behavior (the product decision, plan Deviation 2), so what is pinned
+        // behavior (the product decision — ADR 0030 Deviation 2), so what is pinned
         // here is the widening itself — never parity with the old behavior.
         let all_allow = FilePolicy {
             reads: AccessPolicy::Allow,

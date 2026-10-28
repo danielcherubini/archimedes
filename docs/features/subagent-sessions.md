@@ -1,7 +1,7 @@
 ---
 status: live
-last-verified: 2026-10-16
-verified-by: feature/subagent-liveness-bound — cargo test 1067 + clippy 0 warnings + fmt; pnpm test 1979 + tsc; ADR 0055
+last-verified: 2026-10-27
+verified-by: feature/harness-cost-close-out — the six-command gate at wave end (measured at implement time)
 ---
 
 # Subagent sessions
@@ -11,8 +11,9 @@ verified-by: feature/subagent-liveness-bound — cargo test 1067 + clippy 0 warn
 > signal, the gate-close and failure-`reason` wiring) and the client half; it
 > does NOT redeem the **pre-ADR 0025** driver prose below. The intro paragraph,
 > the numbered list in "The driver task", the CHILD-RESULT tail of the "Metrics
-> are real" paragraph (its cost half was corrected for issue #87 and describes
-> the SHIPPED mechanism) and the "Trust inheritance" section still describe the
+> are real" paragraph (whose cost half has since been corrected twice over —
+> first for issue #87, then for #105/#106/#107, so the #87 text alone is NOT the
+> shipped final state) and the "Trust inheritance" section still describe the
 > IN-PROCESS driver — a
 > throwaway
 > `:memory:` `Db`, the `TempFileGuard`, `NativeDeps`, `ExternalClose`,
@@ -144,19 +145,24 @@ call whose usage chunk carried a cost (the `ProviderEvent::Usage` arm of
 PROVIDER's, read from the response BODY's `usage.cost` (then its two known
 variants, `usage.cost_details.upstream_inference_cost` and
 `usage.estimated_cost`) — never derived from tokens, never from a header (the
-roadmap's D4, `docs/roadmap/harness-trust-and-cost.md`). A call that reported no
+roadmap's D4 — ADR 0082's decision,
+`docs/decisions/0082-the-sessions-money-is-the-providers-per-call-figure-read-from-the-response-body.md`:
+body-not-header, the first-present field order, the never-derived-from-tokens
+rejection, and unknown-renders-as-nothing). A call that reported no
 cost emits NOTHING at all: emitting a zero is what manufactures the phantom
 `$0.00`, so absence is the only honest spelling. The Supervisor's
 `SubagentCapture` SUMS those frames into `SubagentMetrics.cost` — a sum,
 deliberately NOT the `max` the token fields next door use, because per-message
 token usage is cumulative while money accumulates across calls — and
 `finish_subagent` then emits ONE parent-keyed roll-up frame (`source:
-"subagent"`) behind a `> 0.0` guard: a child that reported nothing contributes
-nothing, a priced child contributes exactly its total. `SubagentMetrics.cost` is an `f64`, so the capture's `Option` collapses
-at the hand-off and `0.0` means either "no figure
-arrived" or "a call reported a real zero" (promotion to optional is a named
-follow-up — it needs the TypeScript `metrics` declaration and the card's read in
-the same change). **The figure survives a reload** (#105): the Supervisor — the
+"subagent"`) when the child's `SubagentMetrics.cost` is `Some` — the gate is the
+`Option` ITSELF, the same frame-existence rule the main path uses, never a value
+filter on the number: a child that reported nothing contributes nothing, a
+priced child contributes exactly its total, a real zero included.
+`SubagentMetrics.cost` is an `Option<f64>` — `None` means "no call reported a
+cost", `Some(0.0)` means "a call reported a real zero", which IS a figure — so
+the hand-off carries the distinction through untouched (issue #107, commit
+`9202099`; ADR 0082's Amendment 3 closes that follow-up). **The figure survives a reload** (#105): the Supervisor — the
 sole DB writer, since the Worker holds no `Db` — accumulates every `cost_update`
 frame it already routes into `sessions.cost_usd`, a nullable `REAL` with no
 `DEFAULT` so `NULL` ("no call ever reported a cost") stays distinct from `0.0`
@@ -172,15 +178,25 @@ seeds the live accumulator from the row at resume — DIRECTLY, never through
 `applyCost`, which normalises AND sums and would add a stored total to itself.
 Two limits are deliberate: the write is **not idempotent** (frames carry no
 identity — `"seq": 0` — so a replayed frame doubles the figure; bounded by
-`emit_cost_update`'s single call site and pinned as a hazard, not prevented), and
+`emit_cost_update`'s production call sites — today the turn's `Usage` arm and
+the compaction summariser's call — neither a Resume-replay path, and pinned as
+a hazard, not prevented; **deliberately not stated as a count**, because the
+`CONTEXT.md` Cost channel entry's rule is that a count here goes stale the
+moment a third emitter lands), and
 **no token fields are persisted**, because the frame never carried them, so
 `applyCost`'s token accumulation is provably `0 + 0` and `SubagentDelegatingCard`'s
 context-% chain has never run — widening the frame would activate it, unclamped
 and fed by a SUMMED field whose values are cumulative per call. Nor is it a
-session's TOTAL spend: the compaction summarizer's own call sits OUTSIDE the
-loop's `Usage` arm — `compact.rs::summarize` drains its stream on `TextDelta` /
-`Done` / `Error` and drops the provider's `Usage` event — so no figure is ever
-observed for it and no frame is emitted. (Token fields are real when the session
+session's TOTAL spend — and the caution no longer rests on the summariser being
+unseen: the compaction summarizer's own call is now COSTED through the same seam
+(issue #106) — `compact.rs::summarize` reads the provider's `Usage` event and
+returns its cost, and the loop's `run_compaction` emits it through
+`emit_cost_update`, keyed to the SAME session — so the figure no longer excludes
+the summariser's calls, and an absence is still only ever "the provider said
+nothing", never a gap. The totality caution stands for the reasons that remain:
+the figure is only ever **what the provider says it spent**, never a session's
+TOTAL spend, because the operator-side pricing flag and the gateway's web-search
+drop both still hold (see the paragraph below). (Token fields are real when the session
 pushed usage, 0 otherwise; `durationMs` is the desktop's wall clock.) The wire
 metrics shape is
 unchanged: `{ output, inputTokens, outputTokens, cost, durationMs }` (no cache
@@ -192,6 +208,19 @@ A failed child TURN (an
 exhausted-retry model call) settles "successfully" via a bare
 `agent_settled` and reports `Completed { output: "" }` — a documented
 follow-up, not a bug to fix here.
+
+**The figure is a deployment fact, not a promise.** The provider's per-call
+figure exists only when the gateway is configured to price streams: LiteLLM's
+`include_cost_in_streaming_usage` is an **operator-side flag the client cannot
+enable**, and it defaults **off** — so most deployments will show **no figure at
+all**, and that is **not a bug**. "Absence is the only honest spelling" covers a
+deployment that priced nothing exactly as it covers a call that reported no
+cost: no money on the wire, no frame, no element. Absence is not the only
+incompleteness, though: `usage.cost` **under-reports on Claude
+web-search streams** (LiteLLM rebuilds the usage dict from five fields and drops
+the search fees), so a figure that IS present can still be partial. Both are
+why the number is only ever **what the provider says it spent** — never "total
+spend" (ADR 0082, limit 5).
 
 ## Liveness: Active vs Dead
 

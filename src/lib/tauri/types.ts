@@ -382,8 +382,17 @@ export type InteractiveResponseDto =
  * `the_subagent_capture_captures_the_final_text_from_the_sink_frames` pins that
  * accumulation. `durationMs` is the drive task's wall clock.
  *
- * `cost` is the ONE constant: `drive_subagent` builds the struct with `cost:
- * 0.0` literally, because nothing prices a child's usage.
+ * `cost` is the child's summed per-call cost in USD, and it is NULLABLE
+ * (issue #107): `null` means "no call reported a cost" — a preflight failure, a
+ * child that never started, or a child whose every call came back unpriced —
+ * and `0` means a call reported a REAL zero, which IS a figure. The two are
+ * never collapsed, which is the same rule `SessionInfo.costUsd` /
+ * `SessionCostLine` keep: the renderer prints nothing for the first and `$0.00`
+ * for the second (D5, ADR 0082). The Rust field is `Option<f64>` with NO
+ * `skip_serializing_if` on this field, so a `None` arrives as `"cost": null`
+ * (PRESENT AND NULL — read the value, never the key's presence). The earlier
+ * text here claimed `cost` was "`0.0` literally, because nothing prices a
+ * child's usage"; that has been false since issue #87 made the mechanism real.
  *
  * On a FAILED child these fields are REAL TOO (ADR 0055): `drive_subagent`'s
  * non-settled arms read the same `SubagentCapture` the completed arm does, so a
@@ -395,7 +404,7 @@ export type InteractiveResponseDto =
 export interface SubagentMetrics {
   inputTokens: number;
   outputTokens: number;
-  cost: number;
+  cost: number | null;
   durationMs: number;
 }
 

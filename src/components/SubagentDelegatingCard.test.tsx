@@ -823,3 +823,115 @@ describe("SubagentDelegatingCard (the resolve-miss marker, issue #47)", () => {
     }
   });
 });
+
+/**
+ * Issue #107 — the card stops collapsing "no figure" with "a real zero".
+ *
+ * `SubagentMetrics.cost` became `number | null` (the Rust `Option<f64>`), so the
+ * two states reach this row as two different values, and the row must render two
+ * different things: a REAL zero is a figure and prints `$0.00`; a `null` is the
+ * wire spelling of "no call ever reported a cost" and prints NOTHING. The old
+ * gate (`row.cost !== undefined && row.cost > 0`) could not tell them apart — it
+ * skipped both, so a free child and an unpriced child looked identical, and the
+ * `??` chain would happily fall through a live `null` to a stored figure.
+ *
+ * The precedence rule is the tree's own (`lib/sessionCost.ts`'s `costUsdOf`,
+ * pinned by `SessionCostLine.test.tsx`'s "#105's precedence" case): a LIVE entry
+ * that exists holding `null` is a REPORT, not a gap — it STOPS the row.
+ */
+describe("SubagentDelegatingCard (the nullable cost, issue #107)", () => {
+  const METRICS = { inputTokens: 500, outputTokens: 400, cost: 0.02, durationMs: 5000 };
+
+  const metadataLine = () => {
+    const lines = Array.from(
+      document.querySelectorAll("div.font-mono.text-ui-xs"),
+    ).map((n) => n.textContent);
+    expect(lines).toHaveLength(1);
+    return lines[0];
+  };
+
+  const closedChild = (sessionId: string, metrics: Record<string, unknown>) => {
+    useSubagents.getState().addSession(
+      entry({
+        sessionId,
+        agentName: "coder",
+        task: "run tests",
+        status: "running",
+        model: "protector/gemini-3.8-flash",
+      }),
+    );
+    useSubagents.getState().markClosed(sessionId, "completed", undefined, metrics as never);
+    render(
+      <SubagentDelegatingCard
+        title="subagent"
+        status="completed"
+        rawInput={{ task: "run tests" }}
+        sessionId="main1"
+      />,
+    );
+  };
+
+  beforeEach(() => {
+    for (const id of Object.keys(useSubagents.getState().entries)) {
+      useSubagents.getState().dismiss(id);
+    }
+    useInteractive.setState({ cost: {} });
+  });
+
+  it("renders $0.00 for a real-zero child's metrics", () => {
+    // A child whose calls reported a genuine `$0.00` IS priced — the figure is
+    // zero, and D5 says a real zero renders as `$0.00`, never as nothing.
+    closedChild("cost-zero", { ...METRICS, cost: 0 });
+    expect(metadataLine()).toBe("protector/gemini-3.8-flash·900 tok (0.1%)·5s·$0.00");
+  });
+
+  it("renders no cost segment for a never-priced child", () => {
+    // The OTHER spelling: `null` = no call reported a cost. The row keeps its
+    // tokens and its duration and loses the money segment entirely — the
+    // sibling test above proves `0` and `null` are NOT interchangeable.
+    closedChild("cost-null", { ...METRICS, cost: null });
+    const line = metadataLine();
+    expect(line).not.toContain("$");
+    expect(line).toBe("protector/gemini-3.8-flash·900 tok (0.1%)·5s");
+  });
+
+  it("the live entry null does not fall through to the closed metrics", () => {
+    // REGRESSION GUARD (the `??` chain's one wrong answer). A LIVE interactive
+    // entry exists for the child and reports `null` — "frames arrived, none
+    // carried a figure". That is a REPORT about this child, right now, and it
+    // must STOP the row. A bare `??` chain treats `null` as a gap and falls
+    // through to the CLOSED snapshot's `0.02`, resurrecting a figure over a live
+    // session that reports nothing — the exact defect #105 pinned for the
+    // session line and #107 pins here.
+    const childId = "cost-live-null";
+    useSubagents.getState().addSession(
+      entry({
+        sessionId: childId,
+        agentName: "coder",
+        task: "run tests",
+        status: "running",
+        model: "protector/gemini-3.8-flash",
+      }),
+    );
+    useSubagents.getState().markClosed(childId, "completed", undefined, {
+      ...METRICS,
+      cost: 0.02,
+    });
+    // The store's own entry shape for "frames arrived, none carried a figure"
+    // (`applyCost` normalises a `null` frame into BOTH money keys).
+    useInteractive.getState().applyCost(childId, { costUsd: null });
+
+    render(
+      <SubagentDelegatingCard
+        title="subagent"
+        status="completed"
+        rawInput={{ task: "run tests" }}
+        sessionId="main1"
+      />,
+    );
+
+    const line = metadataLine();
+    expect(line).not.toContain("$0.02");
+    expect(line).not.toContain("$");
+  });
+});

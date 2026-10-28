@@ -528,9 +528,11 @@ impl Db {
     /// stored, so a re-delivered frame doubles the figure. That is a property
     /// of the wire, not an oversight — `cost_update` frames carry no identity
     /// (`emit_cost_update` sends `"seq": 0`), so there is nothing to dedupe
-    /// on. Bounded today by `emit_cost_update` having exactly one production
-    /// call site (`turn.rs:207`, the `Usage` arm), so a Resume cannot re-emit
-    /// history. Pinned by `a_replayed_cost_frame_doubles_the_stored_figure`,
+    /// on. Bounded today by `emit_cost_update`'s production call sites
+    /// (`turn.rs`'s `Usage` arm and `loop.rs`'s `run_compaction`), so a
+    /// Resume cannot re-emit history; stated as a bound, not a count — a
+    /// count goes stale the moment a third emitter lands (#110). Pinned by
+    /// `a_replayed_cost_frame_doubles_the_stored_figure`,
     /// which must be DELETED — not adjusted — if idempotency is ever added.
     ///
     /// `NULL + x = x`: the first frame turns "never reported" into a figure.

@@ -104,6 +104,28 @@ describe("SubagentTranscript (the read-only session transcript, expanded inline 
     expect(screen.getByText(/1s/)).toBeTruthy();
   });
 
+  it("renders nothing for a never-priced child's cost (issue #107)", () => {
+    // `SubagentMetrics.cost` is `number | null`: `null` = "no call reported a
+    // cost". The transcript coalesces it to `0`, which `formatCost` renders as
+    // `""`, and the `.filter(Boolean)` swallows the empty segment — so a
+    // never-priced child prints NO `$` and, critically, NO dangling ` · `.
+    // This is the "never-priced does not print `$0.00`" end of the rule, seen
+    // from the transcript side (the card owns the `$0.00`-for-a-real-zero end).
+    useSubagents.getState().addSession(entry);
+    useSubagents.getState().markClosed("sub1", "completed", undefined, {
+      inputTokens: 10,
+      outputTokens: 2,
+      cost: null,
+      durationMs: 1234,
+    });
+    render(<SubagentTranscript sessionId="sub1" />);
+    const line = screen.getByText(/1s/).textContent ?? "";
+    expect(line).toContain("1s");
+    expect(line).not.toContain("$");
+    // No dangling separator: the absent cost left the join with three segments.
+    expect(line).toBe("10 in · 2 out · 1s");
+  });
+
   it("renders a failed entry's error", () => {
     useSubagents.getState().addSession({ ...entry, status: "failed" });
     useSubagents.getState().markClosed("sub1", "failed", "boom");

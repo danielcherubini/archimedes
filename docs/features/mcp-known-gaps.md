@@ -63,7 +63,9 @@ deletes the roadmap family which recorded them.
 to ONE param dialect (drop the camelCase acceptance) and fix the truncation notice
 + `details` key to say `response_id`. The interim shipped with T9 (`a9b2347`) — the
 specs advertise exactly what the handlers read, so #78's unknown-param checker has
-zero known false positives — and the real fix wants a line in the ADR that owns the
+zero known false positives (an unknown top-level param is REJECTED, not warned, since
+[ADR 0079](../decisions/0079-an-unknown-top-level-tool-parameter-rejects-the-call.md)) —
+and the real fix wants a line in the ADR that owns the
 web tools, which is why it was not folded into T9. **And `ask`'s nested
 `recommended` is read by the handler but unadvertised** in `ask`'s nested
 `items.properties` (small; fold into #82's area): #78's checker is top-level-only,

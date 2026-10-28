@@ -180,11 +180,20 @@ export function SubagentTranscript({ sessionId }: { sessionId: string }) {
                   `cost.toFixed(2)`, so `1234` now reads `1s`, and a zero cost
                   prints nothing (`formatCost(0)` → `""`). Only the NON-EMPTY
                   segments are joined, so an absent cost never leaves a
-                  dangling ` · `. */}
+                  dangling ` · `.
+                  (issue #107) `metrics.cost` is now `number | null`: a
+                  never-priced child's `null` coalesces to `0`, which
+                  `formatCost` renders as `""` and the `.filter(Boolean)` below
+                  swallows — i.e. a `null` renders EXACTLY what a `0` rendered
+                  here before, nothing. This surface keeps the shared "cost
+                  prints nothing" rule under both spellings; the surface that
+                  tells `null` from a real zero is `SubagentDelegatingCard`
+                  (whose gate prints `$0.00` for a real zero and nothing for
+                  `null`). */}
               {[
                 `${formatTokens(entry.metrics.inputTokens)} in`,
                 `${formatTokens(entry.metrics.outputTokens)} out`,
-                formatCost(entry.metrics.cost),
+                formatCost(entry.metrics.cost ?? 0),
                 formatDuration(entry.metrics.durationMs),
               ]
                 .filter(Boolean)
