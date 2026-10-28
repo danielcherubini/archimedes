@@ -9,6 +9,7 @@ import {
   PaletteIcon,
   ServerIcon,
   Settings2Icon,
+  ShieldIcon,
 } from "lucide-react";
 
 import { getAppInfo } from "@/lib/version";
@@ -18,6 +19,7 @@ import {
   listSessions,
   listTools,
   shellSandboxAvailable,
+  type AccessRule,
   type AppSettings,
   type AgentOverrides,
   type McpServerEntry,
@@ -36,6 +38,7 @@ import AppearanceSection from "./AppearanceSection";
 import ProviderSection from "./ProviderSection";
 import UpdateSection from "./UpdateSection";
 import McpSection, { type McpDraft } from "./McpSection";
+import PermissionsSection, { type RuleDraft } from "./PermissionsSection";
 import WebSearchSection from "./WebSearchSection";
 import SessionsSection from "./SessionsSection";
 
@@ -52,6 +55,7 @@ type Section =
   | "appearance"
   | "providers"
   | "mcp"
+  | "permissions"
   | "sessions"
   | "web-search"
   | "updates";
@@ -146,6 +150,9 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
   // The MCP add/edit dialog draft (`null` = closed — a fresh draft per open
   // so a Cancel never leaks the draft into the next open).
   const [mcpDialog, setMcpDialog] = useState<McpDraft | null>(null);
+  // The rules add/edit dialog draft (`null` = closed — a fresh draft per open,
+  // the MCP dialog's pattern).
+  const [rulesDialog, setRulesDialog] = useState<RuleDraft | null>(null);
 
   useEffect(() => {
     // The page's own picker data — NOT the settings document, which
@@ -346,6 +353,43 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
     update({ mcpServers });
   };
 
+  /** Save one rule (the dialog's Save — immediate save, the provider pattern).
+   * Always composes over `settings.filePolicy` (spread), so an existing `rules`
+   * list is never dropped by an add/edit/remove. (Composes over the RENDERED
+   * `settings`, not a ref — the two-write interleave pin in
+   * `SettingsPage.test.tsx` makes that window observable.)
+   *
+   * `replaces` is the rule an EDIT started from (the store's own object,
+   * carried on the draft — there is no rule id, and the dialog's Save builds a
+   * FRESH `{path, direction, decision}`, so the fresh triple cannot locate the
+   * rule it replaces). An add omits it and appends. */
+  const saveRule = (rule: AccessRule, replaces?: AccessRule) => {
+    if (settings === null) return;
+    const rules = settings.filePolicy?.rules ?? [];
+    const index = replaces === undefined ? -1 : rules.indexOf(replaces);
+    update({
+      filePolicy: {
+        ...settings.filePolicy,
+        rules:
+          index === -1
+            ? [...rules, rule]
+            : rules.map((r, i) => (i === index ? rule : r)),
+      },
+    });
+    setRulesDialog(null);
+  };
+
+  const removeRule = (rule: AccessRule) => {
+    if (settings === null) return;
+    const rules = settings.filePolicy?.rules ?? [];
+    update({
+      filePolicy: {
+        ...settings.filePolicy,
+        rules: rules.filter((r) => r !== rule),
+      },
+    });
+  };
+
   const refreshProvider = (id: string): Promise<void> =>
     listModels(id)
       .then(setModels)
@@ -374,8 +418,6 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
       tools={tools}
       thinkingLevelUnion={thinkingLevelUnion}
       storedLevelOutsideUnion={storedLevelOutsideUnion}
-      shellSandboxAvailable={platform === "linux"}
-      shellSandboxSupported={sandboxSupported === true}
       onSave={update}
       onToggleTool={toggleTool}
     />
@@ -406,6 +448,19 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
       setDialog={setMcpDialog}
       onSave={saveMcpServer}
       onRemove={removeMcpServer}
+    />
+  );
+
+  const permissionsSection = (
+    <PermissionsSection
+      settings={settings}
+      dialog={rulesDialog}
+      setDialog={setRulesDialog}
+      shellSandboxAvailable={platform === "linux"}
+      shellSandboxSupported={sandboxSupported === true}
+      onSave={update}
+      onSaveRule={saveRule}
+      onRemoveRule={removeRule}
     />
   );
 
@@ -468,6 +523,12 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
                 onClick={() => setSection("mcp")}
               />
               <SettingsSidebarButton
+                icon={ShieldIcon}
+                label="Permissions"
+                active={section === "permissions"}
+                onClick={() => setSection("permissions")}
+              />
+              <SettingsSidebarButton
                 icon={FolderXIcon}
                 label="Detached sessions"
                 active={section === "sessions"}
@@ -499,11 +560,13 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
                 ? providersSection
                 : section === "mcp"
                   ? mcpSection
-                  : section === "sessions"
-                    ? sessionsSection
-                    : section === "web-search"
-                      ? webSearchSection
-                      : updatesSection}
+                  : section === "permissions"
+                    ? permissionsSection
+                    : section === "sessions"
+                      ? sessionsSection
+                      : section === "web-search"
+                        ? webSearchSection
+                        : updatesSection}
         </div>
       </section>
     </div>

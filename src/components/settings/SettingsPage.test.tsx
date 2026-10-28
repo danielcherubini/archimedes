@@ -15,13 +15,11 @@ import {
   listModels,
   listSessions,
   saveSettings,
-  shellSandboxAvailable,
   testMcpServer,
   type AppSettings,
 } from "@/lib/tauri";
 import { brailleLoaderVariants } from "@/lib/braille-loader";
 import { useSessions } from "@/store/sessions";
-import { getAppInfo } from "@/lib/version";
 import { humanizeVariant } from "./primitives";
 
 // The page's single source of truth (the `getSettings` fixture): a full
@@ -359,7 +357,7 @@ async function loaded(): Promise<void> {
 
 /** Navigate to a section (click its sidebar button) and wait for it. */
 async function go(
-  section: "Appearance" | "Providers" | "MCP" | "Web search",
+  section: "Appearance" | "Providers" | "MCP" | "Web search" | "Permissions",
 ): Promise<void> {
   fireEvent.click(screen.getByRole("button", { name: section }));
   if (section === "Appearance") await screen.findByText("Theme");
@@ -369,6 +367,14 @@ async function go(
     await screen.findByText(
       "Configure Search providers and proxy for web_search and fetch_content tools.",
     );
+  // BEFORE the MCP `else`: the fallthrough awaits the MCP section's "Add
+  // server" button, so a `"Permissions"` arm placed after it would never be
+  // reached and a navigation test could pass for the wrong reason (the
+  // Detached-sessions describe documents this exact trap).
+  else if (section === "Permissions")
+    await screen.findByRole("switch", {
+      name: "Trust new Spaces by default",
+    });
   // The "Add server" button is always in the MCP section (below the card).
   else await screen.findByRole("button", { name: "Add server" });
 }
@@ -938,144 +944,19 @@ describe("SettingsPage (the ZCode port — sections + immediate save)", () => {
     expect(saved.enabledTools).toEqual([]);
   });
 
-  // ---------------------------------------------------------------------
-  // The file-access policy (ADR 0030): three selects — Reads / Writes /
-  // Shell — above the Trust switch. All three DEFAULT to `allow`
-  // ("Don't ask me"), so the row copy is the safety story: it must state
-  // the free pass plainly (never phrase the default as a restriction).
-  // ---------------------------------------------------------------------
-
-  /** The `SettingsRow` hosting the named control (label + description +
-   * control share one row element — `SettingsRow` renders the control as
-   * the trigger's accessible name source). */
-  function rowOf(controlName: string): HTMLElement {
-    const trigger = screen.getByRole("combobox", { name: controlName });
-    const row = trigger.closest(".border-t");
-    expect(row).toBeTruthy();
-    return row as HTMLElement;
-  }
-
-  /** Open the named select and return its offered option labels. */
-  async function openSelect(controlName: string): Promise<HTMLElement> {
-    const trigger = await screen.findByRole("combobox", { name: controlName });
-    fireEvent.click(trigger);
-    await screen.findAllByRole("option");
-    return trigger;
-  }
-
-  /** Close the open Radix select (one at a time — an open select
-   * `aria-hidden`s the rest of the document, so the trigger must be the
-   * element reference captured BEFORE it opened). */
-  async function closeSelect(trigger: HTMLElement): Promise<void> {
-    fireEvent.keyDown(trigger, { key: "Escape" });
-    await new Promise((resolve) => setTimeout(resolve, 0)); // let Radix un-`aria-hide`
-  }
-
-  /** The labels of the currently open select's options. */
-  function optionLabels(): string[] {
-    return screen.getAllByRole("option").map((o) => o.textContent ?? "");
-  }
-
-  it("the_three_file_access_selects_default_to_don_t_ask_me", async () => {
-    render(<SettingsPage onBack={vi.fn()} />);
-    await loaded();
-    for (const name of ["Reads", "Writes", "Shell"]) {
-      const trigger = await screen.findByRole("combobox", { name });
-      // The trigger DISPLAYS the selected policy (a fresh install is
-      // all-`allow` — nothing may fall back to a placeholder).
-      expect(
-        trigger.querySelector("[data-slot=select-value]")?.textContent,
-      ).toBe("Don't ask me");
-    }
-    // The three rows sit above the Trust switch (the plan's layout).
-    const rows = document.querySelectorAll(".border-t");
-    const index = (label: string): number =>
-      [...rows].findIndex((r) =>
-        [...r.querySelectorAll("div")].some((d) => d.textContent === label),
-      );
-    expect(index("Reads")).toBeGreaterThanOrEqual(0);
-    expect(index("Reads")).toBeLessThan(index("Writes"));
-    expect(index("Writes")).toBeLessThan(index("Shell"));
-    expect(index("Shell")).toBeLessThan(index("Trust new Spaces by default"));
-  });
-
-  it("the_file_access_rows_state_the_honest_default (the copy carries the all-allow posture)", async () => {
-    render(<SettingsPage onBack={vi.fn()} />);
-    await loaded();
-    // Writes + Shell: the default is a FREE PASS — the copy must name
-    // "anywhere" and the absence of a prompt (a user who only ever sees
-    // the default must not mistake it for a restriction).
-    for (const name of ["Writes", "Shell"]) {
-      const text = rowOf(name).textContent ?? "";
-      expect(text).toContain("anywhere");
-      expect(text).toContain("with no prompt");
-    }
-    // Writes also names the ONE carve-out that survives every policy.
-    expect(rowOf("Writes").textContent ?? "").toContain("agent-definition");
-    // Reads: `Don't ask me` means no prompt AND no log.
-    expect(rowOf("Reads").textContent ?? "").toContain("no prompt and no log");
-    // The boundary-relative promise for `Ask me` / `Sandboxed` (the
-    // policy decides ONLY the beyond-boundary case).
-    expect(rowOf("Reads").textContent ?? "").toContain("outside the boundary");
-  });
-
-  it("the_writes_row_discloses_the_carve_out_is_a_guard_rail_not_a_boundary (the copy is the only disclosure surface)", async () => {
-    // Issue #92 Bug 1. The protected-dir REFUSAL is forbidden from naming the
-    // route that bypasses it (issue #33), so this row is the one place a human
-    // learns the carve-out is not absolute. It used to say the opposite — and
-    // NO test pinned it, which is how. This test pins the MEANING, not the
-    // punctuation: tolerant matchers, so rewording is free and an absolute is
-    // not.
-    render(<SettingsPage onBack={vi.fn()} />);
-    await loaded();
-    const text = rowOf("Writes").textContent ?? "";
-
-    // (a) It names what the carve-out IS, in ADR 0030's words.
-    expect(text).toMatch(/guard.?rail/i);
-    // (b) It says, in as many words, that it is NOT the thing a user will
-    //     assume it is. (`.*?` so "not a security boundary" and "not a hard
-    //     security boundary" both pass; a bare `not a boundary` would not.)
-    expect(text).toMatch(/not a .*boundary/i);
-    // (c) It names the two routes the carve-out does not govern — the whole
-    //     content of the disclosure. `sudo_exec` in lowercase is the tool's
-    //     own name as the Shell row already spells it.
-    expect(text).toMatch(/shell/i);
-    expect(text).toContain("sudo_exec");
-    // (d) The overclaim is dead: no absolute survives. This is the pin's
-    //     teeth, and it is TIGHTENED from the first draft of this plan. The
-    //     draft vetoed only /can ?not|never rewrite|always (refuse|protect)|
-    //     cannot be rewritten/, which PASSED the plan's own replacement
-    //     sentence ("… refuse to rewrite them under any policy") — a pin that
-    //     passes on the copy it exists to police is worse than no pin, so the
-    //     "under any policy" / "in every policy" family is now in here too.
-    //     THREE-WAY CHECK, and all three legs are mandatory: (d) must FAIL on
-    //     the OLD copy (it matches "never rewrite"), must FAIL on the
-    //     overclaiming DRAFT (it matches "under any policy"), and must PASS on
-    //     the FINAL copy below (it matches nothing). A change to (d) that
-    //     breaks any leg makes the matcher decorative — re-run all three.
-    expect(text).not.toMatch(
-      /can ?not|never rewrite|cannot be rewritten|always (refuse|protect)|(under|in|for) (any|every|all) (the )?polic|every (single )?polic|whatever (the )?polic|regardless of (any |the )?polic/i,
-    );
-    // (e) Descriptive, not instructional (#33's rule, moved to the UI): no
-    //     second-person permission, no invitation. These two are kept — they
-    //     are well-scoped to how a human addresses a human, and the copy
-    //     passes them. The third matcher the draft carried, the command/path
-    //     needle /\bcp\b|rm -rf|~\/\.(agents|pi)\b/, is DROPPED: see "Ruling
-    //     on matcher (e)" below the rules — it cannot catch the real hazard
-    //     (a residual absolute) and would reject a future disclosure that has
-    //     to name a real path. Rule 2's ban on command and path examples
-    //     still binds the copy; it is simply not policed by a regex here.
-    expect(text).not.toMatch(/\byou (can|could|should|may)\b/i);
-    expect(text).not.toMatch(/\b(just|simply|if needed|to work around)\b/i);
-
-    // CONTRAST so (a)-(c) cannot pass vacuously on some unrelated sentence:
-    // the Reads row keeps its own story and is NOT the disclosure surface.
-    expect(rowOf("Reads").textContent ?? "").not.toMatch(/guard.?rail/i);
-  });
-
   it("changing_the_reads_select_to_ask_me_saves_the_complete_document", async () => {
+    vi.mocked(getSettings).mockResolvedValueOnce({
+      ...baseSettings,
+      filePolicy: {
+        reads: "allow",
+        writes: "allow",
+        shell: "allow",
+        rules: [{ path: "~/.pi/agent", direction: "read", decision: "deny" }],
+      },
+    });
     render(<SettingsPage onBack={vi.fn()} />);
     await loaded();
+    await go("Permissions");
     fireEvent.click(await screen.findByRole("combobox", { name: "Reads" }));
     fireEvent.click(await screen.findByRole("option", { name: "Ask me" }));
     await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(1));
@@ -1088,6 +969,13 @@ describe("SettingsPage (the ZCode port — sections + immediate save)", () => {
     expect(saved.theme).toBe("dark");
     expect(saved.providers).toHaveLength(1);
     expect(saved.font).toEqual(baseSettings.font);
+    // The PINNED regression (the `savePolicy` spread must carry rules through —
+    // the silent-data-loss hazard of the three-key reconstruction; the complete-
+    // document assertions above would pass even with rules dropped, so this is
+    // the teeth).
+    expect(saved.filePolicy.rules).toEqual([
+      { path: "~/.pi/agent", direction: "read", decision: "deny" },
+    ]);
     // The select reloads from the saved document (the trigger shows the
     // choice — the optimistic state matches what was written).
     const trigger = screen.getByRole("combobox", { name: "Reads" });
@@ -1096,112 +984,48 @@ describe("SettingsPage (the ZCode port — sections + immediate save)", () => {
     );
   });
 
-  it("the_shell_sandboxed_option_is_hidden_off_linux", async () => {
-    vi.mocked(getAppInfo).mockResolvedValueOnce({
-      version: "0.1.0",
-      platform: "windows",
-    });
-    render(<SettingsPage onBack={vi.fn()} />);
-    await loaded();
-    // Reads still offers all three tiers…
-    const reads = await openSelect("Reads");
-    expect(optionLabels()).toEqual(["Sandboxed", "Ask me", "Don't ask me"]);
-    await closeSelect(reads);
-    // …the Shell row offers only two (there is no sandbox to choose —
-    // Landlock is Linux-only).
-    const shell = await openSelect("Shell");
-    expect(optionLabels()).toEqual(["Ask me", "Don't ask me"]);
-    expect(screen.queryByRole("option", { name: "Sandboxed" })).toBeNull();
-    await closeSelect(shell);
-    // Nothing was saved by merely looking.
-    expect(saveSettings).not.toHaveBeenCalled();
-  });
-
-  it("the_shell_sandboxed_option_is_greyed_out_when_the_kernel_has_no_landlock", async () => {
-    // Linux (so the tier IS offered — hiding it would hide a real choice)
-    // but the kernel cannot confine: the option stays VISIBLE and greyed,
-    // with the reason stated in one line. A silently-selectable tier whose
-    // commands all fail closed is the failure mode this guards.
-    vi.mocked(shellSandboxAvailable).mockResolvedValueOnce(false);
-    render(<SettingsPage onBack={vi.fn()} />);
-    await loaded();
-    // The row is captured BEFORE the select opens (an open Radix select
-    // `aria-hidden`s the rest of the document, so the trigger is
-    // unqueryable while it is open).
-    const shellRow = rowOf("Shell");
-    const shell = await openSelect("Shell");
-    const option = await screen.findByRole("option", { name: "Sandboxed" });
-    expect(option.getAttribute("data-disabled")).not.toBeNull();
-    expect(option.getAttribute("aria-disabled")).toBe("true");
-    // The reason is in the row (not only in the disabled option).
-    expect(shellRow.textContent ?? "").toContain("Landlock");
-    // Clicking the greyed option changes nothing.
-    fireEvent.click(option);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(saveSettings).not.toHaveBeenCalled();
-    await closeSelect(shell);
-  });
-
-  it("the_shell_sandboxed_option_is_selectable_when_the_kernel_can_confine", async () => {
-    // CONTRAST (so the grey-out above cannot pass vacuously): with the
-    // probe reporting Landlock ( the suite default), the tier is enabled.
-    render(<SettingsPage onBack={vi.fn()} />);
-    await loaded();
-    const shellRow = rowOf("Shell");
-    const shell = await openSelect("Shell");
-    const option = await screen.findByRole("option", { name: "Sandboxed" });
-    // The probe has to have SETTLED before this is meaningful (the page's
-    // pre-probe state is deliberately "not supported"), hence `waitFor`.
-    await waitFor(() =>
-      expect(option.getAttribute("data-disabled")).toBeNull(),
-    );
-    expect(option.getAttribute("aria-disabled")).not.toBe("true");
-    expect(shellRow.textContent ?? "").not.toContain("cannot run");
-    fireEvent.keyDown(shell, { key: "Escape" });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(saveSettings).not.toHaveBeenCalled();
-  });
-
-  it("a_stored_sandboxed_shell_on_non_linux_does_not_render_an_empty_select", async () => {
-    // Off Linux the `Sandboxed` item is HIDDEN, but a stored
-    // `shell: "sandboxed"` value survives the platform change — the trigger
-    // must never render blank for a value whose option is gone (a
-    // placeholder stands in; the value itself is preserved on save).
-    vi.mocked(getAppInfo).mockResolvedValueOnce({
-      version: "0.1.0",
-      platform: "windows",
-    });
+  it("a posture change and a rule save in the same flow save BOTH (the last saveSettings carries the new posture and the new rules list)", async () => {
+    // THE TWO-WRITE INTERLEAVE PIN — the pin that makes Decision 1's residual
+    // OBSERVABLE. `savePolicy`/`saveRule` compose from the LAST-RENDERED
+    // `settings` (the hook's `patch` semantics — the same rendered-document
+    // compose `useSettingsDocument.test.ts:193` pins), so two writes delivered
+    // in ONE render batch compose from the SAME document and the second save
+    // drops the first. The assertion is on the FINAL `saveSettings` argument —
+    // the document the wire actually persists. If either change were dropped
+    // by the interleave, this argument would show a stale posture or a missing
+    // rule. This task does NOT fix the window (that means changing `patch`'s
+    // pinned compose); it pins it so it is observable, not assumed-safe.
     vi.mocked(getSettings).mockResolvedValueOnce({
       ...baseSettings,
-      filePolicy: { reads: "allow", writes: "allow", shell: "sandboxed" },
+      filePolicy: {
+        reads: "allow",
+        writes: "allow",
+        shell: "allow",
+        rules: [{ path: "~/.pi/agent", direction: "read", decision: "deny" }],
+      },
     });
     render(<SettingsPage onBack={vi.fn()} />);
     await loaded();
-    const trigger = await screen.findByRole("combobox", { name: "Shell" });
-    const value = trigger
-      .querySelector("[data-slot=select-value]")
-      ?.textContent?.trim();
-    expect(value).toBe("Sandboxed (unavailable here)");
-    // NOT the freer-sounding label: a stored `sandboxed` fails every
-    // command closed, and "Don't ask me" would hide that.
-    expect(value).not.toBe("Don't ask me");
-  });
-
-  it("a_pre_feature_document_without_file_policy_renders_don_t_ask_me (never an empty select)", async () => {
-    // A `settings.json` written before ADR 0030 has no `filePolicy` key;
-    // the backend fills the default, but the UI must not render an empty
-    // select if the key is ever absent.
-    const preFeature = { ...baseSettings } as Partial<AppSettings>;
-    delete preFeature.filePolicy;
-    vi.mocked(getSettings).mockResolvedValueOnce(preFeature as AppSettings);
-    render(<SettingsPage onBack={vi.fn()} />);
-    await loaded();
-    for (const name of ["Reads", "Writes", "Shell"]) {
-      const trigger = await screen.findByRole("combobox", { name });
-      expect(
-        trigger.querySelector("[data-slot=select-value]")?.textContent,
-      ).toBe("Don't ask me");
-    }
+    await go("Permissions");
+    // Change the Reads posture AND save a rule in the same flow. The
+    // precedence-table entry a `deny` rule overrides is the Reads policy, so
+    // this is the pair that MUST survive together (T03's row-3 ask).
+    fireEvent.click(await screen.findByRole("combobox", { name: "Reads" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Ask me" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add rule" }));
+    fireEvent.change(await screen.findByLabelText("Path"), {
+      target: { value: "/tmp/build" },
+    }); // decision defaults to `deny`; direction defaults to `read`
+    fireEvent.click(await screen.findByRole("button", { name: "Save" }));
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(2));
+    // The LAST whole-document save carries BOTH: the last `saveSettings`
+    // argument is the final document the wire receives.
+    const saved = vi.mocked(saveSettings).mock.calls[1][0] as AppSettings;
+    expect(saved.filePolicy.reads).toBe("ask");
+    expect(saved.filePolicy.rules).toEqual([
+      { path: "~/.pi/agent", direction: "read", decision: "deny" },
+      { path: "/tmp/build", direction: "read", decision: "deny" },
+    ]);
   });
 
   it("the_default_agent_select_is_gone", async () => {
@@ -1630,6 +1454,7 @@ describe("SettingsPage (the Updates section — ADR 0053)", () => {
       "Appearance",
       "Providers",
       "MCP",
+      "Permissions",
       "Detached sessions",
       "Web search",
       "Updates",
@@ -1648,6 +1473,37 @@ describe("SettingsPage (the Updates section — ADR 0053)", () => {
     expect(screen.getByText("Version")).toBeTruthy();
     // The previous section's content is gone (one arm renders at a time).
     expect(screen.queryByText("Default model")).toBeNull();
+    // And the arm switches back out.
+    fireEvent.click(screen.getByRole("button", { name: "General" }));
+    expect(await screen.findByText("Default model")).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Check for updates" }),
+    ).toBeNull();
+  });
+
+  it("selecting Permissions renders the section, and General still renders after going back", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    fireEvent.click(screen.getByRole("button", { name: "Permissions" }));
+    // The render arm is live; the trust row is the first SettingsRow of the
+    // new card (the section's layout) and is unique to the Permissions section.
+    expect(
+      await screen.findByRole("switch", {
+        name: "Trust new Spaces by default",
+      }),
+    ).toBeTruthy();
+    // The previous section's content is gone (one arm renders at a time).
+    expect(screen.queryByText("Default model")).toBeNull();
+    // THE SECOND LEG (fixes the failure-mode conflation): while Permissions
+    // is selected, the Updates content must NOT render either. Without this,
+    // a nav button that points at the wrong arm — or a ternary that misplaces
+    // the `"permissions"` case — fails only the trust-switch query, which
+    // lumps "nav button missing" and "arm missing" into one indistinguishable
+    // red. The "Check for updates" button is unique to `updatesSection`
+    // (`UpdateSection.tsx`), so it is a reliable Updates-probe.
+    expect(
+      screen.queryByRole("button", { name: "Check for updates" }),
+    ).toBeNull();
     // And the arm switches back out.
     fireEvent.click(screen.getByRole("button", { name: "General" }));
     expect(await screen.findByText("Default model")).toBeTruthy();
