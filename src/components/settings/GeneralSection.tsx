@@ -144,10 +144,10 @@ export default function GeneralSection({
    * documented default (`"allow"`) when the document predates the field — the
    * select must render the honest default, never an empty value.
    */
-  const policy = (direction: keyof FilePolicy): AccessPolicy =>
+  const policy = (direction: "reads" | "writes" | "shell"): AccessPolicy =>
     settings.filePolicy?.[direction] ?? "allow";
   /** Save one direction without touching the other two. */
-  const savePolicy = (direction: keyof FilePolicy, value: AccessPolicy) => {
+  const savePolicy = (direction: "reads" | "writes" | "shell", value: AccessPolicy) => {
     const current: FilePolicy = {
       reads: policy("reads"),
       writes: policy("writes"),

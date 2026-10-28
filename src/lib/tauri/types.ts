@@ -146,10 +146,19 @@ export type StopReason =
 /**
  * The user's decision on a permission prompt. Mirrors the Rust
  * `PermissionOutcome` serde shape: the unit variant serializes to the bare
- * string `"cancelled"`, the struct variant to `{"selected": {"option_id": …}}`.
+ * string `"cancelled"`, the struct variant to
+ * `{"selected": {"option_id": …, "value": …}}`.
+ *
+ * `selected` is the struct-variant wire KEY; `option_id` and `value` are the
+ * fields inside it (the Rust enum carries `#[serde(rename_all = "snake_case")]`,
+ * so there is NO top-level `option_id`). `value` echoes the chosen option's
+ * `path` (the guard prompt's `allow-directory` option). It is **absent, not
+ * `null`**, when the option carries no `path` — the Rust field is
+ * `Option<String>` and serde-defaulted, and the UI omits the key entirely, so a
+ * boundary prompt's payload stays byte-identical to the pre-feature shape.
  */
 export type PermissionOutcome =
-  | { selected: { option_id: string } }
+  | { selected: { option_id: string; value?: string } }
   | "cancelled";
 
 
@@ -157,6 +166,11 @@ export interface PermissionOption {
   optionId: string;
   name: string;
   kind?: string;
+  /** The guard prompt's echoed value: the emitted option carries `path`, the UI
+   * sends it back as `value` on the selected outcome. Absent for boundary
+   * options (posture-`Ask` prompts), which is what keeps those payloads
+   * unchanged. */
+  path?: string;
 }
 
 
@@ -609,6 +623,21 @@ export type AccessPolicy =
   | "allow";
 
 
+/** A rule's direction (the Rust `AccessDirection` serde renames). Required —
+ * "`/` has read" is direction-specific, so a direction-less rule is an error. */
+export type AccessDirection = "read" | "write" | "readWrite";
+
+/** One `{path, direction, decision}` exception in `FilePolicy.rules` (mirror of
+ * the Rust `AccessRule`, T01). `decision` is exactly `"allow" | "deny"` — there
+ * is NO `ask` rule value: an ask is what happens when no rule matches and the
+ * guard applies. `path` may carry a leading `~` and may name a directory that
+ * does not exist yet (ADR 0081 leniency is load-bearing for rules). */
+export interface AccessRule {
+  path: string;
+  direction: AccessDirection;
+  decision: "allow" | "deny";
+}
+
 /**
  * (ADR 0030) The per-direction file-access policies (the Settings UI's
  * three selects). Every direction defaults to `"allow"`: a pre-feature
@@ -623,6 +652,11 @@ export interface FilePolicy {
   writes: AccessPolicy;
   /** `bash`. */
   shell: AccessPolicy;
+  /** (permissions-section) `{path, direction, decision}` exceptions, evaluated
+   * by longest canonical prefix. OPTIONAL on purpose: a pre-feature
+   * `settings.json` has no `rules` key and the backend defaults it to empty, so
+   * read it nullishly. Rules NEVER apply to `bash`. */
+  rules?: AccessRule[];
 }
 
 

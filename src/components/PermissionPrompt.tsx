@@ -61,7 +61,18 @@ export default function PermissionPrompt({
             variant={i === 0 ? "default" : "outline"}
             size="sm"
             disabled={busy}
-            onClick={() => respond({ selected: { option_id: option.optionId } })}
+            onClick={() =>
+              respond({
+                selected: {
+                  option_id: option.optionId,
+                  // The guard's `allow-directory` option carries `path`; echo it
+                  // back as `value`. An option WITHOUT one emits the OLD payload
+                  // shape (no `value` key at all) so boundary prompts stay
+                  // byte-identical on the wire.
+                  ...(option.path !== undefined ? { value: option.path } : {}),
+                },
+              })
+            }
             className="min-w-0 [overflow-wrap:anywhere]"
           >
             {option.name}

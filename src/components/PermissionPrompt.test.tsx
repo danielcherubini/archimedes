@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import PermissionPrompt from "./PermissionPrompt";
 import { usePermissions } from "../store/permissions";
 import { resetStores } from "../test/resetStores";
@@ -77,64 +77,80 @@ describe("PermissionPrompt", () => {
     usePermissions.getState().addPrompt("s1", "r1", request);
     render(<PermissionPrompt sessionId="s1" requestId="r1" />);
     fireEvent.click(screen.getByRole("button", { name: "Allow" }));
-    await waitFor(() =>
-      expect(mockedRespond).toHaveBeenCalledWith("s1", "r1", {
-        selected: { option_id: "opt-1" },
-      }),
-    );
+    await waitFor(() => expect(mockedRespond).toHaveBeenCalledTimes(1));
+    // THE backward-compatibility pin (permissions-section acceptance criterion
+    // 2): a STRICT structural compare on the raw third argument, NOT
+    // `toHaveBeenCalledWith` — asymmetric equality would stay green if the
+    // payload picked up a stray `value` key (even `value: undefined`), which is
+    // precisely the regression this test exists to catch. An option WITHOUT
+    // `path` must emit the OLD payload shape: no `value` key at all.
+    expect(mockedRespond.mock.calls[0]?.[2]).toStrictEqual({
+      selected: { option_id: "opt-1" },
+    });
   });
 
   it("sends the second option id when a different option is chosen", async () => {
     usePermissions.getState().addPrompt("s1", "r1", request);
     render(<PermissionPrompt sessionId="s1" requestId="r1" />);
     fireEvent.click(screen.getByRole("button", { name: "Deny" }));
-    await waitFor(() =>
-      expect(mockedRespond).toHaveBeenCalledWith("s1", "r1", {
-        selected: { option_id: "opt-2" },
-      }),
-    );
+    await waitFor(() => expect(mockedRespond).toHaveBeenCalledTimes(1));
+    // The second half of the backward-compatibility pin (see the test above):
+    // strict compare, no `value` key for a `path`-less option.
+    expect(mockedRespond.mock.calls[0]?.[2]).toStrictEqual({
+      selected: { option_id: "opt-2" },
+    });
   });
 
-  it("renders one button per option for the 3-option trusted-space payload (guard)", async () => {
-    // The Rust side (Task 2) appends a third `trust-space` option to the
-    // permission payload. The component is generic — one button per option,
-    // first = primary, the rest = outline — so the third option must appear
-    // with ZERO component changes. This guard pins that assumption.
+  it("renders one button per option for the 3-option guard payload and echoes the allow-directory path back as value (guard)", async () => {
+    // The guard prompt's option list is PER-PROMPT (permissions-section spec):
+    // `allow` / `allow-directory` / `reject`, and `trust-space` is DELIBERATELY
+    // ABSENT — the spec removes that shortcut from the guard's own prompt (the
+    // prompt that protects the agent's instructions must not carry a one-click
+    // permanent way to disable it). The component stays generic — one button per
+    // option, first = primary, the rest = outline, no hardcoded count — so this
+    // fixture proves the generic renderer absorbs the new ids AND the `value`
+    // echo with ZERO layout work.
     usePermissions.getState().addPrompt("s1", "r2", {
       toolCall: { toolCallId: "tc2", title: "run a tool" },
       options: [
         { optionId: "allow", name: "Allow", kind: "allow" },
-        { optionId: "reject", name: "Block", kind: "reject" },
         {
-          optionId: "trust-space",
-          name: "Don't ask again for this Space",
+          optionId: "allow-directory",
+          name: "Always allow this directory",
+          path: "~/.pi/agent",
           kind: "allow",
         },
+        { optionId: "reject", name: "Block", kind: "reject" },
       ],
     });
     const { container } = render(
       <PermissionPrompt sessionId="s1" requestId="r2" />,
     );
     // All three option buttons render with the payload's names, plus Cancel.
-    expect(screen.getByRole("button", { name: "Allow" })).toBeTruthy();
+    // Container-scoped for the collidable "Allow" (the shared boundary fixture
+    // above seeds an option with the same name; a page-wide query would be one
+    // render away from an ambiguity).
+    expect(within(container).getByRole("button", { name: "Allow" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Block" })).toBeTruthy();
     expect(
-      screen.getByRole("button", { name: "Don't ask again for this Space" }),
+      screen.getByRole("button", { name: "Always allow this directory" }),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
-    // First option is primary, the rest (incl. trust-space) are outline.
+    // First option is primary, the rest (incl. allow-directory) are outline.
     const buttons = container.querySelectorAll("button");
     expect(buttons).toHaveLength(4);
     expect(buttons[0].className).toContain("bg-primary");
     expect(buttons[1].className).toContain("border-border");
     expect(buttons[2].className).toContain("border-border");
-    // Clicking the third option answers with its option id.
+    // Clicking the option that carries `path` answers with its option id AND
+    // echoes the path back as `value` — the wire shape is
+    // `{ selected: { option_id, value } }`.
     fireEvent.click(
-      screen.getByRole("button", { name: "Don't ask again for this Space" }),
+      screen.getByRole("button", { name: "Always allow this directory" }),
     );
     await waitFor(() =>
       expect(mockedRespond).toHaveBeenCalledWith("s1", "r2", {
-        selected: { option_id: "trust-space" },
+        selected: { option_id: "allow-directory", value: "~/.pi/agent" },
       }),
     );
   });

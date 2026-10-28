@@ -179,6 +179,12 @@ const domainModules = (): string[] =>
  * -------------------------------------------------------------------------- */
 const TAURI_PUBLIC_API = [
   "AccessPolicy",
+  // (permissions-section T05) The two rule-model type names, added ON PURPOSE
+  // per the header above: `FilePolicy.rules` is `AccessRule[]` and a rule's
+  // `direction` is `AccessDirection`. Type-only — they vanish at runtime, so
+  // `TAURI_RUNTIME_API` (the pinned 49) does NOT gain them.
+  "AccessDirection",
+  "AccessRule",
   "AcpSessionUpdate",
   "AcpToolCallStatus",
   "AgentConfigDto",

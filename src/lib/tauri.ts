@@ -86,6 +86,8 @@ export type {
   McpServerEntry,
   FontSettings,
   AccessPolicy,
+  AccessDirection,
+  AccessRule,
   FilePolicy,
   WebSettings,
   AppSettings,
