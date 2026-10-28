@@ -22,6 +22,10 @@ fn test_ctx() -> ToolCtx {
             rules: Vec::new(),
         },
         protected: vec![],
+        // (T03) The two new `ToolCtx` fields (churn-only): no rules, no
+        // home — the hermetic value every direct fixture passes.
+        rules: Vec::new(),
+        home: None,
         web: crate::agent::web::config::WebConfig::default(),
         render_requester: None,
     }

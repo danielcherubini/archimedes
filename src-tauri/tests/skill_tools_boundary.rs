@@ -20,7 +20,9 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use archimedes_lib::agent::boundary;
-use archimedes_lib::agent::policy::{AccessPolicy, FilePolicy};
+use archimedes_lib::agent::policy::{
+    AccessPolicy, AccessRule, FilePolicy, RuleDecision, RuleDirection,
+};
 use archimedes_lib::agent::tools::{execute_tool, ContentBlock, ToolCtx, ToolResult};
 use archimedes_lib::skills::SkillScope;
 
@@ -108,6 +110,11 @@ fn ctx(cwd: &Path, roots: &[&Path]) -> ToolCtx {
         boundary: vec![cwd.to_path_buf()],
         file_policy: archimedes_lib::agent::policy::FilePolicy::default(),
         protected: Vec::new(),
+        // (T03) HERMETIC like `boundary`/`protected`: no rules, no home — an
+        // empty list is `rule_for(&[], …) == None` and `home: None` makes a
+        // `~` rule match nothing.
+        rules: Vec::new(),
+        home: None,
         skill_roots: Some(
             roots
                 .iter()
@@ -570,13 +577,28 @@ THE-SKILL-BODY",
         "a root kept the symlinked spelling: {roots:?}"
     );
 
-    // The deny-list is canonical too, and a write addressed through the
-    // SYMLINKED spelling is still refused (the resolution happens first).
+    // The guard-membership list is canonical too, and a write addressed
+    // through the SYMLINKED spelling is still caught by it (the resolution
+    // happens first).
+    //
+    // (T03) WHICH refusal this is: with `default_rules()` EMPTY a no-rule
+    // protected write is the GATE's row-3 ASK, not an executor refusal — so
+    // this fixture carries the USER `deny` rule (precedence row 1) that
+    // produces the executor's protected-wording refusal. The list membership
+    // assertion below is unchanged: it is the same four canonical paths, and
+    // it is what the deny's WORDING keys off.
     let protected = boundary::protected_dirs();
     assert!(
         protected.contains(&real.path().join(".agents/skills").canonicalize().unwrap()),
         "the skill dir must be protected: {protected:?}"
     );
+    let deny = AccessRule {
+        // The USER spelling (`~` expanded at match time against `home`) — the
+        // same shape a `settings.json` rule carries.
+        path: "~/.agents/skills".to_string(),
+        direction: RuleDirection::Write,
+        decision: RuleDecision::Deny,
+    };
     let c = ToolCtx {
         boundary: roots,
         protected,
@@ -586,6 +608,11 @@ THE-SKILL-BODY",
             shell: AccessPolicy::Allow,
             rules: Vec::new(),
         },
+        // `default_rules()` ++ the user deny (the concatenation contract).
+        rules: vec![deny],
+        // The home the `~` rule expands against: the SYMLINKED `$HOME`, which
+        // is exactly the spelling the model addresses the write through.
+        home: Some(home_link.clone()),
         skill_roots: None,
         cwd: cwd.path().to_path_buf(),
         cancel: CancellationToken::new(),

@@ -41,6 +41,11 @@ pub(crate) fn ctx(cwd: &Path) -> ToolCtx {
             rules: Vec::new(),
         },
         protected: Vec::new(),
+        // (T03) HERMETIC like `boundary`/`protected`: NO rules and NO home —
+        // an empty list is `rule_for(&[], …) == None` and `home: None` makes
+        // a `~` rule match nothing (both pinned by T03's own pins).
+        rules: Vec::new(),
+        home: None,
         web: Default::default(),
         render_requester: None,
     }

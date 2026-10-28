@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::agent::policy::{default_rules, AccessPolicy, RuleDecision};
+use crate::agent::policy::AccessPolicy;
 
 /// The root-entry meaning "no containment" on UNIX (one floor of the
 /// `Ask`/`Allow` widening): every canonical absolute path is under `/`.
@@ -139,37 +139,65 @@ pub fn write_roots(cwd: &Path) -> Vec<PathBuf> {
     canon(cwd).map(|c| vec![c]).unwrap_or_default()
 }
 
-/// The write DENY-LIST (ADR 0030, Deviation 3): the four user-level
-/// discovery dirs — `~/.agents/skills`, `~/.pi/agent/skills`,
-/// `~/.agents/agents`, `~/.pi/agent/agents`. A write whose resolved path
-/// is under one of these is refused in EVERY policy (a deny, never a
-/// prompt, never widened by Trust): a model that can rewrite
-/// `~/.agents/skills/*/SKILL.md` rewrites its own instructions for every
-/// future session.
+/// Append the LENIENTLY-canonicalized paths of a `user_roots` result as the
+/// write GUARD-MEMBERSHIP list, dropping duplicates and preserving the
+/// feeder's order. Generic over the scope enum (`SkillScope` vs
+/// `AgentScope`) for the same reason [`push_roots`] is: the two feeders share
+/// the shape, not the tag.
 ///
-/// This is no longer a hardcoded list: it is the DERIVED VIEW of the default
-/// rule set — every `Deny` rule in [`crate::agent::policy::default_rules`],
-/// canonicalized. One source of truth for the four dirs (the two feeders
-/// `skills::user_roots` and `agents::user_roots`), consumed two ways: as
-/// RULES by [`crate::agent::policy::rule_for`], and as this PATH LIST by the
-/// gate's deny, the executor's refusal wording, and the Landlock ruleset. The
-/// derivation is pinned against the LITERAL four-dir list — not just against
-/// `default_rules()` — so a derivation that drifted to an empty or wrong rule
-/// set cannot pass by agreeing with itself
-/// (`protected_dirs_are_the_derived_default_deny_rule_paths`).
+/// Lenient, not strict (issue #92): a missing dir is KEPT as its canonical
+/// nearest-existing ancestor plus the components that lead to it, because this
+/// list is frozen for the Session's life (`AgentLoop::new`) and a dropped entry
+/// silently unprotects the agent's own instructions until restart. The leniency
+/// only ever DENIES more, which is why it is safe here and deliberately NOT
+/// applied to the read roots — leniency there would silently WIDEN what is
+/// readable; see [`read_roots`] and `a_nonexistent_root_is_dropped`.
 ///
-/// Entries are canonicalized LENIENTLY, which REPLACES the sentence this task
-/// reversed — *"Canonicalized; a missing dir is dropped."* (issue #92). A
-/// missing dir is now KEPT as its canonical nearest-existing ancestor plus the
-/// components that lead to it, because this list is frozen for the Session's
-/// life (`AgentLoop::new`) and a dropped entry silently unprotects the agent's
-/// own instructions until restart. The leniency only ever DENIES more, which
-/// is why it is safe here and deliberately NOT applied to the read roots —
-/// leniency there would silently WIDEN what is readable; see [`read_roots`]
-/// and `a_nonexistent_root_is_dropped`. A path that cannot be resolved at all
-/// (`$HOME` relative and absent, a protected dir on an unmounted drive) comes
-/// back with its raw spelling — see
+/// A path that cannot be resolved at all (`$HOME` relative and absent, a
+/// protected dir on an unmounted drive) comes back with its raw spelling — see
 /// `protected_dirs_keeps_an_unresolvable_entry_raw`.
+fn push_protected<T>(out: &mut Vec<PathBuf>, roots: Vec<(PathBuf, T)>) {
+    for (path, _scope) in roots {
+        let c = crate::agent::fs_backend::canonicalize_lenient(&path);
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    }
+}
+
+/// The write GUARD-MEMBERSHIP list (ADR 0030 Deviation 3, as the permissions
+/// spec corrects it): the four user-level discovery dirs — `~/.agents/skills`,
+/// `~/.pi/agent/skills`, `~/.agents/agents`, `~/.pi/agent/agents`. A WRITE
+/// whose resolved path is under one of these, with NO rule matching, is the
+/// ROW-3 ASK (the guard prompt) — never the silent hardcoded deny ADR 0030
+/// shipped, because the spec's one behavioural change is precisely
+/// "today's hardcoded deny becomes an ask".
+///
+/// NOT a rule set. This list feeds three consumers and none of them is a
+/// resolver:
+/// * [`crate::agent::harness::loop::gate`]'s row-3 membership (`is_guard_path`),
+/// * the executor's guard/deny wording (`protected_refusal_text`), and
+/// * the Landlock subtraction in [`crate::agent::tools::sandbox`] — the ONLY
+///   reason a confined `bash` cannot write the agent's own instructions, since
+///   Landlock rules are ADD-ONLY and cannot take a right back from an ancestor.
+///
+/// That third consumer is why this stays a PLAIN four-path list and is never
+/// derived from [`crate::agent::policy::default_rules`]: a rule change must not
+/// be able to silently empty the subtraction and widen the shell. User rules
+/// never apply to `bash`, and a user `allow` rule naming one of these dirs
+/// never drops it from this list — pinned by
+/// `protected_dirs_ignore_user_rules_because_bash_never_applies_them`.
+///
+/// Because the guard set and the rule set are now DIFFERENT sets, the row-3
+/// condition (`rule_for` answers `None` AND the target is under one of these)
+/// is reachable by construction — it is the ordinary default posture, not an
+/// override.
+///
+/// Entries are canonicalized LENIENTLY (see [`push_protected`]): a missing dir
+/// is KEPT as its canonical nearest-existing ancestor plus its trailing
+/// components, because this list is frozen at `AgentLoop::new` and a dropped
+/// entry silently unprotects the agent's own instructions until restart
+/// (issue #92). The READ roots keep the opposite, strict rule on purpose.
 ///
 /// The leniency is only half the protection: the comparison that consumes
 /// these entries must canonicalize its ENTRY side leniently too, or a
@@ -177,14 +205,10 @@ pub fn write_roots(cwd: &Path) -> Vec<PathBuf> {
 /// `crate::agent::tools::exec::protected_refusal_text` and
 /// `a_write_into_a_still_missing_protected_dir_is_refused`.
 pub fn protected_dirs() -> Vec<PathBuf> {
-    default_rules()
-        .iter()
-        .filter(|r| r.decision == RuleDecision::Deny)
-        .map(|r| {
-            let raw = std::path::Path::new(r.path.as_str());
-            crate::agent::fs_backend::canonicalize_lenient(raw)
-        })
-        .collect()
+    let mut out: Vec<PathBuf> = Vec::new();
+    push_protected(&mut out, crate::skills::user_roots());
+    push_protected(&mut out, crate::agents::user_roots());
+    out
 }
 
 /// The executor's root set for one direction, derived from the policy.
@@ -548,19 +572,27 @@ mod tests {
         drop((restore, lock));
     }
 
-    /// `protected_dirs()` is now the DERIVED VIEW of the default rule set,
-    /// and this pins the derivation TWICE over: against the LITERAL four-dir
-    /// list (the ground truth), and against `default_rules()`. The second
-    /// comparison alone would be self-referential — a derivation that drifted
-    /// to an empty or wrong rule set would still agree with itself — so the
-    /// literal half is what keeps the derivation honest.
+    /// The guard-membership list is its OWN four-path list, NOT a view of the
+    /// rule set — and this pins the two halves of that sentence separately,
+    /// because the previous revision derived one from the other and made the
+    /// spec's row 3 (`no rule matches AND under an agent dir`) unreachable.
+    ///
+    /// Half one: the LITERAL four dirs (skills first), spelled here
+    /// independently of the code so a derivation that drifted cannot pass by
+    /// agreeing with itself.
+    ///
+    /// Half two — the ROUND-3 CORRECTION: `default_rules()` is EMPTY, so a list
+    /// derived from it would be EMPTY too. The four entries surviving an empty
+    /// rule set IS the assertion that the guard set and the rule set are
+    /// different sets, which is what makes a default-posture write into one of
+    /// these dirs the row-3 ASK instead of a silent deny.
     #[test]
-    fn protected_dirs_are_the_derived_default_deny_rule_paths() {
-        let (lock, restore, home) = pin_home("protected-derived");
+    fn protected_dirs_are_the_plain_four_dir_guard_membership_list() {
+        let (lock, restore, home) = pin_home("protected-guard-list");
         let dirs = protected_dirs();
 
-        // THE LITERAL PIN (ground truth): the four dirs, skills first, in
-        // exactly today's order — spelled here independently of the code.
+        // HALF ONE (ground truth): the four dirs, skills first, in exactly
+        // today's order — spelled here independently of the code.
         let literal: Vec<PathBuf> = [
             ".agents/skills",
             ".pi/agent/skills",
@@ -572,64 +604,61 @@ mod tests {
         .collect();
         assert_eq!(
             dirs, literal,
-            "the derived list must equal the literal four dirs"
+            "the guard-membership list must equal the literal four dirs"
         );
 
-        // THE RULE-SHAPE PIN: `default_rules()` is exactly these four paths,
-        // each a `Write`/`Deny` — the boundary floor, not a posture and never
-        // a prompt.
+        // HALF TWO: the rule set is EMPTY (the spec's pre-filled defaults are a
+        // Settings draft pre-fill, not code defaults, and the four dirs are not
+        // rules at all) — and the guard list is NOT empty alongside it.
         let rules = crate::agent::policy::default_rules();
-        assert_eq!(rules.len(), 4, "the floor is exactly four rules: {rules:?}");
         assert!(
-            rules.iter().all(
-                |r| r.direction == crate::agent::policy::RuleDirection::Write
-                    && r.decision == crate::agent::policy::RuleDecision::Deny
+            rules.is_empty(),
+            "`default_rules()` is EMPTY: the four dirs are the guard-membership \
+             set, not default deny rules (the spec: \"today's hardcoded deny \
+             becomes an ask\"); got {rules:?}"
+        );
+        assert_eq!(
+            dirs.len(),
+            4,
+            "the guard list keeps all four dirs WHILE the rule set is empty — \
+             a rule-derived list would be empty here and a confined `bash` \
+             could write the agent's own instructions"
+        );
+        // And no rule names any of them, so `rule_for` answers `None` for a
+        // plain write into one: the row-3 precondition, reached by construction.
+        let target = home.path().join(".pi/agent/agents/SKILL.md");
+        assert_eq!(
+            crate::agent::policy::rule_for(
+                &rules,
+                crate::agent::policy::RuleDirection::Write,
+                &target,
+                Some(home.path()),
             ),
-            "every default rule is Write/Deny: {rules:?}"
+            None,
+            "at defaults no rule speaks to an agent-dir write (row 3 is reachable)"
         );
-        let trailing: Vec<String> = rules
-            .iter()
-            .map(|r| {
-                std::path::Path::new(r.path.as_str())
-                    .strip_prefix(home.path())
-                    .unwrap_or(std::path::Path::new(r.path.as_str()))
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect();
-        assert_eq!(
-            trailing,
-            vec![
-                ".agents/skills",
-                ".pi/agent/skills",
-                ".agents/agents",
-                ".pi/agent/agents"
-            ],
-            "the default rules name the four dirs, skills first"
-        );
-
-        // THE DERIVATION PIN: `protected_dirs()` is exactly the `Deny` rules
-        // of `default_rules()`, leniently canonicalized.
-        let derived: Vec<PathBuf> = crate::agent::policy::default_rules()
-            .iter()
-            .filter(|r| r.decision == crate::agent::policy::RuleDecision::Deny)
-            .map(|r| {
-                crate::agent::fs_backend::canonicalize_lenient(std::path::Path::new(
-                    r.path.as_str(),
-                ))
-            })
-            .collect();
-        assert_eq!(
-            dirs, derived,
-            "protected_dirs() IS the derived deny-rule list"
+        assert!(
+            dirs.iter().any(|root| target.starts_with(root)),
+            "…and the target IS under the guard-membership set: row 3 is the ask"
         );
         drop((restore, lock));
     }
 
     /// (the honest limit, recorded NOT hidden — and the PIN that replaces the
-    /// one that could not exist) When the home dir cannot be resolved there
-    /// are no default rules at all: `user_roots()` yields nothing, so
-    /// [`crate::agent::policy::default_rules`] is EMPTY.
+    /// one that could not exist) An EMPTY rule set matches nothing, so
+    /// [`crate::agent::policy::rule_for`] answers `None` and the caller falls
+    /// through — to the guard's row-3 ASK for a write under one of the four
+    /// dirs, and to the posture select ([`crate::agent::policy::decision_for`])
+    /// everywhere else — whereas an empty `protected_dirs()` means "deny
+    /// nothing".
+    ///
+    /// **THE EMPTY SET IS NOW THE DEFAULT, not a no-home edge.** Since the
+    /// round-3 spec correction, [`crate::agent::policy::default_rules`] returns
+    /// an EMPTY list by design (the four agent dirs are the guard-membership
+    /// set on `protected_dirs()`, not default deny rules), so this is the shape
+    /// EVERY session starts with, not the degenerate case of an unresolvable
+    /// `$HOME`. The consequence at the gate is
+    /// `default_posture_agent_dir_write_is_an_ask_not_a_silent_deny`.
     ///
     /// THE LIMIT ITSELF CANNOT BE PINNED FROM A TEST PROCESS, and that is
     /// measured, not assumed: `skills::home_dir()`'s third link is

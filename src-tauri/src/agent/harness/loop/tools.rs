@@ -97,6 +97,14 @@ impl AgentLoop {
                         // (ADR 0030) The frozen boundary + deny-list.
                         boundary: self.read_boundary.clone(),
                         protected: self.protected.clone(),
+                        // (T03) The rule list IN FORCE for this turn — the
+                        // SAME concatenated list the gate judged with (one
+                        // concat per turn, so gate and executor agree).
+                        rules: self.rules.clone(),
+                        // (T03) The home `rule_for` expands a `~` rule
+                        // against (frozen at construction — no per-call
+                        // `$HOME` read).
+                        home: self.rules_home.clone(),
                         // (ADR 0030 Task 3) The policy the gate decided with
                         // — the SAME per-turn value, so the executor cannot
                         // re-decide differently from the gate (it enforces

@@ -143,6 +143,10 @@ pub fn permission_title(tool: &str, args: &serde_json::Value) -> String {
 /// the guard prompts: a guard ask is an ask, and an ask can appear for a
 /// Space that is trusted enough to make `trust-space` a one-click way to
 /// disable the protection the prompt exists to provide).
+///
+/// `pub(crate)` because Task 3's CALLER picks the kind: the guard ask is
+/// raised from the harness gate, which knows the target path this module's
+/// gate signature does not carry.
 pub(crate) fn permission_options(boundary: bool) -> Vec<serde_json::Value> {
     if boundary {
         vec![
@@ -215,6 +219,7 @@ pub async fn native_permission_gate(
     trust: Option<&dyn TrustSource>,
     cwd: &std::path::Path,
     cancel: &CancellationToken,
+    options: Vec<serde_json::Value>,
 ) -> PermissionOutcome {
     // A CANCELLED turn must not auto-approve (finding 8a): the cancel
     // token is consulted BEFORE the trusted short-circuit (a Stop beats
@@ -245,13 +250,12 @@ pub async fn native_permission_gate(
         map.insert(key.clone(), tx);
     }
 
-    // (b) Tell the UI to show the prompt. The option list is PER-PROMPT
-    // (`permission_options`) — this gate emits the BOUNDARY set, the only
-    // kind it produces until Task 3 adds the guard's caller (the old claim
-    // that a prompt is always three options because it only ever appears for
-    // an untrusted Space dies with the guard prompt: see
-    // `permission_options`).
-    let options = permission_options(true);
+    // (b) Tell the UI to show the prompt. The option list is PER-PROMPT and
+    // PER-CALLER (`permission_options`, passed in): the boundary caller emits
+    // the old three, the guard caller (Task 3's harness gate) emits the
+    // guard's three with a real `allow-directory` path. The old claim that a
+    // prompt is always three options because it only ever appears for an
+    // untrusted Space dies with the guard prompt: see `permission_options`.
     sink.emit(
         "permission-request",
         json!({
@@ -406,6 +410,9 @@ mod tests {
                 None,
                 &c,
                 &cancel,
+                // The BOUNDARY list (this gate's caller picks the option set —
+                // Task 3's parameter; the guard list is the other kind).
+                permission_options(true),
             )
             .await
         });
@@ -504,6 +511,7 @@ mod tests {
             Some(&SqliteTrustSource::new(db)),
             &cwd,
             &cancel,
+            permission_options(true),
         )
         .await;
 
@@ -550,6 +558,7 @@ mod tests {
                 Some(&SqliteTrustSource::new(task_db)),
                 &task_cwd,
                 &task_cancel,
+                permission_options(true),
             )
             .await
         });
@@ -625,6 +634,7 @@ mod tests {
                 Some(&SqliteTrustSource::new(task_db)),
                 &task_cwd,
                 &task_cancel,
+                permission_options(true),
             )
             .await
         });
@@ -828,6 +838,7 @@ mod tests {
             Some(&SqliteTrustSource::new(db)),
             &cwd,
             &cancel,
+            permission_options(true),
         )
         .await;
         assert_eq!(

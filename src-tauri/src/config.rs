@@ -10,9 +10,9 @@
 //!
 //! LAYERING: this module is a LEAF (std + serde + exactly two `agent`
 //! vocabulary imports — `agent::harness::WireApi` and
-//! `agent::policy::FilePolicy`; no `commands` / `storage` imports) — the
-//! domain (`agent`) and the IPC layer (`commands`) both depend on it, never
-//! the other way.
+//! `agent::policy::{FilePolicy, AccessRule}`; no `commands` / `storage`
+//! imports) — the domain (`agent`) and the IPC layer (`commands`) both depend
+//! on it, never the other way.
 
 use std::collections::HashMap;
 use std::fs;
@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::agent::harness::WireApi;
-use crate::agent::policy::FilePolicy;
+use crate::agent::policy::{AccessRule, FilePolicy};
 
 /// A user-managed LLM provider.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -492,6 +492,109 @@ pub fn write_settings(config_dir: &Path, settings: &Settings) -> Result<(), Stri
     .map_err(|e| e.to_string())
 }
 
+/// Persist the settings ATOMICALLY (temp-file + rename). The relay's
+/// whole-document overwrites (the permissions append) use this so a torn
+/// write can never destroy the file — the rename is atomic-on-POSIX and
+/// atomic-in-practice on Windows NTFS (`tempfile` 3.x's `persist` uses
+/// `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, so it succeeds when the
+/// destination exists; the crate's documented copy+remove fallback covers
+/// cross-volume/dir edge cases). Deliberately NOT the shared entry point:
+/// the Settings page (`save_settings`) keeps [`write_settings`], whose exact
+/// serialized bytes are pinned by the tests above.
+///
+/// No non-atomic fallback on purpose: a partial `fs::write` after a failed
+/// `persist` is exactly the torn write this exists to prevent, so a failure
+/// returns `Err` and the temp is cleaned by its `Drop`.
+pub fn write_settings_atomic(config_dir: &Path, settings: &Settings) -> Result<(), String> {
+    use std::io::Write;
+
+    let path = settings_path(config_dir);
+    // `new_in` needs a non-empty parent: `config_dir` is the settings file's
+    // own directory (the same dir `write_settings` writes into).
+    let mut tmp = tempfile::NamedTempFile::new_in(config_dir)
+        .map_err(|e| format!("settings: temp create failed: {e}"))?;
+    tmp.write_all(
+        serde_json::to_string_pretty(settings)
+            .map_err(|e| e.to_string())?
+            .as_bytes(),
+    )
+    .map_err(|e| e.to_string())?;
+    tmp.as_file().sync_all().map_err(|e| e.to_string())?;
+    // Mode preservation (DECIDED): `NamedTempFile` creates the temp with mode
+    // 0o600 (`file/imp/unix.rs`: `unwrap_or(0o600)`) and the rename takes the
+    // TEMP's mode — without this the atomic write would silently tighten
+    // `settings.json` from its configured mode (typically 0644) to 0600 on
+    // unix. That silent mode change is exactly the unrequested behaviour
+    // change this repo's rules forbid, so the existing file's mode is copied
+    // onto the temp before the rename. Pinned by
+    // `write_settings_atomic_preserves_the_existing_files_mode_on_unix`
+    // (`#[cfg(unix)]` — Windows has no mode concept, so nothing is pinned
+    // there and this block is not even compiled).
+    #[cfg(unix)]
+    {
+        if let Ok(md) = fs::metadata(&path) {
+            // Best-effort: a mode we cannot read (or cannot set) must not fail
+            // the write — the file's CONTENTS are the load-bearing half.
+            let _ = fs::set_permissions(&tmp, md.permissions());
+        }
+    }
+    tmp.persist(&path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// The relay's settings-write shape: load FRESH, mutate in place, atomic
+/// overwrite. The fresh [`load_settings`] is load-bearing — writing a
+/// document built from a STALE read can silently clobber another writer's
+/// field.
+///
+/// This NARROWS the read-modify-write window to one function call; it is NOT
+/// a lock and does NOT close the window. `settings.json` has six+ independent
+/// writers (the Settings page's whole-document save, `set_config_option`, this
+/// relay, …) and nothing serializes them, so NO lock is added here.
+///
+/// THE RESIDUAL LOST UPDATE, concretely (recorded, deliberately NOT fixed in
+/// this task): (1) the user sees the permissions prompt and clicks "Always
+/// allow this directory"; (2) this helper reads `settings.json` (no rule yet),
+/// appends the rule in memory, and `write_settings_atomic` lands it — the file
+/// is correct; (3) a moment later the Settings page's user clicks Save, and
+/// `save_settings` writes a WHOLE document composed from a `useSettingsDocument`
+/// store snapshot taken BEFORE step 2 (that store refreshes only when the
+/// Settings page loads); (4) the whole-document overwrite replaces the file
+/// with a document that has no rule — the user's "always allow" silently
+/// evaporates. It is SILENT because the relay already returned `Ok` and its
+/// failure path is best-effort-logged anyway: afterwards the file simply lacks
+/// the rule, with no error anywhere. `useSettingsDocument`'s Agents-modal write
+/// queue serializes only the frontend's OWN modal writes; it never serializes
+/// against the Rust writers. Atomicity protects the FILE (no torn write), not
+/// the WRITERS — that is exactly why this sequence survives.
+///
+/// The recorded follow-up is a settings-write `RwLock` or a save-version /
+/// merge at the `useSettingsDocument` boundary. A second Rust writer touching
+/// this file MUST come through here rather than a
+/// `load_settings`-mutate-`write_settings` sequence with a stale read.
+pub fn load_mutate_write<F: FnOnce(&mut Settings)>(config_dir: &Path, f: F) -> Result<(), String> {
+    let mut settings = load_settings(config_dir);
+    f(&mut settings);
+    write_settings_atomic(config_dir, &settings)
+}
+
+/// Append exactly one rule, unless an IDENTICAL one is already present
+/// (dedupe by path + direction + decision — a second "always allow this
+/// directory" click is idempotent, not a duplicate Settings row that
+/// re-orders the file). A rule that differs in ANY field is a NEW rule and
+/// appends: a hand-written `deny` for the same path coexists with an appended
+/// `allow`.
+///
+/// Dedupe compares the PERSISTED spelling verbatim — `~/.pi/agent/agents` and
+/// `/home/u/.pi/agent/agents` are two rules, because matching canonicalizes at
+/// MATCH time, never at write time (see `AccessRule::path`). `Vec::contains`
+/// is `O(n)`, which is right for a hand-sized rule list.
+pub(crate) fn append_rule(rules: &mut Vec<AccessRule>, rule: AccessRule) {
+    if !rules.contains(&rule) {
+        rules.push(rule);
+    }
+}
+
 /// A known provider template (the built-in catalog — the Settings'
 /// known-providers picker's data source; ADR 0024). Seeded from the
 /// ZCode builtin provider catalog (`config/provider/zcode-builtin.json`
@@ -660,7 +763,7 @@ pub const KNOWN_PROVIDERS: &[KnownProvider] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::policy::AccessPolicy;
+    use crate::agent::policy::{AccessPolicy, AccessRule, RuleDecision, RuleDirection};
 
     #[test]
     fn default_settings_are_dark_with_empty_layout() {
@@ -680,6 +783,24 @@ mod tests {
         assert!(settings.session_naming_enabled);
         assert_eq!(settings.session_naming_model, None);
         assert_eq!(settings.session_naming_reasoning, None);
+        // (Task 4) The rule list is the same story: a file written BEFORE the
+        // `rules` key existed parses with an EMPTY list (`#[serde(default)]`),
+        // and an empty list is never written back (`skip_serializing_if`), so
+        // the three-direction wire shape stays byte-identical until the first
+        // `allow-directory` append.
+        assert!(
+            settings.file_policy.rules.is_empty(),
+            "an old file has NO user rules, got {:?}",
+            settings.file_policy.rules
+        );
+        // And through the REAL file, not just the value.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("settings.json"),
+            r#"{ "theme": "dark", "paneLayout": {} }"#,
+        )
+        .unwrap();
+        assert!(load_settings(dir.path()).file_policy.rules.is_empty());
     }
 
     #[test]
@@ -1645,5 +1766,155 @@ mod tests {
         let back = load_settings(dir.path());
         assert_eq!(back.web, settings.web);
         assert_eq!(back, settings);
+    }
+
+    // ── Task 4: the atomic settings write + the relay's read-modify-write ──
+
+    /// The atomic sibling writes EXACTLY the bytes `write_settings` writes —
+    /// the temp-file + rename path must not change the wire format by one
+    /// byte (the existing byte pins on `write_settings` stay the contract).
+    #[test]
+    fn write_settings_atomic_writes_the_same_bytes_as_write_settings() {
+        let settings = Settings {
+            theme: "light".to_string(),
+            file_policy: FilePolicy {
+                reads: AccessPolicy::Ask,
+                writes: AccessPolicy::Sandboxed,
+                shell: AccessPolicy::Allow,
+                rules: vec![AccessRule {
+                    path: "~/skills".to_string(),
+                    direction: RuleDirection::ReadWrite,
+                    decision: RuleDecision::Allow,
+                }],
+            },
+            ..Settings::default()
+        };
+        let plain = tempfile::tempdir().unwrap();
+        let atomic = tempfile::tempdir().unwrap();
+        write_settings(plain.path(), &settings).unwrap();
+        write_settings_atomic(atomic.path(), &settings).unwrap();
+        let plain_bytes = fs::read(settings_path(plain.path())).unwrap();
+        let atomic_bytes = fs::read(settings_path(atomic.path())).unwrap();
+        assert_eq!(
+            plain_bytes, atomic_bytes,
+            "the atomic write must be byte-identical to `write_settings`"
+        );
+        // And it loads back as the same document (the rename landed on the
+        // right path — not on a leftover temp name).
+        assert_eq!(load_settings(atomic.path()), settings);
+        assert!(settings_path(atomic.path()).exists());
+    }
+
+    /// The relay's settings-write shape: a FRESH load (a file mutated behind
+    /// the helper's back is visible), the mutate applied in place, and the
+    /// result persisted atomically — `write_settings_atomic`, not a stale
+    /// document.
+    #[test]
+    fn load_mutate_write_reads_fresh_mutates_and_persists_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        // Seed a file carrying one user rule.
+        let mut seeded = Settings::default();
+        seeded.file_policy.rules.push(AccessRule {
+            path: "/Users/u/older".to_string(),
+            direction: RuleDirection::Write,
+            decision: RuleDecision::Deny,
+        });
+        write_settings(dir.path(), &seeded).unwrap();
+
+        // Mutate something ELSE behind the helper's back, through a document
+        // the helper never saw: a fresh load inside the helper must carry it.
+        let mut raced = load_settings(dir.path());
+        raced.theme = "dracula-was-here".to_string();
+        write_settings(dir.path(), &raced).unwrap();
+
+        load_mutate_write(dir.path(), |s| {
+            append_rule(
+                &mut s.file_policy.rules,
+                AccessRule {
+                    path: "/Users/u/skills".to_string(),
+                    direction: RuleDirection::ReadWrite,
+                    decision: RuleDecision::Allow,
+                },
+            );
+        })
+        .unwrap();
+
+        let after = load_settings(dir.path());
+        assert_eq!(
+            after.theme, "dracula-was-here",
+            "the helper re-read the file — a stale document would have lost this field"
+        );
+        assert_eq!(
+            after.file_policy.rules,
+            vec![
+                AccessRule {
+                    path: "/Users/u/older".to_string(),
+                    direction: RuleDirection::Write,
+                    decision: RuleDecision::Deny,
+                },
+                AccessRule {
+                    path: "/Users/u/skills".to_string(),
+                    direction: RuleDirection::ReadWrite,
+                    decision: RuleDecision::Allow,
+                },
+            ],
+            "the pre-existing rule is untouched and the appended rule is LAST"
+        );
+        // No temp file litter beside the settings file (the rename consumed it).
+        let leftovers: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "settings.json")
+            .collect();
+        assert!(leftovers.is_empty(), "the atomic write left {leftovers:?}");
+    }
+
+    /// A persisted rule survives write → load → write → load through the REAL
+    /// file (not through a serde value alone) — the guarantee the
+    /// `allow-directory` append relies on.
+    #[test]
+    fn a_persisted_rule_survives_a_settings_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let rule = AccessRule {
+            path: "/Users/u/skills".to_string(),
+            direction: RuleDirection::ReadWrite,
+            decision: RuleDecision::Allow,
+        };
+        let mut s = Settings::default();
+        s.file_policy.rules.push(rule.clone());
+        write_settings(dir.path(), &s).unwrap();
+        let loaded = load_settings(dir.path());
+        assert_eq!(loaded.file_policy.rules, vec![rule.clone()]);
+        // A second write from the loaded document changes nothing.
+        write_settings(dir.path(), &loaded).unwrap();
+        let again = load_settings(dir.path());
+        assert_eq!(again.file_policy, loaded.file_policy);
+        // And the same through the ATOMIC path (the relay's entry point).
+        write_settings_atomic(dir.path(), &again).unwrap();
+        assert_eq!(load_settings(dir.path()).file_policy.rules, vec![rule]);
+    }
+
+    /// The atomic write must NOT tighten a deliberately configured mode to
+    /// the temp file's 0600 (`NamedTempFile` creates 0600 and the rename
+    /// takes the temp's mode) — DECISION (a): preserve the existing file's
+    /// mode. `#[cfg(unix)]` because Windows has no mode concept, so there is
+    /// nothing to pin there (the production twin is the same `#[cfg(unix)]`
+    /// block inside `write_settings_atomic`).
+    #[cfg(unix)]
+    #[test]
+    fn write_settings_atomic_preserves_the_existing_files_mode_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = settings_path(dir.path());
+        let s = Settings::default();
+        write_settings(dir.path(), &s).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+            .expect("the seeded mode is settable");
+        write_settings_atomic(dir.path(), &s).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640,
+            "the atomic write must NOT tighten a deliberately configured mode to the temp's 0600"
+        );
     }
 }

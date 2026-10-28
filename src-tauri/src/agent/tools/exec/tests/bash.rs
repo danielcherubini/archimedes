@@ -356,6 +356,9 @@ async fn bash_cancel_kills_child() {
         boundary: vec![cwd.to_path_buf()],
         file_policy: crate::agent::policy::FilePolicy::default(),
         protected: Vec::new(),
+        // (T03) The two new `ToolCtx` fields (churn-only): no rules, no home.
+        rules: Vec::new(),
+        home: None,
         web: Default::default(),
         render_requester: None,
     };
@@ -516,6 +519,9 @@ async fn bash_cancel_kills_a_child_that_closed_its_pipes() {
         boundary: vec![cwd.to_path_buf()],
         file_policy: crate::agent::policy::FilePolicy::default(),
         protected: Vec::new(),
+        // (T03) The two new `ToolCtx` fields (churn-only): no rules, no home.
+        rules: Vec::new(),
+        home: None,
         web: Default::default(),
         render_requester: None,
     };

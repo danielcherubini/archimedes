@@ -1935,15 +1935,26 @@ impl SessionManager {
                 // flip (Task 2's `PermissionResponse` handler) is the live-lookup
                 // half; this is the persistence half.
                 //
-                // The `..` here is the ONLY thing Task 2 (the outcome's `value`
-                // field) changed in this file: `value` is READ nowhere yet — the
-                // `allow-directory` rule write rides it, and the relay that
-                // persists that rule is Task 4's.
-                if let permission::PermissionOutcome::Selected { option_id, .. } = &outcome {
+                // The `..` this pattern used to carry is GONE (Task 4): the
+                // outcome's `value` field is now READ — the `allow-directory`
+                // rule write rides it. The trust-space arm below is verbatim
+                // (its body and doc unchanged; only the shared destructure lost
+                // the `..`).
+                if let permission::PermissionOutcome::Selected { option_id, value } = &outcome {
                     if option_id == "trust-space" {
                         if let (Some(db), Some(cwd)) = (&self.driver.db, cwd) {
                             let _ = db.set_space_trusted(&cwd.display().to_string(), true);
                         }
+                    }
+                    // (Task 4) The `allow-directory` outcome persists ONE `allow`
+                    // rule to `settings.json` — the rules store (ADR 0025's
+                    // ownership split: the gate asks, the relay persists, because
+                    // the Worker has no `config_dir`). `value` is the option's
+                    // `path` echoed back verbatim by the frontend; a BLANK path
+                    // (the gate's placeholder) persists NOTHING. A SEPARATE `if`,
+                    // so neither arm's body can touch the other's.
+                    if option_id == "allow-directory" {
+                        self.persist_allow_directory_rule(value.as_deref());
                     }
                 }
                 // Mark the request id as ANSWERED (the pending-modal cleanup — a
@@ -1967,6 +1978,62 @@ impl SessionManager {
                 Ok(true)
             }
             Err(_) => Ok(false),
+        }
+    }
+
+    /// (Task 4) Persist an `allow-directory` answer as EXACTLY ONE `allow`
+    /// rule in `settings.json` (the rule store — ADR 0025: the Worker has no
+    /// `config_dir`, so the Supervisor relays the write exactly as the
+    /// `trust-space` db write does; the gate itself never persists).
+    ///
+    /// Directives, all pinned by `session_tests`:
+    /// - `ReadWrite`, so the rule governs both the write that prompted AND the
+    ///   reads / greps into the same dir — one "always allow" answers all five
+    ///   path tools (`ReadWrite::covers` is all-direction).
+    /// - Appended at the END of the file's `rules` list, which holds ONLY user
+    ///   rules (`default_rules()` is runtime-only and never serialized). The
+    ///   RUNTIME concat — `default_rules()` FIRST, then these user rules — is
+    ///   what makes an appended allow beat a default `deny` on an exact tie:
+    ///   that half lives at the harness concat site, and the tie itself is
+    ///   pinned by `an_exact_tie_goes_to_the_last_rule_so_an_appended_allow_beats_a_default_deny`
+    ///   in `agent/policy.rs`. Concatenate the other way round and every rule
+    ///   written here silently no-ops at the gate.
+    /// - A repeat click on the same directory writes nothing (dedupe by
+    ///   path + direction + decision — see `config::append_rule`). The compare
+    ///   is on the PERSISTED spelling verbatim: `~` and absolute spellings of
+    ///   one dir are two rules, because matching canonicalizes at match time.
+    /// - A `None` or ALL-WHITESPACE path writes nothing (the gate's `""`
+    ///   placeholder until it computes the real nearest-existing ancestor). A
+    ///   path that trims to something real is persisted with its ORIGINAL
+    ///   spelling — the trim tests blankness ONLY.
+    /// - `cwd` / the `Db` are NOT touched: the child path (the `drives`
+    ///   fallback) has no `live` entry, so the path from `value` is the only
+    ///   input — and it is enough. **Child-safety guarantee (checkable): this
+    ///   method reads NO `self.live`, NO `self.driver` and NO `db` —
+    ///   `config_dir` is a plain non-`Option` field, so it cannot drift. Any
+    ///   future edit that introduces one of those reads into this method is
+    ///   VISIBLY breaking against this doc.**
+    /// - Best-effort: a write failure is logged and does NOT fail the answer
+    ///   (the `trust-space` arm's `let _ =` discipline).
+    fn persist_allow_directory_rule(&self, value: Option<&str>) {
+        use crate::agent::policy::{AccessRule, RuleDecision, RuleDirection};
+
+        let Some(raw) = value else { return };
+        if raw.trim().is_empty() {
+            return;
+        }
+        let path = raw.to_string();
+        if let Err(e) = crate::config::load_mutate_write(&self.config_dir, |s| {
+            crate::config::append_rule(
+                &mut s.file_policy.rules,
+                AccessRule {
+                    path,
+                    direction: RuleDirection::ReadWrite,
+                    decision: RuleDecision::Allow,
+                },
+            )
+        }) {
+            eprintln!("allow-directory: rule save failed: {e}");
         }
     }
 
@@ -3927,6 +3994,291 @@ mod session_tests {
                 &manager.persister().expect("persister should be set")
             ),
             "SessionManager must use the exact persister instance provided to the builder"
+        );
+    }
+
+    // ── Task 4: the `allow-directory` relay persistence ───────────────────
+    //
+    // The relay's persistence half of ADR 0025: an "Always allow this
+    // directory" answer appends EXACTLY ONE `allow` rule to `settings.json`'s
+    // `rules` key — which holds ONLY user rules (`default_rules()` is
+    // runtime-only and never serialized), so the file-side half of the
+    // ordering contract is "appended AFTER the pre-existing user rules". The
+    // RUNTIME half (defaults FIRST, then the user rules, so an appended allow
+    // wins an exact tie against a default `deny`) is the harness concat site's
+    // half, and the tie itself is pinned in `agent/policy.rs`'s
+    // `an_exact_tie_goes_to_the_last_rule_so_an_appended_allow_beats_a_default_deny`.
+    // Concatenate the other way round and every rule written here silently
+    // no-ops at the gate.
+
+    /// The FILE side of the ordering contract: exactly ONE rule appended, at
+    /// the END of the pre-existing user rules, nothing else in the document
+    /// touched. Seeded with a real user rule (the file has no defaults in it —
+    /// a `rules[..default_rules().len()] == default_rules()` assertion would
+    /// be false on every machine).
+    #[tokio::test]
+    async fn an_allow_directory_answer_appends_exactly_one_rule_after_the_existing_user_rules() {
+        use crate::agent::policy::{AccessRule, RuleDecision, RuleDirection};
+        use crate::config::load_settings;
+
+        let dir = temp_config_dir();
+        write_settings_json(
+            &dir,
+            serde_json::json!({
+                "filePolicy": {
+                    "reads": "allow", "writes": "allow", "shell": "allow",
+                    "rules": [{ "path": "/Users/u/older", "direction": "write", "decision": "deny" }]
+                }
+            }),
+        );
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        let (manager, info) = start_native_session(&dir, &sink).await;
+
+        manager.persist_allow_directory_rule(Some("/Users/u/skills"));
+
+        let rules = load_settings(dir.path()).file_policy.rules;
+        assert_eq!(
+            rules.len(),
+            2,
+            "exactly ONE rule appended to the pre-existing user rules"
+        );
+        assert_eq!(
+            rules[0],
+            AccessRule {
+                path: "/Users/u/older".to_string(),
+                direction: RuleDirection::Write,
+                decision: RuleDecision::Deny,
+            },
+            "the pre-existing user rule is untouched and still FIRST"
+        );
+        assert_eq!(
+            rules[1],
+            AccessRule {
+                path: "/Users/u/skills".to_string(),
+                direction: RuleDirection::ReadWrite,
+                decision: RuleDecision::Allow,
+            },
+            "the new allow lands at the END of the user rules — the file-side half of the CONCATENATION CONTRACT"
+        );
+        let _ = manager.close_session(&info.session_id).await;
+    }
+
+    /// A `None` value, the gate's `""` placeholder, and an all-whitespace path
+    /// all persist NOTHING — a rule matching nothing would pollute the file,
+    /// the Settings list, and the round-trip. T03 replaces the placeholder;
+    /// this pin keeps the seam honest until then.
+    #[tokio::test]
+    async fn a_blank_or_absent_value_persists_nothing() {
+        use crate::config::load_settings;
+
+        let dir = temp_config_dir();
+        write_settings_json(&dir, serde_json::json!({}));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        let (manager, info) = start_native_session(&dir, &sink).await;
+
+        manager.persist_allow_directory_rule(None);
+        manager.persist_allow_directory_rule(Some(""));
+        manager.persist_allow_directory_rule(Some("   "));
+
+        let settings = load_settings(dir.path());
+        assert!(
+            settings.file_policy.rules.is_empty(),
+            "a blank path persists nothing, got {:?}",
+            settings.file_policy.rules
+        );
+        let _ = manager.close_session(&info.session_id).await;
+    }
+
+    /// A repeat click on the same directory is idempotent: dedupe by
+    /// path + direction + decision, so the second click writes nothing rather
+    /// than a duplicate row that re-orders the file.
+    #[tokio::test]
+    async fn a_second_click_on_the_same_directory_is_idempotent() {
+        use crate::agent::policy::{RuleDecision, RuleDirection};
+        use crate::config::load_settings;
+
+        let dir = temp_config_dir();
+        write_settings_json(&dir, serde_json::json!({}));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        let (manager, info) = start_native_session(&dir, &sink).await;
+
+        manager.persist_allow_directory_rule(Some("/Users/u/skills"));
+        manager.persist_allow_directory_rule(Some("/Users/u/skills"));
+
+        let settings = load_settings(dir.path());
+        assert_eq!(
+            settings.file_policy.rules.len(),
+            1,
+            "one rule total, not two"
+        );
+        assert_eq!(
+            settings
+                .file_policy
+                .rules
+                .iter()
+                .filter(|r| r.direction == RuleDirection::ReadWrite
+                    && r.decision == RuleDecision::Allow)
+                .count(),
+            1,
+            "a repeat click must NOT append a duplicate rule"
+        );
+        let _ = manager.close_session(&info.session_id).await;
+    }
+
+    /// The dedupe is EXACT identity, never a path key: a hand-written `Deny`
+    /// for the same path is a DIFFERENT rule, so the allow coexists with it
+    /// (and the last-wins tie-break in `rule_for` is what decides).
+    #[tokio::test]
+    async fn a_differing_rule_for_the_same_path_still_appends() {
+        use crate::agent::policy::{RuleDecision, RuleDirection};
+        use crate::config::load_settings;
+
+        let dir = temp_config_dir();
+        write_settings_json(
+            &dir,
+            serde_json::json!({
+                "filePolicy": {
+                    "reads": "allow", "writes": "allow", "shell": "allow",
+                    "rules": [{ "path": "/Users/u/skills", "direction": "write", "decision": "deny" }]
+                }
+            }),
+        );
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        let (manager, info) = start_native_session(&dir, &sink).await;
+
+        manager.persist_allow_directory_rule(Some("/Users/u/skills"));
+
+        let rules = load_settings(dir.path()).file_policy.rules;
+        assert_eq!(rules.len(), 2, "a differing rule is NOT deduped away");
+        assert!(rules
+            .iter()
+            .any(|r| r.direction == RuleDirection::Write && r.decision == RuleDecision::Deny));
+        assert!(rules
+            .iter()
+            .any(|r| r.direction == RuleDirection::ReadWrite && r.decision == RuleDecision::Allow));
+        let _ = manager.close_session(&info.session_id).await;
+    }
+
+    /// The persist arm lives INSIDE `respond_permission`'s send-success arm,
+    /// so a `handle_for` miss (`Ok(false)`) reaches neither the trust-space
+    /// write nor the rule append.
+    #[tokio::test]
+    async fn a_missing_worker_routes_the_answer_to_nowhere_and_writes_no_rule() {
+        use crate::agent::permission::PermissionOutcome;
+        use crate::config::load_settings;
+
+        let dir = temp_config_dir();
+        write_settings_json(&dir, serde_json::json!({}));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        let (manager, _wm, _db) = build_worker_manager(&dir, native_test_catalog(), &sink);
+        // NO session is started — `handle_for` misses → `Ok(false)` and the
+        // `Ok(())` arm (where the persistence lives) is never reached.
+        let hit = manager
+            .respond_permission(
+                "no-such-session",
+                "req-1",
+                PermissionOutcome::Selected {
+                    option_id: "allow-directory".to_string(),
+                    value: Some("/Users/u/skills".to_string()),
+                },
+            )
+            .await
+            .expect("the miss is Ok(false), not Err");
+        assert!(!hit, "a missing worker is a no-op");
+        assert!(
+            load_settings(dir.path()).file_policy.rules.is_empty(),
+            "no session → no write"
+        );
+    }
+
+    /// The `trust-space` persistence arm is UNCHANGED by the `value`
+    /// destructure: an answer still flips the `spaces` row (seeded first —
+    /// `set_space_trusted` is an UPDATE) and writes NO rule.
+    #[tokio::test]
+    async fn the_trust_space_persistence_arm_is_unchanged() {
+        use crate::config::load_settings;
+
+        let dir = temp_config_dir();
+        write_settings_json(&dir, serde_json::json!({}));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        let (manager, _wm, db) = build_worker_manager(&dir, native_test_catalog(), &sink);
+        let info = manager
+            .start_session(dir.to_path_buf(), &sink)
+            .await
+            .expect("the native session started");
+
+        let cwd = info.cwd.clone();
+        // `set_space_trusted` is an UPDATE — a missing row is a no-op, so the
+        // row must exist (INSERT) before the arm can flip it.
+        db.upsert_space(&cwd.display().to_string(), false)
+            .expect("the space row is seeded");
+
+        manager
+            .respond_permission(
+                &info.session_id,
+                "req-1",
+                crate::agent::permission::PermissionOutcome::Selected {
+                    option_id: "trust-space".to_string(),
+                    value: None,
+                },
+            )
+            .await
+            .expect("the answer relays");
+
+        assert!(
+            db.space_trusted(&cwd).expect("space_trusted should work"),
+            "the trust-space arm still flips the `spaces` row"
+        );
+        assert!(
+            load_settings(dir.path()).file_policy.rules.is_empty(),
+            "trust-space writes NO rule"
+        );
+        let _ = manager.close_session(&info.session_id).await;
+    }
+
+    /// The child path (a subagent rides this same relay through `handle_for`'s
+    /// `drives` fallback and has NO `live` entry, so `cwd` is `None` for it)
+    /// is covered by CONSTRUCTION, not by a fixture: the persistence method
+    /// reads `value` and `config_dir` ONLY — no `self.live`, no `self.driver`,
+    /// no `db` — which its doc states as a checkable guarantee. Driving a real
+    /// child-shaped `respond_permission` is not possible with these fixtures
+    /// (`start_native_session` always carries a main-session `live` entry with
+    /// a `cwd`, and a manager with no live entry misses `handle_for` — which is
+    /// the `Ok(false)` pin above). This test pins the observable half of that
+    /// construction claim: the write happens on a manager with NO live session
+    /// at all — nothing but the `value` and the config dir is involved.
+    #[tokio::test]
+    async fn the_persist_write_needs_no_live_session_state() {
+        use crate::agent::policy::{RuleDecision, RuleDirection};
+        use crate::config::load_settings;
+
+        let dir = temp_config_dir();
+        write_settings_json(&dir, serde_json::json!({}));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        // NO session started: no `live` entry, no `cwd`, nothing attached
+        // beyond the `db` the builder wires. The method still persists —
+        // because its ONLY inputs are the `value` and `config_dir`.
+        let (manager, _wm, _db) = build_worker_manager(&dir, native_test_catalog(), &sink);
+
+        manager.persist_allow_directory_rule(Some("/Users/u/child-skills"));
+
+        let rules = load_settings(dir.path()).file_policy.rules;
+        assert_eq!(rules.len(), 1, "the value-only write needs no session");
+        assert_eq!(
+            rules[0],
+            crate::agent::policy::AccessRule {
+                path: "/Users/u/child-skills".to_string(),
+                direction: RuleDirection::ReadWrite,
+                decision: RuleDecision::Allow,
+            },
+            "the persisted rule is the `value` verbatim, ReadWrite/Allow"
         );
     }
 }

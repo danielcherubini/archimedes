@@ -254,74 +254,57 @@ pub fn rule_for<'a>(
         .map(|(_, rule, _)| rule)
 }
 
-/// The DEFAULT rule set — the boundary floor, expressed in the SAME
-/// vocabulary as the user's rules (ADR 0030, Deviation 3): the four
-/// user-level discovery dirs as `Write`/`Deny`. This is exactly today's
-/// write deny-list, derived from the SAME sources of truth as
-/// [`crate::agent::boundary::protected_dirs`] (`skills::user_roots`,
-/// `agents::user_roots`), so there is no second copy of the four dirs that
-/// could drift away from the first.
+/// The DEFAULT rule set: **EMPTY**.
 ///
-/// ORDER is preserved — skills two first, then agents two — because
-/// `protected_dirs`'s output order is pinned (`protected_dirs_are_the_four_user_level_dirs`
-/// asserts the four dirs as an ORDERED list).
+/// # Why empty, when an earlier revision returned four `Write`/`Deny` floors
 ///
-/// CONCATENATION CONTRACT: every consumer that puts rules in front of
-/// [`rule_for`] MUST emit `default_rules()` FIRST and user-written rules
-/// SECOND. `rule_for`'s exact-tie rule (last rule wins) depends on this
-/// ordering: the Supervisor's "always allow this directory" action appends
-/// one `allow` rule AFTER these defaults so it beats a default `deny` on an
-/// exact path tie. Concatenate the other way round and the allow-directory
-/// action silently no-ops against the default deny — which is why
-/// [`rule_for`]'s tie-break is pinned in BOTH orders
-/// (`an_exact_tie_goes_to_the_last_rule_so_an_appended_allow_beats_a_default_deny`).
-/// There is no UI-ordering dependency: the only load-bearing order is
-/// defaults-then-user.
+/// The permissions spec's "Step 3 is the only behavioural change in this
+/// spec: today's hardcoded deny becomes an ask" is the sentence that decides
+/// it. Four `Deny` rules for the agent-definition dirs keep the deny a deny —
+/// the refusal stays SILENT, which is the exact defect the spec exists to
+/// close. Worse, deriving the write guard-membership set from this rule set
+/// (as the previous revision did) makes the guard set and the default-deny set
+/// the SAME paths under the SAME prefix predicate, so the spec's row 3
+/// ("NO rule matches AND the target is under an agent-definition dir") is
+/// `A AND NOT A` and is unreachable at every dir and every nesting depth.
 ///
-/// HONEST LIMIT: when the home dir cannot be resolved — `home_dir()` yields
-/// `None`, and then both `user_roots()` return an empty vec — this returns an
-/// EMPTY list, i.e. no rules at all. Under an empty rule set `rule_for`
-/// concludes "no match" and the caller falls through to the posture select
-/// (an ask under the guard), whereas today an empty `protected_dirs()` means
-/// "deny nothing". Recorded and accepted, deliberately NOT "fixed": a process
-/// with no home cannot write the four user dirs anyway — it has no home to
-/// write into. The CONSEQUENCE is pinned by
+/// So the four dirs are a GUARD-MEMBERSHIP set, not a rule set: they live on
+/// [`crate::agent::boundary::protected_dirs`], which is its own plain
+/// four-path list (never rule-derived, so a settings change can never silently
+/// widen the Landlock subtraction that consumes it). A write into one of them
+/// with no user rule matching is therefore the ROW-3 ASK — the guard prompt —
+/// which is the single behavioural change this spec ships.
+///
+/// The spec's three "pre-filled defaults" (`~` readWrite `allow`, `/` read
+/// `allow`, `~/.pi/agent` read `deny`) are NOT here either: the spec says they
+/// are "written only on first write", i.e. a Settings-side draft pre-fill, not
+/// a runtime code default — an existing install must never silently gain a
+/// restriction. The two `allow` rows are documented there as changing
+/// "nothing", since the executor floor is already `["/"]`.
+///
+/// # The concatenation contract still holds
+///
+/// Every consumer that puts rules in front of [`rule_for`] MUST emit
+/// `default_rules()` FIRST and user-written rules SECOND. `rule_for`'s
+/// exact-tie rule (last rule wins) depends on that ordering: the Supervisor's
+/// "always allow this directory" action appends one `allow` rule AFTER the
+/// defaults. With this function empty the contract is trivially satisfied
+/// today, and it stays load-bearing the moment any default is ever reintroduced
+/// (or a pre-filled rule is treated as a default) — which is why
+/// [`rule_for`]'s tie-break is pinned in BOTH orders by
+/// `an_exact_tie_goes_to_the_last_rule_so_an_appended_allow_beats_a_default_deny`,
+/// and why the per-turn concat in `AgentLoop::handle_prompt` keeps the
+/// defaults-first shape rather than `file_policy.rules` alone.
+///
+/// CONSEQUENCE, stated plainly: the old count pin (`default_rules().len() == 4`)
+/// is now `0`, and
 /// `an_empty_rule_set_matches_nothing_so_the_posture_select_decides` (in
-/// `boundary.rs`); the CAUSE cannot be pinned from a test process at all,
-/// because on unix `home_dir()` falls back to the passwd database and no
-/// environment manipulation an in-process test can perform makes it return
-/// `None` — the reason is recorded on that test rather than left as an
-/// `#[ignore]`d fixture that could never pass. So that any future change here
-/// is a visible decision rather than a silent fallback.
+/// `boundary.rs`) describes the DEFAULT posture rather than a no-home edge: at
+/// defaults `rule_for` answers `None` and the caller falls through — to the
+/// guard's row-3 ASK for a write under one of the four dirs, and to the
+/// posture select everywhere else.
 pub fn default_rules() -> Vec<AccessRule> {
-    let mut out: Vec<AccessRule> = Vec::new();
-    push_default(&mut out, crate::skills::user_roots());
-    push_default(&mut out, crate::agents::user_roots());
-    out
-}
-
-/// Shape one `user_roots` result into `Write`/`Deny` rules, dropping the
-/// scope tag (a rule is about a PATH, not about which scope discovered it) and
-/// preserving the feeder's order. Generic over the scope enum (`SkillScope` vs
-/// `AgentScope`) for exactly the reason `boundary::push_roots` is: the two
-/// feeders share the shape, not the tag.
-///
-/// The paths arrive ABSOLUTE (the feeders join `skills::home_dir()`), so no
-/// `~` expansion happens here — the `~` spelling in [`AccessRule::path`] is
-/// only ever a USER-written spelling, expanded at match time. A dir that does
-/// not exist yet is KEPT with whatever spelling the feeder produced: the
-/// leniency lives in the canonicalizer that CONSUMES these paths (both
-/// `rule_for` and `protected_dirs`), which is the half that has to be lenient
-/// for a not-yet-created dir to stay protected — see
-/// `a_rule_naming_a_directory_that_does_not_exist_yet_matches_leniently`.
-fn push_default<T>(out: &mut Vec<AccessRule>, roots: Vec<(PathBuf, T)>) {
-    for (path, _scope) in roots {
-        out.push(AccessRule {
-            path: path.to_string_lossy().into_owned(),
-            direction: RuleDirection::Write,
-            decision: RuleDecision::Deny,
-        });
-    }
+    Vec::new()
 }
 
 #[cfg(test)]
