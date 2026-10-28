@@ -1,23 +1,16 @@
-# Grounding report — Supervisor relay & settings persistence
+# Grounding report — Supervisor relay & settings persistence (T04 area, RE-GROUNDING)
 
-**Scope:** `src-tauri/src/agent/session/mod.rs`, `src-tauri/src/config.rs`, `src-tauri/src/storage/db.rs`, plus the Worker-side entry points the relay touches (`src-tauri/src/agent/worker/core.rs`, `src-tauri/src/agent/worker/manager/mod.rs`, `src-tauri/src/agent/harness/loop.rs`) and every `settings.json` writer in the crate.
+**Tree:** `feature/permissions-section` at `4395bed` (`docs: mark permissions-section wave 2 done; record barrel-pin breakage`). Waves 1–2 landed (T01 `AccessRule`/`FilePolicy.rules`/`default_rules`; T02 `Selected { option_id, value }` + per-prompt option lists + the `..` destructure in the relay; T06 the Settings Permissions section + `saveRule`/`removeRule`/`savePolicy`).
 
-**Spec context:** the relay persists an `allow-directory` rule to `settings.json` (Worker has no `Db`; the relay owns the write), and `PermissionOutcome::Selected` gains an optional `value`. Everything here is what EXISTS today. No recommendations, no proposed patch.
+**Scope:** `src-tauri/src/agent/session/mod.rs`, `src-tauri/src/config.rs`, `src-tauri/src/storage/db.rs`, plus every `settings.json` writer in the crate and the Worker-side entry points the relay touches. Everything quoted is what EXISTS at `4395bed`. No recommendations, no proposed patch.
 
 ---
 
-## 1. `respond_permission` — the relay's equality of arms, and the missing subagent half
+## 1. `respond_permission` NOW (session/mod.rs)
 
-### 1a. Signature (verbatim, `SessionManager::respond_permission`, in `session/mod.rs`)
+### 1a. Signature + docs (verbatim)
 
 ```rust
-    /// Deliver the user's answer to a pending permission request.
-    ///
-    /// Looks up the oneshot sender by the compound key
-    /// `"{session_id}/{request_id}"` and sends the outcome through it. If the
-    /// entry is gone (the session closed, or the prompt already resolved), this
-    /// is a silent no-op. Returns `true` when an entry was resolved (the caller
-    /// can then route a miss to the subagent manager).
     /// Deliver the user's answer to a pending permission request.
     ///
     /// The `pending_permissions` map lives in the WORKER now (the main-session
@@ -38,7 +31,7 @@
     ) -> Result<bool, SessionError> {
 ```
 
-Note the doc-comment body is duplicated (two stacked blocks, the first stale, citing the pre-ADR-0025 "the caller can then route a miss to the subagent manager" and pre-move "`pending_permissions` map lives in the WORKER now"). The code body:
+Body (verbatim, all of it):
 
 ```rust
         let wm = self.worker_manager.get().cloned().ok_or_else(|| {
@@ -63,7 +56,12 @@ Note the doc-comment body is duplicated (two stacked blocks, the first stale, ci
                 // `set_space_trusted` `Db` method). The Worker's `StaticTrustSource`
                 // flip (Task 2's `PermissionResponse` handler) is the live-lookup
                 // half; this is the persistence half.
-                if let permission::PermissionOutcome::Selected { option_id } = &outcome {
+                //
+                // The `..` here is the ONLY thing Task 2 (the outcome's `value`
+                // field) changed in this file: `value` is READ nowhere yet — the
+                // `allow-directory` rule write rides it, and the relay that
+                // persists that rule is Task 4's.
+                if let permission::PermissionOutcome::Selected { option_id, .. } = &outcome {
                     if option_id == "trust-space" {
                         if let (Some(db), Some(cwd)) = (&self.driver.db, cwd) {
                             let _ = db.set_space_trusted(&cwd.display().to_string(), true);
@@ -95,27 +93,620 @@ Note the doc-comment body is duplicated (two stacked blocks, the first stale, ci
     }
 ```
 
-**The exact `trust-space` persistence pattern the rule-write follows** (quoted immediately above, in `respond_permission`):
+### 1b. `..` comment and where an `allow-directory` branch goes
+
+The `..` in the `if let permission::PermissionOutcome::Selected { option_id, .. } = &outcome` is present, with the T02 comment (quoted in 1a): “`value` is READ nowhere yet — the `allow-directory` rule write rides it, and the relay that persists that rule is Task 4's.”
+
+The natural landing spot for a `value`-carrying `allow-directory` branch is the SAME `if let … Selected { option_id, .. }` block, immediately after the `if option_id == "trust-space"` arm — i.e. the current `trust-space` persistence arm is the exact template. Guards that branch would have:
+
+- **`self.driver.db`** — the trust-space arm touches it via `(&self.driver.db, cwd)`; `self.driver` is present (the `driver.db: Option<Arc<Db>>` field is the persistence half's handle). BUT the `settings.json` write path needs NO db — it needs `self.config_dir` (the same field the `cwd` lookup already uses; `config_dir: PathBuf` — `write_settings(&self.config_dir, …)` is already called inside `set_config_option`, see §4). **Caveat: `SessionManager` in `session/mod.rs` has `config_dir`; the Worker does not** — this is precisely why the relay (Supervisor-side) owns the write, per the ADR 0025 split.
+- **`cwd`** — the `Option<PathBuf>` local captured before the `handle_for` lookup: `cwd` is `Some` iff the session is in the `live` map (a started main session). It is moved into the `if let (Some(db), Some(cwd))` — a T04 `allow-directory` write that needs `cwd` must capture/borrow before this move or restructure the destructure. (For `allow-directory` the path to persist comes from `outcome.value`, NOT from `cwd`; `cwd` is only relevant if the rule's path should default to the session cwd when `value` is missing.)
+- **`wm.handle_for` guard** — already passed (the `else` returns `Ok(false)`); the persistence arms run only on the `Ok(())` send success, exactly like `trust-space`.
+
+### 1c. Subagent routing fact — RE-VERIFIED, still holds after T02
+
+No separate subagent branch exists in `respond_permission`. There is exactly ONE `handle_for` entry — the compound-key lookup — and children ride the same relay.
+
+`handle_for` — `src-tauri/src/agent/worker/manager/mod.rs` (verbatim, doc + body):
 
 ```rust
-                if let permission::PermissionOutcome::Selected { option_id } = &outcome {
-                    if option_id == "trust-space" {
-                        if let (Some(db), Some(cwd)) = (&self.driver.db, cwd) {
-                            let _ = db.set_space_trusted(&cwd.display().to_string(), true);
-                        }
-                    }
-                }
+    /// The session's `WorkerHandle` (a clone) — `None` when the session is not
+    /// attached (or was already reaped). The `SessionManager` uses this to relay
+    /// frames (prompt / config / abort / responses) to the session's Worker.
+    /// The `drives` fallback (ADR 0025 Task 5 — the `dispatch_native` re-plumb):
+    /// a SUBAGENT session's handle is in the `drives` map (the in-flight
+    /// dispatchs — the subagent's pending maps live in its Worker; the
+    /// `respond_*` commands route through this lookup — main AND subagent
+    /// sessions both resolve).
+    pub fn handle_for(&self, session_id: &str) -> Option<WorkerHandle> {
+        self.state.get_handle_for(session_id)
+    }
 ```
 
-Observed mechanics a planner needs:
+`get_handle_for` — `src-tauri/src/agent/worker/manager/registry.rs` (verbatim):
 
-- The `cwd` is read from `self.live` (a `LiveWorkerSession { cwd, … }` map — main-session bookkeeping only). `LiveWorkerSession` (in `session/mod.rs`) holds `cwd: PathBuf`, `close_kind`, `pending_turn`, `cancel_requested`, `pending_modal_ids`.
-- The persistence is guarded on `(&self.driver.db, cwd)` both being `Some`; the result of `db.set_space_trusted(...)` is `let _ =` (error swallowed). `self.driver` is the `SessionDriver { db: Option<Arc<Db>>, trust_db: Option<Arc<Db>> }` — `db` is transcript persistence + the `spaces` table (main only), `trust_db` is the trust lookup for main AND subagent.
-- **No code path in `respond_permission` resolves a subagent session's `cwd` from the child side.** `self.live` has an entry only for main sessions (the `start_native_session` / `resume_native_session` path inserts it; subagent `drives` live in the `WorkerManager`, keyed by child session id, and the child's cwd is recorded in the Supervisor's `TranscriptPersister` `cwd_map` via `set_cwd` — see §1c). The main branch's `trust-space` write therefore would be a no-op for a child (`self.live.get(child_id)` → `None`).
+```rust
+    pub(crate) fn get_handle_for(&self, session_id: &str) -> Option<WorkerHandle> {
+        {
+            let map = self.workers.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(e) = map.get(session_id) {
+                return Some(e.handle.clone());
+            }
+        }
+        self.drives
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(session_id)
+            .and_then(|d| d.handle.clone())
+    }
+```
 
-### 1b. The subagent branch — the `pending_*` maps
+- Main session → found in the `workers` map; subagent → falls through to the `drives` map. Both resolve through the SAME `respond_permission` body.
+- The manager-side proof (`src-tauri/src/agent/worker/manager/tests/mod.rs`, `an_answered_gates_card_is_not_closed_again_at_teardown`): the child's answer routes via `manager.handle_for(&child_id)` + `send_permission_response`, i.e. “the response routes to the CHILD's handle — `handle_for` resolves the `drives` map's entry”.
+- **Caveat for the T04 design**: the `cwd` local is looked up from `self.live` (MAIN sessions only — a child never has a `live` entry here). If the relay's `allow-directory` write needs the cwd, it is `None` on the child path; the path from `value` is the only child-safe input. Also `note_gate_answered(session_id, request_id)` runs for BOTH main and child (the child arm is the no-op for main); a T04 persistence branch inside this `Ok(())` arm inherits the same shape.
 
-The relay is a single command path. The **Tauri command** `respond_permission` (`commands/sessions.rs`, quoted verbatim in full):
+---
+
+## 2. `config.rs` NOW
+
+### 2a. `Settings` struct — verbatim (the whole struct, `src-tauri/src/config.rs:159`)
+
+```rust
+/// The persisted app settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Settings {
+    /// `"system" | "dark" | "light"` (default `"dark"`).
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// (ADR 0027) The color scheme: `"zai" | "dracula"`. `None` = `"zai"` (a
+    /// pre-feature file — `#[serde(default)]`, no migration). Orthogonal to
+    /// `theme` (the light/dark mode): we ship Dracula's dark variant only (a
+    /// scope decision), so `dracula` PINS the app dark and the mode is ignored
+    /// — the spec's light reading, Alucard Classic, is deferred, not impossible.
+    #[serde(default)]
+    pub palette: Option<String>,
+    /// Free-form pane layout state (owned by the frontend).
+    #[serde(default)]
+    pub pane_layout: Value,
+    /// Whether to trust new Spaces by default.
+    #[serde(default)]
+    pub default_trust_new_spaces: bool,
+    /// Whether the composer's `#` MCP-server mention is live (ADR 0031's
+    /// follow-up). `#[serde(default)]` = `false`, so a pre-feature
+    /// `settings.json` ships `#` OFF: `#` is the one mention prefix that
+    /// collides with pasted text (`#include`, `#123`, `#hashtag` all match
+    /// the token grammar), so it is opt-in while `$` and `@` are always on.
+    /// Gates the TRIGGER only — the display side still parses a persisted
+    /// `<mcp>` block, and the MCP catalog command stays available.
+    #[serde(default)]
+    pub mcp_mentions_enabled: bool,
+    /// (ADR 0030) The per-direction file-access policies. `#[serde(default)]`
+    /// — a pre-feature file parses to `FilePolicy::default()` (all `Allow`),
+    /// so no migration runs. NOTE: that default is WIDER than the pre-feature
+    /// hardcoded behavior — out of the box a session reads and writes anywhere
+    /// and runs `bash` with no prompt, including in an untrusted Space (this
+    /// makes ADR 0010's prompt opt-in). Intentional; see ADR 0030 Deviation 2.
+    #[serde(default)]
+    pub file_policy: FilePolicy,
+    /// The web tools' configuration (ADR-less; see `docs/roadmap/web-search-and-fetch.md`).
+    /// `#[serde(default)]` — a pre-feature file parses to `WebSettings::default()`
+    /// (all empty ⇒ only the keyless `duckduckgo` Search provider is available).
+    #[serde(default)]
+    pub web: WebSettings,
+    /// `"provider/id"`; `None` = system default.
+    #[serde(default)]
+    pub default_model: Option<String>,
+    /// The per-app thinking-level seed (the native session start's last
+    /// rung: remembered > stored > this > `None`); `None` = the model's
+    /// own default. `#[serde(default)]` — a pre-feature file parses to
+    /// `None` (no migration needed).
+    #[serde(default)]
+    pub default_thinking_level: Option<String>,
+    /// The harness-level tool filter: `[]` = all tools enabled (the native
+    /// `AgentLoop` maps an empty list to `None` = all). `#[serde(default)]`
+    /// — a pre-feature file parses to `[]` (no migration needed).
+    #[serde(default)]
+    pub enabled_tools: Vec<String>,
+    /// User-managed providers (default `[]`).
+    #[serde(default)]
+    pub providers: Vec<ProviderConfig>,
+    /// (ADR 0019) The user-managed MCP servers: `name → entry` in pi's
+    /// `mcpServers` entry shape VERBATIM (an entry copy-pastes between the
+    /// two files). Merged into the harness's effective set at global
+    /// precedence (project > desktop > pi-global). `#[serde(default)]` —
+    /// a pre-feature file parses to `{}` (no migration).
+    #[serde(default)]
+    pub mcp_servers: HashMap<String, Value>,
+    /// Font settings.
+    #[serde(default)]
+    pub font: FontSettings,
+    /// (ADR 0015) The per-model remembered thinking level: the composed
+    /// model key (`"<provider>/<id>"`) → the last EXPLICITLY chosen level.
+    /// `#[serde(default)]` — a pre-feature file parses to an empty map.
+    #[serde(default)]
+    pub default_thinking_levels: HashMap<String, String>,
+    /// (ADR 0023 — RETIRED by ADR 0066) The per-agent subagent model map:
+    /// agent name → model key. READ-ONLY from here on — `load_settings` folds
+    /// its values into [`Settings::agent_overrides`] and clears it, and
+    /// `skip_serializing` (UNCONDITIONAL, not `skip_serializing_if =
+    /// "HashMap::is_empty"`) is what makes the dead key disappear from the
+    /// file on the next save, permanently. ...
+    #[serde(default, skip_serializing)]
+    pub subagent_models: HashMap<String, String>,
+    /// (ADR 0066) Global Agent overrides keyed by agent NAME ...
+    #[serde(default)]
+    pub agent_overrides: HashMap<String, AgentOverrideFields>,
+    /// The working-indicator spinner style (the `braille-loader` variant name,
+    /// e.g. `"typing"` / `"pendulum"`): the animation the chat's top working
+    /// indicator runs while the agent is busy. `None` = the frontend's
+    /// `typing` default (a pre-feature file — `#[serde(default)]`, no
+    /// migration).
+    #[serde(default)]
+    pub spinner_style: Option<String>,
+    /// The **Transcript**'s empty-state animation: `"off"` / `"static"` /
+    /// `"animated"`. `None` = the frontend's `"animated"` default ...
+    #[serde(default)]
+    pub empty_state_animation: Option<String>,
+    /// Session naming (ported from pi-archimedes' `session-name`): the master
+    /// switch for the post-first-exchange title request. `#[serde(default =
+    /// "default_true")]` — pi ships naming ON ...
+    #[serde(default = "default_true")]
+    pub session_naming_enabled: bool,
+    /// The model used for title generation: the composed key
+    /// (`"provider/id"`, or a hand-edited `"provider/id:<level>"`). `None` /
+    /// blank = the session's own model (pi's `model` setting).
+    #[serde(default)]
+    pub session_naming_model: Option<String>,
+    /// The thinking level for the title request. ...
+    #[serde(default)]
+    pub session_naming_reasoning: Option<String>,
+    /// Attention alerts (ADR 0038/0039): ...
+    #[serde(default = "default_true")]
+    pub attention_alerts_enabled: bool,
+    /// The delay between an attention trigger and the alert, in SECONDS. ...
+    #[serde(default = "default_attention_delay_secs")]
+    pub attention_alert_delay_secs: u64,
+    /// The ADR 0055 **Dead bound**: SECONDS a **Subagent session** may stay
+    /// silent with no tool execution outstanding before it is reaped as Dead. ...
+    #[serde(default = "default_subagent_dead_bound_secs")]
+    pub subagent_dead_bound_secs: u64,
+}
+```
+
+(`Settings::default()` — verbatim: `theme: "dark"`, `palette: None`, `pane_layout: Value::Object(Default::default())`, `default_trust_new_spaces: false`, `mcp_mentions_enabled: false`, `file_policy: FilePolicy::default()`, `web: WebSettings::default()`, `default_model: None`, `default_thinking_level: None`, `enabled_tools: Vec::new()`, `providers: Vec::new()`, `mcp_servers: HashMap::new()`, `font: FontSettings::default()`, `default_thinking_levels: HashMap::new()`, `subagent_models: HashMap::new()`, `agent_overrides: HashMap::new()`, `spinner_style: None`, `empty_state_animation: None`, `session_naming_enabled: true`, `session_naming_model: None`, `session_naming_reasoning: None`, `attention_alerts_enabled: true`, `attention_alert_delay_secs: default_attention_delay_secs()`, `subagent_dead_bound_secs: default_subagent_dead_bound_secs()`.)
+
+### 2b. `FilePolicy` (T01 declaration, `src-tauri/src/agent/policy.rs:79` — verbatim)
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FilePolicy {
+    pub reads: AccessPolicy,
+    pub writes: AccessPolicy,
+    /// `bash`. Defaults to `Allow` like the others — so this field alone
+    /// removes the ADR 0010 untrusted-Space prompt for `bash` unless the
+    /// user sets it back to `Ask`. That is the intended product posture
+    /// (pi gates nothing), not a bug to "fix" back to `Ask`.
+    pub shell: AccessPolicy,
+    /// User rules (`path` may lead with `~`). Serde-defaulted: an old
+    /// `settings.json` without the key still parses; an EMPTY list is not
+    /// serialized, so the three-direction wire shape is byte-identical to
+    /// today (keeps `file_policy_serializes_its_three_directions_in_camel_case`
+    /// and the config.rs `contains` pins passing unchanged).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<AccessRule>,
+}
+```
+
+`AccessRule` (policy.rs:66, verbatim):
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessRule {
+    pub path: String,
+    pub direction: RuleDirection,
+    pub decision: RuleDecision,
+}
+```
+
+`RuleDirection` (policy.rs:33): `Read`, `Write`, `ReadWrite` — `#[serde(rename_all = "lowercase")]` (`covers` helper: `matches!(self, RuleDirection::ReadWrite) || self == direction`). `RuleDecision` (policy.rs:56): `Allow`, `Deny` — lowercase wire.
+
+### 2c. `write_settings` — verbatim (`config.rs:486`)
+
+```rust
+/// Persist the settings (overwrites the file). In-process writers (the
+/// `set_config_option` memory writes — ADR 0015) call this directly; the
+/// command delegates to it.
+pub fn write_settings(config_dir: &Path, settings: &Settings) -> Result<(), String> {
+    let path = settings_path(config_dir);
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
+}
+```
+
+`settings_path`: `config_dir.join("settings.json")`.
+
+### 2d. The four `FilePolicy` literals T01 touched — CURRENT bodies
+
+All carry `rules: Vec::new()`:
+
+1. `file_policy_defaults_to_allow_in_every_direction` (`config.rs:965`):
+```rust
+        let all_allow = FilePolicy {
+            reads: AccessPolicy::Allow,
+            writes: AccessPolicy::Allow,
+            shell: AccessPolicy::Allow,
+            rules: Vec::new(),
+        };
+```
+2. `file_policy_serializes_under_the_camel_case_file_policy_key` (`config.rs:997`):
+```rust
+            file_policy: FilePolicy {
+                reads: AccessPolicy::Sandboxed,
+                writes: AccessPolicy::Ask,
+                shell: AccessPolicy::Allow,
+                rules: Vec::new(),
+            },
+```
+The pin's assertion now: `json.contains(r#""filePolicy":{"reads":"sandboxed","writes":"ask","shell":"allow"}"#)` — i.e. it still pins the EMPTY-rules wire shape (an empty `rules` list is `skip_serializing_if`'d away, so this exact substring holds).
+3. `settings_round_trip_with_the_new_fields` (`config.rs:1409`): same `Sandboxed/Ask/Allow, rules: Vec::new()` literal.
+4. `file_policy_round_trips_through_the_settings_file` (`config.rs:1475`):
+```rust
+            file_policy: FilePolicy {
+                reads: AccessPolicy::Sandboxed,
+                writes: AccessPolicy::Ask,
+                shell: AccessPolicy::Allow,
+                rules: Vec::new(),
+            },
+```
+round-trip through a REAL file via `write_settings(dir.path(), &settings)` → `load_settings(dir.path())`.
+
+Also: `agent/tools/exec/tests/policy.rs` (`:141`, `:208`, `:277`, `:471`, `:546`), `agent/tools/sandbox.rs` (`:897`, `:1547`, `:1720`, `:1756`) build `FilePolicy { …, rules: Vec::new() }` literals. And `agent/tools/exec/tests/policy.rs` has a `file_policy: FilePolicy {` at 141 etc.
+
+### 2e. The pre-feature parse pin's CURRENT body — does it need a `rules`-absent leg now?
+
+`a_pre_feature_settings_json_parses_to_the_new_defaults` (`config.rs:686`) — CURRENT body (verbatim):
+
+```rust
+    #[test]
+    fn a_pre_feature_settings_json_parses_to_the_new_defaults() {
+        // A file written before the extended fields existed must parse (all
+        // new fields `#[serde(default)]`) rather than be treated as corrupt.
+        let settings: Settings =
+            serde_json::from_str(r#"{ "theme": "dark", "paneLayout": {} }"#).unwrap();
+        assert_eq!(settings.default_thinking_level, None);
+        assert!(settings.enabled_tools.is_empty());
+        assert!(!settings.default_trust_new_spaces);
+        assert_eq!(settings.default_model, None);
+        assert!(settings.providers.is_empty());
+        assert!(settings.mcp_servers.is_empty());
+        assert_eq!(settings.font, FontSettings::default());
+        assert!(settings.subagent_models.is_empty());
+        assert_eq!(settings.spinner_style, None);
+        assert_eq!(settings.palette, None);
+        // (ADR 0031 follow-up) `#` ships OFF: ...
+        assert!(!settings.mcp_mentions_enabled);
+        // Session naming is the opposite case: it ships ON, ...
+        assert!(settings.session_naming_enabled);
+        assert_eq!(settings.session_naming_model, None);
+        assert_eq!(settings.session_naming_reasoning, None);
+    }
+```
+
+**It has NO `rules` assertion today** — it does not check `file_policy` at all beyond the odometer of defaults already pinned. The `rules`-absent-leg coverage lives SEPARATELY in `agent/policy.rs` (see §6): `file_policy_without_a_rules_key_parses_with_rules_empty` (partial object AND `{}` → `rules` empty) and `an_empty_rules_list_stays_out_of_the_wire_format` (empty list serializes to the exact 3-direction bytes `{"reads":"allow","writes":"allow","shell":"allow"}`).
+
+**So: no, the pre-feature pin does not strictly NEED a new `rules`-absent leg** — the serde `#[serde(default)]` on `FilePolicy` + the field-level `#[serde(default, skip_serializing_if = "Vec::is_empty")]` already cover the absent-key file through load (and the policy.rs back-compat pins hold that explicitly). It is exactly the same story as every other `#[serde(default)]` field in this file: `{ "theme": "dark", "paneLayout": {} }` parses, `file_policy` absent → `FilePolicy::default()` → `rules` empty. (Whether T04 WANTS to extend the pin to name `rules` is a plan decision, not a correctness gap.)
+
+### 2f. What `load_settings` does when the file lacks `rules`
+
+It parses to `FilePolicy::default()`'s `rules: []` — the container-level `#[serde(rename_all = "camelCase", default)]` on `FilePolicy` fills `reads`/`writes`/`shell` (to `Allow`) and the field-level default fills `rules` (`Vec::new()`). Root cause path: `load_settings` — **missing file → writes defaults + returns them; unreadable/corrupt → `Settings::default()` + `eprintln!`; parseable → `serde_json::from_str::<Settings>(&raw)`** (verbatim). A file carrying `"filePolicy": {}` also parses to the same default (pinned in `file_policy_defaults_to_allow_in_every_direction`: `empty_object`/`partial` legs). So a settings.json WITHOUT `rules` loads fine and a subsequent whole-document save keeps `rules` absent (the `skip_serializing_if`), unless something appends a rule first.
+
+---
+
+## 3. The read-modify-write hazard — precisely, and every `settings.json` writer after waves 1–2
+
+### The hazard, stated narrowly
+
+The relay (T04) must append ONE `allow-directory` rule to `settings.json`. The current write path is `write_settings(config_dir, &Settings)` — a whole-document `fs::write` that OVERWRITES the file, with NO re-read inside it and NO serialization:
+
+- `fs::write` is non-atomic (truncate + write; no temp-file+rename — verified: `grep` for `fs::rename`/`fs::copy`/`atomic`/`tempfile` in `config.rs` has ZERO hits in production code).
+- There is NO lock around settings I/O anywhere: no mutex in `config.rs`; `SessionManager` holds many `StdMutex`/`tokio::sync::Mutex` fields but NONE protects `settings.json` (see the field list in §1; `config_state`, `discovery_cache`, `naming`, `live` are for other state).
+- The frontend's whole-document `save_settings` writes the file from whatever document the webview holds — a document loaded BEFORE the relay's append, or composed from a stale store, silently clobbers the appended rule on the next Settings-page save.
+
+The ONLY existing guard against this class is a FRONTEND one, and it deliberately does NOT cover the relay: `useAgentOverridesWrites` (`src/hooks/useAgentOverridesWrites.ts`) serializes its own writes with a promise queue + does a fresh `getSettings()` re-read before each `saveSettings` — but that guard exists for the Agents-modal/`agentOverrides` writer only, and its own doc-comment (quoted below) STATES that every Rust writer does load-mutate-write and that the desktop as a whole has no shared lock:
+
+> “A READ-MODIFY-WRITE, never composed from the store. The re-read is load-bearing, not paranoia: the store's copy is seeded at boot and by the Settings page, but the Rust side writes `settings.json` on its own — `agent/session/mod.rs:1678` persists a remembered thinking level through `load_settings` + mutate + `write_settings` — so a modal opened at an arbitrary moment can be holding a stale document, and composing from the store would silently clobber a concurrent change. EVERY Rust writer does load-mutate-write; this has to match or the desktop becomes the one writer that can lose someone else's field.”
+
+So the ANSWER to “what exists to serialize these?” is: **nothing backend-wide; the frontend serializes only its own Agents-modal queue (and `useSettingsDocument.patch` explicitly does NOT — “orders concurrent writes: not at all”, per the hook's contract table).** A relay append therefore follows the established de-facto protocol — read-modify-write with a fresh `load_settings` — and still races a Settings-page whole-document save that was composed from stale state.
+
+### Every current writer of `settings.json` (after waves 1–2; six Rust sites + two frontend paths)
+
+**Rust (production code):**
+1. `config.rs::write_settings` — the single serialization point: `fs::write(path, to_string_pretty(settings))`.
+2. `config.rs::load_settings` — writes the DEFAULTS on a MISSING file (`fs::write(&path, json)`; logged failure, returns defaults). This is a `settings.json` **creator**, not a rewriter.
+3. `commands/settings.rs::save_settings` — verbatim:
+```rust
+#[tauri::command]
+pub async fn save_settings(
+    state: State<'_, Arc<SessionManager>>,
+    settings: Settings,
+) -> Result<(), SettingsError> {
+    write_settings(state.config_dir(), &settings).map_err(SettingsError::SaveFailed)
+}
+```
+4. `agent/session/mod.rs::set_config_option` — the remembered-thinking-level write (verbatim):
+```rust
+                // (ADR 0015) Remember the level for the session's CURRENT model
+                // (best-effort: a write failure is logged and does NOT fail the config
+                // change — the level is applied in the loop either way; ...
+                let key = ModelKey::from(&state.model).to_string();
+                let mut settings = load_settings(&self.config_dir);
+                settings
+                    .default_thinking_levels
+                    .insert(key, value.to_string());
+                if let Err(e) = write_settings(&self.config_dir, &settings) {
+                    eprintln!("remembered thinking level: save failed: {e}");
+                }
+```
+5. `agent/web/config.rs` — 8 test-only `write_settings` calls.
+6. Test fixtures: `session/mod.rs` (`write_settings_json`, `write_settings_default_model`, `write_settings_provider_api`), `harness/launch.rs:1278`, `commands/agents.rs:927`, `loop/tests/policy_gate.rs` — all `std::fs::write(config_dir.join("settings.json"), …)` in TESTS, not production writers.
+
+(Hand-written `settings.json` is also an implicit writer for the whole class — “hand-editing `settings.json`” is quoted in `commands/agents.rs:53`.)
+
+**Frontend (T06's new paths — all funnel through `save_settings` → writer #3):**
+- `src/components/settings/SettingsPage.tsx::saveRule` (verbatim):
+```ts
+  const saveRule = (rule: AccessRule, replaces?: AccessRule) => {
+    if (settings === null) return;
+    const rules = settings.filePolicy?.rules ?? [];
+    const index = replaces === undefined ? -1 : rules.indexOf(replaces);
+    update({
+      filePolicy: {
+        ...settings.filePolicy,
+        rules:
+          index === -1
+            ? [...rules, rule]
+            : rules.map((r, i) => (i === index ? rule : r)),
+      },
+    });
+    setRulesDialog(null);
+  };
+```
+- `removeRule` (verbatim):
+```ts
+  const removeRule = (rule: AccessRule) => {
+    if (settings === null) return;
+    const rules = settings.filePolicy?.rules ?? [];
+    update({
+      filePolicy: {
+        ...settings.filePolicy,
+        rules: rules.filter((r) => r !== rule),
+      },
+    });
+  };
+```
+- `PermissionsSection.tsx::savePolicy` — passes `(value) => savePolicy("reads", value)` etc. through the same `update` whole-document path.
+- `update` is `useSettingsDocument`'s `patch` (`src/hooks/useSettingsDocument.ts`, verbatim tail):
+```ts
+      const next = { ...settings, ...changes };
+      useSettings.getState().setSettings(next);
+      void saveSettings(next); // the complete document
+```
+Its doc-comment (quoted in the hook): “composes from the store, writes the whole document, never re-reads, and has no rollback.” The `saveRule` comment itself names the hazard: “Composes over the RENDERED `settings`, not a ref — the two-write interleave pin in `SettingsPage.test.tsx` makes that window observable.”
+
+So a relay append races: the Settings page (whole-document via `save_settings`), the remembered-thinking-level write (`session/mod.rs:1744`), and any other frontend-originated whole-document save. **Nothing serializes them.**
+
+---
+
+## 4. What `value` contains at the wire — the dependency chain gate → option.path → UI echo → relay → rule
+
+### Today's truth: the gate EMITS A `""` PLACEHOLDER, not a real path
+
+`permission_options` (`src-tauri/src/agent/permission.rs:146`) — verbatim, the whole function:
+
+```rust
+pub(crate) fn permission_options(boundary: bool) -> Vec<serde_json::Value> {
+    if boundary {
+        vec![
+            json!({ "optionId": "allow", "name": "Allow", "kind": "allow" }),
+            json!({ "optionId": "reject", "name": "Block", "kind": "reject" }),
+            json!({
+                "optionId": "trust-space",
+                "name": "Don't ask again for this Space",
+                "kind": "allow"
+            }),
+        ]
+    } else {
+        vec![
+            json!({ "optionId": "allow", "name": "Allow once", "kind": "allow" }),
+            // THE guard's distinctive option: `allow-directory` carries the
+            // resolved path as `path` (echoed back by the frontend as the
+            // outcome's `value`). `""` is a PLACEHOLDER — the real
+            // nearest-existing-ancestor path is computed at the guard's call
+            // site (Task 3), whose prompt signature carries the target path
+            // that `native_permission_gate`'s does not.
+            //
+            // `trust-space` is DELIBERATELY ABSENT here. ...
+            json!({
+                "optionId": "allow-directory",
+                "name": "Always allow this directory",
+                "path": "",
+                "kind": "allow"
+            }),
+            json!({ "optionId": "reject", "name": "Block", "kind": "reject" }),
+        ]
+    }
+}
+```
+
+**`permission_options(false)` emits `"path": ""` — a placeholder — today.** The comment names the substitution point: “the real nearest-existing-ancestor path is computed at the guard's call site (Task 3), whose prompt signature carries the target path that `native_permission_gate`'s does not.”
+
+### Who calls it today
+
+- `permission_options(true)` — called by `native_permission_gate` (`permission.rs:254`) and `gate_tool`'s seam (`permission.rs:675`). The boundary gate.
+- `permission_options(false)` — **NO caller anywhere in `src-tauri/src` outside `permission.rs` itself** (grep for `permission_options(false)` across the crate: zero hits outside the unit tests `a_guard_prompt_offers_exactly_allow_allow_directory_reject_and_no_trust_space` at `permission.rs`). T03 is the guard's caller that will call it for real.
+
+The test that pins the present shape (`permission.rs:697`, verbatim salient):
+```rust
+        assert!(
+            options[1].get("path").is_some(),
+            "`allow-directory` carries the `path` key (the placeholder the \
+             guard's call site replaces with the resolved ancestor — Task 3)"
+        );
+```
+and `a_boundary_prompt_emits_the_old_three_options_with_trust_space` asserts the boundary list carries NO `path` key at all: `assert!(options.iter().all(|o| o.get("path").is_none()));`.
+
+### The UI echo (T02's frontend half) — verbatim
+
+`src/components/PermissionPrompt.tsx` (the `respond` builder inside the option buttons):
+```tsx
+            onClick={() =>
+              respond({
+                selected: {
+                  option_id: option.optionId,
+                  // The guard's `allow-directory` option carries `path`; echo it
+                  // back as `value`. An option WITHOUT one emits the OLD payload
+                  // shape (no `value` key at all) so boundary prompts stay
+                  // byte-identical on the wire.
+                  ...(option.path !== undefined ? { value: option.path } : {}),
+                },
+              })
+            }
+```
+Frontend test pin (`PermissionPrompt.test.tsx:104,146-153`): the guard payload echoes the path back as `value` — e.g. `selected: { option_id: "allow-directory", value: "~/.pi/agent" }`.
+
+### The wire model (`PermissionOutcome`, permission.rs:53 — verbatim)
+
+```rust
+#[serde(rename_all = "snake_case")]
+pub enum PermissionOutcome {
+    Selected {
+        option_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+    },
+    Cancelled,
+}
+```
+Doc: “`value` is the option's payload (`path` for `allow-directory`)… `None` omits the key on the wire — byte-identical to today's `{"selected":{…}}`”. Round-trip pin: `before_value_selected_still_deserializes` (old shape → `value: None`), `a_selected_without_value_serializes_without_the_key`, and the new shape round-trips with a `value`. The worker-protocol crate-wide pin (`worker/protocol.rs:557-565`) already carries a real `allow-directory` value through the wire: `value: Some("/home/u/.pi/agent/agents".to_string())` in the inbound round-trip fixture.
+
+The Worker's `PermissionResponse` handler echoes the outcome VERBATIM to the gate's oneshot (`core.rs:617-628`): no path transformation — `tx.send(outcome.clone())`. `commands/sessions.rs::respond_permission` passes `outcome` untouched (see §7). So the relay's `value` is EXACTLY what the UI echoed, which is EXACTLY the option's `path` field.
+
+### THE DEPENDENCY CHAIN (precise, for T04)
+
+1. T03 (NOT landed) computes the nearest-existing-ancestor path at the guard call site and replaces the `""` placeholder in the emitted option's `path`.
+2. `PermissionPrompt` echoes `option.path` back as `selected.value` (or omits `value` when `path === undefined`).
+3. `respond_permission` receives `PermissionOutcome::Selected { option_id: "allow-directory", value: Some(<echoed path>) }`.
+4. T04's relay persists ONE rule from `value`.
+
+**THE GAP:** until T03 lands, step 1 produces `""` — so today a user clicking “Always allow this directory” would echo `""` as `value`, and a T04 persistence of that would write `AccessRule { path: "", … }` — garbage (an empty-string rule matches nothing via `rule_for`, but it still pollutes the file and the Settings list). T04 must either (a) refuse to persist when `value` is `None`/empty/blank, or (b) depend explicitly on T03 having landed first. The `permission_options(false)` doc already assigns the path computation to T03; nothing in the current tree computes a real path. **Pinning this in a T04 test requires a synthetic `PermissionOutcome` with a `Some(path)` (the relay cannot currently be driven end-to-end with a real path, because no caller emits `permission_options(false)` yet).**
+
+Also note: the guard's `path` and the default-rule paths are SPELLING-sensitive for the rule's match semantics — `rule_for` canonicalizes leniently at match time and ties go last-wins (`default_rules()` first, user rules appended; §6d). A relay rule with a `~`-leading path is expanded only at match time (policy.rs:66 doc: “Stored as the user wrote it — a leading `~` is expanded to the home dir at MATCH time”).
+
+---
+
+## 5. `db.rs` — the persistence model
+
+`set_space_trusted` (`src-tauri/src/storage/db.rs:1027`) — verbatim (doc + body):
+
+```rust
+    /// Set (or clear) a space's trust flag, keyed by the canonical path
+    /// (raw fallback on canonicalize failure, as in `upsert_space`).
+    ///
+    /// Returns `true` when a row matched, `false` when nothing matched (a
+    /// missing row is a no-op, not an error — but a diagnosable one, not a
+    /// silent one).
+    pub fn set_space_trusted(&self, path: &str, trusted: bool) -> Result<bool, DbError> {
+        let key = space_key(path).unwrap_or_else(|| path.to_string());
+        let n = self.conn.lock().expect("db mutex poisoned").execute(
+            "UPDATE spaces SET trusted = ?2 WHERE path = ?1",
+            params![key, trusted],
+        )?;
+        Ok(n > 0)
+    }
+```
+
+Context: `space_key` canonicalizes (falls back to the raw string); the `spaces` table lives in the same `Db` (SQLite, `conn: Mutex<...>` per operation). The other trust-side methods: `upsert_space(path, default_trusted)` (INSERT … `ON CONFLICT(path) DO UPDATE SET last_opened_at = excluded.last_opened_at` — the conflict branch never touches `trusted`; used by the Supervisor at session start/resume with `load_settings(&self.config_dir).default_trust_new_spaces`), `space_trusted(cwd)` (SELECT `trusted`, `unwrap_or(false)` fail-closed), `list_spaces`.
+
+The `trust-space` relay arm calls it exactly like the permission.rs tests do: `db.set_space_trusted(&cwd.display().to_string(), true)`.
+
+**Rules-adjacent: nothing.** `grep -i rules` over `storage/db.rs` → zero hits. `AccessRule` / `FilePolicy` / `rule_for` exist only in `agent/policy.rs` + `agent/boundary.rs` (which derives `protected_dirs` from `default_rules()` at boundary.rs:180). Rules are NOT persisted in SQLite anywhere — settings.json is their store (via `FilePolicy.rules`), and the T04 persistence model therefore is `config.write_settings`, NOT a `Db` method. (`Db` has no settings access; the Supervisor reaches it via `self.driver.db`.)
+
+---
+
+## 6. Test inventory
+
+### 6a. `config.rs` inline tests relevant to rules / round-trip (after T01)
+
+- `file_policy_defaults_to_allow_in_every_direction` — default (all `Allow` + `rules: Vec::new()`), pre-feature and empty-object and partial parses.
+- `file_policy_serializes_under_the_camel_case_file_policy_key` — the exact `"filePolicy":{"reads":"sandboxed","writes":"ask","shell":"allow"}` substring pin (empty rules omitted).
+- `settings_round_trip_with_the_new_fields` — serialized DOCUMENT key set includes `"filePolicy"`; round-trips back.
+- `file_policy_round_trips_through_the_settings_file` — `write_settings` → `load_settings` on a REAL temp dir, non-default policy.
+- The pre-feature pins (`a_pre_feature_settings_json_parses_to_the_new_defaults`, `attention_alert_defaults_survive_a_pre_feature_file`, `subagent_dead_bound_secs_defaults_to_1800`) — none assert `rules` directly (see §2e).
+
+### 6b. Rule-level tests (T01, in `agent/policy.rs`, NOT config.rs)
+
+- `file_policy_without_a_rules_key_parses_with_rules_empty` — the back-compat half.
+- `an_empty_rules_list_stays_out_of_the_wire_format` — exact bytes `{"reads":"allow","writes":"allow","shell":"allow"}`.
+- `a_populated_rules_list_serializes_inside_the_file_policy_object` — wire sample `{"reads":"allow","writes":"allow","shell":"allow","rules":[{"path":"~/.pi/agent","direction":"read","decision":"deny"}]}`.
+- `rule_for` suite + THE T04-relevant pin `an_exact_tie_goes_to_the_last_rule_so_an_appended_allow_beats_a_default_deny` (defaults-first/append contract, pinned in BOTH orders) + `a_rule_naming_a_directory_that_does_not_exist_yet_matches_leniently` + `an_empty_rule_set_matches_nothing_so_the_posture_select_decides` (in boundary.rs).
+
+### 6c. Worker-side `permission_response_*` tests T02 touched (`agent/worker/core.rs`)
+
+- `permission_response_resolves_the_pending_oneshot` — `Selected { option_id: "allow", value: None }` resolves the oneshot with the outcome VERBATIM and removes the map entry (fixtures: `stub_core()`, `test_env(StartMode::Fresh, None, None)`, seeded `pending_permissions` at `permission_key("s1","r1")`).
+- `permission_response_trust_space_flips_the_trust_source` — `Selected { option_id: "trust-space", value: None }` → `core.trust_source().is_trusted(Path::new("/x"))` flips true. **THE closest existing trust-space test shape** (it drives the Worker-side flip half; the Supervisor-side `db` half is what the relay adds).
+- `before_value_permission_response_still_decodes` (`worker/protocol.rs:650`) — old `{"selected":{"option_id":"allow"}}` decodes to `value: None`.
+- The crate-wide inbound pin in `worker/protocol.rs` now carries `allow-directory` with `value: Some("/home/u/.pi/agent/agents")` (the NEW shape rides the round-trip fixture).
+- `config_trusted_flips_the_trust_source` (`core.rs:1340`) — the `Config { trusted }` flip path (the Spaces-UI twin).
+
+### 6d. Where a relay-persists-one-rule test would live + fixtures
+
+**The natural host is `session/mod.rs`'s `session_tests`** — the tests for `SessionManager::respond_permission` already run there; the module has every needed fixture (`mod session_tests` at `session/mod.rs:2205`):
+
+- `temp_config_dir() -> ScratchDir` — `ScratchDir::in_env_temp("session-cfg-", "cfg")` (the settings.json home; dropped on test end).
+- `open_db(dir) -> Arc<Db>` — `Db::open(&dir.join("archimedes.db"))`.
+- `build_worker_manager(dir, catalog, sink) -> (Arc<SessionManager>, Arc<WorkerManager>, Arc<Db>)` — verbatim:
+```rust
+    fn build_worker_manager(
+        dir: &Path,
+        catalog: ModelCatalog,
+        sink: &Arc<dyn EventSink>,
+    ) -> (Arc<SessionManager>, Arc<WorkerManager>, Arc<Db>) {
+        let db = open_db(dir);
+        let mut manager = SessionManager::new(dir.to_path_buf());
+        manager.attach_db(db.clone());
+        manager.set_catalog(catalog);
+        manager.set_sink(sink.clone());
+        let manager = Arc::new(manager);
+        let wm = {
+            let m = manager.clone();
+            let m2 = manager.clone();
+            Arc::new(WorkerManager::new(
+                Arc::new(FixtureFactory),
+                Arc::new(move |s, c, p| m.handle_crash(&s, c, p)),
+                Arc::new(move |s, b, e| m2.route_event(&s, b, e)),
+                Arc::new(|_s| None),
+            ))
+        };
+        manager.attach_worker_manager(wm.clone());
+        (manager, wm, db)
+    }
+```
+- `start_native_session(dir, sink)` / `start_native_session_with_catalog(dir, sink, catalog)` — real `SessionManager::start_session(dir, sink)` with the `FixtureFactory` WorkerManager (the `FixtureFactory` spawns a fake Worker — a REAL `respond_permission` round-trip through the manager is possible), `TestSink` (recording `EventSink` over an `mpsc::UnboundedSender<Value>`), `native_test_catalog()`, `write_settings_json(dir, serde_json::Value)` (test fixture writer).
+
+**The closest EXISTING trust-space test is NOT in `session_tests`** — it is the worker-side `permission_response_trust_space_flips_the_trust_source` (6c). There is NO current test anywhere that drives `SessionManager::respond_permission` with a `trust-space` outcome and asserts the `db` write (the relay arm added in T01 has no test in the current tree — verification: grep shows no `set_space_trusted` use in any test beside `permission.rs:491` gate tests, `db.rs` tests, `trust.rs` tests, and `policy_gate.rs:783`). A T04 relay test would therefore be NEW, and its fixture shape is `build_worker_manager(temp_config_dir(), …)` → `start_native_session` → seed a `permission-request` (or call `respond_permission` directly with a synthetic outcome, since the gate itself is not required) → assert `load_settings(dir).file_policy.rules` contains exactly one `AccessRule`. (For the write the relay needs `self.config_dir` — which `SessionManager::new(dir.to_path_buf())` sets from the same `dir`.) A `handle_for` miss (no live session) yields `Ok(false)` and NO write — the `cwd: None` + `Ok(false)` arms are the obvious no-write pins.
+
+**Where it must NOT go:** `agent/permission.rs` tests (no `SessionManager`), `worker/core.rs` tests (no `config_dir`, no `Db` — that's the ADR 0025 point), `commands/sessions.rs` tests (thin IPC wrapper).
+
+---
+
+## 7. `commands/sessions.rs::respond_permission` — value flows through untouched
+
+Verbatim:
 
 ```rust
 #[tauri::command]
@@ -140,839 +731,61 @@ pub async fn respond_permission(
 }
 ```
 
-Its doc:
-
-```rust
-/// The ADR 0025 Task 5 re-plumb: a SINGLE `state` (the `SessionManager`
-/// routes through the `WorkerManager`'s `handle_for` — a MAIN session's
-/// handle is in the `workers` map, a SUBAGENT session's handle in the
-/// `drives` map — the `SubagentSessionManager`'s `respond_*` methods are
-/// deleted: the child's pending maps live in its Worker).
-```
-
-**There is no second "subagent branch" inside `SessionManager::respond_permission`.** The routing that reaches a subagent Worker is the `WorkerManager::handle_for` → `ManagerState::get_handle_for` fallback (`worker/manager/registry.rs`, quoted verbatim):
-
-```rust
-    pub(crate) fn get_handle_for(&self, session_id: &str) -> Option<WorkerHandle> {
-        {
-            let map = self.workers.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(e) = map.get(session_id) {
-                return Some(e.handle.clone());
-            }
-        }
-        self.drives
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(session_id)
-            .and_then(|d| d.handle.clone())
-    }
-```
-
-`ManagerState` fields (quoted from `worker/manager/registry.rs`):
-
-```rust
-pub(crate) struct ManagerState {
-    /// session_id → the live Worker (the `attach`-time `StartEnv` —
-    /// the `dispatch_subagent` reads the parent's effective `catalog`
-    /// / `config_dir` / `trusted` from it — the Supervisor owns them).
-    pub(crate) workers: StdMutex<HashMap<String, WorkerEntry>>,
-    ...
-    /// The in-flight subagent dispatchs (session_id → the drive — ...)
-    pub(crate) drives: StdMutex<HashMap<String, SubagentDrive>>,
-```
-
-`WorkerManager::handle_for`'s doc names the maps explicitly:
-
-```rust
-    /// The `drives` fallback (ADR 0025 Task 5 — the `dispatch_native` re-plumb):
-    /// a SUBAGENT session's handle is in the `drives` map (the in-flight
-    /// dispatchs — the subagent's pending maps live in its Worker; the
-    /// `respond_*` commands route through this lookup — main AND subagent
-    /// sessions both resolve).
-    pub fn handle_for(&self, session_id: &str) -> Option<WorkerHandle> {
-        self.state.get_handle_for(session_id)
-    }
-```
-
-The **child's pending maps are per-Worker**, not per-manager: `WorkerCore` (in `agent/worker/core.rs`) owns
-
-```rust
-    pub(crate) pending_permissions: PendingPermissions,
-    pub(crate) pending_bridge: PendingInteractive,
-    pub(crate) pending_sudo: PendingSudo,
-```
-
-created at spawn and shared into the loop. So **a subagent's `respond_permission` resolves through the SAME `SessionManager::respond_permission` body as a main session's** — there is no separate subagent persist branch to mirror; the only difference is (i) which map `handle_for` finds the handle in, and (ii) the cwd lookup above misses for subagents. The `respond_interactive_request` relay (`session/mod.rs`) is structurally identical (same `handle_for` lookup, same `pending_modal_ids` removal, same `note_gate_answered`); its spec-relevant piece is the `note_gate_answered` doc:
-
-```rust
-    /// The TRUE answer moment for a **gate** (ADR 0055 review): the Supervisor's
-    /// `respond_permission` / `respond_interactive_request` relay the user's
-    /// answer to the session's Worker, and this clears the child's record of it
-    /// so teardown stops re-emitting a close for a card the user already
-    /// answered. The `session_id` is the CHILD id for a child gate (the gate
-    /// payload is stored child-keyed and the Client answers with that same
-    /// `sessionId`).
-```
-
-The `WorkerCore::Inbound::PermissionResponse` handler (the Worker-side twin of the relay, `agent/worker/core.rs`, quoted verbatim):
-
-```rust
-            Inbound::PermissionResponse { id, outcome } => {
-                // Resolve the `pending_permissions` oneshot (the compound
-                // key — the wire `id` is the payload's `requestId`, the
-                // map key is `"{session_id}/{request_id}"`; the `PermissionOutcome` verbatim — the real 3-option outcome, mirroring the existing `respond_permission` resolution).
-                if let Some(sid) = &self.session_id {
-                    let key = permission_key(sid, &id);
-                    if let Some(tx) = self.pending_permissions.lock().await.remove(&key) {
-                        let _ = tx.send(outcome.clone());
-                    }
-                    // The mid-session trust flip (the very next tool call
-                    // auto-approves, matching today's live-lookup behavior;
-                    // the Supervisor's `db.set_space_trusted` write — Task
-                    // 4 — is the persistence half).
-                    if let PermissionOutcome::Selected { option_id } = &outcome {
-                        if option_id == "trust-space" {
-                            if let Some(s) = &self.trust {
-                                s.set(true);
-                            }
-                        }
-                    }
-                }
-                Vec::new()
-            }
-```
-
-The child-cwd record the Supervisor would need for a subagent rule-write: `TranscriptPersister` (`agent/persist.rs`) holds `cwd_map: Arc<StdMutex<HashMap<String,String>>>` and
-
-```rust
-    /// Record a session's `cwd` (the `ensure_session_row` source — the
-    /// `StoreFrame` carries no `cwd`). Called by the `SessionManager`
-    /// (main sessions, at `start`/`resume`) and the `WorkerManager`'s
-    /// `dispatch_subagent` flow (subagent sessions).
-    pub fn set_cwd(&self, session_id: &str, cwd: &str) {
-```
-
-wired in `SessionManager::attach_worker_manager` (`session/mod.rs`):
-
-```rust
-        let persister = self.persister.clone();
-        wm.set_cwd_registrar(Arc::new(move |session_id: &str, cwd: &str| {
-            if let Some(p) = persister.get() {
-                p.set_cwd(session_id, cwd);
-            }
-        }));
-```
-
-The subagent dispatch registers the child's cwd as the **parent's** cwd (`subagent_flow.rs`): `state.hooks.register_child_cwd(&child_id, &wire.parent_cwd);` and the child's `StartEnv` gets `wire.parent_cwd.clone()` — subagents run in the parent's Space and share its cwd. The spec's claim "the subagent manager's own `pending_*` maps" does not match the tree: the child's pending maps are the child Worker's own maps, and the supervisor-side handle lookup falls back through `drives`.
-
-### 1c. The `PermissionOutcome` type (verbatim, `agent/permission.rs`)
-
-```rust
-/// The user's decision on a permission prompt, as chosen via the
-/// `respond_permission` Tauri command.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PermissionOutcome {
-    /// The user selected one of the offered options; `option_id` is its id.
-    Selected { option_id: String },
-    /// The user dismissed the prompt (or the turn / session was cancelled).
-    Cancelled,
-}
-```
-
-Type aliases and helpers:
-
-```rust
-pub type PendingPermissions = Arc<Mutex<HashMap<String, oneshot::Sender<PermissionOutcome>>>>;
-
-pub fn permission_key(session_id: &str, request_id: &str) -> String {
-    format!("{session_id}/{request_id}")
-}
-```
-
-`Selected` has **no `value` field today** — it is a bare `option_id: String`. Every construction site in the crate (gate, tests) matches `Selected { option_id }`, so adding `Option<String>` is a destructuring-compatible widening only if sites stop exhaustively naming just `option_id` (Rust requires all fields named unless `..` — every quoted pattern above uses `Selected { option_id }` alone, which **will fail to compile** once a `value` field is added; the spec's "serde-defaulted" covers the wire only).
-
-The gate's option list (`native_permission_gate`, `agent/permission.rs`, verbatim — the comment "always three options" is the exact assumption the spec removes):
-
-```rust
-    // (b) Tell the UI to show the prompt (always three options, since a
-    // prompt only ever appears for an untrusted Space, so `trust-space`
-    // is always actionable).
-    sink.emit(
-        "permission-request",
-        json!({
-            "sessionId": session_id,
-            "requestId": request_id,
-            "request": {
-                "sessionId": session_id,
-                "toolCall": { "title": title },
-                "options": [
-                    { "optionId": "allow", "name": "Allow", "kind": "allow" },
-                    { "optionId": "reject", "name": "Block", "kind": "reject" },
-                    {
-                        "optionId": "trust-space",
-                        "name": "Don't ask again for this Space",
-                        "kind": "allow"
-                    },
-                ],
-            },
-        }),
-    );
-```
-
-The gate's accept set (the loop gate, `agent/harness/loop/gate.rs`):
-
-```rust
-    pub(super) async fn gate_tool(&self, tc: &ToolCall, turn: &CancellationToken) -> bool {
-        let outcome = native_permission_gate(
-            ...
-        )
-        .await;
-        matches!(
-            outcome,
-            PermissionOutcome::Selected { option_id }
-                if option_id == "allow" || option_id == "trust-space"
-        )
-    }
-```
-
-The frontend echo shape (`src/lib/tauri/types.ts`, verbatim — the wire shape `save_settings`/`respond_permission` users rely on):
-
-```ts
-export type PermissionOutcome =
-  | { selected: { option_id: string } }
-  | "cancelled";
-```
-
-`PermissionPrompt.tsx` renders `prompt.options.map((option, i) => ...)` and responds `respond({ selected: { option_id: option.optionId } })` — no `value` is echoed anywhere today, and `PermissionOption` is `{ optionId; name; kind?: string }`.
+`outcome` is moved verbatim into `SessionManager::respond_permission`; T02 changed nothing here (the Tauri-command `PermissionOutcome` IS the same `agent::permission::PermissionOutcome` — the serde pair rides it transparently). `logged` is `debuglog`-only on `Err`, returns the result unchanged (error display `format!("ipc {command} FAILED: {err}")`). Wire half: `WorkerHandle::send_permission_response(id, &PermissionOutcome)` clones the outcome into `Inbound::PermissionResponse` (client.rs:597-610, “The outcome rides its own serde attrs — no wrapper — so a `None` `value` never reaches the wire”).
 
 ---
 
-## 2. `Settings` and `write_settings` (`config.rs`)
+## 8. Methods + commands used (with `--no-run` for scoped commands)
 
-### 2a. The struct (verbatim, `agent::policy::FilePolicy` lives in `agent/policy.rs` — the only two `agent` imports `config.rs` has)
+The scoped command set below is what a T04 check/round-trip run would use; each carries `--no-run` where the plan only needs compile-proof (build fixtures first — `cargo build` once before the first scoped `cargo test`, since a suite can otherwise fail with stale artifacts):
 
-`FilePolicy` (`agent/policy.rs`, verbatim):
+```bash
+cd /home/daniel/Coding/AI/archimedes-desktop
 
-```rust
-/// The three per-direction policies (the settings' three selects).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase", default)]
-pub struct FilePolicy {
-    pub reads: AccessPolicy,
-    pub writes: AccessPolicy,
-    /// `bash`. Defaults to `Allow` like the others — so this field alone
-    /// removes the ADR 0010 untrusted-Space prompt for `bash` unless the
-    /// user sets it back to `Ask`. That is the intended product posture
-    /// (pi gates nothing), not a bug to "fix" back to `Ask`.
-    pub shell: AccessPolicy,
-}
+# Build fixtures first (one full build; then the scoped runs are incremental).
+cargo build --package archimedes-desktop --lib
+
+# The relay's host test module (session_tests) — where a relay-persists test lives.
+cargo test --package archimedes-desktop --lib \
+  -- agent::session::session_tests --no-run
+
+# The Worker-side permission-response handler (T02 touched).
+cargo test --package archimedes-desktop --lib \
+  -- agent::worker::core::tests::permission_response --no-run
+
+# Policy / rule model (T01) — the append-contract pins the relay writes against.
+cargo test --package archimedes-desktop --lib \
+  -- agent::policy::tests::file_policy agent::policy::tests::an_exact_tie --no-run
+
+# config.rs round-trip pins (the file the relay writes).
+cargo test --package archimedes-desktop --lib \
+  -- config::tests::file_policy --no-run
+
+# The frontend echo (T02) + T06 settings rule paths.
+cd src && npx vitest run src/components/PermissionPrompt.test.tsx \
+  src/components/settings/SettingsPage.test.tsx src/hooks/useSettingsDocument.test.ts 2>/dev/null \
+  || npx vitest run --reporter=dot PermissionPrompt SettingsPage useSettingsDocument
 ```
-
-with
-
-```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum AccessPolicy {
-    Sandboxed,
-    Ask,
-    #[default]
-    Allow,
-}
-```
-
-`Settings` (`config.rs`, quoted verbatim — every field and its serde attribute; the `#[serde(rename_all = "camelCase")]` sits on the struct itself at line 158):
-
-```rust
-/// The persisted app settings.
-#[serde(rename_all = "camelCase")]
-pub struct Settings {
-    /// `"system" | "dark" | "light"` (default `"dark"`).
-    #[serde(default = "default_theme")]
-    pub theme: String,
-    #[serde(default)]
-    pub palette: Option<String>,
-    #[serde(default)]
-    pub pane_layout: Value,
-    /// Whether to trust new Spaces by default.
-    #[serde(default)]
-    pub default_trust_new_spaces: bool,
-    #[serde(default)]
-    pub mcp_mentions_enabled: bool,
-    /// (ADR 0030) The per-direction file-access policies. `#[serde(default)]`
-    /// — a pre-feature file parses to `FilePolicy::default()` (all `Allow`),
-    /// so no migration runs. ...
-    #[serde(default)]
-    pub file_policy: FilePolicy,
-    #[serde(default)]
-    pub web: WebSettings,
-    #[serde(default)]
-    pub default_model: Option<String>,
-    #[serde(default)]
-    pub default_thinking_level: Option<String>,
-    #[serde(default)]
-    pub enabled_tools: Vec<String>,
-    #[serde(default)]
-    pub providers: Vec<ProviderConfig>,
-    #[serde(default)]
-    pub mcp_servers: HashMap<String, Value>,
-    #[serde(default)]
-    pub font: FontSettings,
-    #[serde(default)]
-    pub default_thinking_levels: HashMap<String, String>,
-    #[serde(default, skip_serializing)]
-    pub subagent_models: HashMap<String, String>,
-    #[serde(default)]
-    pub agent_overrides: HashMap<String, AgentOverrideFields>,
-    #[serde(default)]
-    pub spinner_style: Option<String>,
-    #[serde(default)]
-    pub empty_state_animation: Option<String>,
-    #[serde(default = "default_true")]
-    pub session_naming_enabled: bool,
-    #[serde(default)]
-    pub session_naming_model: Option<String>,
-    #[serde(default)]
-    pub session_naming_reasoning: Option<String>,
-    #[serde(default = "default_true")]
-    pub attention_alerts_enabled: bool,
-    #[serde(default = "default_attention_delay_secs")]
-    pub attention_alert_delay_secs: u64,
-    #[serde(default = "default_subagent_dead_bound_secs")]
-    pub subagent_dead_bound_secs: u64,
-}
-```
-
-`impl Default for Settings` fills every field (`theme: "dark"`, `file_policy: FilePolicy::default()`, session naming / attention ON, etc. — quoted in §7 inventory context; standard `Default` list, `subagent_models = HashMap::new()`).
-
-### 2b. `write_settings` — signature, location, atomicity, locking
-
-```rust
-/// Persist the settings (overwrites the file). In-process writers (the
-/// `set_config_option` memory writes — ADR 0015) call this directly; the
-/// command delegates to it.
-pub fn write_settings(config_dir: &Path, settings: &Settings) -> Result<(), String> {
-    let path = settings_path(config_dir);
-    fs::write(
-        &path,
-        serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())
-}
-```
-
-```rust
-fn settings_path(config_dir: &Path) -> PathBuf {
-    config_dir.join("settings.json")
-}
-```
-
-**File location:** `config_dir.join("settings.json")`, where the config dir is `dirs::config_dir() → join("archimedes")` — `~/.config/archimedes/settings.json` on Linux, `~/Library/Application Support/archimedes` on macOS, `%APPDATA%/archimedes` on Windows (wired in `lib.rs`'s `.setup`, quoted: "The on-disk dirs are named `archimedes` (NOT the bundle identifier …): `~/.config/archimedes` + `~/.local/share/archimedes` (Linux), …". The same `config_dir` is threaded into `SessionManager::new(config_dir)` and, via `StartEnv.config_dir`, into every Worker (see §6).
-
-**Creation:** `load_settings` creates the file on first read when missing (quoted verbatim):
-
-```rust
-pub fn load_settings(config_dir: &Path) -> Settings {
-    let path = settings_path(config_dir);
-    if !path.exists() {
-        let settings = Settings::default();
-        let json = match serde_json::to_string_pretty(&settings) {
-            Ok(json) => json,
-            Err(e) => {
-                eprintln!("settings: failed to serialize defaults: {e}");
-                return settings;
-            }
-        };
-        if let Err(e) = fs::write(&path, json) {
-            eprintln!("settings: failed to write defaults to {path:?}: {e}");
-        }
-        return settings;
-    }
-    ...
-```
-
-so `parent` dirs are **not** created by `write_settings` itself (they already exist by the startup path; `load_settings` likewise does no `create_dir_all` — only `Db::open` does).
-
-**Atomicity: NO.** `write_settings` is a plain `fs::write` straight to the final path — no temp file, no `rename`, no `persist`. Grep for `tempfile`/`rename`/`persist`/`atomic` in `config.rs` finds only the `tempfile::tempdir()` test fixtures. A crash mid-write can truncate/tear the JSON.
-
-**Locking: NONE.** No `flock`, no advisory lock, no mutex around the file (the only locks in the write path are per-`Db`-connection `StdMutex`, which do not cover `settings.json`). There is no serialization between any two writers; concurrent reads interleave with writes. There is also no "settings singleton" alias — the file is read fresh by many callers (each `load_settings` call parses it).
-
-**Hazard visibility for the planner — the concurrent-writer reality the spec's "the desktop side owns that file" claim must square with:**
-
-1. `save_settings` (Settings UI) writes the **whole document** from a frontend-supplied `Settings` (see §5a).
-2. `SessionManager::set_config_option`'s "remembered thinking level" writes `load_settings → mutate → write_settings` (`session/mod.rs:1744` region, quoted verbatim in §5c).
-3. `useAgentOverridesWrites.ts` (Agents modal) does a **fresh `get_settings` re-read → modify → `save_settings`** specifically *because* "Rust writes settings.json on its own", documented verbatim in §5b — a whole-file replace that can clobber any other field changed between its re-read and its save.
-4. `useSettingsDocument.ts` (Settings page) composes from the store and `saveSettings(next)` the **complete document** ("the second save drops the first" for two patches in one batch).
-5. `write_settings` is also called by the boot path — every `load_settings` on a missing file writes defaults (so a parallel first-use race can write defaults over a file another thread just created).
-
-No process in the crate holds a lock while writing; nothing serializes 1–4. A relay writing `allow-directory` must fit into this read-modify-write, write-whole-file world (the same shape the remembered-thinking-level write uses), and the UI/Agents-modal writers can overwrite a relay's rule if their snapshot predates it.
+(For runs, drop `--no-run`; single-filters keep both surfaces scoped. If the barrel-pin breakage noted in `4395bed`('s message) is still outstanding, the SettingsPage suite may need the mocker pins' updated counts already committed in `c6aba74`.)
 
 ---
 
-## 3. The backward-compat pin (config.rs)
-
-The spec's referenced pin "an old `settings.json` parses to the new defaults" is this test (`config.rs`, inline `mod tests`), quoted verbatim:
-
-```rust
-    #[test]
-    fn a_pre_feature_settings_json_parses_to_the_new_defaults() {
-        // A file written before the extended fields existed must parse (all
-        // new fields `#[serde(default)]`) rather than be treated as corrupt.
-        let settings: Settings =
-            serde_json::from_str(r#"{ "theme": "dark", "paneLayout": {} }"#).unwrap();
-        assert_eq!(settings.default_thinking_level, None);
-        assert!(settings.enabled_tools.is_empty());
-        assert!(!settings.default_trust_new_spaces);
-        assert_eq!(settings.default_model, None);
-        assert!(settings.providers.is_empty());
-        assert!(settings.mcp_servers.is_empty());
-        assert_eq!(settings.font, FontSettings::default());
-        assert!(settings.subagent_models.is_empty());
-        assert_eq!(settings.spinner_style, None);
-        assert_eq!(settings.palette, None);
-        // (ADR 0031 follow-up) `#` ships OFF: a file written before the
-        // setting existed must NOT silently enable the one trigger that
-        // collides with pasted text.
-        assert!(!settings.mcp_mentions_enabled);
-        // Session naming is the opposite case: it ships ON, so the same
-        // pre-feature file reads as ENABLED with no model/reasoning override
-        // (`default = "default_true"` — see
-        // `session_naming_settings_default_on_and_round_trip_in_camel_case`).
-        assert!(settings.session_naming_enabled);
-        assert_eq!(settings.session_naming_model, None);
-        assert_eq!(settings.session_naming_reasoning, None);
-    }
-```
-
-It does **not** currently assert on `file_policy` or `rules` (there is no `rules`). The `rules`-defaults-to-empty pin would be a NEW assertion added to this pattern (or to `file_policy_defaults_to_allow_in_every_direction`, §7). The filePolicy-related existing pins are `file_policy_defaults_to_allow_in_every_direction` and `file_policy_serializes_under_the_camel_case_file_policy_key` (quoted in §7).
-
----
-
-## 4. `set_space_trusted` and the `trusted` column (`storage/db.rs`)
-
-Signature (verbatim) and body:
-
-```rust
-    /// Set (or clear) a space's trust flag, keyed by the canonical path
-    /// (raw fallback on canonicalize failure, as in `upsert_space`).
-    ///
-    /// Returns `true` when a row matched, `false` when nothing matched (a
-    /// missing row is a no-op, not an error — but a diagnosable one, not a
-    /// silent one).
-    pub fn set_space_trusted(&self, path: &str, trusted: bool) -> Result<bool, DbError> {
-        let key = space_key(path).unwrap_or_else(|| path.to_string());
-        let n = self.conn.lock().expect("db mutex poisoned").execute(
-            "UPDATE spaces SET trusted = ?2 WHERE path = ?1",
-            params![key, trusted],
-        )?;
-        Ok(n > 0)
-    }
-```
-
-The `spaces` table (SCHEMA in `db.rs`, verbatim):
-
-```sql
-CREATE TABLE IF NOT EXISTS spaces (
-    path TEXT PRIMARY KEY,
-    created_at INTEGER NOT NULL,
-    last_opened_at INTEGER NOT NULL,
-    trusted INTEGER NOT NULL DEFAULT 0,
-    sort_order INTEGER NOT NULL DEFAULT 0
-);
-```
-
-Migration for pre-existing databases (in `Db::open`, verbatim):
-
-```rust
-        // One-time migration for pre-existing databases: add `trusted`
-        // (fresh databases already have it from SCHEMA). Gated on a schema
-        // pre-check — the ALTER runs only when the column is absent, so a
-        // re-open never issues it and no error string is matched (the
-        // backfill below, by contrast, is idempotent via DO NOTHING).
-        let has_trusted: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('spaces') WHERE name = 'trusted'",
-            [],
-            |row| row.get(0),
-        )?;
-        if has_trusted == 0 {
-            conn.execute(
-                "ALTER TABLE spaces ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0",
-                [],
-            )?;
-        }
-```
-
-The row type (`SpaceRow`) and the fail-closed read:
-
-```rust
-/// A row from the `spaces` table.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SpaceRow {
-    pub path: String,
-    /// Unix milliseconds.
-    pub created_at: i64,
-    /// Unix milliseconds.
-    pub last_opened_at: i64,
-    /// Trusted Space flag (untrusted by default; fail-closed reads).
-    pub trusted: bool,
-}
-```
-
-```rust
-    /// The trust flag for the space at `cwd`, keyed by the canonical path
-    /// (the single key form, ADR 0010). Fail-closed: a canonicalize failure
-    /// or a missing row is `Ok(false)` — untrusted.
-    pub fn space_trusted(&self, cwd: &std::path::Path) -> Result<bool, DbError> {
-        // Fail-closed on canonicalize failure (unlike the write path's raw
-        // fallback): a folder that can't be canonicalized is untrusted.
-        let Some(key) = space_key(cwd) else {
-            return Ok(false);
-        };
-        let guard = self.conn.lock().expect("db mutex poisoned");
-        let mut stmt = guard.prepare("SELECT trusted FROM spaces WHERE path = ?1")?;
-        let found = stmt
-            .query_map(params![key], |row| row.get::<_, i64>(0))?
-            .next()
-            .transpose()?;
-        Ok(found.map(|t| t != 0).unwrap_or(false))
-    }
-```
-
-Also relevant as "the relay persists a flag" model — `upsert_space` seeds `trusted` from `default_trusted` **only on INSERT** (quoted doc + SQL):
-
-```rust
-    /// `default_trusted` is written ONLY on INSERT (a NEW row is born
-    /// `trusted` per the flag — the settings' `default_trust_new_spaces`);
-    /// the CONFLICT branch never touches `trusted` (an existing row's flag
-    /// is never changed by a re-upsert — no retroactive trust).
-    pub fn upsert_space(&self, path: &str, default_trusted: bool) -> Result<(), DbError> {
-        let key = space_key(path).unwrap_or_else(|| path.to_string());
-        self.conn.lock().expect("db mutex poisoned").execute(
-            "INSERT INTO spaces (path, created_at, last_opened_at, trusted, sort_order) \
-             VALUES (?1, ?2, ?2, ?3, COALESCE((SELECT MAX(sort_order) FROM spaces), -1) + 1)
-                 ON CONFLICT(path) DO UPDATE SET last_opened_at = excluded.last_opened_at",
-            params![key, now_ms(), default_trusted],
-        )?;
-        Ok(())
-    }
-```
-
----
-
-## 5. `save_settings` and every writer of `settings.json`
-
-### 5a. The command (`commands/settings.rs`, verbatim)
-
-```rust
-/// Read the settings. Always succeeds (see `load_settings`); the `Result`
-/// is kept for command-shape stability but is never `Err`.
-#[tauri::command]
-pub async fn get_settings(
-    state: State<'_, Arc<SessionManager>>,
-) -> Result<Settings, SettingsError> {
-    Ok(load_settings(state.config_dir()))
-}
-
-/// Persist the settings (overwrites the file).
-#[tauri::command]
-pub async fn save_settings(
-    state: State<'_, Arc<SessionManager>>,
-    settings: Settings,
-) -> Result<(), SettingsError> {
-    write_settings(state.config_dir(), &settings).map_err(SettingsError::SaveFailed)
-}
-```
-
-`save_settings` receives a **complete `Settings` from the frontend** and overwrites the whole file. The `Settings` name is the wire shape itself (serde/camelCase `Settings` — the command's argument is the full document).
-
-### 5b. Every production writer of `settings.json` in the crate
-
-| # | Writer | Shape | Where | Notes |
-|---|---|---|---|---|
-| 1 | `commands::settings::save_settings` | whole-document `write_settings` | `commands/settings.rs` | The Settings-UI save (frontend-supplied full doc). |
-| 2 | `SessionManager::set_config_option` ("remembered thinking level", ADR 0015) | `load_settings` → mutate `default_thinking_levels` → `write_settings` | `agent/session/mod.rs:1744` | Best-effort; a failure is `eprintln!`-logged, not an error. Quoted verbatim in §5c. |
-| 3 | `load_settings` boot default-write | `fs::write(path, defaults)` when the file is missing | `config.rs` `load_settings` | Creates the file on first read (quoted in §2b). |
-| 4 | Frontend `save_settings` via two hooks | whole-document, but sourced from a FRESH `get_settings` (Agents modal) or the store (Settings page) | `src/hooks/useAgentOverridesWrites.ts`, `src/hooks/useSettingsDocument.ts` | Both route to #1 (the same Tauri command). See §5d. |
-
-Grep hits for `fs::write(…settings.json…)` in production code resolve to **tests only**: `commands/agents.rs:927` is inside `#[cfg(test)] mod tests` (`fs::write(config_dir.join("settings.json"), settings_body)` — a `resolve_launch` parity fixture); `agent/harness/launch.rs:1278` is inside `#[cfg(test)]`; `agent/harness/loop/tests/policy_gate.rs:72` is the test fixture; `config.rs` test-fn writes and session_tests' `write_settings_json` helper (`session/mod.rs:2682`) are test-only. `write_settings` call sites in `agent/web/config.rs` are all test-only (`settings_fill_the_config` etc.).
-
-So the **production** set is exactly: `save_settings` (via command), `set_config_option`'s remembered-level write, and `load_settings`'s missing-file default creation. The spec's "the desktop side owns that file — the Settings UI writes it" is *almost* true (both are desktop-side), but there are **two desktop-side producers of full-document writes on top of the UI** — the in-process remembered-level write and the boot default-write — and the frontend's Agents-modal hook goes out of its way to re-read before writing because of #2. No external process writes it.
-
-### 5c. The in-process writer quoted verbatim (`agent/session/mod.rs`, inside `set_config_option`'s `"thought_level"` arm)
-
-```rust
-                // (ADR 0015) Remember the level for the session's CURRENT model
-                // (best-effort: a write failure is logged and does NOT fail the config
-                // change — the level is applied in the loop either way; the value is
-                // guaranteed non-empty — an empty one is rejected above).
-                let key = ModelKey::from(&state.model).to_string();
-                let mut settings = load_settings(&self.config_dir);
-                settings
-                    .default_thinking_levels
-                    .insert(key, value.to_string());
-                if let Err(e) = write_settings(&self.config_dir, &settings) {
-                    eprintln!("remembered thinking level: save failed: {e}");
-                }
-```
-
-### 5d. The two frontend whole-document writers (quoted)
-
-`useSettingsDocument.ts` (Settings page) — the "immediate-save" pattern:
-
-```ts
-      // Reads the RENDERED `settings`, exactly as `update()` did — so two patches
-      // delivered inside one batch both compose from the SAME document and the
-      // second save drops the first. ...
-      if (settings === null) return;
-      const next = { ...settings, ...changes };
-      // The app-wide store (...)
-      useSettings.getState().setSettings(next);
-      void saveSettings(next); // the complete document
-```
-
-`useAgentOverridesWrites.ts` (Agents modal) — the re-read before write, with the load-bearing rationale naming the Rust writer:
-
-```ts
- * A READ-MODIFY-WRITE, never composed from the store. The re-read is load-bearing,
- * not paranoia: the store's copy is seeded at boot and by the Settings page, but
- * the Rust side writes `settings.json` on its own — `agent/session/mod.rs:1678`
- * persists a remembered thinking level through `load_settings` + mutate +
- * `write_settings` — so a modal opened at an arbitrary moment can be holding a
- * stale document, and composing from the store would silently clobber a concurrent
- * change. EVERY Rust writer does load-mutate-write; this has to match or the
- * desktop becomes the one writer that can lose someone else's field.
-```
-
-```ts
-async function writeAgentOverrides(
-  next: AgentOverrides,
-  epoch: number,
-  epochRef: { current: number },
-  onRolledBack: () => void,
-): Promise<void> {
-  ...
-  const fresh = await getSettings();
-  freshDocument = { ...fresh, agentOverrides: next };
-  await saveSettings(freshDocument);
-```
-
-This hook also documents the ONE intra-frontend second writer that can be clobbered (the Provider-rename remap in SettingsPage) and the accepted narrow window. Both hooks' writes go through command #1.
-
----
-
-## 6. Worker notification of a settings change — it isn't pushed; it is re-read
-
-The spec's "effective next turn" claim is exactly what the tree shows. **The Supervisor never pushes a `Settings`/`file_policy` frame to the Worker.** The Worker receives only: the `StartEnv` at spawn (whose `config_dir` points at the settings dir), and `Inbound::Config { model, thinking, trusted }`, `Prompt`, `Compact`, `Close`, `PermissionResponse`, `InteractiveResponse`, `SubagentResult`, `FetchRenderResponse`, `Unknown` (the `Inbound` enum in `agent/worker/protocol.rs`, quoted in §1c's neighborhood — **there is no `Settings` variant**). The only `Config` fields are `model` / `thinking` / `trusted` — a Settings round-trip cannot carry `file_policy`.
-
-The loop re-reads settings **once per turn** in `AgentLoop::handle_prompt` (`agent/harness/loop.rs`, quoted verbatim — the exact lines the spec cites as `loop.rs:609`):
-
-```rust
-    pub async fn handle_prompt(&mut self, prompt: &PromptTurn) {
-        // (ADR 0030 Deviation 4) The policy and web config are
-        // re-read from `settings.json` ONCE per turn — the same in-process read
-        // `launch.rs` does per dispatch, so a user who flips a select in
-        // Settings affects an ALREADY-RUNNING session at its next prompt
-        // (no restart, no relaunch). ONE read per turn (not per tool call):
-        // every tool call in a turn must agree, or a half-asked batch would
-        // be a policy the user never chose. `config_dir: None` → the
-        // all-`Allow` default (no settings layer) + env-only web config.
-        let settings = self.config_dir.as_deref().map(crate::config::load_settings);
-        self.file_policy = settings.as_ref().map(|s| s.file_policy).unwrap_or_default();
-        self.web = crate::agent::web::config::WebConfig::from_web_settings(
-            settings.as_ref().map(|s| &s.web),
-        );
-```
-
-The loop's `config_dir` field doc:
-
-```rust
-    /// (ADR 0030 Task 3) The file-access policy IN FORCE for the current
-    /// turn — refreshed from `settings.json` at the top of every
-    /// `handle_prompt` (Deviation 4: one read per turn, so every tool call
-    /// in a turn agrees and a mid-turn hand-edit is observed at the NEXT
-    /// prompt; the same in-process read `launch.rs` does per dispatch).
-    /// `config_dir: None` → all-`Allow` (no settings layer to read).
-    /// Handed to every `ToolCtx` so the executor enforces the SAME tier the
-    /// gate decided, and read by the gate itself.
-    file_policy: FilePolicy,
-```
-
-The Worker gets `config_dir` at Start (`agent/worker/core.rs` building the loop): `AgentLoop::new(..., Some(std::path::PathBuf::from(&env.config_dir)), ...)`, with `env.config_dir` supplied by the Supervisor in `establish_worker_session` (`StartEnv::from_parts(..., self.config_dir.display().to_string(), ...)`; subagents inherit `parent_env.config_dir.clone()`).
-
-The pinned proof that a file edit between prompts changes the next turn's gating (no push, no reload): `policy_gate.rs`'s `a_settings_edit_between_prompts_changes_the_next_turns_gating` — it rewrites `settings.json` *between* two prompts and asserts turn 2 gates differently ("the user edits the file BETWEEN the prompts: `ask` → `sandboxed`"; "The loop's own `config_dir` (the fixture's temp dir): re-read between the prompts, exactly as a user editing Settings would."). Described in full in §7.
-
-**Thus the only notification path for a persisted rule is the per-turn `load_settings` re-read; nothing pushes a `settings.json` change to any Worker, live or subagent.**
-
----
-
-## 7. Test inventory
-
-### 7a. `config.rs` inline `mod tests` (`#[test]` fns, verbatim names)
-
-| Test name | One clause each |
-|---|---|
-| `default_settings_are_dark_with_empty_layout` | asserts the `Settings::default()` lane (theme dark, empty pane layout, `!default_trust_new_spaces`, naming ON, …). |
-| `a_pre_feature_settings_json_parses_to_the_new_defaults` | asserts an old two-key file parses with every new field at its default (covers `file_policy` implicitly — `filePolicy` absent parses to `FilePolicy::default()`). |
-| `mcp_mentions_enabled_defaults_off_and_round_trips` | `#`-mention OFF by default, explicit `true` round-trips through camelCase + the real file. |
-| `session_naming_settings_default_on_and_round_trip_in_camel_case` | naming ON by default (the one bool whose serde default is not `false`), overrides parse from camelCase. |
-| `attention_alert_defaults_survive_a_pre_feature_file` | a pre-feature file reads alerts ON / 15 s, and `subagentDeadBoundSecs` 1800 s. |
-| `spinner_style_defaults_to_none_and_round_trips` | absent key parses `None`; value survives write/read. |
-| `empty_state_animation_defaults_to_none_and_round_trips` | same for the transcript animation. |
-| `palette_defaults_to_none_and_round_trips` | `None` default; `"dracula"` etc. round-trips. |
-| `file_policy_defaults_to_allow_in_every_direction` | **the filePolicy defaults pin** — `FilePolicy::default()` and `Settings::default().file_policy` are all-`Allow`, a no-`filePolicy` file and an empty `{}` object and a partial `{reads:"ask"}` all parse per-field (quoted fully below). |
-| `file_policy_serializes_under_the_camel_case_file_policy_key` | wire key is `filePolicy` with lowercase direction values; round-trips. |
-| `mcp_servers_round_trips_in_camel_case` | `mcpServers` holds pi entry shapes verbatim. |
-| `default_thinking_levels_defaults_to_empty_and_round_trips` | empty map default, camelCase. |
-| `subagent_models_is_read_from_camel_case_but_never_written` | legacy key still reads, `skip_serializing` keeps it off the wire. |
-| `agent_overrides_default_to_an_empty_map_that_still_serializes` | empty map still serializes `{}` (required TS key) even on a pre-feature file's next save. |
-| `agent_overrides_round_trip_as_a_flat_camel_case_map` | `agentOverrides` round-trips flat camelCase. |
-| `an_unset_field_inside_an_override_entry_is_absent_not_null` | unset entry fields are absent, not `null`. |
-| `a_legacy_subagent_models_file_folds_into_agent_overrides_on_load` | legacy `subagentModels` folds into `agentOverrides` at load when the new map is empty. |
-| `a_non_empty_agent_overrides_map_wins_over_the_legacy_key_wholesale` | a hand-edited file carrying both keys: new key wins, no merge. |
-| `the_legacy_subagent_models_key_never_reaches_the_file_again` | the dead key stays out of the serialized file. |
-| `font_settings_default_is_noto_sans_ui_and_fira_code_code` | hand-written `Default` (no derive) gives Noto Sans / Fira Code, size 14. |
-| `provider_config_api_defaults_to_openai_completions` | `ProviderConfig::default().api` is `openai-completions`. |
-| `provider_config_api_and_key_url_round_trip` | api + key_url round-trip through JSON. |
-| `settings_round_trip_with_the_new_fields` | the full `Settings` literal round-trips and the serialized doc enumerates every camelCase key (including `"filePolicy"`), `subagentModels` never serialized. |
-| `file_policy_round_trips_through_the_settings_file` | a non-default policy survives `write_settings` → `load_settings`. |
-| `load_settings_normalizes_a_blank_default_thinking_level_to_none` | hand-edited `""` level becomes `None`. |
-| `load_settings_normalizes_a_blank_session_naming_model_to_none` | all-whitespace naming-model key becomes `None`. |
-| `load_settings_on_a_corrupt_file_returns_the_defaults` | unparseable file → defaults, file untouched (no overwrite of the bad doc). |
-| `load_settings_on_a_missing_file_writes_the_defaults` | missing file → defaults AND the file appears on disk. |
-| `get_settings_never_errors` | the command-level guarantee (`load_settings` never `Err`s). |
-| `settings_round_trip_through_json` | serde round-trip. |
-| `web_block_defaults_to_empty_when_absent` | absent `web` block → default `WebSettings`. |
-| `web_block_round_trips` | `web` block round-trips. |
-
-`file_policy_defaults_to_allow_in_every_direction` (verbatim):
-
-```rust
-    #[test]
-    fn file_policy_defaults_to_allow_in_every_direction() {
-        // (ADR 0030) All three policies default to `Allow` (pi's posture — the
-        // UI's "Don't ask me"). This is WIDER than the pre-feature hardcoded
-        // behavior (the product decision — ADR 0030 Deviation 2), so what is pinned
-        // here is the widening itself — never parity with the old behavior.
-        let all_allow = FilePolicy {
-            reads: AccessPolicy::Allow,
-            writes: AccessPolicy::Allow,
-            shell: AccessPolicy::Allow,
-        };
-        assert_eq!(FilePolicy::default(), all_allow);
-        assert_eq!(Settings::default().file_policy, all_allow);
-        // A pre-feature file (no `filePolicy` key at all) parses to the same
-        // (`#[serde(default)]` — no migration).
-        let pre_feature: Settings = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert_eq!(pre_feature.file_policy, all_allow);
-        // An EMPTY `filePolicy` object parses to the same too (the
-        // container-level `#[serde(default)]` fills the three fields).
-        let empty_object: Settings =
-            serde_json::from_value(serde_json::json!({ "filePolicy": {} })).unwrap();
-        assert_eq!(empty_object.file_policy, all_allow);
-        // A PARTIAL object leaves the directions the file omits at `Allow`.
-        let partial: Settings =
-            serde_json::from_value(serde_json::json!({ "filePolicy": { "reads": "ask" } }))
-                .unwrap();
-        assert_eq!(partial.file_policy.reads, AccessPolicy::Ask);
-        assert_eq!(partial.file_policy.writes, AccessPolicy::Allow);
-        assert_eq!(partial.file_policy.shell, AccessPolicy::Allow);
-    }
-```
-
-(`FilePolicy` derives `PartialEq`, so `rules: Vec<AccessRule>` added to it with an `Eq` member changes this test's "all-Allow" assertions only if `rules` participates in `PartialEq` — it will, as a field. This is the exact test the spec's "pins an old settings.json parses to the new defaults" points at, plus `a_pre_feature_settings_json_parses_to_the_new_defaults`.)
-
-### 7b. `session/mod.rs` — `mod session_tests` (`#[test]`/`#[tokio::test]`, verbatim names)
-
-Helpers first (`mint_session_id_format`, `session_info_round_trips_the_archived_flag_camel_case`, `session_info_serialises_the_cost_as_cost_usd_and_keeps_zero_distinct`, `native_capabilities_advertises_image`, plus fixture helpers): not behavioral pins.
-
-Behavioral tests:
-
-| Test name | One clause each |
-|---|---|
-| `the_stalled_registry_and_the_stalled_event_agree_on_the_pid_named_log` | the crash log the router writes carries the dead Worker's pid. |
-| `a_native_session_starts_with_the_remembered_level_over_the_settings_default` | a remembered (validated) thinking level beats the settings' `defaultThinkingLevel`. |
-| `a_stale_remembered_level_and_an_invalid_settings_default_start_with_no_level` | a stale remembered entry and a settings default the model doesn't advertise are ignored/dropped. |
-| `a_settings_default_level_applies_when_it_is_a_member_of_the_model_levels` | the settings default wins when the model advertises it. |
-| `a_settings_default_level_applies_as_is_for_a_model_without_levels` | a model with no levels gets the settings default as-is. |
-| `a_remembered_level_is_ignored_for_a_model_without_levels` | no levels ⇒ no remembered level. |
-| `a_native_thought_level_change_remembers_the_level` | **the `write_settings`-in-`set_config_option` pin** — a thought-level change persists into `settings.defaultThinkingLevels`. |
-| `a_native_empty_thought_level_change_is_rejected` | an empty level is rejected before the frame is sent. |
-| `a_native_model_switch_resets_an_invalid_level_to_the_new_model_s_memory` | switching to a model that lacks the current level resets to the new model's memory. |
-| `a_native_model_switch_keeps_a_valid_level` | a level the new model supports is kept across the switch. |
-| `a_resume_prefers_the_remembered_level_over_the_stale_stored_value` | resume uses the remembered level over a stale stored one. |
-| `list_sessions_carries_the_stored_config_options_and_context_usage` / `…_context_window_follows_the_current_catalog` / `…_keeps_its_snapshot_window` / `…_carries_the_stored_title` / `a_resume_carries_the_stored_context_usage` | the stored-row → `SessionInfo` surface. |
-| `the_native_model_chain_settings_default_wins_over_the_catalog_default` | model resolution chain. |
-| `refresh_model_metadata_applies_live_and_degrades_on_failure` | metadata refresh live-apply + degradation. |
-| `effective_catalog_discovers_a_user_provider` / `resolve_uses_the_provider_api` / `resolve_uses_the_litellm_provider_api` / `effective_catalog_a_failed_discovery_still_shadows_the_seeded_provider` / `effective_catalog_caches_and_force_refresh_bypasses_the_cache` / `a_failed_discovery_does_not_latch_the_negative_result` | provider discovery/cache behavior on the settings file. |
-| `compact_session_on_a_non_live_session_is_a_no_op` / `compact_session_sends_the_frame_and_never_marks_a_cancel` | ADR 0044 compaction semantics. |
-| `session_manager_builder_cyclic_weak_reference_drops_cleanly` / `session_manager_builder_preserves_supplied_persister` | builder wiring. |
-
-**There is NO `respond_permission` test in `session_tests`** — the relay's answer path is covered on the Worker side: `agent/worker/core.rs` `permission_response_resolves_the_pending_oneshot` (outcome rides verbatim; entry removed) and `permission_response_trust_space_flips_the_trust_source` (the `trust-space` outcome flips the `StaticTrustSource`, the "very next tool call auto-approves" half), plus `config_trusted_flips_the_trust_source`. The `respond_permission` Tauri command's miss path is asserted by its own doc ("the caller can then route a miss") — the `hit` printing lives in `commands/sessions.rs` and is not otherwise pinned. The child-answer relay is pinned by `worker/manager/tests/mod.rs`'s `an_answered_gates_card_is_not_closed_again_at_teardown`, whose comment states: "**The CHILD-side half of the answer relay — what `SessionManager::respond_permission` does next to the relay above.**" — i.e. that test manually replicates `handle_for(child_id).send_permission_response(...)` + `note_gate_answered` against the `drives` map.
-
-### 7c. The re-read pin (`agent/harness/loop/tests/policy_gate.rs`)
-
-`a_settings_edit_between_prompts_changes_the_next_turns_gating` — possessions quoted in §6; its doc:
-
-```rust
-/// (ADR 0030 Deviation 4 — "affects an already-running session") the
-/// policy is re-read from `settings.json` at the top of EVERY prompt:
-/// a settings edit BETWEEN two prompts changes the SECOND prompt's
-/// gating, with no restart and no relaunch.
-```
-
-Other gate tests in that module that any rules work must keep green: `ask_beyond_the_boundary_prompts_naming_the_path_then_runs`, `sandboxed_beyond_the_boundary_errors_with_no_prompt`, `the_default_policy_reads_and_writes_beyond_the_boundary_in_silence`, `a_sandboxed_shell_dispatches_confined_with_no_prompt`, `a_gate_denial_of_a_protected_dir_uses_the_protected_wording`, `a_recreated_protected_dir_is_refused_by_the_gate_without_a_new_session` (protected-dir denial with the lenient canonicalizer — the behavior the rules layer replaces), `a_trusted_space_suppresses_the_prompt_the_policy_would_raise` (Trust suppress `Ask` at the decision point), `the_skill_tools_stay_outside_the_policy_gate`.
-
----
-
-## 8. Exact scoped commands from `src-tauri/`
-
-Per the approved spec (§Verification) and `AGENTS.md`:
-
-- **Full gate:** `cargo test` (from `src-tauri/`) — the crate is ONE compilation unit; this builds the `archimedes` bin, the `archimedes_lib` lib, the `fake_worker` / `fake_mcp_stdio` bin fixtures (needed by the worker/session/manager tests and the integration targets that use `env!("CARGO_BIN_EXE_fake_worker")`), and the `tests/` integration targets (`ipc.rs`, `session_native.rs`, `worker_*.rs`, `harness_*.rs`, `fs_backend.rs`, `storage.rs`, …).
-- **Lint (0 warnings):** `cargo clippy --all-targets`
-- **Format:** `cargo fmt --check`
-- **Windows type-check:** `cargo check --target x86_64-pc-windows-gnu --all-targets`
-- **Scoped single-module tests** (the names in §7 live in `archimedes_lib`'s `src/` module tests):
-  - `cargo test --lib config::tests::file_policy_defaults_to_allow_in_every_direction`
-  - `cargo test --lib config::tests::a_pre_feature_settings_json_parses_to_the_new_defaults`
-  - `cargo test --lib config::tests::file_policy_serializes_under_the_camel_case_file_policy_key`
-  - `cargo test --lib agent::session::session_tests::a_native_thought_level_change_remembers_the_level` (the `write_settings`-in-`set_config_option` pin)
-  - `cargo test --lib agent::worker::core::tests::permission_response_trust_space_flips_the_trust_source`
-  - `cargo test --lib agent::worker::core::tests::permission_response_resolves_the_pending_oneshot`
-  - `cargo test --lib agent::worker::manager::tests::an_answered_gates_card_is_not_closed_again_at_teardown`
-  - `cargo test --lib agent::harness::loop::tests::policy_gate::a_settings_edit_between_prompts_changes_the_next_turns_gating`
-  - `cargo test --lib agent::harness::loop::tests::policy_gate::a_gate_denial_of_a_protected_dir_uses_the_protected_wording`
-  - `cargo test --lib agent::permission::tests` (the option-list / gate tests — permissions module test suite; includes the "always three options" pins the spec says change)
-- **Constraint the spec records:** `cargo test --lib` alone **does not rebuild `fake_worker`** — the worker/manager/session_native tests that spawn the fake binary need `cargo test` (or a prior `cargo build --bins`) so `target/debug/fake_worker` exists.
-
----
-
-## Risks & divergences the tree shows (facts, not design)
-
-1. **Concurrent whole-file writers (no lock, no atomic write)** — §2b/§5b. The relay's rule-write shares the file with `save_settings`, the remembered-level write, the boot default-write, and two frontend hooks that save the complete document; nothing serializes them and `fs::write` is non-atomic.
-2. **`PermissionOutcome::Selected` gains a required-known destructuring** — every handler/gate matches `Selected { option_id }` without `..` (relay `session/mod.rs`, Worker `core.rs`, gate `gate.rs`, numerous tests), so adding a `value` field is a compile error everywhere until each pattern is updated; the serde-default only saves the wire.
-3. **The subagent path has no branch in `respond_permission`** — the spec's "the subagent manager's own `pending_*` maps" is not the tree: the maps live per-Worker; subagent answers reach the same single relay via `handle_for`'s `drives` fallback, and the child's cwd record the rule-write would need lives in `TranscriptPersister::cwd_map` (registered as the PARENT's cwd — subagents share the parent Space), not in `self.live`. The main branch's cwd lookup misses for children.
-4. **`rules` does not exist yet** — `FilePolicy` is three `Copy` policy enums; adding `Vec<AccessRule>` changes its `PartialEq`/`Default`/`Copy`-ness (it stops being `Copy`), which touches the assertions quoted in §7 and the `..FilePolicy::default()` literals across the executor tests.
-5. **`protected_dirs()` is currently consumed as a frozen `Vec<PathBuf>`** in the loop (`loop.rs`: "The write DENY-LIST (`boundary::protected_dirs()` …), frozen with the boundary") and enforced in the tool-exec layer (`agent/tools/exec/access.rs`'s `PROTECTED_WRITE_ROUTE` — see the gate test asserting the refusal text ends with that route) — the spec's plan to turn it into default rules replaces an existing, test-pinned deny path whose wording tests (`a_gate_denial_of_a_protected_dir_uses_the_protected_wording`, `the_skill_tools_stay_outside_the_policy_gate`) assert today's sentences.
-6. **There are two stale doc-duplicates** (the doubled `respond_permission` doc block) that already drift from the code.
-
-## Sources
-
-- `src-tauri/src/agent/session/mod.rs` — `respond_permission` (relay, `trust-space` persistence), `respond_interactive_request` (relay twin), `set_config_option` (the remembered-level `write_settings` production writer), `SessionDriver`, `LiveWorkerSession`, `establish_worker_session` (`StartEnv` construction).
-- `src-tauri/src/commands/sessions.rs` — the `respond_permission` Tauri command (single-route, `hit` printing).
-- `src-tauri/src/commands/settings.rs` — `get_settings` / `save_settings` commands.
-- `src-tauri/src/config.rs` — `Settings`, `write_settings`, `load_settings`, `settings_path`, inline tests.
-- `src-tauri/src/agent/policy.rs` — `FilePolicy`, `AccessPolicy`, `decision_for`.
-- `src-tauri/src/agent/permission.rs` — `PermissionOutcome`, `PendingPermissions`, `permission_key`, `native_permission_gate` (three-option emit).
-- `src-tauri/src/agent/worker/core.rs` — `PendingPermissions`/`pending_bridge`/`pending_sudo` maps, `Inbound::PermissionResponse` handler (trust flip), `AgentLoop::new(... Some(config_dir) ...)`, worker tests.
-- `src-tauri/src/agent/worker/manager/mod.rs` + `registry.rs` + `tests/mod.rs` — `handle_for` / `get_handle_for` (`workers` → `drives` fallback), `note_gate_answered`, `send_config_to_space`; the child-answer relay test.
-- `src-tauri/src/agent/worker/manager/subagent_flow.rs` — child `StartEnv` (cwd = parent's), `register_child_cwd(&child_id, &wire.parent_cwd)`, `SubagentDrive`.
-- `src-tauri/src/agent/harness/loop.rs` + `loop/gate.rs` + `loop/tests/policy_gate.rs` — per-turn re-read of `settings.json`, `file_policy` field, `gate_tool` accept set, the Deviation-4 pin and protected-dir pins.
-- `src-tauri/src/agent/persist.rs` — `TranscriptPersister::set_cwd` (the child-cwd record).
-- `src-tauri/src/storage/db.rs` — `set_space_trusted`, `space_trusted`, `upsert_space`, `spaces` table + `trusted` migration.
-- `src-tauri/src/lib.rs` — `setup_dirs` wiring, `settings.json` home dirs, command registration.
-- `src-tauri/Cargo.toml` — single-crate layout, `archimedes_lib` lib, autobins fixtures.
-- `src/hooks/useSettingsDocument.ts`, `src/hooks/useAgentOverridesWrites.ts`, `src/lib/tauri/commands/settings.ts`, `src/lib/tauri/types.ts`, `src/components/PermissionPrompt.tsx`, `src/hooks/useChildGates.ts`, `src/store/permissions.ts` — the frontend writers and the prompt echo surface.
-- `docs/roadmap/permissions-section.md` (the approved spec), `AGENTS.md` (test/lint commands).
+## Appendix — verbatim reference blocks (sources for every claim above)
+
+- `Settings` struct — `config.rs:159-332` (whole struct quoted in §2a).
+- `load_settings` — `config.rs:393-484` (verbatim in §2f summary; the missing-file branch writes defaults, corrupt branch returns `Settings::default()`).
+- `write_settings` — `config.rs:486-496` (quoted §2c).
+- `FilePolicy`/`AccessRule`/`RuleDecision`/`RuleDirection` — `agent/policy.rs:33-100` (quoted §2b + doc).
+- `default_rules` — `agent/policy.rs:296-333` (verbatim; CONCATENATION CONTRACT doc quoted in §1/§6d context): “every consumer that puts rules in front of `rule_for` MUST emit `default_rules()` FIRST and user-written rules SECOND … the Supervisor's ‘always allow this directory’ action appends one `allow` rule AFTER these defaults so it beats a default `deny` on an exact path tie.”
+- `rule_for` tie-break — `agent/policy.rs:195-230` (doc) + the two-order pin in §6b.
+- `respond_permission` — `session/mod.rs:1909-1972` (quoted §1a).
+- `SessionManager` fields — `driver: { db: Option<Arc<Db>>, … }`, `config_dir: PathBuf`, `live: StdMutex<HashMap<String, LiveWorkerSession>>` (`session/mod.rs` `SessionManager` struct def; `config_dir` is set by `SessionManager::new(dir.to_path_buf())` and `write_settings(&self.config_dir, …)` already appears at `:1744`).
+- `handle_for` / `get_handle_for` — `worker/manager/mod.rs:413-427` + `worker/manager/registry.rs:78-89` (quoted §1c).
+- `send_permission_response` — `worker/client.rs:597-610`.
+- Worker `PermissionResponse` handler — `worker/core.rs:617-637` (quoted §4).
+- `set_space_trusted` — `storage/db.rs:1027-1035` (quoted §5); `space_key` at `db.rs:1134`.
+- `PermissionOutcome` — `agent/permission.rs:53-75` (quoted §4).
+- `permission_options` — `agent/permission.rs:146-205` (quoted §4).
+- Frontend echo — `src/components/PermissionPrompt.tsx:65-75`.
+- Settings writers — `src/hooks/useSettingsDocument.ts:96-100`, `src/components/settings/SettingsPage.tsx:366-394`, `src/hooks/useAgentOverridesWrites.ts:144-179`.
+- Frontend rule contract pin — `src/components/settings/SettingsPage.tsx` comment “Composes over the RENDERED `settings`, not a ref — the two-write interleave pin in `SettingsPage.test.tsx` makes that window observable.”
