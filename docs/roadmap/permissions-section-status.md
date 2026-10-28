@@ -113,8 +113,8 @@ lands, or its report will describe a tree that no longer exists.
 |---|------|------|-----------|------|------------------------------------------|--------|
 | T01 | Rule model + longest-prefix resolver; `protected_dirs()` becomes the default rule set | policy-core | `docs/roadmap/permissions-section-task01-rule-model-resolver.md` | 1 | `src-tauri/src/agent/policy.rs`, `src-tauri/src/agent/boundary.rs` (both + inline test mods) — **plus the 10-file `FilePolicy` blast-radius set ratified 2026-10-28**: `src-tauri/src/agent/harness/loop.rs`, `src-tauri/src/agent/harness/loop/tools.rs`, `src-tauri/src/config.rs`, `src-tauri/src/agent/web/tools.rs`, `src-tauri/src/agent/web/extract/tests.rs`, `src-tauri/src/agent/tools/exec/tests/support.rs`, `src-tauri/src/agent/tools/exec/tests/bash.rs`, `src-tauri/src/agent/tools/sandbox.rs`, `src-tauri/tests/skill_tools_boundary.rs`, `src-tauri/tests/worker_e2e.rs`, **plus `src-tauri/src/agent/tools/exec/tests/policy.rs`** (found in execution — 3rd Copy-move site, see Changelog) | `done` `c90f5dd` |
 | T05 | Wire types + prompt store + guard-prompt UI (`value` echo, generic options) | frontend-prompt | `docs/roadmap/permissions-section-task05-wire-types-prompt-ui.md` | 1 | `src/lib/tauri/types.ts`, `src/lib/tauri.ts`, `src/lib/tauriBarrel.test.ts`, `src/lib/tauri/commands/gates.ts`, `src/store/permissions.ts`, `src/hooks/useChildGates.ts`, `src/hooks/useChildGates.test.ts`, `src/components/PermissionPrompt.tsx`, `src/components/PermissionPrompt.test.tsx`, **plus `src/components/settings/GeneralSection.tsx`** (2-line type narrowing, see Changelog) | `done` `6fd3740` |
-| T02 | `PermissionOutcome::Selected { option_id, value }`, per-prompt option lists, approve predicate, drop `trust-space` from the guard prompt | permission-wire | `docs/roadmap/permissions-section-task02-wire-shape-guard-prompt.md` | 2 | `src-tauri/src/agent/permission.rs`, `src-tauri/src/agent/harness/loop/gate.rs`, `src-tauri/src/agent/worker/sink.rs`, `…/worker/protocol.rs`, `…/worker/client.rs`, `…/worker/core.rs`, `…/worker/manager/mod.rs`, `…/worker/manager/tests/mod.rs`, `src-tauri/src/bin/fake_worker.rs`, `src-tauri/src/agent/harness/loop/tests/policy_gate.rs`, `src-tauri/src/commands/sessions.rs`, `src-tauri/src/agent/mod.rs` (only if the re-export must change) | `todo` |
-| T06 | Settings → Permissions section: rules list, posture rows + trust toggle moved out of General, bash/trust copy | frontend-settings | `docs/roadmap/permissions-section-task06-settings-permissions-section.md` | 2 | `src/components/settings/SettingsPage.tsx`, `src/components/settings/SettingsPage.test.tsx`, `src/components/settings/GeneralSection.tsx`, `src/components/settings/PermissionsSection.tsx` (new), `src/components/settings/PermissionsSection.test.tsx` (new) | `todo` |
+| T02 | `PermissionOutcome::Selected { option_id, value }`, per-prompt option lists, approve predicate, drop `trust-space` from the guard prompt | permission-wire | `docs/roadmap/permissions-section-task02-wire-shape-guard-prompt.md` | 2 | `src-tauri/src/agent/permission.rs`, `src-tauri/src/agent/harness/loop/gate.rs`, `src-tauri/src/agent/worker/sink.rs`, `…/worker/protocol.rs`, `…/worker/client.rs`, `…/worker/core.rs`, `…/worker/manager/mod.rs`, `…/worker/manager/tests/mod.rs`, `src-tauri/src/bin/fake_worker.rs`, `src-tauri/src/agent/harness/loop/tests/policy_gate.rs`, `src-tauri/src/commands/sessions.rs`, `src-tauri/src/agent/mod.rs` (only if the re-export must change) — **plus ratified: `src-tauri/src/agent/session/mod.rs` (ONE `..`-pattern line only), `src-tauri/tests/worker_e2e.rs`, `src-tauri/tests/harness_loop.rs`** | `vetted` |
+| T06 | Settings → Permissions section: rules list, posture rows + trust toggle moved out of General, bash/trust copy | frontend-settings | `docs/roadmap/permissions-section-task06-settings-permissions-section.md` | 2 | `src/components/settings/SettingsPage.tsx`, `src/components/settings/SettingsPage.test.tsx`, `src/components/settings/GeneralSection.tsx`, `src/components/settings/PermissionsSection.tsx` (new), `src/components/settings/PermissionsSection.test.tsx` (new) | `vetted` |
 | T03 | Enforce precedence rows 1–4 at the gate and in the executor; default rule set frozen per session | gate-executor | `docs/roadmap/permissions-section-task03-gate-executor-precedence.md` | 3 | `src-tauri/src/agent/harness/loop.rs`, `src-tauri/src/agent/tools/exec/access.rs`, `src-tauri/src/agent/tools/exec/tests/policy.rs`, `src-tauri/src/agent/tools/types.rs`, `src-tauri/src/agent/tools/sandbox.rs`, `src-tauri/src/agent/harness/loop/tests/param_rejection.rs` | `todo` |
 | T04 | Supervisor relay persists `allow-directory` as one rule; settings round-trip | supervisor-relay | `docs/roadmap/permissions-section-task04-relay-rule-persistence.md` | 4 | `src-tauri/src/agent/session/mod.rs`, `src-tauri/src/config.rs`, `src-tauri/src/storage/db.rs` | `todo` |
 | T07 | ADR 0083 + ADR 0030 amendment, `CONTEXT.md` terms, `docs/features/` permissions page | docs | `docs/roadmap/permissions-section-task07-adrs-docs.md` | 5 | `docs/decisions/0083-*.md` (new), `docs/decisions/0030-*.md` (append amendment only), `CONTEXT.md`, `docs/features/permissions-model.md` (new) | `todo` |
@@ -239,3 +239,29 @@ One line per task: hash, what shipped, gate numbers at that moment.
 - **2026-10-28** — T01's plan doc is stale on one point: it still names the deleted
   `default_rules_is_empty_when_the_home_dir_cannot_be_resolved` pin in three places. Harmless (the plan is a
   historical artifact deleted on ship), noted so nobody re-adds the unpassable test from the plan text.
+
+- **VET round 1, T02** (`task02-wire-shape-guard-prompt.md`): REVISE, two real catches. (a) The plan's
+  construction sweep missed `tests/worker_e2e.rs::permission_round_trip_real_worker` and
+  `tests/harness_loop.rs::tool_call_gates_executes_loops_and_settles` — both CONSTRUCT `Selected`, neither is
+  compiled by `cargo test --lib`, so the plan's own full-suite step was guaranteed red. (b) `#[serde(default)]`
+  alone serializes `None` as `"value": null`, contradicting the plan's own byte-shape pin — the pair
+  `#[serde(default, skip_serializing_if = "Option::is_none")]` is now stated everywhere. Round 2 also named the
+  T03 handoff as a LOUD PIN (`a_guard_allow_directory_runs_the_tool`) instead of a comment, and settled
+  `pub(crate)` cannot reach the `fake_worker` bin crate (fixture keeps its literal).
+- **2026-10-28** — **Ratified T02's Owns extension**: `session/mod.rs` (the one `Selected { option_id, .. }`
+  destructure line, no logic — the relay itself stays T04's), plus `tests/worker_e2e.rs` and
+  `tests/harness_loop.rs` (mechanical `value: None`). Cross-wave overlap with T04 is harmless — disjointness is
+  a within-wave requirement and these are sequential waves.
+- **VET round 1, T06** (`task06-settings-permissions-section.md`): narrow REVISE. Critical: the plan's own
+  one-save pins could not see a two-write interleaving (posture save + rule save composing from the
+  last-rendered document through `patch`'s pinned compose). Round 2 adds the two-write pin, names the two moved
+  sandboxed tests that must carry their own `getAppInfo("windows")` overrides (verbatim copy would red), decides
+  the default-rules offer re-appears on an empty list (accepted + pinned), and RE-WORDS the Writes disclosure
+  now rather than moving an overclaiming pin verbatim to be un-pinned later.
+- **2026-10-28** — **SPEC DEVIATION to carry to #112 and T07**: the spec says the three default rules are
+  "written only on first write"; no first-write mechanism exists anywhere in the settings path (no save
+  history, no version marker; Rust's missing-file branch is not surfaced to the UI) and the wire cannot
+  distinguish empty from absent rules. T06 ships an explicit user-visible "Add default rule" button that
+  pre-fills the DRAFT (no write until the user saves the dialog) plus panel copy naming all three defaults.
+  No automatic write is possible, so no install silently gains the one real restriction. This is a deviation
+  from the spec's letter, recorded deliberately, not a silent substitution.
