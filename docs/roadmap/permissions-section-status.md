@@ -210,7 +210,8 @@ One line per task: hash, what shipped, gate numbers at that moment.
   rather than added); `pnpm build` green. The 4 ignored are all pre-existing manual/live-network tests, verified
   by name — none is ours.
 - **Wave 1 deviations, all accepted and committed:**
-  - **The `Copy` blast radius is 20 sites, not 19.** `exec/tests/policy.rs:34` passes one `FilePolicy` local
+  - **The `Copy` blast radius is 20 sites, not 19.** `exec/tests/policy.rs`'s
+    `read_beyond_the_boundary_succeeds_when_reads_allow` passes one `FilePolicy` local
     through the by-value `ctx_policy()` helper twice — legal under `Copy`, a use-after-move (E0382) without it.
     Its *literals* survive (they use spreads); it is a third Copy-move site, and the file was outside T01's set.
     Accepted: same kind as the two already owned, one line. **Corrected figure: 17 full literals + 3 Copy-moves
