@@ -809,6 +809,7 @@ async fn permission_round_trip_real_worker() {
             &id,
             &PermissionOutcome::Selected {
                 option_id: "allow".to_string(),
+                value: None,
             },
         )
         .expect("the permission response is sent");

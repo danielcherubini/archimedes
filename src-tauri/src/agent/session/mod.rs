@@ -1934,7 +1934,12 @@ impl SessionManager {
                 // `set_space_trusted` `Db` method). The Worker's `StaticTrustSource`
                 // flip (Task 2's `PermissionResponse` handler) is the live-lookup
                 // half; this is the persistence half.
-                if let permission::PermissionOutcome::Selected { option_id } = &outcome {
+                //
+                // The `..` here is the ONLY thing Task 2 (the outcome's `value`
+                // field) changed in this file: `value` is READ nowhere yet — the
+                // `allow-directory` rule write rides it, and the relay that
+                // persists that rule is Task 4's.
+                if let permission::PermissionOutcome::Selected { option_id, .. } = &outcome {
                     if option_id == "trust-space" {
                         if let (Some(db), Some(cwd)) = (&self.driver.db, cwd) {
                             let _ = db.set_space_trusted(&cwd.display().to_string(), true);

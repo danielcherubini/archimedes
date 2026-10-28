@@ -116,6 +116,7 @@ async fn answer_permission(pending: PendingPermissions, session: &str, option: &
             let sender = map.remove(&key).expect("the entry is in the map");
             let _ = sender.send(PermissionOutcome::Selected {
                 option_id: option.to_string(),
+                value: None,
             });
             return;
         }

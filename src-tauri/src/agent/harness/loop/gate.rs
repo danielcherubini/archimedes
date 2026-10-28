@@ -220,6 +220,16 @@ impl AgentLoop {
     /// `Ask` reaching here already implies untrusted); it stays because the
     /// gate is also the seam that answers `trust-space`, and a
     /// fail-closed gate is cheaper than a clever one.
+    ///
+    /// THE GUARD-PROMPT SEAM: the guard ask (Task 3) reaches `gate_tool`
+    /// ONLY if the precedent wiring sends protected writes to `Ask` — that
+    /// verdict is Task 3's. When it does, the prompt offers `allow` /
+    /// `allow-directory` / `reject` (see `permission_options(false)`), and
+    /// `allow-directory` must become an allow id HERE — Task 3's contract
+    /// names the loud pin `a_guard_allow_directory_runs_the_tool` (the
+    /// `value` rides to the Supervisor, which persists it — Task 4). Both
+    /// extensions are recorded in Task 2's plan; this gate stays
+    /// boundary-only until they land.
     pub(super) async fn gate_tool(&self, tc: &ToolCall, turn: &CancellationToken) -> bool {
         let outcome = native_permission_gate(
             &self.session_id,
@@ -234,7 +244,7 @@ impl AgentLoop {
         .await;
         matches!(
             outcome,
-            PermissionOutcome::Selected { option_id }
+            PermissionOutcome::Selected { option_id, .. }
                 if option_id == "allow" || option_id == "trust-space"
         )
     }

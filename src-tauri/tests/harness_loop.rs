@@ -434,6 +434,7 @@ async fn tool_call_gates_executes_loops_and_settles() {
             &pending,
             PermissionOutcome::Selected {
                 option_id: "allow".to_string(),
+                value: None,
             },
         )
         .await;
