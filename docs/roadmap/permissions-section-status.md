@@ -398,6 +398,20 @@ One line per task: hash, what shipped, gate numbers at that moment.
   defaults**, not merely "now an ask"), and Deliverable D would ship both readings side by side. One MINOR is a
   false universal worth noting for any later docs task: `superseded-by:` is present in all 73 ADRs but EMPTY in
   69 — four name a successor (0017, 0031, 0056, 0057).
+- **VET round 2, T03** (`task03-gate-executor-precedence.md`): ⚠️ **Pass with Issues**. The correction
+  lands (`default_rules()` → `Vec::new()`, four dirs → `protected_dirs()`'s own list, row 3 reachable by
+  construction) but three MAJORs block dispatch: (M1) the plan must add `agent/permission.rs`'s OWN test module
+  (5 `native_permission_gate(` call sites at ~400/498/544/619/822 passing `permission_options(true)`) to the
+  owned set — the B2 `options` param is an 8-site change, one site is inside `permission.rs` itself; (M2)
+  `exec/tests/policy.rs` pins `a_raw_protected_entry_still_refuses_a_canonical_path_under_it` and
+  `a_raw_argument_still_refuses_against_canonical_protected_entries`, which the churn table omits — their
+  no-rule branch now dispatches green so they'd go red; (M3) `tests/skill_tools_boundary.rs` census names 2
+  full literals but the tree has 3 (`ctx`/102, `ctx_roots`/126, the `let c`/580 — `ctx_roots` overrides
+  `file_policy` so needs the new fields). Also MINORs: bash.rs spread-site note in `:: Honest limits`; the
+  vacant "churn" sentence for `skills.rs` spreads; S1/S2 field doc re-checks; `git add -f` reminder (roadmap
+  is gitignored). T07 round 2 returned **Pass** — reading-(A) consistent through ADR 0083/0030 amendment/
+  CONTEXT/docs, WAVE NOTE correctly scoped, no residue — with one MINOR: a false attribution to a nonexistent
+  `default_rules().len()==4` pin; the emptiness is a T03-owned landing, which the plan otherwise states correctly.
 - **2026-10-28** — **T03 plan round 3 decided `default_rules()` returns EMPTY.** Accepted, and it is the
   consequence the ruling implies: the spec's three pre-filled rules are written by the user via T06's
   draft-prefill button, never by code, so nothing is left to emit as a default rule. The planner flagged this
