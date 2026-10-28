@@ -131,7 +131,54 @@ lands, or its report will describe a tree that no longer exists.
 
 ## Blockers / open questions
 
-Empty.
+**BLOCKED (2026-10-28): T03 cannot enforce the spec's precedence table — the spec is self-contradictory.**
+
+The spec makes two statements that cannot both be true:
+- line ~45: "**Step 3 is the only behavioural change in this spec**: today's hardcoded deny becomes an ask."
+- line ~93: "`boundary::protected_dirs()` stops being a hardcoded list and becomes the **default rule set**."
+
+T01 implemented the second literally: `default_rules()` emits `Write`/`Deny` rules for the four agent dirs, and
+`protected_dirs()` is `default_rules().filter(decision == Deny)`. So the guard set (row 3's trigger) is the
+SAME set of paths as the default DENY set, matched by the SAME prefix predicate. Therefore any path that
+satisfies row 3's "under an agent-definition dir" also matches row 1, and row 3 is `A AND NOT A` — the guard
+prompt can never appear. Measured by the implementer across all four dirs at four nesting depths: **0 of 16
+cases reach row 3.** Both escape hatches fail: an exact-tie user `allow` lands on row 2 (silent, no ask), a
+broad `~` allow loses to the longer default-deny prefix (row 1), and `is_guard_path`'s set has no fifth member
+to sit outside it.
+
+Consequence if left as-is: T02's guard option list, T04's relay rule-write, and the entire `allow-directory`
+flow are dead code, and the spec's one behavioural change does not exist.
+
+**RESOLVED 2026-10-28 — no ruling needed; the spec answers it three times and T01 implemented the ambiguous
+clause over the explicit one.** Reading (A) is mandated:
+  - Spec line ~45: "**Step 3 is the only behavioural change in this spec**: today's hardcoded deny **becomes an
+    ask**." If `default_rules()` carries `Deny` for the four dirs, the hardcoded deny stayed a deny and this
+    sentence is false.
+  - Spec "Pre-filled defaults" lists exactly THREE rules (`~` rw allow, `/` read allow, `~/.pi/agent` read deny)
+    and **none of them is an agent-definition dir**. So the spec's "default rule set" is not the four dirs.
+  - Spec "Honest limits" twice accepts the consequence: "Trust suppresses the guard. A Trusted Space permits
+    silent self-modification" and the Settings copy "A trusted Space's agent can also write its own instruction
+    directories without asking". The author already accepted the posture change.
+  - The original bug that motivated the spec was that the refusal was SILENT and the model routed around it.
+    Reading (B) keeps the silent deny — it would ship the exact defect the spec exists to fix.
+
+  `default_rules()` returns NO deny rules for the four dirs; the four dirs become a guard-membership set that
+  is not a rule set. Row 1 then fires only for USER deny rules; the executor's unconditional
+  `protected_refusal` becomes rule-driven; a Trusted Space permits silent self-modification (the spec says so
+  twice: "A trusted Space's agent can also write its own instruction directories without asking", and "Trust
+  suppresses the guard"). Churn: the pre-existing pins asserting "refused under EVERY policy" must change — the
+  spec predicted that churn. `protected_dirs()` must keep returning the four dirs as a plain list so
+  `sandbox.rs`'s Landlock subtraction is unchanged (rules never apply to bash; DD2 stays true).
+**The correction lands in T03** (waves are serial, and T03 needs `policy.rs`/`boundary.rs` anyway):
+`default_rules()` stops emitting `Write`/`Deny` for the four agent dirs; the four dirs become a guard-membership
+set that is NOT a rule set; row 1 fires only for USER deny rules; the executor's unconditional
+`protected_refusal` becomes rule-driven. `protected_dirs()` MUST keep returning the four dirs as a plain list so
+`sandbox.rs`'s Landlock subtraction is unchanged (rules never apply to bash; DD2 stays true).
+Consequence: T01's pins asserting "refused under EVERY policy" change meaning — the spec predicted this churn
+("Churn expected: ... `permission.rs`'s option-list tests"). T01's `done` stands as measured against its own
+plan; this is a spec-reading correction, not a T01 defect.
+
+Partial work is STASHED, not discarded — see the Decisions log for the ref. Nothing was committed red.
 
 ## Decisions log
 
@@ -318,3 +365,23 @@ One line per task: hash, what shipped, gate numbers at that moment.
   takes the temp's mode, silently tightening `settings.json` from 0644. Round 2 preserves the existing mode
   before persist, pinned `#[cfg(unix)]`. Concurrency limitation re-worded to "narrows, does not close" with
   the concrete lost-update sequence.
+
+- **2026-10-28** — **T03 BLOCKED and its partial work stashed** (`stash@{0}`, message
+  "T03 partial: ToolCtx rules/home plumbing (row-3 blocker)"). The 8 files touched are the `ToolCtx`
+  `rules`/`home` fields, the frozen `default_rules`/`rules_home` on `AgentLoop`, the per-turn concat, and the
+  mechanical literal churn — plumbing that ANY resolution needs, so it is worth recovering once the ruling
+  lands. It was NOT committed: `cargo test --no-run` was red because `tests/skill_tools_boundary.rs` has 2 more
+  `ToolCtx` literals the plan's census missed (that file is T01's ratified set, not T03's). Tree verified
+  clean and green at `be2046d` after the stash.
+- **2026-10-28** — Two more census errors, both the implementer's find, both recorded so a later round does not
+  re-derive them: the `ToolCtx` site list omits `tests/skill_tools_boundary.rs` (2 full literals), and the
+  dispatch's owned-file list omitted `loop/turn.rs`, `exec/fs_tools.rs`, `exec/search.rs` which the plan's
+  `## Files` claimed the dispatch had ratified. The two lists must be reconciled before T03 is re-dispatched.
+
+- **2026-10-28** — **DECISION: reading (A).** T03's owned set is extended to `agent/policy.rs` and
+  `agent/boundary.rs` to carry the correction above, and to `loop/turn.rs`, `tools/exec/fs_tools.rs`,
+  `tools/exec/search.rs` (the executor arms), `tools/exec/bash.rs` (read-only unless proven otherwise —
+  DD2 says no signature change), and `src-tauri/tests/skill_tools_boundary.rs` (the 2 missed `ToolCtx`
+  literals). Reconciled against the plan's `## Files` list, which had claimed ratification the dispatch never
+  granted. T04's design is unaffected and its plan stands; it is downstream of T03's concat order, which the
+  T04 plan already flags in a cross-task box.
