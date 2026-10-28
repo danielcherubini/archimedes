@@ -111,8 +111,8 @@ lands, or its report will describe a tree that no longer exists.
 
 | # | Task | Area | Plan file | Wave | Owns (file set — disjointness evidence) | Status |
 |---|------|------|-----------|------|------------------------------------------|--------|
-| T01 | Rule model + longest-prefix resolver; `protected_dirs()` becomes the default rule set | policy-core | `docs/roadmap/permissions-section-task01-rule-model-resolver.md` | 1 | `src-tauri/src/agent/policy.rs`, `src-tauri/src/agent/boundary.rs` (both + inline test mods) — **plus the 10-file `FilePolicy` blast-radius set ratified 2026-10-28**: `src-tauri/src/agent/harness/loop.rs`, `src-tauri/src/agent/harness/loop/tools.rs`, `src-tauri/src/config.rs`, `src-tauri/src/agent/web/tools.rs`, `src-tauri/src/agent/web/extract/tests.rs`, `src-tauri/src/agent/tools/exec/tests/support.rs`, `src-tauri/src/agent/tools/exec/tests/bash.rs`, `src-tauri/src/agent/tools/sandbox.rs`, `src-tauri/tests/skill_tools_boundary.rs`, `src-tauri/tests/worker_e2e.rs` | `vetted` |
-| T05 | Wire types + prompt store + guard-prompt UI (`value` echo, generic options) | frontend-prompt | `docs/roadmap/permissions-section-task05-wire-types-prompt-ui.md` | 1 | `src/lib/tauri/types.ts`, `src/lib/tauri.ts`, `src/lib/tauriBarrel.test.ts`, `src/lib/tauri/commands/gates.ts`, `src/store/permissions.ts`, `src/hooks/useChildGates.ts`, `src/hooks/useChildGates.test.ts`, `src/components/PermissionPrompt.tsx`, `src/components/PermissionPrompt.test.tsx` | `vetted` |
+| T01 | Rule model + longest-prefix resolver; `protected_dirs()` becomes the default rule set | policy-core | `docs/roadmap/permissions-section-task01-rule-model-resolver.md` | 1 | `src-tauri/src/agent/policy.rs`, `src-tauri/src/agent/boundary.rs` (both + inline test mods) — **plus the 10-file `FilePolicy` blast-radius set ratified 2026-10-28**: `src-tauri/src/agent/harness/loop.rs`, `src-tauri/src/agent/harness/loop/tools.rs`, `src-tauri/src/config.rs`, `src-tauri/src/agent/web/tools.rs`, `src-tauri/src/agent/web/extract/tests.rs`, `src-tauri/src/agent/tools/exec/tests/support.rs`, `src-tauri/src/agent/tools/exec/tests/bash.rs`, `src-tauri/src/agent/tools/sandbox.rs`, `src-tauri/tests/skill_tools_boundary.rs`, `src-tauri/tests/worker_e2e.rs`, **plus `src-tauri/src/agent/tools/exec/tests/policy.rs`** (found in execution — 3rd Copy-move site, see Changelog) | `done` `c90f5dd` |
+| T05 | Wire types + prompt store + guard-prompt UI (`value` echo, generic options) | frontend-prompt | `docs/roadmap/permissions-section-task05-wire-types-prompt-ui.md` | 1 | `src/lib/tauri/types.ts`, `src/lib/tauri.ts`, `src/lib/tauriBarrel.test.ts`, `src/lib/tauri/commands/gates.ts`, `src/store/permissions.ts`, `src/hooks/useChildGates.ts`, `src/hooks/useChildGates.test.ts`, `src/components/PermissionPrompt.tsx`, `src/components/PermissionPrompt.test.tsx`, **plus `src/components/settings/GeneralSection.tsx`** (2-line type narrowing, see Changelog) | `done` `6fd3740` |
 | T02 | `PermissionOutcome::Selected { option_id, value }`, per-prompt option lists, approve predicate, drop `trust-space` from the guard prompt | permission-wire | `docs/roadmap/permissions-section-task02-wire-shape-guard-prompt.md` | 2 | `src-tauri/src/agent/permission.rs`, `src-tauri/src/agent/harness/loop/gate.rs`, `src-tauri/src/agent/worker/sink.rs`, `…/worker/protocol.rs`, `…/worker/client.rs`, `…/worker/core.rs`, `…/worker/manager/mod.rs`, `…/worker/manager/tests/mod.rs`, `src-tauri/src/bin/fake_worker.rs`, `src-tauri/src/agent/harness/loop/tests/policy_gate.rs`, `src-tauri/src/commands/sessions.rs`, `src-tauri/src/agent/mod.rs` (only if the re-export must change) | `todo` |
 | T06 | Settings → Permissions section: rules list, posture rows + trust toggle moved out of General, bash/trust copy | frontend-settings | `docs/roadmap/permissions-section-task06-settings-permissions-section.md` | 2 | `src/components/settings/SettingsPage.tsx`, `src/components/settings/SettingsPage.test.tsx`, `src/components/settings/GeneralSection.tsx`, `src/components/settings/PermissionsSection.tsx` (new), `src/components/settings/PermissionsSection.test.tsx` (new) | `todo` |
 | T03 | Enforce precedence rows 1–4 at the gate and in the executor; default rule set frozen per session | gate-executor | `docs/roadmap/permissions-section-task03-gate-executor-precedence.md` | 3 | `src-tauri/src/agent/harness/loop.rs`, `src-tauri/src/agent/tools/exec/access.rs`, `src-tauri/src/agent/tools/exec/tests/policy.rs`, `src-tauri/src/agent/tools/types.rs`, `src-tauri/src/agent/tools/sandbox.rs`, `src-tauri/src/agent/harness/loop/tests/param_rejection.rs` | `todo` |
@@ -202,3 +202,40 @@ One line per task: hash, what shipped, gate numbers at that moment.
   ONE literal array not two, and a triage note for the four unowned files (`App.test.tsx`, `ChatStream.test.tsx`,
   `InlineGateRow.test.tsx`, `SubagentModals.test.tsx`) that seed `optionId: "allow"` fixtures and query by the
   name "Allow". Now `vetted`.
+
+- **Wave 1 IMPLEMENTED + GATED.** T01 `c90f5dd`, T05 `6fd3740`. Gate at `6fd3740`, all six legs green:
+  `cargo test` **1597 passed / 0 failed / 4 ignored** (baseline 1581 → +16 new Rust tests); `clippy --all-targets`
+  **0 warnings**; `fmt --check` clean; **`cargo check --target x86_64-pc-windows-gnu --all-targets` clean** (first
+  baseline for that leg); `pnpm test` **153 files / 3240 tests** (count unchanged — T05 renamed and strengthened
+  rather than added); `pnpm build` green. The 4 ignored are all pre-existing manual/live-network tests, verified
+  by name — none is ours.
+- **Wave 1 deviations, all accepted and committed:**
+  - **The `Copy` blast radius is 20 sites, not 19.** `exec/tests/policy.rs:34` passes one `FilePolicy` local
+    through the by-value `ctx_policy()` helper twice — legal under `Copy`, a use-after-move (E0382) without it.
+    Its *literals* survive (they use spreads); it is a third Copy-move site, and the file was outside T01's set.
+    Accepted: same kind as the two already owned, one line. **Corrected figure: 17 full literals + 3 Copy-moves
+    = 20 sites across 12 files.**
+  - **`GeneralSection.tsx` needed 2 lines** (`keyof FilePolicy` → `"reads" | "writes" | "shell"`). Adding
+    `rules?` made the index return `AccessPolicy | AccessRule[]`, a `pnpm build` blocker. Type-only. T05's plan
+    Note D claimed no unowned file churns from the type change — that was wrong, and the implementer caught it,
+    proved causation by toggling the field, and refused to edit the file itself.
+  - **An `#[ignore]`d pin was deleted.** `default_rules_is_empty_when_the_home_dir_cannot_be_resolved` can never
+    pass: unix `home_dir()` falls back to the passwd DB, so removing `HOME`+`USERPROFILE` still resolves
+    `/home/<user>`. I confirmed it myself — `--ignored` FAILS red. It was a landmine for whoever ran `--ignored`
+    next. The honest limit stays recorded on `default_rules()`, and the reachable consequence is now pinned
+    instead (`an_empty_rule_set_matches_nothing_so_the_posture_select_decides`).
+  - **A coverage gap the plan missed, now pinned.** Replacing component-wise `starts_with` with string
+    `starts_with` — the exact bug the plan forbids twice — left ALL tests green. I verified the divergence is
+    reachable in a scratch crate (`/a/bc` is a strict string prefix of `/a/bcd/x`, not a component prefix). New
+    pin `a_rule_dir_that_is_only_a_string_prefix_of_the_target_matches_nothing` is the unique discriminator
+    (mutation-tested: exactly that one test reddens).
+  - **`a_tilde_rule_and_a_slash_rule_tie_at_one_component_and_last_wins` mis-pins its own premise**: a scratch
+    `$HOME` is 3 components, not 1, so `~` beats `/` on longest-prefix, not on the tie-break. Test kept (it still
+    pins that both spellings reach the path); its doc now says what it actually proves. A genuine `~`/`/` tie
+    needs `HOME=/`, which no scratch fixture can be. `an_exact_tie_...` is the only real exact-tie pin.
+- **2026-10-28** — `pnpm test -- <path>` does NOT scope — the filter leaks and the whole suite runs. Both the
+  grounding report and the T05 plan recommended it. Use `npx vitest run <path>`. Corrected in the grounding
+  report; do not re-recommend the `pnpm` form.
+- **2026-10-28** — T01's plan doc is stale on one point: it still names the deleted
+  `default_rules_is_empty_when_the_home_dir_cannot_be_resolved` pin in three places. Harmless (the plan is a
+  historical artifact deleted on ship), noted so nobody re-adds the unpassable test from the plan text.
