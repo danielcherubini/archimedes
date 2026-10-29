@@ -189,11 +189,26 @@ const TAURI_PUBLIC_API = [
   "AcpToolCallStatus",
   "AgentConfigDto",
   "AgentDefinitionDto",
+  // (issue #101) The declared-`permission:` wire types, added ON PURPOSE per the
+  // header above. `AgentConfigDto.filePermission` is `AgentPermissionBlock | null`
+  // and `.frontmatterNotes` is `AgentFrontmatterNote[]`; the block is an ordered
+  // array of `[AgentToolKey, AgentPermissionRules]` pairs whose rules are
+  // `AgentPermissionRule`s carrying an `AgentPermissionAction`, and a note's
+  // unsupported arm carries an `AgentUnsupportedReason`. All SEVEN are type-only —
+  // they vanish at runtime, so `TAURI_RUNTIME_API` (the pinned 49) does NOT gain
+  // them, exactly as `AccessDirection`/`AccessRule` above.
+  "AgentFrontmatterNote",
   "AgentNameResolution",
   "AgentOverride",
   "AgentOverrideFields",
   "AgentOverrides",
   "AgentOverrideSources",
+  "AgentPermissionAction",
+  "AgentPermissionBlock",
+  "AgentPermissionRule",
+  "AgentPermissionRules",
+  "AgentToolKey",
+  "AgentUnsupportedReason",
   "AppSettings",
   "AskQuestionDto",
   "AskResponsePayload",

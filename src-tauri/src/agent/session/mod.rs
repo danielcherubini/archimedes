@@ -1187,6 +1187,11 @@ impl SessionManager {
             self.config_dir.display().to_string(),
             true, // `subagent_enabled` (main session — the Worker's `subagent` tool)
             None, // `system_prompt` (main sessions: the Worker builds the main prompt)
+            // (issue #101) A MAIN session has no `AgentDefinition` at all, so
+            // there is no per-agent ruleset to carry — `None` here is CORRECT,
+            // not a dropped carry (the status file's finding: no main-session
+            // path passes a definition). The per-agent layer governs CHILDREN.
+            None,
         );
         // SPAWN the Worker (a spawn failure → the command returns an error — the
         // visible session error, NO in-process fallback — ADR 0025).

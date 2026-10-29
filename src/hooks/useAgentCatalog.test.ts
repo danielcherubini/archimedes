@@ -22,11 +22,17 @@ vi.mock("../lib/tauri", async () => {
         description: "Fast recon",
         scope: "space",
         path: "/p/.agents/agents/alpha.md",
-        file: { model: null, thinking: null, tools: null },
-        override: { model: null, thinking: null, tools: null },
-        effective: { model: null, thinking: null, tools: null },
-        source: { model: "parent", thinking: "parent", tools: "parent" },
+        file: { model: null, thinking: null, tools: null, permission: null },
+        override: { model: null, thinking: null, tools: null, permission: null },
+        effective: { model: null, thinking: null, tools: null, permission: null },
+        source: { model: "parent", thinking: "parent", tools: "parent", permission: "parent" },
         shadowed: [],
+        // issue #101: the two new REQUIRED wire fields, at the empty value Rust
+        // sends for a file that says nothing about permissions. This literal is
+        // INLINED because the factory is hoisted — the `row()` builder below is
+        // unreachable from here, so the defaults are repeated rather than shared.
+        filePermission: null,
+        frontmatterNotes: [],
       } satisfies AgentConfigDto,
     ]),
   };
@@ -43,11 +49,16 @@ function row(overrides: Partial<AgentConfigDto> = {}): AgentConfigDto {
     description: "Fast recon",
     scope: "space",
     path: "/p/.agents/agents/alpha.md",
-    file: { model: null, thinking: null, tools: null },
-    override: { model: null, thinking: null, tools: null },
-    effective: { model: null, thinking: null, tools: null },
-    source: { model: "parent", thinking: "parent", tools: "parent" },
+    file: { model: null, thinking: null, tools: null, permission: null },
+    override: { model: null, thinking: null, tools: null, permission: null },
+    effective: { model: null, thinking: null, tools: null, permission: null },
+    source: { model: "parent", thinking: "parent", tools: "parent", permission: "parent" },
     shadowed: [],
+    // issue #101: the two new REQUIRED fields at Rust's empty value (`null` for
+    // the `Option` block, `[]` for the REQUIRED `Vec`) — the `shadowed: []`
+    // precedent, so a default row renders no permission line.
+    filePermission: null,
+    frontmatterNotes: [],
     ...overrides,
   };
 }

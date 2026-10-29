@@ -109,6 +109,8 @@ async fn make_manager(
         "/tmp".to_string(),
         true,
         None,
+        // (issue #101) `from_parts`' new trailing arg (the parent env: no block).
+        None,
     );
     wm.attach("ns1", &env)
         .await

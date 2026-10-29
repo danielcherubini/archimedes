@@ -54,6 +54,9 @@ fn start_env(session_id: &str) -> StartEnv {
         cwd,
         false,
         None,
+        // (issue #101) `from_parts`' new trailing arg: this harness CONSTRUCTS
+        // the envelope (no JSON), and no per-agent block is in play.
+        None,
     )
 }
 

@@ -3,6 +3,12 @@ import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   AgentConfigDto,
+  AgentFrontmatterNote,
+  AgentPermissionAction,
+  AgentPermissionBlock,
+  AgentPermissionRule,
+  AgentPermissionRules,
+  AgentToolKey,
   AgentOverrides,
   AppSettings,
   ModelDto,
@@ -25,11 +31,22 @@ function row(overrides: Partial<AgentConfigDto> = {}): AgentConfigDto {
     scope: "space",
     path: "/p/.agents/agents/scout.md",
     // Every column `null` = nothing below the explicit `subagent` param speaks.
-    file: { model: null, thinking: null, tools: null },
-    override: { model: null, thinking: null, tools: null },
-    effective: { model: null, thinking: null, tools: null },
-    source: { model: "parent", thinking: "parent", tools: "parent" },
+    file: { model: null, thinking: null, tools: null, permission: null },
+    override: { model: null, thinking: null, tools: null, permission: null },
+    effective: { model: null, thinking: null, tools: null, permission: null },
+    source: {
+      model: "parent",
+      thinking: "parent",
+      tools: "parent",
+      permission: "parent",
+    },
     shadowed: [],
+    // The two issue #101 fields, at the wire's EMPTY value — the `shadowed: []`
+    // precedent. `filePermission` is Rust `Option` (so `null`, always present,
+    // never absent) and `frontmatterNotes` is a REQUIRED `Vec` that serializes as
+    // `[]`. The ordinary row therefore renders no permission line at all.
+    filePermission: null,
+    frontmatterNotes: [],
     ...overrides,
   };
 }
@@ -44,6 +61,57 @@ function shadow(overrides: Partial<ShadowedAgent> = {}): ShadowedAgent {
     scope: "user",
     ...overrides,
   };
+}
+
+/** One pattern row of a declared `permission:` ruleset (the Rust
+ *  `definition_permission::Rule`). NO `rename_all` on that struct, so the wire
+ *  keys are `pattern` / `action` — and `action` is the lowercase verb. */
+function rule(
+  pattern: string,
+  action: AgentPermissionAction,
+): AgentPermissionRule {
+  return { pattern, action };
+}
+
+/** One tool's ruleset (the Rust `definition_permission::Rules`).
+ *  `whole_tool` is SNAKE_CASE on purpose: `Rules` carries no `rename_all`, so a
+ *  struct-level camelCase on the parent DTO never reaches it. */
+function rules(
+  patterns: AgentPermissionRule[],
+  wholeTool = false,
+): AgentPermissionRules {
+  return { patterns, whole_tool: wholeTool };
+}
+
+/** The whole-tool spelling (`bash: deny`): the Rust `Rules::whole_tool`
+ *  constructor stores the catch-all `"*"` row AND sets `whole_tool: true`. */
+function toolWide(action: AgentPermissionAction): AgentPermissionRules {
+  return rules([rule("*", action)], true);
+}
+
+/** The whole declared block (the Rust `PermissionBlock`). `tools` is an ORDERED
+ *  ARRAY OF PAIRS — Rust serializes `Vec<(ToolKey, Rules)>` as a 2-element
+ *  array, not an object — so a fixture builds the pair, never a map literal. */
+function block(
+  tools: [AgentToolKey, AgentPermissionRules][],
+): AgentPermissionBlock {
+  return { tools };
+}
+
+/** One announce note (the Rust `definition_permission::FrontmatterNote`).
+ *  EXTERNALLY tagged — the wire form is `{"unknownKey":"mode"}`, one object
+ *  keyed by the camelCase variant name, NOT `{kind:"unknownKey", value:"mode"}`
+ *  (an internally-tagged enum cannot carry a bare `String` payload; serde would
+ *  fail at RUNTIME on the first wire send). */
+function note(
+  kind:
+    | "unknownKey"
+    | "unrecognizedToolKey"
+    | "unsupportedUnvalidatedMatcher"
+    | "unknownAction",
+  value: string,
+): AgentFrontmatterNote {
+  return { [kind]: value } as AgentFrontmatterNote;
 }
 
 const MODELS: ModelDto[] = [
@@ -225,14 +293,20 @@ describe("AgentsDialog", () => {
       agentOverrides: { scout: { model: "tama/Qwen3.8" } },
       rows: [
         row({
-          override: { model: "tama/Qwen3.8", thinking: null, tools: null },
-          file: { model: "openai/GPT-5", thinking: "low", tools: null },
+          override: { model: "tama/Qwen3.8", thinking: null, tools: null, permission: null },
+          file: { model: "openai/GPT-5", thinking: "low", tools: null, permission: null },
           effective: {
             model: "tama/Qwen3.8",
             thinking: "low",
             tools: null,
+            permission: null,
           },
-          source: { model: "override", thinking: "file", tools: "parent" },
+          source: {
+            model: "override",
+            thinking: "file",
+            tools: "parent",
+            permission: "parent",
+          },
         }),
       ],
     });
@@ -320,9 +394,9 @@ describe("AgentsDialog", () => {
     const { patches } = renderControlled({
       rows: [
         row({
-          override: { model: null, thinking: null, tools: ["read_file", "grep"] },
-          effective: { model: null, thinking: null, tools: ["read_file"] },
-          source: { model: "parent", thinking: "parent", tools: "override" },
+          override: { model: null, thinking: null, tools: ["read_file", "grep"], permission: null },
+          effective: { model: null, thinking: null, tools: ["read_file"], permission: null },
+          source: { model: "parent", thinking: "parent", tools: "override", permission: "parent" },
         }),
       ],
       agentOverrides: { scout: { tools: ["read_file", "grep"] } },
@@ -353,9 +427,9 @@ describe("AgentsDialog", () => {
       agentOverrides: { scout: { model: "gone/m1" } },
       rows: [
         row({
-          override: { model: "gone/m1", thinking: null, tools: null },
-          effective: { model: "openai/GPT-5", thinking: null, tools: null },
-          source: { model: "override", thinking: "parent", tools: "parent" },
+          override: { model: "gone/m1", thinking: null, tools: null, permission: null },
+          effective: { model: "openai/GPT-5", thinking: null, tools: null, permission: null },
+          source: { model: "override", thinking: "parent", tools: "parent", permission: "parent" },
         }),
       ],
     });
@@ -406,9 +480,9 @@ describe("AgentsDialog", () => {
       agentOverrides: { scout: { thinking: "max" } },
       rows: [
         row({
-          override: { model: null, thinking: "max", tools: null },
-          effective: { model: null, thinking: null, tools: null },
-          source: { model: "parent", thinking: "parent", tools: "parent" },
+          override: { model: null, thinking: "max", tools: null, permission: null },
+          effective: { model: null, thinking: null, tools: null, permission: null },
+          source: { model: "parent", thinking: "parent", tools: "parent", permission: "parent" },
         }),
       ],
     });
@@ -440,9 +514,9 @@ describe("AgentsDialog", () => {
       agentOverrides: { scout: { model: "openai/GPT-5", thinking: "max" } },
       rows: [
         row({
-          override: { model: "openai/GPT-5", thinking: "max", tools: null },
-          effective: { model: "openai/GPT-5", thinking: null, tools: null },
-          source: { model: "override", thinking: "parent", tools: "parent" },
+          override: { model: "openai/GPT-5", thinking: "max", tools: null, permission: null },
+          effective: { model: "openai/GPT-5", thinking: null, tools: null, permission: null },
+          source: { model: "override", thinking: "parent", tools: "parent", permission: "parent" },
         }),
       ],
     });
@@ -661,9 +735,9 @@ describe("AgentsDialog", () => {
       agentOverrides: { scout: { model: "tama/Qwen3.8" } },
       rows: [
         row({
-          override: { model: "openai/GPT-5", thinking: null, tools: null },
-          effective: { model: "openai/GPT-5", thinking: null, tools: null },
-          source: { model: "override", thinking: "parent", tools: "parent" },
+          override: { model: "openai/GPT-5", thinking: null, tools: null, permission: null },
+          effective: { model: "openai/GPT-5", thinking: null, tools: null, permission: null },
+          source: { model: "override", thinking: "parent", tools: "parent", permission: "parent" },
         }),
       ],
     });
@@ -685,9 +759,9 @@ describe("AgentsDialog", () => {
       agentOverrides: { scout: { model: "tama/Qwen3.8", thinking: "high" } },
       rows: [
         row({
-          override: { model: "tama/Qwen3.8", thinking: "high", tools: null },
-          effective: { model: "tama/Qwen3.8", thinking: "high", tools: null },
-          source: { model: "override", thinking: "override", tools: "parent" },
+          override: { model: "tama/Qwen3.8", thinking: "high", tools: null, permission: null },
+          effective: { model: "tama/Qwen3.8", thinking: "high", tools: null, permission: null },
+          source: { model: "override", thinking: "override", tools: "parent", permission: "parent" },
         }),
       ],
     });
@@ -713,9 +787,9 @@ describe("AgentsDialog", () => {
     renderControlled({
       rows: [
         row({
-          override: { model: "openai/GPT-5", thinking: null, tools: null },
-          effective: { model: "openai/GPT-5", thinking: null, tools: null },
-          source: { model: "override", thinking: "parent", tools: "parent" },
+          override: { model: "openai/GPT-5", thinking: null, tools: null, permission: null },
+          effective: { model: "openai/GPT-5", thinking: null, tools: null, permission: null },
+          source: { model: "override", thinking: "parent", tools: "parent", permission: "parent" },
         }),
       ],
       agentOverrides: { scout: { model: "openai/GPT-5" } },
@@ -821,4 +895,290 @@ describe("AgentsDialog", () => {
       }).hasAttribute("disabled"),
     ).toBe(false);
   });
+
+  // -------------------------------------------------------------------------
+  // The declared `permission:` block (issue #101 part (c)) — DISPLAY ONLY.
+  //
+  // Every fixture below is built through `block` / `rules` / `rule` / `toolWide`
+  // / `note`, which construct the WIRE shapes Rust actually emits (re-derived
+  // from `definition_permission.rs` + `commands/agents.rs`, not from the plan):
+  // `tools` is an ORDERED ARRAY OF PAIRS, `whole_tool` is snake_case, and a note
+  // is one object keyed by its camelCase variant. A type that drifted from the
+  // Rust serde shape would not compile here.
+  // -------------------------------------------------------------------------
+
+  it("a_row_renders_the_definitions_declared_permission_block", async () => {
+    // A multi-tool block: `edit` with an ordered pattern map, then a bare-verdict
+    // `bash`. The tool names and their verdicts must be readable, because the
+    // whole point of #101 is that a declared block used to be silently ignored.
+    openDialog({
+      rows: [
+        row({
+          filePermission: block([
+            ["edit", rules([rule("*", "deny"), rule("*.md", "allow")])],
+            ["bash", toolWide("deny")],
+          ]),
+          source: {
+            model: "parent",
+            thinking: "parent",
+            tools: "parent",
+            permission: "file",
+          },
+        }),
+      ],
+    });
+    const report = await permissionReport();
+    expect(permissionLines(report)).toEqual([
+      "edit * → deny",
+      "edit *.md → allow",
+      "bash → deny",
+    ]);
+    // THE `whole_tool` DISTINCTION, which is the only reason the field exists:
+    // Rust stores a bare `bash: deny` as the catch-all `"*"` row PLUS the flag,
+    // and an explicit `{"*": deny}` map as the same row WITHOUT it. The row says
+    // "the file said tool-wide", so it must NOT print the stored `"*"` — a line
+    // reading `bash * → deny` would report a pattern the file never wrote.
+    expect(permissionLines(report)[2]).not.toContain("*");
+    // And ADR 0068's layer vocabulary is REUSED, not re-invented: the block
+    // carries the same `file` tag the three field lines use.
+    expect(within(report).getByText("file")).toBeTruthy();
+  });
+
+  it("the_permission_display_preserves_file_order_and_never_sorts", async () => {
+    // opencode resolves a tool's pattern object IN ORDER and the LAST matching
+    // rule governs, so a sorted display would misrepresent which rule actually
+    // decides — the same silent-no-op class #101 exists to fix.
+    //
+    // The fixture breaks BOTH plausible sort keys at once: the patterns are NOT
+    // in lexicographic order (`src/lib/*.ts` sits BEFORE `src/generated/*`, which
+    // sorts earlier), and the actions alternate deny/allow/deny/allow, which no
+    // action sort can produce. A `.sort()` on either key — or on the tool names —
+    // reorders this sequence, so this test can only stay green by not sorting.
+    const scrambled = [
+      rule("*", "deny"),
+      rule("*.md", "allow"),
+      rule("src/lib/*.ts", "deny"),
+      rule("src/generated/*", "allow"),
+    ];
+    openDialog({
+      rows: [
+        row({
+          filePermission: block([
+            ["read", rules([rule("docs/**", "allow")])],
+            ["edit", rules(scrambled)],
+            ["bash", toolWide("ask")],
+          ]),
+          source: {
+            model: "parent",
+            thinking: "parent",
+            tools: "parent",
+            permission: "file",
+          },
+        }),
+      ],
+    });
+    const report = await permissionReport();
+    // ORDERED, as ONE sequence — never per-text `getByText`, which cannot
+    // observe order. `read` before `edit` before `bash` is the file order (a
+    // tool-name sort would put `bash` first); the four `edit` rows stay in the
+    // scrambled order they arrived in.
+    expect(permissionLines(report)).toEqual([
+      "read docs/** → allow",
+      "edit * → deny",
+      "edit *.md → allow",
+      "edit src/lib/*.ts → deny",
+      "edit src/generated/* → allow",
+      "bash → ask",
+    ]);
+  });
+
+  it("a_row_with_no_permission_block_renders_no_permission_line", async () => {
+    // The ordinary case stays lean, exactly like `ShadowReport` returning `null`
+    // for zero losers: a file that says nothing about permissions has nothing to
+    // disclose. `filePermission: null` + `frontmatterNotes: []` is what Rust
+    // sends for such a file, and it is the fixture builder's DEFAULT — so this
+    // also pins that the default row cannot start carrying a line on every row.
+    openDialog();
+    await screen.findByText("scout");
+    expect(document.querySelector("[data-permission-report]")).toBeNull();
+    expect(screen.queryByText("Permission")).toBeNull();
+  });
+
+  it("the_permission_block_is_plain_text_never_a_control", async () => {
+    // Display-only scope, pinned the way the shadow report pins its own: the
+    // block is the DEFINITION FILE's declaration, and there is no honest control
+    // for it here (the rules are authored in the markdown file, never in this
+    // modal). A control would promise an edit this component cannot perform.
+    openDialog({
+      rows: [
+        row({
+          filePermission: block([
+            ["edit", rules([rule("*.md", "allow")])],
+            ["bash", toolWide("deny")],
+          ]),
+          frontmatterNotes: [note("unrecognizedToolKey", "glob")],
+          source: {
+            model: "parent",
+            thinking: "parent",
+            tools: "parent",
+            permission: "file",
+          },
+        }),
+      ],
+    });
+    const report = await permissionReport();
+    expect(report.closest('[role="button"]')).toBeNull();
+    expect(report.getAttribute("tabindex")).toBeNull();
+    // No control of ANY shape inside the block — not for the rules, not for the
+    // notes.
+    expect(report.querySelector("input")).toBeNull();
+    expect(report.querySelector("button")).toBeNull();
+    expect(report.querySelector('[role="button"]')).toBeNull();
+    expect(report.querySelector('[role="combobox"]')).toBeNull();
+    // And the row gained no new `onPatch` route: the dialog was opened with a
+    // fresh spy and nothing has been written.
+  });
+
+  it("unrecognised_and_unsupported_rows_are_named_not_dropped", async () => {
+    // The ANNOUNCE half of #101: a note is a report, never an error, and it must
+    // NAME what the file said. Each fixture note is the serialised wire element
+    // (`{"unrecognizedToolKey":"glob"}` and friends) — so a renamed field cannot
+    // pass this test, because the renderer reads the tagged key.
+    //
+    // And the block carries its OWN unrecognised shape: a `ToolKey::Unrecognized`
+    // is the externally-tagged OBJECT `{"unrecognized":"glob"}` (the tuple
+    // element is an enum, so serde wraps it), not the bare string the eleven
+    // recognised keys arrive as. It stays in the block — never dropped — so the
+    // row names it too.
+    openDialog({
+      rows: [
+        row({
+          // A note without a block is reachable: a `permission:` line that
+          // yielded nothing readable at all is `filePermission: null` plus
+          // `{"unknownKey":"permission"}`.
+          filePermission: block([
+            [{ unrecognized: "glob" }, rules([rule("*.json", "deny")])],
+          ]),
+          frontmatterNotes: [
+            note("unknownKey", "temperature"),
+            note("unrecognizedToolKey", "glob"),
+            note("unsupportedUnvalidatedMatcher", "bashPatternRules"),
+            note("unknownAction", "maybe"),
+          ],
+          source: {
+            model: "parent",
+            thinking: "parent",
+            tools: "parent",
+            permission: "file",
+          },
+        }),
+      ],
+    });
+    const report = await permissionReport();
+    // The unrecognised TOOL keeps its verbatim name (the silent-drop class #101
+    // exists to fix has no path through the display either).
+    expect(permissionLines(report)).toEqual(["glob *.json → deny"]);
+    // Each note is its own line, naming BOTH the kind and the verbatim value.
+    expect(
+      within(report).getByText("unknown key: temperature"),
+    ).toBeTruthy();
+    expect(
+      within(report).getByText("unrecognised tool key: glob"),
+    ).toBeTruthy();
+    expect(
+      within(report).getByText(/bash pattern rules are parsed but NOT enforced/),
+    ).toBeTruthy();
+    expect(within(report).getByText("unknown action: maybe")).toBeTruthy();
+    // In FILE ORDER, one line per note — the Rust `Vec` order, nothing grouped
+    // or deduped.
+    expect(
+      Array.from(report.querySelectorAll("p")).map((p) => p.textContent),
+    ).toEqual([
+      "unknown key: temperature",
+      "unrecognised tool key: glob",
+      "bash pattern rules are parsed but NOT enforced",
+      "unknown action: maybe",
+    ]);
+  });
+
+  it("an_empty_notes_array_renders_nothing_extra", async () => {
+    // `frontmatterNotes` is REQUIRED on the wire and arrives as `[]` for a clean
+    // file (the `shadowed` precedent). An empty report must not become a line
+    // every row carries.
+    openDialog({
+      rows: [
+        row({
+          filePermission: block([["bash", toolWide("deny")]]),
+          frontmatterNotes: [],
+          source: {
+            model: "parent",
+            thinking: "parent",
+            tools: "parent",
+            permission: "file",
+          },
+        }),
+      ],
+    });
+    const report = await permissionReport();
+    expect(permissionLines(report)).toEqual(["bash → deny"]);
+    expect(report.querySelectorAll("p")).toHaveLength(0);
+  });
+
+  it("the_permission_block_reports_the_layer_rust_named", async () => {
+    // The block prints the layer the RESOLVER reported (`source.permission`),
+    // not one this component guesses. Rust says `file` exactly when the block
+    // exists, so the honest rendering is Rust's word — and a row whose notes
+    // announce a block that never parsed carries `parent`, which reads through
+    // the SAME ADR 0068 rung as the three field lines.
+    openDialog({
+      rows: [
+        row({
+          filePermission: block([["edit", rules([rule("*", "deny")])]]),
+          source: {
+            model: "parent",
+            thinking: "parent",
+            tools: "parent",
+            permission: "file",
+          },
+        }),
+      ],
+    });
+    const report = await permissionReport();
+    expect(within(report).getByText("file")).toBeTruthy();
+    expect(within(report).queryByText("override")).toBeNull();
+  });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The permission-block query helpers (see the `#101 part (c)` block above).
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** The permission block's container. `data-permission-report` is the ordered
+ *  hook the order test needs — `ShadowReport` gets away with a bare text query
+ *  because its loser paths are unique strings, but a rule line like `* → deny`
+ *  is not, and an ORDERED node list has to start from the block itself. The
+ *  `data-*` hook is this repo's idiom for exactly that (`data-reasoning-content`
+ *  in `Reasoning.tsx`, `data-changes-group-row` in `ChangesGroupCard.tsx`). */
+async function permissionReport(): Promise<HTMLElement> {
+  // The dialog renders synchronously; the await is the same settle `findBy*`
+  // gives every other test in this file, so a missing block fails LOUDLY rather
+  // than vacuously.
+  await screen.findByText("scout");
+  const report = document.querySelector("[data-permission-report]");
+  if (report === null) throw new Error("no [data-permission-report] rendered");
+  return report as HTMLElement;
+}
+
+/** The block's rule lines, IN DOM ORDER, each reconstructed from its own child
+ *  spans (`["edit", "*.md", "→ allow"]` → `"edit *.md → allow"`). One joined
+ *  ORDERED array is what makes the no-sort test able to FAIL: an array
+ *  comparison catches a reorder, where `getByText("*.md")` cannot. */
+function permissionLines(report: HTMLElement): string[] {
+  return Array.from(report.querySelectorAll("[data-permission-rule]")).map(
+    (line) =>
+      Array.from(line.children)
+        .map((part) => part.textContent ?? "")
+        .join(" "),
+  );
+}
+

@@ -437,16 +437,51 @@ describe("listAgentConfig (the sidebar Agents modal's IPC boundary, ADR 0068)", 
     // renders "Inherits parent" for a value the file actually set. The payload
     // is a REAL serialized row (ADR 0068's `shadowed` included, required and
     // empty-as-`[]`).
+    //
+    // issue #101 added TWO more fields and this pin GAINED them as ASSERTIONS,
+    // not as quiet fixture edits. The block below is written in the exact
+    // spelling `definition_permission.rs` produces — `tools` is an ORDERED ARRAY
+    // OF PAIRS (Rust serializes `Vec<(ToolKey, Rules)>` as a 2-element JSON
+    // array, never an object), `whole_tool` is SNAKE_CASE (`Rules` carries no
+    // `rename_all`, and a rename on the parent DTO never reaches a nested type),
+    // `action` is the lowercase verb, and a note is ONE TAGGED OBJECT
+    // (`{"unknownKey":"mode"}`) because `FrontmatterNote` is EXTERNALLY tagged.
+    // The assertions beneath pin those SERIALISED ELEMENTS rather than a bare
+    // `contains`, so a renamed field or a re-tagged enum reddens THIS test —
+    // which matters more here than anywhere, because this repo has no Rust↔TS
+    // wire-contract test and both suites would otherwise stay green on a drift.
     const row: AgentConfigDto = {
       name: "scout",
       description: "Fast recon.",
       scope: "space",
       path: "/p/scout.md",
-      file: { model: "fake/m1", thinking: null, tools: null },
-      override: { model: null, thinking: null, tools: null },
-      effective: { model: "fake/m1", thinking: null, tools: null },
-      source: { model: "file", thinking: "parent", tools: "parent" },
+      file: {
+        model: "fake/m1",
+        thinking: null,
+        tools: null,
+        permission: {
+          tools: [
+            ["bash", { patterns: [{ pattern: "*", action: "deny" }], whole_tool: true }],
+            [{ unrecognized: "glob" }, { patterns: [{ pattern: "*.json", action: "ask" }], whole_tool: false }],
+          ],
+        },
+      },
+      override: { model: null, thinking: null, tools: null, permission: null },
+      effective: { model: "fake/m1", thinking: null, tools: null, permission: null },
+      source: { model: "file", thinking: "parent", tools: "parent", permission: "file" },
       shadowed: [{ name: "scout", path: "/u/scout.md", scope: "user" }],
+      // The row-level declared block, the SAME block the `file` column carries
+      // (Rust clones it from the definition twice — `file_permission` and
+      // `file_fields(def).permission` are one value).
+      filePermission: {
+        tools: [
+          ["bash", { patterns: [{ pattern: "*", action: "deny" }], whole_tool: true }],
+          [{ unrecognized: "glob" }, { patterns: [{ pattern: "*.json", action: "ask" }], whole_tool: false }],
+        ],
+      },
+      // REQUIRED like `shadowed`: a clean file's empty `Vec` is `[]`, never
+      // `null` and never an absent key.
+      frontmatterNotes: [{ unknownKey: "mode" }, { unrecognizedToolKey: "glob" }],
     };
     mockedInvoke.mockResolvedValue([row]);
     await expect(listAgentConfig("/p/space")).resolves.toEqual([row]);
@@ -456,9 +491,77 @@ describe("listAgentConfig (the sidebar Agents modal's IPC boundary, ADR 0068)", 
     // declared `override_` would not type-check here, and the modal's editor
     // would read a column that never arrives.
     const [out] = await listAgentConfig("/p/space");
-    expect(out.override).toEqual({ model: null, thinking: null, tools: null });
+    expect(out.override).toEqual({
+      model: null,
+      thinking: null,
+      tools: null,
+      // The stored entry has NO `permission` key at all (ADR 0066's shape is
+      // model/thinking/tools), so this column is `null` by construction — never
+      // a block, and never `override` in the source column either.
+      permission: null,
+    });
     expect(out.source.model).toBe("file");
     expect(out.shadowed).toHaveLength(1);
+
+    // ---- issue #101: the permission wire spellings, asserted as ELEMENTS ----
+
+    // The block is the ORDERED PAIR ARRAY, in file order — `bash` first because
+    // the file wrote it first, and an assertion that read it as an object could
+    // not observe that order at all.
+    expect(out.filePermission).toEqual({
+      tools: [
+        ["bash", { patterns: [{ pattern: "*", action: "deny" }], whole_tool: true }],
+        [{ unrecognized: "glob" }, { patterns: [{ pattern: "*.json", action: "ask" }], whole_tool: false }],
+      ],
+    });
+    // THE snake_case key, asserted by name: `whole_tool` and NOT `wholeTool`.
+    // A TS mirror that guessed camelCase would read `undefined` here and the
+    // row would render a tool-wide deny as a pattern rule — the exact silent
+    // drift no other test in either suite can see.
+    expect(out.filePermission!.tools[0]![1]).toHaveProperty("whole_tool", true);
+    expect(out.filePermission!.tools[0]![1]).not.toHaveProperty("wholeTool");
+    // The lowercase verb, and the externally-tagged `ToolKey::Unrecognized`
+    // object that keeps an unpoliced key's verbatim name.
+    expect(out.filePermission!.tools[0]![1].patterns[0]!.action).toBe("deny");
+    expect(out.filePermission!.tools[1]![0]).toEqual({ unrecognized: "glob" });
+    // The notes, one TAGGED OBJECT per note, in order. `toEqual` on the whole
+    // array is the rot-proof form: a `{kind, value}` mirror of these objects
+    // fails it, where `JSON.stringify(...).includes("mode")` would pass.
+    expect(out.frontmatterNotes).toEqual([
+      { unknownKey: "mode" },
+      { unrecognizedToolKey: "glob" },
+    ]);
+    // `source.permission` is `file` here — Rust reports the FILE layer exactly
+    // when the block exists, and there is no fourth `OverrideSource` variant.
+    expect(out.source.permission).toBe("file");
+  });
+
+  it("a file that says nothing about permissions still sends both fields", async () => {
+    // The empty-case wire shape, pinned separately because it is the shape
+    // EVERY row in the ordinary install arrives as, and because the two fields
+    // are empty in two DIFFERENT ways: `filePermission` is Rust `Option` so it
+    // is `null`, while `frontmatterNotes` is a REQUIRED `Vec` so it is `[]`.
+    // A mirror that declared the notes `null`-able, or the block optional,
+    // would read fine here and lie about the wire.
+    const row: AgentConfigDto = {
+      name: "scout",
+      description: "Fast recon.",
+      scope: "space",
+      path: "/p/scout.md",
+      file: { model: null, thinking: null, tools: null, permission: null },
+      override: { model: null, thinking: null, tools: null, permission: null },
+      effective: { model: null, thinking: null, tools: null, permission: null },
+      source: { model: "parent", thinking: "parent", tools: "parent", permission: "parent" },
+      shadowed: [],
+      filePermission: null,
+      frontmatterNotes: [],
+    };
+    mockedInvoke.mockResolvedValue([row]);
+    const [out] = await listAgentConfig("/p/space");
+    expect(out.filePermission).toBeNull();
+    expect(out.frontmatterNotes).toEqual([]);
+    // No block ⇒ no file layer: Rust reports `parent`, never a fourth word.
+    expect(out.source.permission).toBe("parent");
   });
 });
 

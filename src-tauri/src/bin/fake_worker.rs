@@ -512,6 +512,7 @@ fn emit_subagent_dispatch<W: Write>(
                 thinking: None,
                 frontmatter_thinking: None,
                 tools,
+                permission: None,
             },
             task: task.to_string(),
             model_key: model_key.to_string(),

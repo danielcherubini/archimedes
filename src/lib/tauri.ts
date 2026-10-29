@@ -99,6 +99,16 @@ export type {
   AgentOverrideFields,
   AgentOverrideSources,
   AgentConfigDto,
+  // (issue #101) The declared-`permission:` wire types. TYPE-ONLY — they vanish
+  // at runtime, so `TAURI_RUNTIME_API` does NOT gain them (the
+  // `AccessRule`/`AccessDirection` precedent).
+  AgentFrontmatterNote,
+  AgentPermissionAction,
+  AgentPermissionBlock,
+  AgentPermissionRule,
+  AgentPermissionRules,
+  AgentToolKey,
+  AgentUnsupportedReason,
   McpServerInfo,
   ShadowedSkill,
   ShadowedAgent,

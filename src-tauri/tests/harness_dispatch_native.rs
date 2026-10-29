@@ -106,6 +106,8 @@ async fn make_manager(
         "/tmp".to_string(),
         true,
         None,
+        // (issue #101) `from_parts`' new trailing arg (the parent env: no block).
+        None,
     );
     wm.attach("p1", &env)
         .await
@@ -181,6 +183,11 @@ fn default_launch() -> LaunchConfig {
         thinking: None,
         frontmatter_thinking: None,
         tools: None,
+        // (issue #101, task05a) A new additive field lands here: this literal is
+        // FULLY specified (no `..Default::default()`), so it is one of the tree's
+        // two sites `cargo build --all-targets` — and NOT `cargo test --lib` —
+        // catches. `None` = "this dispatch carries no declared ruleset".
+        permission: None,
     }
 }
 

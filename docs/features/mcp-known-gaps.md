@@ -1,7 +1,7 @@
 ---
 status: live
-last-verified: 2026-10-24
-verified-by: read against this tree at `774039d` (`agent/mcp/{http,oauth,manager,tool}.rs`, `commands/settings.rs`) — every gap below re-confirmed still open, not copied from the plan
+last-verified: 2026-10-29
+verified-by: read against this tree at `2b6bd26` (`agent/mcp/tool.rs`, `agent/harness/tool_specs.rs`) — every gap below re-confirmed still open, not copied from the plan
 ---
 
 # MCP — known gaps
@@ -53,6 +53,44 @@ gap that its own plan named.
   (`manager.rs:161-166`). The `mcp` tool's own `auth` action does clear the state
   (`authenticate_with` drops client + state, `manager.rs:314-318`), so the gap is
   specific to the Settings door, not to authenticating.
+
+## The `server_tool` name forms, and what the precedence shadows (#118, T3)
+
+`mcp({ tool: … })` and `mcp({ describe: … })` now accept the callable prefixed
+spelling: `<server>_<tool>` (the form `search` and the single-`server` listing
+print) and the `mcp__<server>__<tool>` alias. Both resolve against the server
+names the manager
+HOLDS by LONGEST prefix — never a split on the first `_` — so with a `github` and
+a `github_enterprise` server, `github_enterprise_get_issue` is server
+`github_enterprise`'s `get_issue`. Whatever the tier resolves to, the RAW tool
+name is what reaches the server: the prefix is a spelling this proxy understands
+and is never forwarded. The rules that decide an awkward name:
+
+- **A prefix naming a known server WINS over a literal raw name.** `github_echo`
+  is server `github`'s `echo` even if some other server serves a tool literally
+  called `github_echo`. A `server` param forces the RAW reading — the name is
+  passed through untouched — and a name carrying no `_` is never a prefix
+  candidate at all, which is what keeps every raw-name behavior below intact.
+- **A prefixed miss FAILS even when every server answered** (#118). This is
+  layered onto the #68 partial-set rule, not a replacement of it: a raw name's
+  miss keeps its exact bytes (`Tool not found: nope`, a SUCCESS on an all-healthy
+  set), and a prefixed miss composes the same `Skipped servers:` note, scoped to
+  the server the prefix named.
+- **A resolved prefix never reaches the ambiguity rule.** The tie arm counts the
+  servers owning a RAW name; a prefix has already picked its server by
+  construction.
+
+**The residual limitation the precedence leaves:** a tool literally named
+`X_<something>` on a server that is NOT `X` is SHADOWED whenever `X` is also a
+known server — `{ "tool": "github_echo" }` cannot reach server `linear`'s
+tool of that literal name, because the prefix reading wins. The escape hatch is
+the raw reading: `mcp({ tool: "echo", server: "linear" })` (and, for the literal
+name, `mcp({ tool: "github_echo", server: "linear" })` — a `server` param means
+the name is raw). `search` still lists the shadowed tool under its own
+`[linear] linear_github_echo` line, so it is findable, merely not callable by
+that spelling. Accepted: the alternative — preferring a literal raw name over a
+known-server prefix — would make the callable form `search` prints unreliable,
+which is the whole point of the change.
 
 ## Two pointers the same loop recorded, so they are not re-derived
 
