@@ -1517,18 +1517,29 @@ async fn a_child_with_a_tools_list_and_an_empty_body_gets_no_main_prompt() {
         "the child completed with NO system message, got {closed:?}"
     );
 
-    // The child's persisted transcript, read AFTER the close (the store
-    // frames all land before the child's `agent_settled` — the pump's
-    // capture-feed ordering — so no `wait_for_rows` count race is needed).
-    let child_rows =
-        h.db.load_native_messages(&child_id)
-            .expect("the child transcript loads");
+    // The child's persisted transcript. The four sibling e2es all bound this
+    // read with `wait_for_rows`; this one used to read ONCE and assert, on the
+    // theory that the store frames all land before the child's
+    // `agent_settled`. That premise does not hold end to end: `subagent-closed`
+    // is the PARENT's sink event, and the child is a SEPARATE PROCESS writing
+    // the same SQLite file, so the parent's connection is not guaranteed to
+    // observe the child's answer row at the instant the close arrives. When it
+    // didn't, the read saw only the task row and the vacuity guard below fired
+    // ("got [\"{\\\"role\\\":\\\"user\\\"...}\"]") — observed once on
+    // `macos-latest`, green on the sibling job of the same SHA.
+    //
+    // Bounding the read is the same contract the siblings use, and it costs
+    // nothing when the ordering DOES hold: `wait_for_rows` returns on the first
+    // poll that already has `want` rows.
+    let child_rows = wait_for_rows(&h.db, &child_id, 2).await;
     let cv: Vec<Value> = child_rows
         .iter()
         .map(|r| serde_json::from_str(r).expect("the row is JSON"))
         .collect();
     // The guard that keeps "no `system` row" from passing on an EMPTY
     // transcript (a child that never persisted anything is a DIFFERENT bug).
+    // Still load-bearing after the bounded read: it is what fires when the
+    // wait TIMES OUT rather than filling.
     assert!(
         child_rows.len() >= 2,
         "the child persisted its task + its answer, got {child_rows:?}"
