@@ -575,8 +575,8 @@ async fn a_sandboxed_shell_dispatches_confined_with_no_prompt() {
     // the dir leaked. With the guard owning the dir, a guard declared inside
     // the block would remove it at the block's closing brace and redden the
     // `confined_here` arm on any Landlock machine. Same rule the sibling
-    // `a_gate_denial_of_a_protected_dir_uses_the_protected_wording` records
-    // for its `link` dir: the thing the post-block assertions read must
+    // `a_user_deny_rule_refuses_an_agent_dir_write_with_the_unchanged_protected_wording`
+    // records for its `link` dir: the thing the post-block assertions read must
     // OUTLIVE the block, so it is bound here. The BLOCK stays — it scopes the
     // TURN — and no assertion moves.
     let (_space, mut loop_, _cfg) = build_policy_loop(

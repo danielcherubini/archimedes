@@ -38,8 +38,10 @@ pub(crate) fn write_backend(ctx: &ToolCtx) -> FsBackend {
 /// (ADR 0030: a guard-rail, not a security boundary), but the refusal is read
 /// at the moment of decision, and naming an elevated route there is what sent
 /// the reporting agent reaching for one over a markdown file (issue #33).
-/// Pinned negative by `write_into_a_protected_dir_is_refused_under_every_policy`
-/// and by the gate's `a_gate_denial_of_a_protected_dir_uses_the_protected_wording`.
+/// Pinned by `a_user_deny_rule_refuses_an_agent_dir_write_with_the_unchanged_protected_wording`
+/// (executor half) and the gate's twin `a_gate_denial_of_a_deny_rule_uses_the_protected_wording`
+/// — the two halves of the pair this spec renamed, whose old names asserted the
+/// every-policy claim this change removes.
 pub(crate) const PROTECTED_WRITE_ROUTE: &str = "This is by design: these directories are the agent's own instructions. Write the file under your session directory instead and ask the user to move it into place (the `ask` tool).";
 
 /// The write DENY-LIST check (ADR 0030 Deviation 3): a resolved path under

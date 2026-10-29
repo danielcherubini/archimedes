@@ -712,7 +712,8 @@ async fn a_raw_protected_entry_still_refuses_a_canonical_path_under_it() {
 /// argument verbatim — so this seam must canonicalize its ARGUMENT side too.
 ///
 /// CI evidence (branch run 38702103063, the `f9b5c17`/`3fd702f` family):
-/// macOS `a_gate_denial_of_a_protected_dir_uses_the_protected_wording` failed
+/// macOS `a_gate_denial_of_a_protected_dir_uses_the_protected_wording` (since
+/// renamed to `a_user_deny_rule_refuses_an_agent_dir_write_with_the_unchanged_protected_wording`) failed
 /// with `got "write: path escapes the session sandbox: …"` (Windows the same
 /// with the `\\?\C:\…` verbatim spelling): the gate's raw argument shared no
 /// prefix with its canonical entry, so the deny-list branch never fired and
