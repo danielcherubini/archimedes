@@ -94,6 +94,8 @@ fn subagent_start(session_id: &str, cwd: &str) -> StartEnv {
         cwd.to_string(),
         false,
         Some("the subagent system prompt".to_string()),
+        // (issue #101) `from_parts`' new trailing arg (no per-agent block here).
+        None,
     )
 }
 

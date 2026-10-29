@@ -399,6 +399,12 @@ fn start_env_with_file_policy(
             config_dir.display().to_string(),
             subagent_enabled,
             None,
+            // (issue #101) `from_parts`' new trailing arg. `None` for the MAIN
+            // env this builder makes (a main session has no definition); the
+            // CHILD's block is what the dispatch e2e asserts on, and it arrives
+            // through `wire.launch.permission` → the child's own `StartEnv`,
+            // never through this builder.
+            None,
         ),
         config_dir,
     )
@@ -1547,4 +1553,274 @@ async fn a_child_with_a_tools_list_and_an_empty_body_gets_no_main_prompt() {
             );
         }
     }
+}
+
+/// **THE ACCEPTANCE TEST FOR #101** — the definition's `permission:` block is
+/// ENFORCED by a REAL child Worker, and it RIDES THE WIRE to get there.
+///
+/// Two independent halves, because the two ways this feature can be a confident
+/// no-op are in DIFFERENT files, and a test that only checked one would let the
+/// other drop silently:
+///
+///  * **the carry (plumbing):** the `SubagentDispatch` frame's `launch.permission`
+///    is the file's block. This reddens if the resolver / the wire / the
+///    `SubagentDispatchWire` drops it — but it would ALSO pass with a child that
+///    never received it, so it is not sufficient on its own;
+///  * **the enforcement (live):** the CHILD's own `bash` call is REFUSED by the
+///    child's gate — a `tool_execution_end` with `is_error: true` in the
+///    file-access policy's own words, and NO `PermissionRequest` (a deny never
+///    prompts). This reddens if `StartEnv.permission` is never populated or
+///    `worker/core.rs` never calls `set_permission` — the dormant-enforcement
+///    class this round exists to kill.
+///
+/// THE SHAPE IS THE MOTIVATING CASE, NOT AN EDGE CASE: the definition declares NO
+/// `tools:` key (`grep -c '^tools:' ~/.agents/agents/researcher.md` = 0 — the file
+/// issue #101's Evidence section names) and a whole-tool `bash: deny`. The
+/// advertisement filter task05a landed CANNOT help here — it narrows a list the
+/// resolver PRODUCED, and with `tools:` absent there is no list — so `bash` is
+/// still advertised to the child, which is exactly what the `enabledTools`
+/// assertion below pins. The GATE is the only layer that can refuse it, and the
+/// user's policy would NOT: no `settings.json` exists in this fixture, so the
+/// child's `filePolicy` is the all-`Allow` default. Only the definition stops it.
+// The `ENV_LOCK` (`std::sync::Mutex`) is held across the test's `await`
+// points INTENTIONALLY — a sibling test's `HOME` read mid-mutation would
+// see the wrong value (the `test_support` `ENV_LOCK` pattern).
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn the_definition_permission_deny_refuses_the_child_real_worker() {
+    let _lock = archimedes_lib::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let original_home = std::env::var_os("HOME");
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(v) => unsafe {
+                    std::env::set_var("HOME", v);
+                },
+                None => unsafe {
+                    std::env::remove_var("HOME");
+                },
+            }
+        }
+    }
+    let _restore = RestoreHome(original_home.clone());
+    let home = temp_dir();
+    std::fs::create_dir_all(home.join(".pi/agent/agents")).unwrap();
+    // NO `tools:` key — the researcher shape. `bash: deny` is the whole-tool
+    // spelling (a bare `Action`), the one the gate can decide with no matcher.
+    std::fs::write(
+        home.join(".pi/agent/agents/gated.md"),
+        "---\nname: gated\nmodel: fake/sub-model\npermission:\n  bash: deny\n---\nYou are the gated child.\n",
+    )
+    .unwrap();
+    // SAFETY: the `ENV_LOCK` is held for the whole set→assert→restore
+    // span (the `_lock` guard); no other thread mutates HOME concurrently.
+    unsafe {
+        std::env::set_var("HOME", home.path());
+    }
+
+    let mut h = E2e::new().await;
+    // The MAIN: request 1 dispatches the gated child, request 2 is the `stop`.
+    let main_server = MockServer::start().await;
+    mount_two_request_streams(
+        &main_server,
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"tc_sub\",\"function\":{\"name\":\"subagent\",\"arguments\":\"{\\\"task\\\":\\\"run the command\\\",\\\"agentName\\\":\\\"gated\\\"}\"}}]}}]}\n\n\
+         data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n\
+         data: [DONE]\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n\
+         data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+         data: [DONE]\n\n",
+    )
+    .await;
+    // The CHILD: request 1 asks for the denied `bash`, request 2 is the `stop`.
+    // The second stream answers whatever the refusal was, so the child settles
+    // and the capture is the REFUSAL's text — the point of the test.
+    let sub_server = MockServer::start().await;
+    mount_two_request_streams(
+        &sub_server,
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_bash\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"echo GATED-RAN\\\"}\"}}]}}]}\n\n\
+         data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n\
+         data: [DONE]\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"blocked by the definition\"}}]}\n\n\
+         data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+         data: [DONE]\n\n",
+    )
+    .await;
+    let cwd = temp_dir();
+    let main_model = wire_model(&main_server, "main-model");
+    let sub_model = wire_model(&sub_server, "sub-model");
+    let catalog = ModelCatalog {
+        models: vec![main_model.clone(), sub_model],
+        ..Default::default()
+    };
+    // NO `file_policy` argument → no `settings.json` → the child's posture is the
+    // all-`Allow` default: the USER's policy would run the command. Only the
+    // definition's block can refuse it.
+    let (env, _config_dir) = start_env(
+        "e2e-gated",
+        &cwd,
+        main_model.clone(),
+        catalog,
+        true,
+        // The parent offers `bash` + `subagent`; with `tools:` absent the child
+        // INHERITS that list minus the guard, so `bash` reaches the child's
+        // advertisement — the leg the resolver-side filter cannot reach.
+        Some(vec!["bash".to_string(), "subagent".to_string()]),
+        true,
+    );
+    h.attach(env).await;
+    h.manager
+        .handle_for("e2e-gated")
+        .expect("the session is attached")
+        .send_prompt("go", &[])
+        .expect("the prompt is sent");
+
+    // (a) THE CARRY — the block rode the resolver → `LaunchConfig` → the wire.
+    let collected = h
+        .wait(Duration::from_secs(30), |evs| {
+            evs.iter()
+                .any(|(_, _, e)| matches!(e, WorkerInboundEvent::SubagentDispatch(..)))
+        })
+        .await
+        .expect("the SubagentDispatch arrives within the bound");
+    let dispatch = collected
+        .into_iter()
+        .find_map(|(_, _, e)| match e {
+            WorkerInboundEvent::SubagentDispatch(w) => Some(w),
+            _ => None,
+        })
+        .expect("a SubagentDispatch frame");
+    assert_eq!(dispatch.agent_name, "gated");
+    let carried = dispatch
+        .launch
+        .permission
+        .as_deref()
+        .expect("the definition's block rides the wire (a `None` here is the silent drop)");
+    assert_eq!(
+        serde_json::to_value(carried).expect("a block serializes"),
+        serde_json::json!({
+            "tools": [
+                ["bash", { "patterns": [{ "pattern": "*", "action": "deny" }], "whole_tool": true }]
+            ]
+        }),
+        "the block crosses as the WHOLE-TOOL `deny` the gate can decide, in B1's \
+         pinned spellings (lowercase `action`, snake_case `whole_tool`)"
+    );
+
+    // (b) `bash` IS STILL ADVERTISED to the child — the `tools:`-absent leg.
+    // Recorded, not assumed: this is why half (c) is the only possible refusal.
+    let started = h
+        .wait_sink(Duration::from_secs(30), |evs| {
+            evs.iter().any(|(e, _)| e == "subagent-session-started")
+        })
+        .await
+        .expect("subagent-session-started arrives within the bound")
+        .into_iter()
+        .find_map(|(e, p)| (e == "subagent-session-started").then_some(p))
+        .expect("the subagent-session-started payload");
+    let child_id = started["sessionId"]
+        .as_str()
+        .expect("the child session id")
+        .to_string();
+    let enabled: Vec<String> = started["enabledTools"]
+        .as_array()
+        .expect("the enabledTools list")
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        enabled.contains(&"bash".to_string()),
+        "with no `tools:` key nothing was filtered, so the model WAS offered the \
+         denied tool and the gate is the only layer that can refuse it: {enabled:?}"
+    );
+
+    // (c) THE ENFORCEMENT — the child's own `bash` is refused by the CHILD's
+    // gate, in the existing policy wording, with no prompt.
+    let evs = h
+        .wait(Duration::from_secs(60), |evs| {
+            evs.iter().any(|(_, is_sub, e)| {
+                *is_sub
+                    && matches!(e, WorkerInboundEvent::Event(ev) if ev.kind() == "tool_execution_end")
+            })
+        })
+        .await
+        .expect("the child's tool_execution_end arrives within the bound");
+    let (result, is_error) =
+        tool_execution_end(&evs, Some("bash")).expect("the child's bash tool_execution_end");
+    assert!(
+        is_error,
+        "the definition's `bash: deny` REFUSED the child's call (an `Allow` here \
+         means StartEnv.permission or core.rs's set_permission dropped): {result:?}"
+    );
+    let text = result
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|c| c.first())
+        .and_then(|c| c.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        text.contains("refused by the file-access policy"),
+        "the refusal is the EXISTING shell wording (no per-layer renderer): {text:?}"
+    );
+    assert!(
+        !text.contains("GATED-RAN"),
+        "the command never ran: {text:?}"
+    );
+    // A DENY never prompts. Matched on the CHILD's tool-call id rather than a
+    // session id: the child's frames are delivered under the PARENT's id with
+    // `is_subagent: true` (the sibling dispatch e2e's predicate records the same
+    // shape), so the `requestId` is the unambiguous key.
+    assert!(
+        !evs.iter().any(|(_, _, e)| match e {
+            WorkerInboundEvent::PermissionRequest { id, payload } =>
+                id == "call_bash" || payload["requestId"] == "call_bash",
+            _ => false,
+        }),
+        "a deny emits no permission-request"
+    );
+
+    // (d) The child settles COMPLETED (a refusal is a tool result, not a failure)
+    // and the parent's turn finishes with the child's captured text.
+    let closed = h
+        .wait_sink(Duration::from_secs(60), |evs| {
+            evs.iter().any(|(e, _)| e == "subagent-closed")
+        })
+        .await
+        .expect("subagent-closed arrives within the bound")
+        .into_iter()
+        .find_map(|(e, p)| (e == "subagent-closed").then_some(p))
+        .expect("the subagent-closed payload");
+    assert_eq!(closed["sessionId"], child_id);
+    assert_eq!(
+        closed["status"], "completed",
+        "a gate refusal is a tool RESULT the child recovers from, got {closed:?}"
+    );
+    let main_evs = h
+        .wait(Duration::from_secs(60), |evs| {
+            evs.iter().any(|(_, is_sub, e)| {
+                !is_sub
+                    && matches!(e, WorkerInboundEvent::Event(ev) if ev.kind() == "agent_settled")
+            })
+        })
+        .await
+        .expect("the main turn settles within the bound");
+    let (sub_result, sub_is_error) =
+        tool_execution_end(&main_evs, Some("subagent")).expect("the subagent tool_execution_end");
+    assert!(
+        !sub_is_error,
+        "the dispatch Completed (the refusal is inside the capture), got {sub_result:?}"
+    );
+    // (e) A clean child exit (no `on_crash`) + a clean main close.
+    let main_handle = h.manager.detach("e2e-gated").expect("the main is attached");
+    let code = tokio::time::timeout(Duration::from_secs(15), main_handle.exited())
+        .await
+        .expect("the main worker exits after the close");
+    assert_eq!(code, Some(0), "the main worker exits 0, got {code:?}");
+    assert!(
+        h.crashes.try_recv().is_err(),
+        "no on_crash (the child reaped cleanly, the main closed cleanly)"
+    );
 }

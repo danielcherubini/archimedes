@@ -505,6 +505,9 @@ mod tests {
             "/tmp/config".to_string(),
             true,
             None,
+            // (issue #101) A parent/worker-side start (no definition involved) —
+            // `None` = no per-agent narrowing.
+            None,
         )
     }
 
