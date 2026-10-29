@@ -354,6 +354,30 @@ workflow can do — is writing notes a person would read.
 
 ### Working in this repo
 
+- **The squash-merge convention silently orphans the commit hashes the docs cite.**
+  `docs/decisions/` + `docs/features/` cite **52** distinct 7-hex tokens that resolve to
+  commits; **17** are unreachable from `main`, and **10** of those resolve nowhere at all —
+  not locally, not on GitHub. Measured at `6f501ab`, re-runnable as:
+  `git grep -hoE '\b[0-9a-f]{7}\b' -- docs/decisions docs/features | sort -u` then keep each
+  token where `git cat-file -e "$h^{commit}"` succeeds and
+  `git merge-base --is-ancestor "$h" HEAD` fails. The cause is structural, not neglect: the
+  convention above lands one squash commit, so every per-issue commit the branch described
+  becomes unreachable the moment the branch is deleted. Seven of the seventeen still resolve
+  because GitHub keeps `refs/pull/N/head` after the branch is deleted — **but only if you have
+  fetched those refs** (`git fetch origin '+refs/pull/*/head:refs/remotes/origin/pr/*'`), so
+  they are unresolvable in a normal clone, which is what a reader has. Worse case seen live: a
+  **dangling stash-commit** cited as forensic evidence is local to one machine and dies to
+  `git gc`'s default two-week prune. So: in durable prose, cite the **squash commit** (or the PR
+  number) rather than the per-issue hash, and when a hash is the *evidence* for a claim — "this
+  shape existed and was wrong" — **quote the text verbatim** so the claim survives the object.
+  `AGENTS.md` itself was the source of this trap: it told the run to squash, and the docs it
+  inherits already cite pre-squash hashes.
+- **`gh api` writes its error body to STDOUT, not stderr.** So `2>/dev/null` does not suppress a
+  404/422, and a `-n "$(...)"` truthiness test is **true for every failure** — a loop built that
+  way reported "all 11 commits present on GitHub" for 11 commits that were all absent. Branch on
+  exit status (`gh api … >/dev/null 2>&1 && …`), never on captured output. Hit live while
+  measuring the bullet above; the wrong answer was confident and well-formed.
+
 These are properties of the repo, not of any branch:
 
 - **`archimedes` is ONE compilation unit**, so a syntax error anywhere breaks

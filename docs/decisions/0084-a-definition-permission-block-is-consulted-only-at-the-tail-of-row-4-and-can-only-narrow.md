@@ -34,7 +34,26 @@ An Agent definition's `permission:` frontmatter (issue #101, opencode's per-tool
 
 The drop originally reused ADR 0067's emptied-means-ABSENT rule, cited from `narrow` a few lines above. That citation was **wrong in that position**: 0067 exists to stop a *typo or a stale name* in an allowlist from accidentally zeroing a child — unintended narrowing — and a deliberate `deny` is the opposite case, so its rationale does not travel. Falling back to ABSENT there made `tools: [bash]` + `bash: deny` hand the child the **parent's full set**: the file that denied the most gave the child the **most** tools, the exact inverse of #101's invariant ("a definition can make its own agent stricter … it can never grant past it") and a direct failure of its own acceptance item ("drop the tool from the child's `enabled_tools` … so the model is never offered a call it can't make"). It is strictly worse than the case 0067 guards against, because there the accident required a typo and here it required the most restrictive file a user could write.
 
-**Corrected before anything was committed, and the record says so precisely.** `git log --all -S '(!names.is_empty()).then_some(names)'` over this repo returns **nothing on any ref**: the buggy form and the test that asserted it (`a_deny_that_empties_the_advertised_list_falls_back_to_absent`) survive only in a **dangling stash-commit** (`fb502a7`, "On feature/agent-permission-and-pins: task05a-wip"). The only commit that ever touched the drop (`62b3789`) shipped the `map` form and the renamed pin `a_deny_that_empties_the_advertised_list_yields_zero_tools_not_the_parent_set`, whose doc comment records that it used to assert the opposite. **So this is a review-caught defect, not a shipped one** — the run's own status log described it as having shipped green, and the object database says otherwise. The lesson stands either way, and is the reason the pin's doc comment is written as a history note: **a test that asserts the current behaviour of a widening is a pin on the defect, and a green suite will defend it.** What makes this one catchable by reading is that the fallback was justified by a citation to a real ADR, which is the most dangerous kind of wrong comment.
+**Corrected before anything was committed, and the record says so precisely.** `git log --all -S '(!names.is_empty()).then_some(names)'` over this repo returns **nothing on any ref**: the buggy form and the test that asserted it (`a_deny_that_empties_the_advertised_list_falls_back_to_absent`) survived only in a **dangling stash-commit** — local to one machine, reachable from no ref, and therefore doomed to `git gc`'s default two-week prune. **That object is gone by the time you read this; the quotation below is the evidence, not the hash.** Its drop site read, verbatim:
+
+> ```rust
+> // Same ADR 0067-emptied-means-ABSENT rule as `narrow`: a list that
+> // empties out is ABSENT, NOT "zero tools" (only the explicit list is
+> // allowed to zero a child, and this drop never *adds* a name, so the
+> // emptied-means-ABSENT rule only ever applies to the
+> // override/frontmatter rung it narrowed).
+> (!names.is_empty()).then_some(names)
+> ```
+
+and its test asserted the inversion **as the expectation**, message included:
+
+> ```rust
+> assert_eq!(r.launch.tools, None,
+>     "an emptied list is ABSENT, not zero tools (ADR 0067) — the gate, not \
+>      this filter, is what refuses the call");
+> ```
+
+That second block is the whole lesson in four lines: a green test defending the widening. The only commit that ever touched the drop shipped the `map` form and the renamed pin `a_deny_that_empties_the_advertised_list_yields_zero_tools_not_the_parent_set`, whose doc comment records that it used to assert the opposite. **So this is a review-caught defect, not a shipped one** — the run's own status log described it as having shipped green, and the object database says otherwise. The lesson stands either way, and is the reason the pin's doc comment is written as a history note: **a test that asserts the current behaviour of a widening is a pin on the defect, and a green suite will defend it.** What makes this one catchable by reading is that the fallback was justified by a citation to a real ADR, which is the most dangerous kind of wrong comment.
 
 ## Considered Options
 

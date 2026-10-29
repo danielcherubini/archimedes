@@ -6,7 +6,7 @@ verified-by: sections 1–10 re-read against this tree at `00676d5` plus **the f
   `--self-test`, five sabotages of the census script, drop-order probes, `wine --version`). Gaps 9
   and 10 are what that CI run *found*; the rest were re-confirmed still open rather than copied.
   **Section 9a added 2026-10-29** from `main`'s CI run `40875258489` (job `123452317398`, log read)
-  plus four measurements on this tree at `b1b5744` (grep for the minter, the tolerance table's single
+  plus four measurements on this tree at `6f501ab`, all four re-run at `02a6de9` and unchanged (grep for the minter, the tolerance table's single
   row, the dot-free name against the Darwin shape rule, the unattributed-vs-tolerated code path) and
   the `.test.sh` case-18c citation. **Not verified:** what actually mints `betaenrollmentagent` — no
   source for it was found, and the section says so rather than guessing.
