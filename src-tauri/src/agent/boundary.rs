@@ -637,6 +637,19 @@ mod tests {
             None,
             "at defaults no rule speaks to an agent-dir write (row 3 is reachable)"
         );
+        // BOTH SIDES OF THE PREFIX COMPARE ARE CANONICAL, because that is what
+        // production compares. `dirs` comes from `protected_dirs()`, which
+        // canonicalizes through `push_protected`; `target` is the RAW temp
+        // `$HOME` spelling. On Linux `temp_dir()` is already canonical so the
+        // two agree by luck; on macOS it is a symlink (`/var` → `/private/var`)
+        // and on Windows `canonicalize` rewrites `C:\…` into the verbatim
+        // `\\?\C:\…`, so a raw `target` is NOT `starts_with` a canonical entry
+        // and this assertion reddens on both while staying green here. The
+        // gate and the executor both feed `rule_for` / the guard-membership
+        // compare a value already put through `canonicalize_lenient`, so the
+        // lenient form is the faithful one — and the target file does not
+        // exist, which strict `canonicalize()` would fail on.
+        let target = crate::agent::fs_backend::canonicalize_lenient(&target);
         assert!(
             dirs.iter().any(|root| target.starts_with(root)),
             "…and the target IS under the guard-membership set: row 3 is the ask"

@@ -1430,13 +1430,20 @@ async fn the_guard_prompt_end_to_end_carries_exactly_three_options_a_real_path_a
         "the `\"\"` placeholder must be replaced with the real ancestor"
     );
     // It is the CANONICAL nearest-existing ancestor DIRECTORY of the resolved
-    // target — spelled through `canonicalize()` so a macOS `/var` → `/private/var`
-    // temp dir does not make the expectation a platform accident.
-    let want = target
-        .parent()
-        .unwrap()
-        .canonicalize()
-        .unwrap_or_else(|_| target.parent().unwrap().to_path_buf());
+    // target. The expectation goes through the SAME canonicalizer production
+    // uses, NOT strict `canonicalize()`: `pwn` does not exist, so strict
+    // canonicalization FAILS on the parent and an `unwrap_or_else` fallback
+    // silently hands back the RAW spelling. On Linux `temp_dir()` is already
+    // canonical so raw == canonical and that fallback is invisible; on macOS
+    // the temp dir is a symlink (`/var` → `/private/var`) and on Windows
+    // `canonicalize` rewrites it into the verbatim `\\?\` form, so the raw
+    // fallback and the emitted canonical value disagree and this reddens on
+    // both platforms while staying green here. `canonicalize_lenient` peels to
+    // the deepest EXISTING ancestor and re-appends `pwn`, which is exactly the
+    // shape `guard_ancestor` produces from the resolved target.
+    let want = crate::agent::fs_backend::canonicalize_lenient(
+        target.parent().expect("the target is a file under a dir"),
+    );
     assert_eq!(
         std::path::Path::new(emitted),
         want.as_path(),

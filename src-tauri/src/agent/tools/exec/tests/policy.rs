@@ -518,9 +518,17 @@ async fn a_deny_rule_never_narrows_bash_because_rules_do_not_apply_to_the_shell(
     let cwd = temp_cwd("bash-not-narrowed");
     std::fs::write(cwd.join("f.txt"), "READABLE").unwrap();
     let deny_all = AccessRule {
-        // `/` — the broadest rule the resolver can be handed: every canonical
-        // absolute path is under it.
-        path: "/".to_string(),
+        // The broadest rule the resolver can be handed: every canonical
+        // absolute path on this machine is under it. NOT the literal `"/"` —
+        // that is the unix root, and on Windows a lone `/` is only the current
+        // drive's root in the cwd's own spelling, so it is not a component
+        // prefix of the verbatim (`\\?\C:\…`) path the canonicalizer returns
+        // and the CONTRAST below would find the `read` tool unrefused. Taking
+        // the root from the fixture's own path keeps it on the same drive and
+        // in the same spelling as the resolved target on all three platforms.
+        path: crate::test_support::filesystem_root(cwd.path())
+            .to_string_lossy()
+            .into_owned(),
         direction: RuleDirection::ReadWrite,
         decision: RuleDecision::Deny,
     };

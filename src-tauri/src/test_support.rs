@@ -15,6 +15,70 @@ pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     std::sync::Mutex::lock(&ENV_LOCK).unwrap_or_else(|p| p.into_inner())
 }
 
+/// (test only) The broadest rule path a test can name — the one root that
+/// really does contain every canonical absolute path ON THIS PLATFORM.
+///
+/// WHY THIS EXISTS: a test that wants "a rule with maximum reach" reaches for
+/// the literal `"/"`, and that is a Unix fact, not a platform one. On Windows
+/// a lone `/` is only the CURRENT DRIVE'S root in the current working
+/// directory's spelling, and it is not a component prefix of the verbatim
+/// (`\\?\C:\…`) form that `canonicalize` hands back — so a `"/"` rule matches
+/// NOTHING and a test that asserts it refuses something reddens there while
+/// staying green on Linux and macOS. This is the same fact
+/// `boundary::unrestricted_floor` had to encode to widen the executor on
+/// Windows: a lone `/` there is only the current drive, so that function
+/// enumerates the mounted drive roots instead.
+///
+/// `for_path` is a path the test is actually working with (its scratch home or
+/// `cwd`); the root is taken from ITS OWN components, so the two land on the
+/// same drive AND on the same verbatim spelling that the shared canonicalizer
+/// (`agent::fs_backend::canonicalize_lenient`) produces for it — which is the
+/// property the caller needs for a component-prefix compare to hold.
+///
+/// The result is run through `canonicalize()` for the same reason: on Windows
+/// the drive root spelled `C:\` has a `Disk` prefix component while the
+/// canonicalized target carries a `VerbatimDisk` one (`\\?\C:\…`), and
+/// `Path::starts_with` compares components — so the raw spelling would still
+/// fail the very compare it exists to satisfy. Canonicalizing lands both sides
+/// in the verbatim form. Strict `canonicalize()` (not the shared lenient one)
+/// is enough here and is deliberately the only resolver used: a drive root
+/// derived from a real path always EXISTS, and it keeps this test helper from
+/// reaching into `crate::agent`'s private `fs_backend` module.
+#[cfg(test)]
+pub(crate) fn filesystem_root(for_path: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(not(windows))]
+    {
+        // On unix the root is the one true `/`, and every canonical absolute
+        // path is under it. `for_path` is irrelevant here, but the signature
+        // stays uniform so the call sites do not need a `cfg`.
+        let _ = for_path;
+        std::path::PathBuf::from("/")
+    }
+    #[cfg(windows)]
+    {
+        // `Prefix`(e.g. `C:`) then `RootDir`(`\`) is the drive root — the
+        // component-wise root, not a string slice, so a UNC path yields its
+        // own server/share root rather than a mangled `C:\`.
+        let mut root = std::path::PathBuf::new();
+        for component in for_path.components() {
+            match component {
+                std::path::Component::Prefix(prefix) => root.push(prefix.as_os_str()),
+                std::path::Component::RootDir => {
+                    root.push(component.as_os_str());
+                    break;
+                }
+                // Anything else is below the root: stop.
+                _ => break,
+            }
+        }
+        assert!(
+            !root.as_os_str().is_empty(),
+            "`{for_path:?}` is rooted on a drive — a relative path has no root to name"
+        );
+        root.canonicalize().unwrap_or(root)
+    }
+}
+
 /// The app's managed `WorkerManager` (the registry view — the accessor
 /// for the headless IPC test: a `start_session` spawns a Worker (assert
 /// via `test_is_attached` / `test_session_count`); a `detach` / `reap_all`

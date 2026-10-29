@@ -757,19 +757,32 @@ mod tests {
     ///
     /// WHAT THIS ACTUALLY PINS (corrected in execution — the plan described
     /// this as a ONE-COMPONENT tie, and that is measurably false for a temp
-    /// home): `/` canonicalizes to ONE component while `~` expands to the
-    /// scratch home and canonicalizes to THREE (verified by probe: `root=1
-    /// home=3`). So the `~` Allow below wins on LONGEST PREFIX, not on the
-    /// tie-break, and this test's third assertion is decided by step 2 rather
-    /// than step 3. It still earns its place — it pins that both spellings
-    /// reach a path under the home and that the more specific `~` beats the
-    /// broader `/` regardless of which is listed last — but the EXACT-TIE
-    /// contract is pinned non-vacuously by
+    /// home): the root rule canonicalizes to ONE component on unix while `~`
+    /// expands to the scratch home and canonicalizes to THREE (verified by
+    /// probe: `root=1 home=3`). So the `~` Allow below wins on LONGEST PREFIX,
+    /// not on the tie-break, and this test's third assertion is decided by step
+    /// 2 rather than step 3. It still earns its place — it pins that both
+    /// spellings reach a path under the home and that the more specific `~`
+    /// beats the broader root regardless of which is listed last — but the
+    /// EXACT-TIE contract is pinned non-vacuously by
     /// `an_exact_tie_goes_to_the_last_rule_so_an_appended_allow_beats_a_default_deny`,
     /// which is the only place two rules really do share a component count
-    /// (they name the same canonical path). A genuine `~`/`/` tie would need
+    /// (they name the same canonical path). A genuine `~`/root tie would need
     /// `$HOME` itself to be a one-component path (i.e. `HOME=/`), which no
     /// scratch fixture can be.
+    ///
+    /// THE ROOT IS NOT THE STRING `"/"` (Windows CI): on unix `/` is the one
+    /// true filesystem root, but on Windows a lone `/` is only the CURRENT
+    /// DRIVE'S root in the cwd's own spelling and is not a component prefix of
+    /// the verbatim (`\\?\C:\…`) form `canonicalize` returns, so the first
+    /// assertion below — "a root rule covers a path under the home" — failed
+    /// there with `None` while staying green on Linux and macOS.
+    /// `test_support::filesystem_root` names the root OF THE SCRATCH HOME'S OWN
+    /// DRIVE in the spelling the shared canonicalizer produces, which is the
+    /// claim this test is actually making. The component-count note above is
+    /// the unix probe: on Windows the drive root is two components
+    /// (`Prefix` + `RootDir`) against the scratch home's many, so the `~` rule
+    /// still wins step 2 there for the same reason.
     #[test]
     fn a_tilde_rule_and_a_slash_rule_tie_at_one_component_and_last_wins() {
         use RuleDecision::{Allow, Deny};
@@ -779,12 +792,16 @@ mod tests {
 
         // Each half on its own matches the same path (both really do contain
         // it — the overlap the spec's defaults create).
-        let root = rule("/", Write, Deny);
+        let root = rule(
+            &crate::test_support::filesystem_root(home.path()).to_string_lossy(),
+            Write,
+            Deny,
+        );
         let rules = [root.clone()];
         assert_eq!(
             rule_for(&rules, Write, &target, Some(home.path())),
             Some(&root),
-            "a `/` rule covers a path under the home"
+            "a filesystem-root rule covers a path under the home"
         );
         let home_rule = rule("~", Write, Allow);
         let rules = [home_rule.clone()];
