@@ -181,6 +181,11 @@ fn default_launch() -> LaunchConfig {
         thinking: None,
         frontmatter_thinking: None,
         tools: None,
+        // (issue #101, task05a) A new additive field lands here: this literal is
+        // FULLY specified (no `..Default::default()`), so it is one of the tree's
+        // two sites `cargo build --all-targets` — and NOT `cargo test --lib` —
+        // catches. `None` = "this dispatch carries no declared ruleset".
+        permission: None,
     }
 }
 

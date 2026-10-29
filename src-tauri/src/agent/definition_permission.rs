@@ -39,7 +39,13 @@
 //!   block to the gate and deciding the strict-of-two against the user's
 //!   policy is the follow-up task's job.
 
-use serde::Serialize;
+// `Deserialize` is NOT decoration here: `LaunchConfig` (which carries
+// `PermissionBlock` across `SubagentDispatchWire.launch`, issue #101 task05a)
+// derives `Deserialize`, so a `Serialize`-only block is an E0277 in the parent
+// crate. NO serde attribute was added alongside the derive — the pinned
+// spellings (externally-tagged notes, lowercase `Action`, camelCase `ToolKey`,
+// and the deliberately snake_case `whole_tool`) are exactly what round-trips.
+use serde::{Deserialize, Serialize};
 
 /// The catch-all pattern spelling — the pattern opencode's docs put FIRST so
 /// the specific rules after it carve out exceptions. PRIVATE on purpose: the
@@ -48,7 +54,7 @@ use serde::Serialize;
 const CATCH_ALL_PATTERN: &str = "*";
 
 /// The three verdicts opencode's permission model carries (`allow | ask | deny`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Action {
     Allow,
@@ -64,7 +70,7 @@ pub enum Action {
 /// `pattern` is the layer's only place where opencode wildcards (`*`, `?`) can
 /// appear. (Despite the generic sound of `pattern`, this is a PATH/PATTERN
 /// matcher for path-taking tools ONLY — see [`ToolKey`].)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rule {
     pub pattern: String,
     pub action: Action,
@@ -74,7 +80,7 @@ pub struct Rule {
 /// file order, LAST matching rule wins (the `"*"` catch-all first, the
 /// specifics after it). A bare verdict is stored as the catch-all pattern with
 /// `whole_tool: true` (see [`Rules::whole_tool`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rules {
     pub patterns: Vec<Rule>,
     /// Whether the action applies to ANY argument (a bare `edit: deny`) or
@@ -137,7 +143,7 @@ impl Rules {
 /// name verbatim (opencode has keys this desktop has no policed twin for —
 /// `glob`, `grep`, `list`, `task`, `skill`, `lsp`; an unrecognised key is
 /// announced via [`FrontmatterNote::UnrecognizedToolKey`], NEVER dropped).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ToolKey {
     Edit,
@@ -198,7 +204,7 @@ pub enum UnsupportedReason {
 
 /// The FULL ordered aggregate: every tool the block speaks about, in FILE
 /// ORDER. This is the type `AgentDefinition.permission` carries.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionBlock {
     /// A multi-tool block (`edit:` + `bash:` + `read:` in one file) is exactly
     /// three ordered elements. Never a HashMap: file order is faithful to how

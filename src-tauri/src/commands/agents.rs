@@ -118,6 +118,14 @@ pub struct OverrideFields {
     pub model: Option<String>,
     pub thinking: Option<String>,
     pub tools: Option<Vec<String>>,
+    /// The declared `permission:` ruleset as this layer sees it. Only the FILE
+    /// layer can ever be non-`None` — the persisted `agentOverrides` entry has
+    /// NO `permission` key (ADR 0066's shape is `model`/`thinking`/`tools`, and
+    /// absence is the ONLY meaning there), and the explicit `subagent` param has
+    /// no permission argument. Kept as a column anyway so the modal's three
+    /// column structs stay ONE shape (the wire-shape pin iterates the same four
+    /// keys over `file` / `override` / `effective`).
+    pub permission: Option<crate::agent::definition_permission::PermissionBlock>,
 }
 
 /// The STORED entry seen as one column of the report. The two types are not
@@ -130,6 +138,11 @@ impl From<&AgentOverrideFields> for OverrideFields {
             model: o.model.clone(),
             thinking: o.thinking.clone(),
             tools: o.tools.clone(),
+            // The persisted entry has NO `permission` key (config.rs'
+            // `AgentOverrideFields` is `model`/`thinking`/`tools`), so the
+            // override column is ALWAYS `None` for permission — absence is the
+            // only thing the store can say about it.
+            permission: None,
         }
     }
 }
@@ -143,6 +156,12 @@ pub struct SourceFields {
     pub model: OverrideSource,
     pub thinking: OverrideSource,
     pub tools: OverrideSource,
+    /// Which layer supplied `permission` — `File` exactly when the definition
+    /// declared a block, `Parent` when it did not. NEVER `Override`: there is no
+    /// settings.json permission layer, and no fourth `OverrideSource` variant
+    /// exists (`the_source_label_space_is_exactly_three_layers_and_never_space`
+    /// keeps the three-variant enum a compile-time fact).
+    pub permission: OverrideSource,
 }
 
 /// One row of the **Agents** modal: what a definition's file says, what the
@@ -195,6 +214,16 @@ pub struct AgentConfigDto {
     /// `Shadowed<T>` already crosses the wire), so TypeScript declares it
     /// required too. Rendered as TEXT on this row, never as rows of its own.
     pub shadowed: Vec<crate::skills::Shadowed<crate::agents::AgentScope>>,
+    /// The definition's declared `permission:` ruleset, VERBATIM from the
+    /// file (opencode's allow/ask/deny block, issue #101) — `null` when the
+    /// file does not speak about permissions. NOT the effective verdict (the
+    /// gate's strict-of-two merge is a runtime decision, not a static one).
+    pub file_permission: Option<crate::agent::definition_permission::PermissionBlock>,
+    /// The file-READ announce notes (unknown keys, unrecognised tool keys,
+    /// unsupported bash-pattern rows — issue #101's announce half). REQUIRED
+    /// on the wire, not `Option`: the Rust side ALWAYS serializes the `Vec`
+    /// (empty as `[]`), exactly like `shadowed` (ADR 0065's report shape).
+    pub frontmatter_notes: Vec<crate::agent::definition_permission::FrontmatterNote>,
 }
 
 /// The three columns the resolver reads, plus the ones it never touches.
@@ -203,6 +232,7 @@ fn file_fields(def: &AgentDefinition) -> OverrideFields {
         model: def.model.clone(),
         thinking: def.thinking.clone(),
         tools: def.tools.clone(),
+        permission: def.permission.clone(),
     }
 }
 
@@ -256,13 +286,23 @@ pub(crate) fn agent_config(
                     model: resolved.launch.model,
                     thinking: resolved.launch.thinking,
                     tools: resolved.launch.tools,
+                    // UNBOXED here: `LaunchConfig::permission` is boxed only for
+                    // clippy's enum-size lint, and the DTO reports the plain
+                    // block (serde-identical either way).
+                    permission: resolved.launch.permission.map(|block| *block),
                 },
                 source: SourceFields {
                     model: resolved.model_source,
                     thinking: resolved.thinking_source,
                     tools: resolved.tools_source,
+                    permission: resolved.permission_source,
                 },
                 shadowed: def.shadowed.clone(),
+                // Both cloned from the definition BEFORE the resolver: this is
+                // the frontmatter half of what the row REPORTS (never an
+                // effective verdict — the strict-of-two merge is runtime work).
+                file_permission: def.permission.clone(),
+                frontmatter_notes: def.frontmatter_notes.clone(),
             }
         })
         // Discovery already sorts (case-insensitive by name, `path` as the
@@ -862,11 +902,16 @@ mod tests {
                     model: Some("fake/m3".into()),
                     thinking: Some("high".into()),
                     tools: Some(vec!["read".into()]),
+                    // The stored entry CANNOT speak about permissions (no such
+                    // key exists in `agentOverrides`), so the override column is
+                    // `None` here even though the entry won every other field.
+                    permission: None,
                 },
                 SourceFields {
                     model: OverrideSource::Override,
                     thinking: OverrideSource::Override,
                     tools: OverrideSource::Override,
+                    permission: OverrideSource::Parent,
                 },
             ),
             // The FILE layer wins (no entry in the map) — and note `thinking`:
@@ -882,11 +927,13 @@ mod tests {
                     model: Some("fake/m1".into()),
                     thinking: None,
                     tools: Some(vec!["bash".into()]),
+                    permission: None,
                 },
                 SourceFields {
                     model: OverrideSource::File,
                     thinking: OverrideSource::Parent,
                     tools: OverrideSource::File,
+                    permission: OverrideSource::Parent,
                 },
             ),
             // NOTHING below the explicit param speaks: `parent` on all three.
@@ -897,11 +944,13 @@ mod tests {
                     model: None,
                     thinking: None,
                     tools: None,
+                    permission: None,
                 },
                 SourceFields {
                     model: OverrideSource::Parent,
                     thinking: OverrideSource::Parent,
                     tools: OverrideSource::Parent,
+                    permission: OverrideSource::Parent,
                 },
             ),
             // A STALE override degrades (ADR 0023's soft degrade) and the layer
@@ -914,11 +963,13 @@ mod tests {
                     model: Some("fake/m1".into()),
                     thinking: None,
                     tools: None,
+                    permission: None,
                 },
                 SourceFields {
                     model: OverrideSource::File,
                     thinking: OverrideSource::Parent,
                     tools: OverrideSource::Parent,
+                    permission: OverrideSource::Parent,
                 },
             ),
         ];
@@ -1405,6 +1456,8 @@ mod tests {
             "effective",
             "source",
             "shadowed",
+            "filePermission",
+            "frontmatterNotes",
         ] {
             assert!(row.contains_key(key), "missing `{key}` in {json}");
         }
@@ -1413,11 +1466,12 @@ mod tests {
             !row.contains_key("override_"),
             "the trailing underscore is a Rust spelling, not a wire name: {json}"
         );
-        // Every column struct carries all three fields, `null` when absent —
-        // Task 4 types them `string | null`, so an absent key would be a lie.
+        // Every column struct carries all four fields, `null` when absent —
+        // Task 4 types them `string | null` (and `permission` the block-or-null),
+        // so an absent key would be a lie.
         for column in ["file", "override", "effective"] {
             let obj = row[column].as_object().unwrap();
-            for key in ["model", "thinking", "tools"] {
+            for key in ["model", "thinking", "tools", "permission"] {
                 assert!(
                     obj.contains_key(key),
                     "`{column}.{key}` must be present (null), not absent: {json}"
@@ -1432,6 +1486,89 @@ mod tests {
         for key in ["model", "thinking", "tools"] {
             assert_eq!(source[key], serde_json::json!("parent"), "`{key}`: {json}");
         }
+        // A file that does not speak about permissions reports `parent` too —
+        // there is NO settings.json permission layer, so `permission` is `File`
+        // exactly when the block exists and `Parent` otherwise (never `Override`).
+        assert_eq!(
+            source["permission"],
+            serde_json::json!("parent"),
+            "`source.permission`: {json}"
+        );
+        // `frontmatterNotes` is REQUIRED on the wire (the `shadowed` precedent):
+        // a file that speaks about nothing still serializes the empty `Vec` as
+        // `[]`, never `null` and never an absent key.
+        assert_eq!(
+            row["frontmatterNotes"],
+            serde_json::json!([]),
+            "an empty notes vec is `[]` on the wire: {json}"
+        );
+    }
+
+    /// (issue #101, task05a) THE rot-proof carry test B1's hand-off #2 required:
+    /// a definition carrying a declared `permission:` block AND frontmatter
+    /// announce notes must land BOTH on the DTO row, and the test asserts on the
+    /// SERIALISED ELEMENT (the exact tagged JSON object), not a bare substring —
+    /// so a renamed field or a re-tagged `FrontmatterNote` reddens it instead of
+    /// passing on an accidental substring match. It FAILS if `frontmatter_notes`
+    /// ever stops reaching the DTO: the exact silent-no-op class #101 exists to
+    /// fix, re-appearing one wave later.
+    #[test]
+    fn a_definition_with_permission_and_notes_carries_both_to_the_dto() {
+        use crate::agent::definition_permission::{
+            Action, FrontmatterNote, PermissionBlock, Rules, ToolKey,
+        };
+        let block = PermissionBlock {
+            tools: vec![(ToolKey::Bash, Rules::whole_tool(Action::Deny))],
+        };
+        let notes = vec![FrontmatterNote::UnknownKey("mode".to_string())];
+        let mut def = definition("scout", AgentScope::User);
+        def.permission = Some(block.clone());
+        def.frontmatter_notes = notes.clone();
+        let rows = agent_config(&Settings::default(), std::slice::from_ref(&def), &catalog());
+        let row = one_row(&rows);
+
+        // The declared block is carried VERBATIM (a REPORT — not a verdict).
+        assert_eq!(
+            row.file_permission,
+            Some(block.clone()),
+            "the DTO carries the file's declared `permission:` block"
+        );
+        // …and so are the announce notes, verbatim and in order.
+        assert_eq!(
+            row.frontmatter_notes, notes,
+            "the DTO carries the file-READ announce notes"
+        );
+
+        // THE rot-proof half: assert on the SERIALISED ELEMENTS, so the wire
+        // SPELLING is pinned too (B1's externally-tagged note object and the
+        // snake_case `whole_tool` inside a camelCase parent). A field rename or a
+        // serde change makes THIS fail, where `json.contains("mode")` would not.
+        let json: serde_json::Value = serde_json::to_value(&rows[0]).unwrap();
+        assert_eq!(
+            json["frontmatterNotes"],
+            serde_json::json!([{"unknownKey": "mode"}]),
+            "the notes cross the wire as one tagged object per note: {json}"
+        );
+        assert_eq!(
+            json["filePermission"],
+            serde_json::json!({
+                "tools": [["bash", { "patterns": [{ "pattern": "*", "action": "deny" }], "whole_tool": true }]]
+            }),
+            "the block crosses the wire in B1's pinned spelling (`whole_tool` \
+             snake_case, `action` lowercase, the ordered tool pairs in file order): {json}"
+        );
+        // The `file` column shows the same declared block (the row's "what the
+        // file said" column), and `source.permission` names the FILE for it.
+        assert_eq!(
+            json["file"]["permission"], json["filePermission"],
+            "the `file` column and `filePermission` are the same declared block: {json}"
+        );
+        assert_eq!(json["source"]["permission"], serde_json::json!("file"));
+        // An EMPTY override has no permission key at all, so that column is null.
+        assert!(
+            json["override"]["permission"].is_null(),
+            "the stored entry has no `permission` key — absence is its only meaning: {json}"
+        );
     }
 
     /// TWO keys that ASCII-fold equal (`"Scout"` beside `scout`) make the
