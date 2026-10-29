@@ -85,6 +85,11 @@ async fn set_model_rebuilds_provider_when_composed_key_changes() {
     assert_eq!(a_requests.len(), 0, "server A should receive zero requests");
 }
 
+/// Preserves the existing provider when the model's composed key does not change.
+///
+/// References ADR 0024's amendment and accepted consequence #4 in
+/// `docs/features/model-selection.md` (a same-key baseUrl edit preserves the
+/// existing provider without rebuilding).
 #[tokio::test]
 async fn set_model_preserves_provider_when_composed_key_is_identical() {
     let server_a = MockServer::start().await;

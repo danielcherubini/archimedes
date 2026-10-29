@@ -1721,6 +1721,7 @@ impl SessionManager {
                 if let Some(db) = &self.driver.db {
                     let caps = native_capabilities(&model, current_level.as_deref());
                     if let Err(e) = db.update_session_capabilities(session_id, &caps.to_string()) {
+                        // Log to stderr for dev console, and debuglog for packaged runtime logs.
                         eprintln!("update_session_capabilities failed for {session_id}: {e}");
                         crate::agent::debuglog::log(&format!(
                             "update_session_capabilities failed for {session_id}: {e}"
