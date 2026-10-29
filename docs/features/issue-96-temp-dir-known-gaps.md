@@ -1,10 +1,15 @@
 ---
 status: live
-last-verified: 2026-10-26
-verified-by: read against this tree at `00676d5` plus **the first CI run of PR #99** (real
-  ubuntu/macOS/windows legs, logs read in full), plus measurements on this box (temp-dir counts,
+last-verified: 2026-10-29
+verified-by: sections 1–10 re-read against this tree at `00676d5` plus **the first CI run of PR #99**
+  (real ubuntu/macOS/windows legs, logs read in full), plus measurements on this box (temp-dir counts,
   `--self-test`, five sabotages of the census script, drop-order probes, `wine --version`). Gaps 9
   and 10 are what that CI run *found*; the rest were re-confirmed still open rather than copied.
+  **Section 9a added 2026-10-29** from `main`'s CI run `40875258489` (job `123452317398`, log read)
+  plus four measurements on this tree at `b1b5744` (grep for the minter, the tolerance table's single
+  row, the dot-free name against the Darwin shape rule, the unattributed-vs-tolerated code path) and
+  the `.test.sh` case-18c citation. **Not verified:** what actually mints `betaenrollmentagent` — no
+  source for it was found, and the section says so rather than guessing.
 ---
 
 # Temp-dir hygiene — known gaps
@@ -197,6 +202,50 @@ it is rewritten rather than left as a prediction:
   `uname -s` on this box, because no macOS is available locally. The `getconf
   DARWIN_USER_TEMP_DIR` spelling in `resolve_base` is now corroborated by the
   snapshot's own output, but the `TMPDIR`-unset path that reaches it has not run.
+
+### 9a. A dot-free macOS name defeats the shape rule — `betaenrollmentagent`
+
+**Live on `main`, unfixed, and it will red a macOS job again.** Observed on
+`main`'s own history at `2f5f896` (PR #121): CI run `40875258489`, job
+`123452317398`, `macos-latest` failed the census step with
+
+> `error: the Rust test suite left 1 new directories …` / `betaenrollmentagent ← <UNATTRIBUTED: no known minter matches this prefix …>`
+
+and the sibling `macos-latest` job of a later SHA ran the same step green. So it
+is **intermittent on `main`**, not introduced by any branch, and it is **not** one
+of the two `AGENTS.md` frontend flakers.
+
+Measured on this tree, all four claims checked rather than inferred:
+
+- `grep -ri betaenrollment src-tauri/src src-tauri/tests src scripts` → **empty**.
+  This repo does not mint it, so the `UNATTRIBUTED` line is correct: the guard is
+  doing its job by refusing to guess a minter.
+- It is **not** in the tolerance table, which holds exactly one row
+  (`harness-subagent-	1`).
+- **It contains no dot**, so section 9's Darwin shape rule **cannot exclude it**.
+  That rule's safety rests on "no Archimedes minter prefix contains a dot" — an
+  invariant that keeps the exclusion from hiding our own leaks. It says nothing
+  about a *system* name that happens to be dot-free, and this is one. The shape
+  rule is therefore narrower than "excludes macOS noise": it excludes reverse-DNS
+  shaped noise.
+- An unattributed name **hard-fails regardless of budget** — tolerance is looked up
+  by prefix row, and a name with no row never reaches the tolerated path.
+
+**What it is, is not established here.** The name reads like an Apple beta-program
+enrollment agent, and it appeared in the same per-user `TMPDIR` that produced 19
+`com.apple.*` dirs in the first macOS run, but nothing in this repo mints it and I
+did not find a source for it — do not record a minter you have not read.
+
+**Do not fix this by widening the tolerance table.** Section 3's rule is that
+tolerances are earned by measurement of *our* leak, and a row here would let a real
+`betaenrollmentagent*` leak hide behind a system daemon forever — the exact failure
+the allow-list argument in the script's header refuses. The two honest options, if
+it starts costing rounds: (a) extend the Darwin exclusion to a second *shape* that
+still cannot match an Archimedes prefix, and re-pin the no-dot invariant test
+(`.test.sh` case 18c) to cover the new shape too; or (b) snapshot the base
+immediately before `cargo test` rather than at job start, shrinking the window a
+daemon can write into. (a) trades guard precision for green CI and needs a reviewer;
+(b) costs nothing in precision. **Needs an owner, not a drive-by entry.**
 
 ## 10. `ScratchDir::drop` cannot tell you it failed — and on Windows nothing else can either
 
