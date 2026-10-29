@@ -1636,6 +1636,8 @@ mod tests {
             model: model.map(str::to_string),
             thinking: thinking.map(str::to_string),
             tools: tools.map(|t| t.iter().map(|s| s.to_string()).collect()),
+            permission: None,
+            frontmatter_notes: Vec::new(),
             system_prompt: "You are a scout.".to_string(),
             scope: crate::agents::AgentScope::Space,
             path: "/tmp/scout.md".to_string(),
