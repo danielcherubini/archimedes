@@ -38,3 +38,5 @@ The native harness spoke **OpenAI-compatible chat-completions only** (ADR 0012's
 
 **ADR 0014's sole-model-source ruling stands intact.** The Settings list remains the sole model source (ADR 0014:23 — "The desktop has ONE model source — the Settings list"). The provider instance in `AgentLoop` is a view of a user's Settings provider rebuilt from the catalog's `Model` — never an independent per-session provider and never a second model source.
 
+**Session persistence on model switch.** A mid-session model switch also persists the new model key and re-synthesised capabilities (`thinkingLevel`) to the session's database row (`src-tauri/src/agent/session/mod.rs:1721-1731`, `update_session_capabilities`), ensuring the switch survives app restarts.
+

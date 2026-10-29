@@ -2705,6 +2705,29 @@ mod tests {
         );
     }
 
+    /// Calling `update_session_capabilities` on a non-existent session id succeeds
+    /// without error and creates no row (a silent no-op, mirroring `record_session_cost`).
+    #[test]
+    fn update_session_capabilities_on_a_missing_row_is_a_silent_no_op() {
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-caps-test-", "scratch");
+        let path = dir.join("t.db");
+        let db = Db::open(&path).expect("db should open");
+
+        let caps = serde_json::json!({
+            "native": true,
+            "model": "tama/b",
+        })
+        .to_string();
+
+        db.update_session_capabilities("nonexistent", &caps)
+            .expect("a missing row is a no-op returning Ok(())");
+        assert!(
+            db.session("nonexistent").expect("session lookup").is_none(),
+            "nothing was written for a row that does not exist"
+        );
+        assert!(db.list_sessions(true).expect("list_sessions").is_empty());
+    }
+
     /// (ADR 0025 §3) A subagent `sessions` row (`is_subagent = 1`) is
     /// HIDDEN from `list_sessions` (the `is_subagent = 0` filter) but its
     /// transcript rows are still loadable (`load_native_messages` works

@@ -1695,14 +1695,14 @@ impl SessionManager {
                 // doesn't support it. The second `send_config` mirrors ONLY on success
                 // (finding 12): a failed send leaves the mirror untouched. The arm does
                 // NOT write memory.
-                let level = self
+                let mut current_level = self
                     .config_state
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .get(session_id)
                     .and_then(|s| s.thinking_level.clone());
-                if let Some(level) = level {
-                    let valid = model.supports_thinking_level(&level);
+                if let Some(level) = &current_level {
+                    let valid = model.supports_thinking_level(level);
                     if !valid {
                         let reset = remembered_thinking_level(
                             &load_settings(&self.config_dir).default_thinking_levels,
@@ -1714,18 +1714,18 @@ impl SessionManager {
                             self.update_config_state(session_id, |s| {
                                 s.thinking_level = reset.clone();
                             });
+                            current_level = reset;
                         }
                     }
                 }
-                let current_level = self
-                    .config_state
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .get(session_id)
-                    .and_then(|s| s.thinking_level.clone());
                 if let Some(db) = &self.driver.db {
                     let caps = native_capabilities(&model, current_level.as_deref());
-                    let _ = db.update_session_capabilities(session_id, &caps.to_string());
+                    if let Err(e) = db.update_session_capabilities(session_id, &caps.to_string()) {
+                        eprintln!("update_session_capabilities failed for {session_id}: {e}");
+                        crate::agent::debuglog::log(&format!(
+                            "update_session_capabilities failed for {session_id}: {e}"
+                        ));
+                    }
                 }
             }
             "thought_level" => {
