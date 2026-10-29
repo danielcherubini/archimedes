@@ -1695,14 +1695,14 @@ impl SessionManager {
                 // doesn't support it. The second `send_config` mirrors ONLY on success
                 // (finding 12): a failed send leaves the mirror untouched. The arm does
                 // NOT write memory.
-                let level = self
+                let mut current_level = self
                     .config_state
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .get(session_id)
                     .and_then(|s| s.thinking_level.clone());
-                if let Some(level) = level {
-                    let valid = model.supports_thinking_level(&level);
+                if let Some(level) = &current_level {
+                    let valid = model.supports_thinking_level(level);
                     if !valid {
                         let reset = remembered_thinking_level(
                             &load_settings(&self.config_dir).default_thinking_levels,
@@ -1714,7 +1714,18 @@ impl SessionManager {
                             self.update_config_state(session_id, |s| {
                                 s.thinking_level = reset.clone();
                             });
+                            current_level = reset;
                         }
+                    }
+                }
+                if let Some(db) = &self.driver.db {
+                    let caps = native_capabilities(&model, current_level.as_deref());
+                    if let Err(e) = db.update_session_capabilities(session_id, &caps.to_string()) {
+                        // Log to stderr for dev console, and debuglog for packaged runtime logs.
+                        eprintln!("update_session_capabilities failed for {session_id}: {e}");
+                        crate::agent::debuglog::log(&format!(
+                            "update_session_capabilities failed for {session_id}: {e}"
+                        ));
                     }
                 }
             }
@@ -3097,6 +3108,74 @@ mod session_tests {
         assert_eq!(
             thought["currentValue"], "high",
             "a valid level is kept across the switch"
+        );
+        let _ = manager.close_session(&info.session_id).await;
+    }
+
+    /// A mid-session model switch persists the new model key and re-synthesised
+    /// thinkingLevel to the sessions table row, so the switch survives a restart.
+    #[tokio::test]
+    async fn a_native_model_switch_persists_model_key_and_capabilities_to_row() {
+        let catalog = ModelCatalog {
+            models: vec![
+                level_test_model("tama", "a", &["off", "high"]),
+                level_test_model("b", "gpt-4o", &["off", "low", "medium", "xhigh"]),
+            ],
+            default_model: Some("tama/a".to_string()),
+            compaction: crate::agent::harness::catalog::CompactionConfig::default(),
+        };
+        let dir = temp_config_dir();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        write_settings_json(
+            &dir,
+            serde_json::json!({ "defaultThinkingLevels": { "b/gpt-4o": "xhigh" } }),
+        );
+        let (manager, _wm, db) = build_worker_manager(&dir, catalog, &sink);
+        let info = manager
+            .start_session(dir.to_path_buf(), &sink)
+            .await
+            .expect("the native session started");
+
+        // The current level on A (valid for `a`).
+        let _ = manager
+            .set_config_option(&info.session_id, "thought_level", "high", &sink)
+            .await
+            .expect("the level change applies");
+
+        // Switch to `b/gpt-4o`. "high" is not in b's levels, so thinking level
+        // resets to b's remembered level ("xhigh").
+        let _ = manager
+            .set_config_option(&info.session_id, "model", "b/gpt-4o", &sink)
+            .await
+            .expect("the model switch applies");
+
+        let row = db
+            .session(&info.session_id)
+            .expect("db.session should succeed")
+            .expect("the row exists");
+
+        let caps: serde_json::Value =
+            serde_json::from_str(&row.capabilities_json).expect("valid capabilities_json");
+        assert_eq!(
+            caps["model"], "b/gpt-4o",
+            "the persisted row must reflect the switched model key"
+        );
+        assert_eq!(
+            caps["thinkingLevel"], "xhigh",
+            "the persisted row must reflect the re-synthesised thinkingLevel for the new model"
+        );
+
+        let _ = manager.close_session(&info.session_id).await;
+
+        // Restart/resume: the session resumes on model B because the row persisted "b/gpt-4o".
+        let resumed = manager
+            .resume_session(&info.session_id, dir.to_path_buf(), &sink)
+            .await
+            .expect("the native resume succeeded");
+        assert_eq!(
+            resumed.capabilities["model"], "b/gpt-4o",
+            "a session switched A -> B resumes on B after a restart"
         );
         let _ = manager.close_session(&info.session_id).await;
     }

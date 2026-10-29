@@ -472,6 +472,22 @@ impl Db {
         Ok(())
     }
 
+    /// Update a session's persisted capabilities JSON envelope (e.g. after a mid-session model switch).
+    ///
+    /// Updates only `capabilities_json` for the given session id; `title`, `sort_order`,
+    /// `cost_usd`, and `archived` remain untouched. A missing row is a no-op; returns `Ok(())`.
+    pub fn update_session_capabilities(
+        &self,
+        id: &str,
+        capabilities_json: &str,
+    ) -> Result<(), DbError> {
+        self.conn.lock().expect("db mutex poisoned").execute(
+            "UPDATE sessions SET capabilities_json = ?2 WHERE id = ?1",
+            params![id, capabilities_json],
+        )?;
+        Ok(())
+    }
+
     /// Persist the session's last known context usage (the
     /// `context_usage_update` frame's values — the provider's
     /// `input_tokens` vs the model's window). Called on EVERY frame, so a
@@ -2645,6 +2661,71 @@ mod tests {
             all[0].archived,
             "a re-record never clears the archived flag"
         );
+    }
+
+    /// `update_session_capabilities` updates `capabilities_json` while preserving
+    /// `title`, `cost_usd`, and `sort_order` (the row's manual list position, ADR 0075).
+    #[test]
+    fn update_session_capabilities_updates_envelope_and_preserves_other_columns() {
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-caps-test-", "scratch");
+        let path = dir.join("t.db");
+        let db = Db::open(&path).expect("db should open");
+        let session = title_session("sess-1");
+        db.record_session(&session)
+            .expect("record_session should succeed");
+        db.set_session_title("sess-1", "Kept title")
+            .expect("set_session_title should succeed");
+        db.record_session_cost("sess-1", 0.000042)
+            .expect("record_session_cost should succeed");
+        let initial_sort_order = sort_order_of(&db, "sessions", "id", "sess-1");
+
+        let new_caps = serde_json::json!({
+            "native": true,
+            "model": "tama/b",
+            "loadSession": true,
+            "thinkingLevel": "xhigh",
+        })
+        .to_string();
+
+        db.update_session_capabilities("sess-1", &new_caps)
+            .expect("update_session_capabilities should succeed");
+
+        let row = db
+            .session("sess-1")
+            .expect("session should succeed")
+            .expect("the row exists");
+
+        assert_eq!(row.capabilities_json, new_caps);
+        assert_eq!(row.title.as_deref(), Some("Kept title"));
+        assert_eq!(row.cost_usd, Some(0.000042));
+        assert_eq!(
+            sort_order_of(&db, "sessions", "id", "sess-1"),
+            initial_sort_order,
+            "updating capabilities must never renumber sort_order (ADR 0075)"
+        );
+    }
+
+    /// Calling `update_session_capabilities` on a non-existent session id succeeds
+    /// without error and creates no row (a silent no-op, mirroring `record_session_cost`).
+    #[test]
+    fn update_session_capabilities_on_a_missing_row_is_a_silent_no_op() {
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-caps-test-", "scratch");
+        let path = dir.join("t.db");
+        let db = Db::open(&path).expect("db should open");
+
+        let caps = serde_json::json!({
+            "native": true,
+            "model": "tama/b",
+        })
+        .to_string();
+
+        db.update_session_capabilities("nonexistent", &caps)
+            .expect("a missing row is a no-op returning Ok(())");
+        assert!(
+            db.session("nonexistent").expect("session lookup").is_none(),
+            "nothing was written for a row that does not exist"
+        );
+        assert!(db.list_sessions(true).expect("list_sessions").is_empty());
     }
 
     /// (ADR 0025 §3) A subagent `sessions` row (`is_subagent = 1`) is
