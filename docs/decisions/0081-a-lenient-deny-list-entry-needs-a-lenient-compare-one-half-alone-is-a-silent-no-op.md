@@ -263,3 +263,95 @@ The pin is `the_writes_row_discloses_the_carve_out_is_a_guard_rail_not_a_boundar
 - **Nothing macOS- or Windows-behavioural was run.** The residue section is source plus ADR 0064's spelling story; the mingw target type-checks, and the Landlock module is not compiled for Windows at all.
 - **The Landlock ruleset difference is classification-by-re-implementation**, not a confined-process measurement, and on a kernel without Landlock the confined tests skip loudly, so a suite run would not settle it either.
 - **That the five new/renamed tests are the complete state delta** was T06's measurement (A0 **1512/0/4** → **1516/0/4**, +4 with one rename), inherited here; no suite was run to re-establish it.
+
+## Amendment (2026-10-29) — the missing parent-write pin HAS landed; the over-refusal it pins is still unfixed, and the falsifier turns out to be a WORDING assertion, not a success assertion
+
+**What this amendment narrows: one sentence in *"The over-refusal found by mutation and
+deliberately NOT fixed"* — *"Measured: there is **no fixture anywhere** that writes into a
+protected directory's own **parent** and asserts success"*.** That measurement was true when
+written and is now false. Everything else in that section stands, including the title's
+claim: **the over-refusal itself is still not fixed**, no behaviour changed, and what
+arrived is a pin. The state moves from *unobserved* to **pinned-and-still-present**, which is
+strictly better and is not a fix. Merged and append-only, so the original sentences stand
+above as written; `status` is unchanged.
+
+**What landed** (issue #104, two tests in `src-tauri/src/agent/tools/exec/tests/policy.rs`,
+test-only, no source change):
+
+- `a_write_into_a_protected_dirs_parent_stays_allowed` — `writes: Allow`, **no rules**, target
+  `$HOME/.pi/agent/allowed.md` while `$HOME/.pi/agent/agents` is missing, asserting `!r.is_error`
+  **and** that the file lands. This is the ADR's prescription almost verbatim, including the
+  parent path it named.
+- `a_parent_deny_rule_does_not_move_the_guard_onto_the_parent_file` — a USER `deny` on the
+  parent (`~/.pi/agent`) forcing row 1 to reach the compare, asserting the refusal is the
+  **rule-deny sentence** and NOT the protected-guard sentence.
+
+**The ADR's own census, re-run.** `grep -rn 'join(".pi/agent")|join(".agents")'` over
+`src-tauri/src` and `src-tauri/tests` returned **4** hits at `fc7b635` (1 in
+`loop/tests/policy_gate.rs`, 2 in `exec/tests/policy.rs`, 1 in `worker/core.rs`) and returns
+**9** today — `+1` and `+4` in the two test files, `core.rs` unchanged. Every new hit is one of
+these two tests building its fixture, so the census moved for the reason the ADR predicted it
+would not: someone finally wrote the fixture.
+
+**The falsifier is NOT the success assertion, and this amendment corrects the obvious guess.**
+The natural reading of the prescription is that the ancestor-peel would redden
+`…_parent_stays_allowed` on its `!r.is_error`. **It does not.** Measured (mutation applied,
+measured, reverted, tree proven byte-identical):
+
+- The faithful **compare-side** ancestor-peel — entry side of `protected_refusal_text` only,
+  keeping an unresolvable entry raw so the `Err` arm's behaviour is preserved — reddens
+  **exactly two** tests, and **both on wording**:
+  `a_parent_deny_rule_does_not_move_the_guard_onto_the_parent_file` (`policy.rs:1169`, the
+  `contains("denied by the access rule")` assertion) and
+  `a_rule_deny_on_an_ordinary_dir_uses_the_rule_wording_not_an_escape_claim`
+  (`policy_gate.rs:1903`, same class, gate scope). Baselines were 18/0 and 33/0; under the
+  mutation 17/1 and 32/1.
+- `…_parent_stays_allowed` **passes under that mutation**, for a reason visible in source and
+  stated in the test's own doc comment: it has **no rules**, and
+  `write_rule_refusal`'s match sends rows 2/3/4 to `_ => None`, so a no-rule write **never
+  reaches `protected_refusal_text`** — the widened compare is not on its path. Its premise
+  guard (`"the snapshot must carry the not-yet-existing dir"`) reddens only under the
+  **snapshot-peel** variant, i.e. when the mutation is applied to `canonicalize_lenient`
+  itself and therefore to `boundary::push_protected`, which *builds* the frozen entry.
+
+**So the pin is a pair with different jobs, and only one of them is the falsifier.** The
+success assertion expresses the property and is guarded by its premise; **the falsifier is the
+sibling's WORDING assertion**, because row 1 runs `protected_refusal(…).or_else(rule_deny_text)`
+— guard first — so a widened entry compare does not flip success, it **steals the sentence**. A
+refused-because-guarded and a refused-because-denied are the same outcome with different
+meanings, and only the sentence distinguishes them. That is the same seam this ADR's
+*"near-miss 3"* already identified as the gate wording bug, arriving from the opposite
+direction: there a correct refusal carried the wrong sentence; here a widened compare would
+make the wrong sentence *look correct*.
+
+**A methodological warning, because the confounded instrument was tried first and is tempting.**
+Mutating `canonicalize_lenient` directly looks like the one-line expression of "peel to the
+canonical ancestor" and it **compiles clean** — but that primitive has **ten production call
+sites across four files** (`loop/gate.rs` 4, `exec/access.rs` 2, `boundary.rs` 2, `policy.rs` 2,
+measured), `boundary::push_protected` among them, so it peels the *snapshot* as well as the
+*compare*. It reddened **more than ten** tests across the wide `agent::` scope, a large number of
+them snapshot- or rule-matching collateral rather than signal — `protected_dirs_keep_a_missing_dir`
+and `protected_dirs_keeps_an_unresolvable_entry_raw` (both premise tests on the *snapshot*), three
+`policy::` longest-prefix tests, and both `sandbox::` ones. **A red count that large is not a
+signal; it is the instrument destroying the fixtures' premises.** The exact A-variant total is
+deliberately not stated: the run that measured it enumerated one more test name than its own
+reported count, and re-measuring a confounded instrument to settle its tally is not worth a
+rebuild — the point needs only that the collateral is broad and that it is named. If this mutation
+is ever re-run, scope it to the entry side of `protected_refusal_text` or the number means nothing.
+Related trap, hit live: an *unconditional* peel in that scope collapses an unresolvable
+**relative** entry to the empty path, and `starts_with("")` matches everything — a spurious
+third failure. The faithful version keeps the entry raw, mirroring the `Err` arm.
+
+**The cost estimate in that section did not hold, recorded rather than reconciled.** It said
+pinning this "moves the suite's test count by **five, not four**". It landed as **two** tests in
+one test file (`exec/tests/policy.rs`, test-only, no source touched; shipped inside the squash `6f501ab`). The five was a cost estimate for a scoping that was never
+the one used; the second half of the pair was cheap precisely because it rides an existing
+row-1 path rather than building a new one. Not a criticism of the trade — the ADR's reason for
+deferring (a pre-committed per-commit delta) was real at the time, and the pin shipped later
+under no such constraint.
+
+**What remains open, unchanged by this amendment:** the ancestor-peel over-refusal is still
+shipped. Nothing here makes the compare tighter; it makes the next person who tightens or
+loosens it unable to do so silently. And the two follow-ups that section's neighbours name —
+`rule_write_root`'s stale "CANONICAL" comment and the dangling `Deviation N` numbering (now
+given a durable home by **ADR 0030's 2026-10-27 amendment**) — are tracked there, not here.
