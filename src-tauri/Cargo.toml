@@ -83,6 +83,13 @@ ddgs = "0.1"
 ipnet = "2"
 pdf-extract = "0.12"
 regex = "1"
+# (Task 4) The ATOMIC settings write (`config::write_settings_atomic`):
+# `NamedTempFile` in the config dir + `persist` (rename), so a torn write can
+# never destroy `settings.json`. Was a DEV-dependency (test temp dirs only);
+# the production use here is why it moved to `[dependencies]` — the version is
+# unchanged, so the lockfile does not re-resolve. The dev-dependency entry is
+# GONE (a crate listed in both is redundant; `[dependencies]` covers tests).
+tempfile = "3"
 
 [dev-dependencies]
 serde_json = "1"
@@ -91,10 +98,6 @@ tauri = { version = "2", features = ["test"] }
 # Mock HTTP server for the `Provider` integration tests (canned SSE
 # streams, canned status codes).
 wiremock = "0.6"
-# Temp dirs for the `skills` / `settings` / `mcp` tests (the config
-# fixtures are written into a temp dir — pointing them at a real `HOME`
-# would be racy).
-tempfile = "3"
 # `test-util` (dev-only): the paused clock the prompt tests advance well past
 # any deadline they must NOT carry — a question waits for the person, never
 # for a timer.

@@ -99,7 +99,13 @@ describe("childGatesOf (the pure core — every consumer's single source)", () =
       {
         requestId: "p1",
         toolTitle: "Run rm -rf /",
-        options: [{ optionId: "allow_once", name: "Allow once" }],
+        options: [
+          {
+            optionId: "allow_once",
+            name: "Allow once",
+            path: "~/.pi/agent",
+          },
+        ],
       },
     ];
     const gates = childGatesOf(
@@ -114,6 +120,10 @@ describe("childGatesOf (the pure core — every consumer's single source)", () =
     // `params`, and no `source` either — `ChildGate` has no such field, and the
     // backend never emitted the `subagent:<name>` value one would have carried),
     // and a card must not read a question out of a prompt that has none.
+    // The option's `path` (permissions-section T05) is in the field set on
+    // purpose: `childGatesOf` pushes `options: p.options` BY REFERENCE, so the
+    // subagent path carries the new field with zero plumbing — this pin is what
+    // proves it.
     expect(gates[0]).toStrictEqual({
       childSessionId: "sub1",
       parentSessionId: "main1",
@@ -121,7 +131,13 @@ describe("childGatesOf (the pure core — every consumer's single source)", () =
       requestId: "p1",
       kind: "permission",
       toolTitle: "Run rm -rf /",
-      options: [{ optionId: "allow_once", name: "Allow once" }],
+      options: [
+        {
+          optionId: "allow_once",
+          name: "Allow once",
+          path: "~/.pi/agent",
+        },
+      ],
       childStartedAt: 1000,
     });
   });

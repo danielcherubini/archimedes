@@ -179,6 +179,12 @@ const domainModules = (): string[] =>
  * -------------------------------------------------------------------------- */
 const TAURI_PUBLIC_API = [
   "AccessPolicy",
+  // (permissions-section T05) The two rule-model type names, added ON PURPOSE
+  // per the header above: `FilePolicy.rules` is `AccessRule[]` and a rule's
+  // `direction` is `AccessDirection`. Type-only — they vanish at runtime, so
+  // `TAURI_RUNTIME_API` (the pinned 49) does NOT gain them.
+  "AccessDirection",
+  "AccessRule",
   "AcpSessionUpdate",
   "AcpToolCallStatus",
   "AgentConfigDto",
@@ -381,22 +387,25 @@ describe("the scanner actually reads the tree", () => {
           stripJsComments(readFileSync(f, "utf8")),
         ),
     );
-    // SET SIZE, pinned: 36 files mock the barrel by path. The number may only
+    // SET SIZE, pinned: 37 files mock the barrel by path. The number may only
     // move when a test file is added or removed, in a commit that says so — this
     // one moved 34 -> 35 when D2 wired `useAgentOverridesWrites` into `SpacesList`
     // and landed its test file, which mocks the barrel the documented way, and
     // 35 -> 36 when #85 added `store/modelCatalog.test.ts` (the catalog store the
-    // subagent card's context % reads).
-    expect(mockers).toHaveLength(36);
-    // 35 of the 36 SPREAD `vi.importActual`, which is the shape that makes the
-    // seam forgiving: an unlisted export still resolves. The remaining one replaces
-    // the module wholesale, so a name it forgets is `undefined` — the case the
-    // pinned-surface assertion below covers.
+    // subagent card's context % reads), and 36 -> 37 when the Permissions section
+    // landed `components/settings/PermissionsSection.test.tsx`, which mocks the
+    // barrel the documented way.
+    expect(mockers).toHaveLength(37);
+    // 36 of the 37 SPREAD `vi.importActual`, which is the shape that makes the
+    // seam forgiving: an unlisted export still resolves. The new mocker spreads,
+    // so the remaining one is still `hooks/useWindowMaximized.test.ts`, which
+    // replaces the module wholesale — so a name it forgets is `undefined`, the
+    // case the pinned-surface assertion below covers.
     expect(
       mockers.filter((f) =>
         /vi\.importActual/.test(readFileSync(f, "utf8")),
       ).length,
-    ).toBe(35);
+    ).toBe(36);
   });
 });
 
