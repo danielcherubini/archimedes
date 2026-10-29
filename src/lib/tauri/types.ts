@@ -807,7 +807,8 @@ export type OverrideSource = "override" | "file" | "parent";
 //   `PermissionBlock`      NO rename                   → `tools`
 //   `ToolKey`              `rename_all = "camelCase"`  → `readSkill`, `webSearch`,
 //                                                        `fetchContent`
-//   `UnsupportedReason`    `rename_all = "camelCase"`  → `bashPatternRules`
+//   `UnsupportedReason`    `rename_all = "camelCase"`  → `bashPatternRules`,
+//                                                        `pathPatternRules`
 //   `FrontmatterNote`      `rename_all = "camelCase"`, EXTERNALLY tagged
 //
 // A `rename_all` on a struct does NOT reach a nested type, which is why
@@ -828,10 +829,13 @@ export type OverrideSource = "override" | "file" | "parent";
 export type AgentPermissionAction = "allow" | "ask" | "deny";
 
 /** Why a rule could not be used (the Rust `UnsupportedReason`,
- *  `rename_all = "camelCase"`). Only ever produced for a `bash`-style
- *  per-command pattern block: parsed and ANNOUNCED, never enforced by a matcher
- *  nothing has validated. */
-export type AgentUnsupportedReason = "bashPatternRules";
+ *  `rename_all = "camelCase"`). Two variants, one per pattern CLASS:
+ *  `bashPatternRules` for opencode `bash`-style patterns over command text,
+ *  `pathPatternRules` for a pattern map on a recognised path-taking tool. Both
+ *  are parsed and ANNOUNCED, never enforced — by a matcher (command text) or by
+ *  a path resolution (path map) that this layer deliberately does not do. A
+ *  `ToolKey::Unrecognized` key gets NEITHER variant. */
+export type AgentUnsupportedReason = "bashPatternRules" | "pathPatternRules";
 
 /** One rule of a path-taking tool's ORDERED pattern→action map (the Rust
  *  `Rule`; no `rename_all`, so both keys are already lowercase).
@@ -919,7 +923,8 @@ export type AgentFrontmatterNote =
   | { unknownKey: string }
   /** A recognised-but-unpoliced tool name, kept verbatim. */
   | { unrecognizedToolKey: string }
-  /** A `bash`-style pattern block: parsed, announced unsupported, never enforced. */
+  /** A pattern block this desktop does not police (either reason class — see
+   *  [`AgentUnsupportedReason`]): parsed, announced unsupported, never enforced. */
   | { unsupportedUnvalidatedMatcher: AgentUnsupportedReason }
   /** A verdict the parser does not recognise — the unknown spelling, verbatim. */
   | { unknownAction: string };

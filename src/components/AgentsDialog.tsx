@@ -882,10 +882,15 @@ function describeNote(note: AgentFrontmatterNote): string {
     // above shows it — but this desktop has no validated matcher for command
     // text, so it is announced and NOT enforced. Saying "parsed but not
     // enforced" is the honest sentence; saying only "unsupported" would imply the
-    // rules vanished.
+    // rules vanished. A path-taking tool's pattern map is the same story on the
+    // other axis: parsed and announced, never enforced, because this layer does
+    // no path resolution at all. The fall-through stays for any reason the Rust
+    // enum gains later — a name we cannot phrase still gets reported verbatim.
     return note.unsupportedUnvalidatedMatcher === "bashPatternRules"
       ? "bash pattern rules are parsed but NOT enforced"
-      : `unsupported matcher: ${note.unsupportedUnvalidatedMatcher}`;
+      : note.unsupportedUnvalidatedMatcher === "pathPatternRules"
+        ? "path pattern rules are parsed but NOT enforced"
+        : `unsupported matcher: ${note.unsupportedUnvalidatedMatcher}`;
   }
   return `unknown action: ${note.unknownAction}`;
 }

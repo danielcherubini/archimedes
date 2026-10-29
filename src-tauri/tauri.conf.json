@@ -39,7 +39,15 @@
       "icons/icon.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "license": "MIT",
+    "linux": {
+      "rpm": {
+        "files": {
+          "/usr/share/licenses/archimedes/LICENSE": "../LICENSE"
+        }
+      }
+    }
   },
   "plugins": {
     "updater": {

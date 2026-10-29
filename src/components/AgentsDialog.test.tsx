@@ -1050,6 +1050,12 @@ describe("AgentsDialog", () => {
     // element is an enum, so serde wraps it), not the bare string the eleven
     // recognised keys arrive as. It stays in the block — never dropped — so the
     // row names it too.
+    //
+    // BOTH `UnsupportedReason` variants ride here, because the union is a mirror
+    // of the Rust enum and this file is the only place either side's drift is
+    // visible: `bashPatternRules` (patterns over command text) and
+    // `pathPatternRules` (a pattern map on a path-taking tool) are DIFFERENT
+    // sentences on the wire and must not collapse into one generic line.
     openDialog({
       rows: [
         row({
@@ -1063,6 +1069,7 @@ describe("AgentsDialog", () => {
             note("unknownKey", "temperature"),
             note("unrecognizedToolKey", "glob"),
             note("unsupportedUnvalidatedMatcher", "bashPatternRules"),
+            note("unsupportedUnvalidatedMatcher", "pathPatternRules"),
             note("unknownAction", "maybe"),
           ],
           source: {
@@ -1088,6 +1095,14 @@ describe("AgentsDialog", () => {
     expect(
       within(report).getByText(/bash pattern rules are parsed but NOT enforced/),
     ).toBeTruthy();
+    // The path-pattern sibling of the same reason enum (issue #78's path-pattern
+    // rows): parsed and ANNOUNCED, never enforced — the gate answers `AsSelf` for
+    // a per-pattern ruleset. The generic `unsupported matcher: …` fall-through
+    // would render the raw wire token here, which is not a sentence a user can
+    // act on, so this variant gets its own arm.
+    expect(
+      within(report).getByText(/path pattern rules are parsed but NOT enforced/),
+    ).toBeTruthy();
     expect(within(report).getByText("unknown action: maybe")).toBeTruthy();
     // In FILE ORDER, one line per note — the Rust `Vec` order, nothing grouped
     // or deduped.
@@ -1097,6 +1112,7 @@ describe("AgentsDialog", () => {
       "unknown key: temperature",
       "unrecognised tool key: glob",
       "bash pattern rules are parsed but NOT enforced",
+      "path pattern rules are parsed but NOT enforced",
       "unknown action: maybe",
     ]);
   });

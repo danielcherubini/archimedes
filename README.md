@@ -7,6 +7,8 @@ first-class agent in v1; other ACP agents follow.
 
 See [CONTEXT.md](CONTEXT.md) for the project's language and terminology.
 
+Licensed under the [MIT License](LICENSE).
+
 ## What it does
 
 - Spawns ACP-speaking agent processes as subprocesses and speaks stdio
