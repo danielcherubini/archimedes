@@ -65,11 +65,18 @@ function agentRow(overrides: Partial<AgentConfigDto> = {}): AgentConfigDto {
     description: "Fast recon",
     scope: "user",
     path: "/u/.agents/agents/scout.md",
-    file: { model: null, thinking: null, tools: null },
-    override: { model: null, thinking: null, tools: null },
-    effective: { model: null, thinking: null, tools: null },
-    source: { model: "parent", thinking: "parent", tools: "parent" },
+    file: { model: null, thinking: null, tools: null, permission: null },
+    override: { model: null, thinking: null, tools: null, permission: null },
+    effective: { model: null, thinking: null, tools: null, permission: null },
+    source: { model: "parent", thinking: "parent", tools: "parent", permission: "parent" },
     shadowed: [],
+    // issue #101: the two new REQUIRED wire fields at Rust's empty value. This
+    // builder is called from INSIDE the hoisted `vi.mock("../lib/tauri")`
+    // factory below — a hoisted `function` declaration, so the factory can reach
+    // it (unlike the object-literal `row()` in `useAgentCatalog.test.ts`, whose
+    // inline twin had to be edited separately).
+    filePermission: null,
+    frontmatterNotes: [],
     ...overrides,
   };
 }
@@ -1600,7 +1607,7 @@ describe("SpacesList", () => {
         }),
     );
     mockedListAgentConfig.mockResolvedValue([
-      agentRow({ override: { model: null, thinking: "max", tools: null } }),
+      agentRow({ override: { model: null, thinking: "max", tools: null, permission: null } }),
     ]);
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     render(<SpacesList />);

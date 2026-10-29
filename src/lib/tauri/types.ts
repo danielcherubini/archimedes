@@ -792,9 +792,142 @@ export type AgentOverrides = Record<string, AgentOverride>;
 export type OverrideSource = "override" | "file" | "parent";
 
 
+// ═══════════════════════════════════════════════════════════════════════════
+// The declared `permission:` block (issue #101). Every shape below is a
+// BYTE-FOR-BYTE mirror of `src-tauri/src/agent/definition_permission.rs`, and
+// the mixed casing is NOT an accident — it is what the Rust serde attributes
+// actually produce, and this repo has NO wire-contract test linking the two
+// sides (the frontend mocks `invoke`, the Rust tests never emit IPC), so a
+// drift here is invisible to BOTH suites. The per-type attribute, restated so a
+// future editor cannot "tidy" a snake_case key into camelCase:
+//
+//   `Action`               `rename_all = "lowercase"`  → `allow` / `ask` / `deny`
+//   `Rule`                 NO rename                   → `pattern`, `action`
+//   `Rules`                NO rename                   → `patterns`, **`whole_tool`**
+//   `PermissionBlock`      NO rename                   → `tools`
+//   `ToolKey`              `rename_all = "camelCase"`  → `readSkill`, `webSearch`,
+//                                                        `fetchContent`
+//   `UnsupportedReason`    `rename_all = "camelCase"`  → `bashPatternRules`
+//   `FrontmatterNote`      `rename_all = "camelCase"`, EXTERNALLY tagged
+//
+// A `rename_all` on a struct does NOT reach a nested type, which is why
+// `whole_tool` stays snake_case inside a camelCase `AgentConfigDto`. Do not
+// "fix" it here: the fix, if it ever happens, is a `rename_all` on the Rust
+// `Rules`, landed in the same change that re-pins `a_permission_block_serializes_in_file_order`.
+//
+// The narrowing-only invariant the Rust module pins, and which these types must
+// keep un-widenable: *"No shape in this module can express 'allow beyond the
+// user's policy' — the actions are exactly `allow | ask | deny` and a per-agent
+// `allow` is at most a no-op on the outside of the user's boundary."* Widening
+// `AgentPermissionAction` past those three verbs turns the type into a grant.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** One of the three verdicts a declared rule can carry (the Rust `Action`,
+ *  `rename_all = "lowercase"`). EXACTLY three — see the narrowing-only note
+ *  above the block. */
+export type AgentPermissionAction = "allow" | "ask" | "deny";
+
+/** Why a rule could not be used (the Rust `UnsupportedReason`,
+ *  `rename_all = "camelCase"`). Only ever produced for a `bash`-style
+ *  per-command pattern block: parsed and ANNOUNCED, never enforced by a matcher
+ *  nothing has validated. */
+export type AgentUnsupportedReason = "bashPatternRules";
+
+/** One rule of a path-taking tool's ORDERED pattern→action map (the Rust
+ *  `Rule`; no `rename_all`, so both keys are already lowercase).
+ *  ORDERED: opencode resolves a tool's pattern object in file order and the
+ *  LAST matching rule wins — which is why the `"*"` catch-all is written FIRST
+ *  and the specifics after it carve out exceptions. Nothing sorts this list. */
+export interface AgentPermissionRule {
+  pattern: string;
+  action: AgentPermissionAction;
+}
+
+/** One tool's ruleset (the Rust `Rules`; no `rename_all`).
+ *
+ *  `whole_tool` is **snake_case** — a struct-level `rename_all` on the parent
+ *  DTO never reaches this nested type, and this is the one key in the whole
+ *  mirror a camelCase guess would get wrong in silence. */
+export interface AgentPermissionRules {
+  patterns: AgentPermissionRule[];
+  /** True when the file wrote a BARE verdict (`bash: deny`), so the action
+   *  applies to ANY argument. Rust stores that as the catch-all `"*"` row PLUS
+   *  this flag; an explicit `{"*": deny}` map is the same row with this `false`.
+   *  The distinction is why the field exists — "the file said tool-wide" is not
+   *  the same claim as "the file said star", and the row renders them
+   *  differently. */
+  whole_tool: boolean;
+}
+
+/** The per-tool discriminant (the Rust `ToolKey`, `rename_all = "camelCase"`,
+ *  EXTERNALLY tagged).
+ *
+ *  The two arms are NOT one string union: the eleven recognised keys arrive as
+ *  their camelCase verb, and `ToolKey::Unrecognized(String)` arrives as the
+ *  tagged OBJECT `{"unrecognized":"glob"}` — serde wraps a tuple element that is
+ *  an enum, so its verbatim name survives. An unrecognised key is a FIRST-CLASS
+ *  case, never a drop: the silent-drop class #101 exists to fix has no path
+ *  through this type. Note this is deliberately NOT widened with `(string & {})`
+ *  — the wire never sends a bare unknown string, and admitting one would let a
+ *  typo of a recognised key type-check. */
+export type AgentToolKey =
+  | "edit"
+  | "read"
+  | "bash"
+  | "write"
+  | "find"
+  | "grep"
+  | "ls"
+  /** The frontmatter key is `read_skill`. */
+  | "readSkill"
+  /** The `permission:`-block `ask:` KEY — a verdict-bearing tool key, NOT the
+   *  interactive `ask` TOOL. Different spell, same word. */
+  | "ask"
+  | "webSearch"
+  | "fetchContent"
+  /** Any other tool name (opencode has `glob`, `task`, `lsp`, …), kept verbatim
+   *  so the ruleset stays REPRESENTABLE. */
+  | { unrecognized: string };
+
+/** The FULL declared block, IN FILE ORDER (the Rust `PermissionBlock`; no
+ *  `rename_all`).
+ *
+ *  `tools` is an ORDERED ARRAY OF PAIRS, because Rust serializes
+ *  `Vec<(ToolKey, Rules)>` as a 2-element JSON array — `[["edit", {…}], …]` —
+ *  NOT as an object. A `{ edit: {…} }` literal here would not type-check, and
+ *  that is the point: a map cannot hold two tools in an order, and last-match-
+ *  wins ordering is the whole semantics of the block. */
+export interface AgentPermissionBlock {
+  tools: [AgentToolKey, AgentPermissionRules][];
+}
+
+/** One "the file said something the reader does not understand" note (the Rust
+ *  `FrontmatterNote`) — the ANNOUNCE half of #101: a report, never an error.
+ *
+ *  EXTERNALLY tagged: one object keyed by the camelCase variant name, e.g.
+ *  `{"unknownKey":"mode"}`. It is NOT `{kind:"unknownKey", value:"mode"}` —
+ *  `#[serde(tag = "kind")]` was tried and REJECTED, because serde's
+ *  internally-tagged representation can only tag payloads that serialize as a
+ *  MAP and every payload here is a bare `String`/unit, so it would compile and
+ *  then fail at RUNTIME on the first wire send. Pinned in Rust by
+ *  `frontmatter_notes_serialize_as_a_tagged_object_per_note`; read here by
+ *  discriminating on the KEY, which is the only thing the wire carries. */
+export type AgentFrontmatterNote =
+  /** A top-level frontmatter key the desktop does not read (`mode:`,
+   *  `temperature:`). `{"unknownKey":"permission"}` means the `permission:` line
+   *  yielded NOTHING readable — the key itself is known. */
+  | { unknownKey: string }
+  /** A recognised-but-unpoliced tool name, kept verbatim. */
+  | { unrecognizedToolKey: string }
+  /** A `bash`-style pattern block: parsed, announced unsupported, never enforced. */
+  | { unsupportedUnvalidatedMatcher: AgentUnsupportedReason }
+  /** A verdict the parser does not recognise — the unknown spelling, verbatim. */
+  | { unknownAction: string };
+
+
 /**
  * One field-triple of the Agents modal's report (the Rust `OverrideFields`).
- * The three `Option`s are serialized ALWAYS PRESENT — no `skip_serializing_if`
+ * The four `Option`s are serialized ALWAYS PRESENT — no `skip_serializing_if`
  * — so "this column has no value" arrives as `null` and the fields are
  * `… | null`, NOT optional. That is the deliberate opposite of `AgentOverride`,
  * where absence is the only meaning of "does not speak": these are ROWS of a
@@ -804,14 +937,30 @@ export interface AgentOverrideFields {
   model: string | null;
   thinking: string | null;
   tools: string[] | null;
+  /** The declared `permission:` ruleset as THIS layer sees it (issue #101).
+   *  Only the `file` column can ever be non-`null`: the stored entry has no
+   *  `permission` key at all (ADR 0066's shape is `model`/`thinking`/`tools`,
+   *  and absence is its ONLY meaning), so `override.permission` is `null` by
+   *  construction. The column exists anyway so the three columns stay ONE
+   *  shape, which is what lets the wire pin iterate the same four keys over
+   *  each of them. */
+  permission: AgentPermissionBlock | null;
 }
 
 
-/** Which layer supplied each of the report's three fields (the Rust `SourceFields`). */
+/** Which layer supplied each of the report's four fields (the Rust
+ *  `SourceFields`). */
 export interface AgentOverrideSources {
   model: OverrideSource;
   thinking: OverrideSource;
   tools: OverrideSource;
+  /** Which layer supplied `permission` (issue #101). There is NO settings.json
+   *  permission layer, so Rust reports `file` exactly when the definition
+   *  declared a block and `parent` when it did not — NEVER `override`, and NO
+   *  fourth `OverrideSource` variant exists for it. Verified against the actual
+   *  enum (`launch.rs`): `OverrideSource` is `Override | File | Parent`, three
+   *  variants, and the permission layer REUSES it rather than inventing a word. */
+  permission: OverrideSource;
 }
 
 
@@ -836,6 +985,27 @@ export interface AgentConfigDto {
    *  `SkillInfo.shadowed`, and `SkillsDialog`'s `?? []` tolerance is a
    *  defence for old rows, not a licence to omit it here. */
   shadowed: ShadowedAgent[];
+  /** The definition file's declared `permission:` block, VERBATIM (issue #101),
+   *  or `null` when the file does not speak about permissions.
+   *
+   *  The wire name is `filePermission` — the Rust field is `file_permission`
+   *  under the DTO's `rename_all = "camelCase"`, and it is NOT `permission`:
+   *  `permission` is the name of the three COLUMN structs' fourth field
+   *  (`AgentOverrideFields.permission`), which carries the same block from one
+   *  layer's point of view. This one is the row-level "what the file declared"
+   *  copy, and it is deliberately NOT an effective verdict — the gate's
+   *  strict-of-two merge against the user's policy is a RUNTIME decision, so no
+   *  static row can report it.
+   *
+   *  `Option` on the Rust side and therefore `| null` here (NOT `?`): the DTO
+   *  has no `skip_serializing_if`, so the key always arrives. */
+  filePermission: AgentPermissionBlock | null;
+  /** The file-READ announce notes (issue #101): unknown top-level keys,
+   *  unrecognised tool keys, unsupported bash-pattern rows, unknown verdicts.
+   *  REQUIRED, not optional, on the `shadowed` precedent — Rust always
+   *  serializes the `Vec` (empty as `[]`, never `null`), and a clean file's `[]`
+   *  renders nothing. */
+  frontmatterNotes: AgentFrontmatterNote[];
 }
 
 
