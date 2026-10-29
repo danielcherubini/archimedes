@@ -1267,20 +1267,75 @@ subtask: "true"
     /// `parse_value` copies, and neither copy is a consumer of it: a change
     /// that touches the copies' shared value-reading guards is a FAILURE here,
     /// by construction, rather than a silent cross-application of a bug.
+    /// Pull one `parse_value` copy out of a source file, as TEXT ONLY.
+    ///
+    /// The source arrives through `include_str!`, so its line endings are
+    /// WHATEVER THE CHECKOUT MATERIALISED — and a Windows runner's git
+    /// defaults to `core.autocrlf=true`, which writes CRLF into the working
+    /// tree while the object store keeps LF (`git show HEAD:src-tauri/src/agents.rs
+    /// | grep -c $'\r'` → 0 even though the Windows job read CRLF bytes). A
+    /// needle carrying a bare `\n` therefore matches on Linux/macOS and matches
+    /// NOTHING on Windows, which is how this pin failed red on
+    /// `windows-latest` while green everywhere else. Normalising first makes
+    /// the pin measure the thing it means to measure — the copy's CONTENT —
+    /// and never the platform's checkout convention.
+    fn parse_value_copy(src: &str) -> String {
+        let src = src.replace("\r\n", "\n");
+        let start = src.find("fn parse_value(").expect("the copy exists");
+        let end = src[start..]
+            .find("\n}\n")
+            .map(|o| start + o)
+            .expect("the copy closes at column 0");
+        src[start..end].to_string()
+    }
+
+    /// The CRLF half of the pin above, asserted DIRECTLY rather than left to
+    /// be discovered by a platform's compiler. Feeding the extractor the
+    /// CRLF bytes a Windows checkout hands `include_str!` must yield the same
+    /// body the LF bytes do — otherwise the shared-guard assertions below are
+    /// vacuous on that platform (they would run over a body that was never
+    /// extracted) or the pin fails outright, which is what it did.
+    #[test]
+    fn the_copy_extractor_survives_a_crlf_checkout() {
+        // The fixture mirrors the shape the extractor is given: a header, the
+        // copy, its column-0 closing brace, and a following function so the
+        // terminator is findable at all. The marker stands in for the shared
+        // guard the pin asserts on.
+        let lf = concat!(
+            "// header\n",
+            "fn parse_value(x: &str) -> String {\n",
+            "    let shared_guard = NBSP_DEDENT_OFFSET;\n",
+            "}\n",
+            "\n",
+            "fn other() {}\n",
+        );
+        let crlf = lf.replace("\n", "\r\n");
+        assert_ne!(lf, crlf, "the fixture really is two different byte strings");
+        assert_eq!(
+            parse_value_copy(lf),
+            parse_value_copy(&crlf),
+            "the extracted copy is the SAME text whichever line ending the \
+             checkout materialised — a Windows CRLF checkout must not read as \
+             a missing or empty body"
+        );
+        assert!(
+            parse_value_copy(&crlf).contains("NBSP_DEDENT_OFFSET"),
+            "and the body the pin asserts on is non-empty on CRLF, so the \
+             shared-guard assertions cannot pass vacuously"
+        );
+        assert!(
+            !parse_value_copy(&crlf).contains("fn other"),
+            "the extractor still stops at the copy's own closing brace, so \
+             normalising the line endings did not widen the slice"
+        );
+    }
+
     #[test]
     fn the_two_parse_value_copies_are_untouched_by_the_permission_reader() {
         let agents = include_str!("../agents.rs");
         let skills = include_str!("../skills.rs");
-        let body = |src: &str| -> String {
-            let start = src.find("fn parse_value(").expect("the copy exists");
-            let end = src[start..]
-                .find("\n}\n")
-                .map(|o| start + o)
-                .expect("the copy closes at column 0");
-            src[start..end].to_string()
-        };
-        let agents_body = body(agents);
-        let skills_body = body(skills);
+        let agents_body = parse_value_copy(agents);
+        let skills_body = parse_value_copy(skills);
 
         // The guards BOTH copies share — the shape bugs the "apply it to both
         // copies" rule binds. Each must still be present in each copy.
