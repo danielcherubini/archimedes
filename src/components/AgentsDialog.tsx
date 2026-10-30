@@ -105,7 +105,7 @@ function toolsInheritLabel(source: OverrideSource): string {
  */
 function shadowHeading(winnerScope: "space" | "user", count: number): string {
   return `${count} ${count === 1 ? "agent is" : "agents are"} hidden by a ${
-    winnerScope === "space" ? "project" : "global"
+    winnerScope === "space" ? "space" : "global"
   } agent with the same name`;
 }
 
@@ -477,11 +477,7 @@ function storedPinDiff(
  * header can accidentally satisfy a query for one of the three words.
  */
 function LayerTag({ children }: { children: string }) {
-  return (
-    <span className="shrink-0 rounded bg-input px-1 text-ui-xs text-foreground-subtlest">
-      {children}
-    </span>
-  );
+  return <MutedCaption className="shrink-0 rounded bg-input px-1">{children}</MutedCaption>;
 }
 
 /**
@@ -809,16 +805,17 @@ function PermissionReport({ row }: { row: AgentConfigDto }) {
         if (rules.whole_tool) {
           const action = rules.patterns[0]?.action;
           return (
-            <div
+            <MutedCaption
+              as="div"
               key={`${name}#${toolIndex}`}
               data-permission-rule=""
-              className="flex min-w-0 flex-wrap items-center gap-x-2 text-ui-xs text-foreground-subtlest"
+              className="flex min-w-0 flex-wrap items-center gap-x-2"
             >
               <span className="min-w-0 shrink-0">{name}</span>
               <span className="min-w-0 truncate">
                 {action === undefined ? "—" : `→ ${action}`}
               </span>
-            </div>
+            </MutedCaption>
           );
         }
         // One line per pattern row, in the order received. `patterns` can be
@@ -828,31 +825,33 @@ function PermissionReport({ row }: { row: AgentConfigDto }) {
         // case the user needs to see.
         if (rules.patterns.length === 0) {
           return (
-            <div
+            <MutedCaption
+              as="div"
               key={`${name}#${toolIndex}`}
               data-permission-rule=""
-              className="flex min-w-0 flex-wrap items-center gap-x-2 text-ui-xs text-foreground-subtlest"
+              className="flex min-w-0 flex-wrap items-center gap-x-2"
             >
               <span className="min-w-0 shrink-0">{name}</span>
               <span className="min-w-0 truncate">
                 — no rule the reader could use
               </span>
-            </div>
+            </MutedCaption>
           );
         }
         return rules.patterns.map((rule, ruleIndex) => (
-          <div
+          <MutedCaption
+            as="div"
             // The index is part of the key on purpose: a tool's pattern list may
             // legitimately repeat a pattern (`"*"` twice with different
             // verdicts — last one wins), so the pattern alone is not unique.
             key={`${name}#${toolIndex}#${ruleIndex}`}
             data-permission-rule=""
-            className="flex min-w-0 flex-wrap items-center gap-x-2 text-ui-xs text-foreground-subtlest"
+            className="flex min-w-0 flex-wrap items-center gap-x-2"
           >
             <span className="min-w-0 shrink-0">{name}</span>
             <span className="min-w-0 shrink-0">{rule.pattern}</span>
             <span className="min-w-0 truncate">→ {rule.action}</span>
-          </div>
+          </MutedCaption>
         ));
       })}
 
@@ -916,15 +915,16 @@ function ShadowReport({
         {shadowHeading(row.scope, losers.length)}
       </MutedCaption>
       {losers.map((loser) => (
-        <div
+        <MutedCaption
+          as="div"
           key={loser.path}
-          className="flex min-w-0 items-center gap-2 text-ui-xs text-foreground-subtlest"
+          className="flex min-w-0 items-center gap-2"
         >
           <span className="min-w-0 shrink-0">{loser.name}</span>
           <span className="min-w-0 truncate" title={loser.path}>
             {loser.path}
           </span>
-        </div>
+        </MutedCaption>
       ))}
     </div>
   );

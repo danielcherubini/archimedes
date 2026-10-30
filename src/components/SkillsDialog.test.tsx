@@ -609,7 +609,7 @@ describe("SkillsDialog", () => {
       />,
     );
     await screen.findByText(
-      "1 skill is hidden by a project skill with the same name",
+      "1 skill is hidden by a space skill with the same name",
     );
     // The loser's own line carries its name AND the path the user can check.
     const path = await screen.findByText("/u/.pi/agent/skills/alpha/SKILL.md");
@@ -634,7 +634,7 @@ describe("SkillsDialog", () => {
       />,
     );
     await screen.findByText(
-      "2 skills are hidden by a project skill with the same name",
+      "2 skills are hidden by a space skill with the same name",
     );
     expect(screen.queryByText(/1 skill is hidden/)).toBeNull();
   });
@@ -667,7 +667,7 @@ describe("SkillsDialog", () => {
     await screen.findByText(
       "1 skill is hidden by a global skill with the same name",
     );
-    expect(screen.queryByText(/hidden by a project skill/)).toBeNull();
+    expect(screen.queryByText(/hidden by a space skill/)).toBeNull();
   });
 
   it("the_shadow_report_is_not_clickable", async () => {
@@ -742,7 +742,7 @@ describe("SkillsDialog", () => {
     expect(screen.getByText("/u/.pi/agent/skills/alpha/SKILL.md")).toBeTruthy();
     // The COUNT follows the filter too (beta's group is gone, not hidden).
     expect(
-      screen.getByText("1 skill is hidden by a project skill with the same name"),
+      screen.getByText("1 skill is hidden by a space skill with the same name"),
     ).toBeTruthy();
   });
 

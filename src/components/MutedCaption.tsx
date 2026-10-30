@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { HTMLAttributes, ReactNode } from "react";
 
 import { cn } from "./lib/utils";
 
@@ -38,15 +38,27 @@ import { cn } from "./lib/utils";
  *
  * `as` EXISTS BECAUSE THE SITES ARE NOT ALL INLINE. `span` is the default (7 of
  * the 10 verbatim sites are spans); `p` is for the caption that owns a line (the
- * ask card's and the sudo modal's footer hints, the transcript's metrics).
- * A caller picks the element the surrounding markup requires — never to change
- * the visual, which is identical either way.
+ * ask card's and the sudo modal's footer hints, the transcript's metrics);
+ * `div` is for a text run that IS a flex container (the agent rule rows, the
+ * shadow-report rows, the subagent metrics row). A caller picks the element the
+ * surrounding markup requires — never to change the visual, which is identical
+ * either way. The three arms exist so a fold onto this component can keep the
+ * DOM element it shipped with: turning a container `div` into a `span` is a DOM
+ * change, not a deduplication.
+ *
+ * EXTRA ATTRIBUTES PASS THROUGH. `title` forwards because a caption sometimes
+ * carries a tooltip, and the rest of a caller's attributes are spread onto the
+ * element for the same reason a fold must not lose them: `data-permission-rule`
+ * is how `AgentsDialog.test.tsx` finds a rule row, and `aria-hidden` is how the
+ * mention picker's prefix badge says it is decorative. The component owns the
+ * pair and the element; everything else belongs to the site.
  */
 export function MutedCaption({
   children,
   className,
   title,
   as: Element = "span",
+  ...rest
 }: {
   children: ReactNode;
   /** Caller geometry (`shrink-0`, `min-w-0 truncate`, …) merged through `cn()`.
@@ -55,13 +67,16 @@ export function MutedCaption({
   className?: string;
   /** The tooltip, when the caption needs one (the `manual only` badge). */
   title?: string;
-  /** `span` (the default — an inline badge) or `p` (a caption on its own line). */
-  as?: "span" | "p";
-}) {
+  /** `span` (the default — an inline badge), `p` (a caption on its own line),
+   * or `div` (a text run inside a flex container — the rule rows, shadow rows,
+   * metrics row). */
+  as?: "span" | "p" | "div";
+} & HTMLAttributes<HTMLElement>) {
   return (
     <Element
       title={title}
       className={cn("text-ui-xs text-foreground-subtlest", className)}
+      {...rest}
     >
       {children}
     </Element>
