@@ -60,13 +60,20 @@ describe("checkUpdate (the `check_update` seam, ADR 0053)", () => {
     expect(await checkUpdate()).toEqual(outcome);
   });
 
-  it("rejects with the Rust typed refusal string (a failed check is NOT upToDate)", async () => {
+  it("rejects with the Rust typed refusal envelope (a failed check is NOT upToDate)", async () => {
     // The conflation lives or dies at this layer too: the Rust command answers
-    // `Err("release-not-found")` for a 404 on `latest.json`, and the wrapper
-    // must let that REJECT — catching it into `{ state: "upToDate" }` here
-    // would make a broken update endpoint read as "you are current".
-    mockedInvoke.mockRejectedValue("release-not-found");
-    await expect(checkUpdate()).rejects.toBe("release-not-found");
+    // the `UpdateError` envelope for a 404 on `latest.json` — `{kind, message}`
+    // whose `message` is the typed code verbatim — and the wrapper must let
+    // that REJECT — catching it into `{ state: "upToDate" }` here would make a
+    // broken update endpoint read as "you are current".
+    mockedInvoke.mockRejectedValue({
+      kind: "release_not_found",
+      message: "release-not-found",
+    });
+    await expect(checkUpdate()).rejects.toMatchObject({
+      kind: "release_not_found",
+      message: "release-not-found",
+    });
   });
 });
 
@@ -78,8 +85,19 @@ describe("installUpdate / relaunchApp (the install + restart seam)", () => {
   });
 
   it("lets an install rejection through (a Linux deb failure is not a success)", async () => {
-    mockedInvoke.mockRejectedValue("install-failed");
-    await expect(installUpdate()).rejects.toBe("install-failed");
+    // The honest wire shape (task14's UpdateError envelope): the hand-built
+    // {kind, message} body whose message is the updater code verbatim. The
+    // wrapper is a pass-through, so the pin models the wire, not a convenience
+    // string; toMatchObject because the hand-built envelope may carry the
+    // variant's own extra field.
+    mockedInvoke.mockRejectedValue({
+      kind: "install_failed",
+      message: "install-failed",
+    });
+    await expect(installUpdate()).rejects.toMatchObject({
+      kind: "install_failed",
+      message: "install-failed",
+    });
   });
 
   it("invokes the relaunch_app command with no arguments", async () => {

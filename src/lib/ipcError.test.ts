@@ -49,6 +49,33 @@ describe("describeIpcError", () => {
     expect(describeIpcError({ kind: "error", message: "proto" })).toBe("proto");
   });
 
+  it("renders a bare string and its envelope the same (the dual-shape window)", () => {
+    // During the F20 migration both shapes are live on the wire at once: the
+    // not-yet-migrated commands answer a bare string (rule 1) and the migrated
+    // ones answer the {kind, message} envelope (rule 3) whose message is the
+    // SAME sentence. The window is a deliberate property of the resolution
+    // order — one representative pair proves the renderer cannot tell them
+    // apart, so a per-command migration flips nothing in the UI.
+    expect(describeIpcError("release-not-found")).toBe("release-not-found");
+    expect(
+      describeIpcError({ kind: "release_not_found", message: "release-not-found" }),
+    ).toBe("release-not-found");
+  });
+
+  it("renders the needs-auth marker inside the SettingsError sentence (the McpSection window)", () => {
+    // The same pair for the badge's substring: the bare-string era and the
+    // envelope era both carry "needs-auth" inside the message, which is why
+    // McpSection's match keeps working across the migration (and why the
+    // sentence, not the kind, is doing the discriminating there — the seam
+    // McpSection.test.tsx parks red).
+    expect(
+      describeIpcError({
+        kind: "mcp_test_failed",
+        message: "MCP server test failed: needs-auth",
+      }),
+    ).toBe("MCP server test failed: needs-auth");
+  });
+
   // ── rule 4 — `kind` is better than nothing ─────────────────────────────
   it("returns the kind when there is no message", () => {
     expect(describeIpcError({ kind: "command" })).toBe("command");
