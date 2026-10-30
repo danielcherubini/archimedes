@@ -800,7 +800,7 @@ describe("ChatStream", () => {
   });
 
   it("labels every reason 'Compacting' (one label is the product decision)", () => {
-    for (const reason of ["manual", "threshold", "overflow"]) {
+    for (const reason of ["manual", "threshold", "overflow"] as const) {
       seedLiveSession();
       useSessions.setState({ compacting: { s1: reason } });
       const { container, unmount } = render(<ChatStream />);

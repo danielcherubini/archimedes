@@ -134,6 +134,15 @@ export interface SessionRecency {
 export type CloseReasonStr = "user" | "agent-exited" | "error";
 
 
+/** Why a compaction was triggered (ADR 0045's vocabulary; wire strings
+ * exactly as Rust emits them — `CompactionRan` is the sibling result
+ * type). A fourth reason is a compile error at every frame-construction
+ * site and falls through every exhaustive switch (see
+ * `src/lib/toolOutput.ts` and the `details` registry guard in
+ * `src/lib/toolDetailsRegistry.test.ts`). */
+export type CompactionReason = "manual" | "threshold" | "overflow";
+
+
 /** Why the agent stopped a prompt turn (snake_case strings). */
 export type StopReason =
   | "end_turn"
@@ -251,8 +260,8 @@ export type AcpSessionUpdate =
       sessionUpdate: "compaction_update";
       /** True while a compaction runs; false when it ends (any outcome). */
       active: boolean;
-      /** "manual" | "threshold" | "overflow" (ADR 0045's vocabulary). */
-      reason: string;
+      /** The reason a compaction was triggered — see `CompactionReason`. */
+      reason: CompactionReason;
     }
   | {
       /** (ADR 0048) An Abandoned attempt's reply is RetRACTED: every

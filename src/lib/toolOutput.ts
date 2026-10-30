@@ -1,4 +1,5 @@
 import { basenameOfPath } from "./paths";
+import type { CompactionReason } from "./tauri";
 import type { ToolCallUiStatus } from "./sessionTypes";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -109,17 +110,24 @@ export function summarizeToolCall(title: string, rawInput: unknown): string | un
     case "manage_todo_list":
       return str("operation");
     // The harness's compaction card (issue #90): the trigger is the only thing
-    // worth the header, and the raw reason string is not prose.
+    // worth the header, and the raw reason string is not prose. Exhaustive —
+    // a fourth reason fails `pnpm build` (TS2322 on the never arm), so the
+    // card cannot silently lose its subtitle again.
     case "compaction": {
-      switch (str("reason")) {
+      const reason = str("reason") as CompactionReason | undefined;
+      if (reason === undefined) return undefined;
+      switch (reason) {
         case "manual":
           return "requested with /compact";
         case "threshold":
           return "context over threshold";
         case "overflow":
           return "provider context overflow";
-        default:
-          return undefined;
+        default: {
+          const exhaustive: never = reason; // a 4th member errors HERE (TS2322)
+          void exhaustive;                 // REQUIRED — noUnusedLocals
+          return undefined;                // the "weird"/absent pin — runtime fallback
+        }
       }
     }
     case "subagent": {

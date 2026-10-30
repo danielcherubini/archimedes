@@ -219,6 +219,13 @@ const TAURI_PUBLIC_API = [
   "CloseReasonStr",
   "closeSession",
   "compactSession",
+  // (task07a / finding 4) The compaction trigger vocabulary, added ON PURPOSE
+  // per the header above: the `compaction_update` frame's `reason` field and
+  // the store's `compacting` value are both this union, so the frame type
+  // forces its return-type presence in the public surface. TYPE-ONLY — it
+  // vanishes at runtime, so `TAURI_RUNTIME_API` does NOT gain it, exactly as
+  // `AccessDirection`/`AccessRule` and the issue #101 seven above.
+  "CompactionReason",
   "CompletionDirDto",
   "CompletionEntryDto",
   "ContentBlock",
