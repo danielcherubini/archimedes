@@ -95,7 +95,7 @@ pub struct AgentDefinition {
     /// struct is unaffected.
     ///
     /// **A REPORT, rendered on the winning row — never a row of its own.** It
-    /// crosses the wire: `commands::agents::AgentConfigDto` carries this very
+    /// crosses the wire: `commands::agents::AgentDefinitionReportDto` carries this very
     /// `Shadowed<AgentScope>` (ADR 0068), so the sidebar **Agents** modal can
     /// name the loser a collision excluded. `AgentDefinitionDto` still does NOT
     /// carry it — and `discover_agents(None)` reads user-level roots only, so

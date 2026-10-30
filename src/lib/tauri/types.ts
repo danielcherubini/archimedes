@@ -807,7 +807,7 @@ export type OverrideSource = "override" | "file" | "parent";
 //   `FrontmatterNote`      `rename_all = "camelCase"`, EXTERNALLY tagged
 //
 // A `rename_all` on a struct does NOT reach a nested type, which is why
-// `whole_tool` stays snake_case inside a camelCase `AgentConfigDto`. Do not
+// `whole_tool` stays snake_case inside a camelCase `AgentDefinitionReportDto`. Do not
 // "fix" it here: the fix, if it ever happens, is a `rename_all` on the Rust
 // `Rules`, landed in the same change that re-pins `a_permission_block_serializes_in_file_order`.
 //
@@ -964,8 +964,8 @@ export interface AgentOverrideSources {
 }
 
 
-/** One row of `list_agent_config` (camelCase over IPC — the Rust `AgentConfigDto`). */
-export interface AgentConfigDto {
+/** One row of `list_agent_definition_reports` (camelCase over IPC — the Rust `AgentDefinitionReportDto`). */
+export interface AgentDefinitionReportDto {
   name: string;
   description: string;
   scope: "space" | "user";

@@ -187,10 +187,10 @@ const TAURI_PUBLIC_API = [
   "AccessRule",
   "AcpSessionUpdate",
   "AcpToolCallStatus",
-  "AgentConfigDto",
   "AgentDefinitionDto",
+  "AgentDefinitionReportDto",
   // (issue #101) The declared-`permission:` wire types, added ON PURPOSE per the
-  // header above. `AgentConfigDto.filePermission` is `AgentPermissionBlock | null`
+  // header above. `AgentDefinitionReportDto.filePermission` is `AgentPermissionBlock | null`
   // and `.frontmatterNotes` is `AgentFrontmatterNote[]`; the block is an ordered
   // array of `[AgentToolKey, AgentPermissionRules]` pairs whose rules are
   // `AgentPermissionRule`s carrying an `AgentPermissionAction`, and a note's
@@ -243,7 +243,7 @@ const TAURI_PUBLIC_API = [
   "InteractiveRequestPayload",
   "InteractiveResponseDto",
   "KnownProvider",
-  "listAgentConfig",
+  "listAgentDefinitionReports",
   "listAgentDefinitionsForSpace",
   "listCompletionEntries",
   "listenInteractiveEvent",
@@ -332,7 +332,7 @@ const TAURI_RUNTIME_API = [
   "externalOpen",
   "getSettings",
   "getWindowState",
-  "listAgentConfig",
+  "listAgentDefinitionReports",
   "listAgentDefinitionsForSpace",
   "listCompletionEntries",
   "listenInteractiveEvent",

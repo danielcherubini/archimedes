@@ -6,13 +6,13 @@ import {
   closeSession,
   deleteSession,
   getSettings,
-  listAgentConfig,
+  listAgentDefinitionReports,
   listSkills,
   reorderSessions,
   saveSettings,
   setSessionArchived,
   startSession,
-  type AgentConfigDto,
+  type AgentDefinitionReportDto,
   type AppSettings,
 } from "../lib/tauri";
 import { useSessions } from "../store/sessions";
@@ -58,8 +58,8 @@ const SETTINGS_FIXTURE: AppSettings = makeSettings({
   defaultModel: "stale/model",
 });
 
-/** One `list_agent_config` row (the Agents modal's data). */
-function agentRow(overrides: Partial<AgentConfigDto> = {}): AgentConfigDto {
+/** One `list_agent_definition_reports` row (the Agents modal's data). */
+function agentRow(overrides: Partial<AgentDefinitionReportDto> = {}): AgentDefinitionReportDto {
   return {
     name: "scout",
     description: "Fast recon",
@@ -132,7 +132,7 @@ vi.mock("../lib/tauri", async () => {
     closeSession: vi.fn().mockResolvedValue(undefined),
     cancelSession: vi.fn().mockResolvedValue(undefined),
     // The Agents modal's three catalog sources + its write path.
-    listAgentConfig: vi.fn().mockResolvedValue([agentRow()]),
+    listAgentDefinitionReports: vi.fn().mockResolvedValue([agentRow()]),
     listModels: vi.fn().mockResolvedValue([
       {
         id: "Qwen3.8",
@@ -152,7 +152,7 @@ const mockedListSkills = vi.mocked(listSkills);
 const mockedDeleteSession = vi.mocked(deleteSession);
 const mockedGetSettings = vi.mocked(getSettings);
 const mockedSaveSettings = vi.mocked(saveSettings);
-const mockedListAgentConfig = vi.mocked(listAgentConfig);
+const mockedListAgentDefinitionReports = vi.mocked(listAgentDefinitionReports);
 
 /**
  * The MOUNT PROBE for the render-site pin (see
@@ -245,7 +245,7 @@ function painted(node: HTMLElement): boolean {
  *
  * `await screen.findByRole("dialog")` on its own is not enough to open the modal
  * the tests then edit: the rows come from `useAgentCatalog`, which starts at `[]`
- * and only fills in when `list_agent_config` lands, so a dialog found on the
+ * and only fills in when `list_agent_definition_reports` lands, so a dialog found on the
  * click's own tick can be the one rendering `No Agent definitions found.`. Every
  * test below that open makes the next lookup SYNCHRONOUS
  * (`within(dialog).getByRole("Model for scout")`), so whenever the fetch lost that
@@ -370,7 +370,7 @@ beforeEach(() => {
   mockedGetSettings
     .mockReset()
     .mockResolvedValue({ ...SETTINGS_FIXTURE, defaultModel: null });
-  mockedListAgentConfig.mockReset().mockResolvedValue([agentRow()]);
+  mockedListAgentDefinitionReports.mockReset().mockResolvedValue([agentRow()]);
   vi.mocked(setSessionArchived).mockReset().mockResolvedValue(true);
   mockedDeleteSession.mockReset().mockResolvedValue(undefined);
   // Stop's two commands, re-armed for the SAME reason as the two lines above:
@@ -835,7 +835,7 @@ describe("SpacesList", () => {
     // hazard this file documents for `Skills`).
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("Agents")).toBeTruthy();
-    // The row came from `list_agent_config` keyed by the ACTIVE Space. AWAITED,
+    // The row came from `list_agent_definition_reports` keyed by the ACTIVE Space. AWAITED,
     // for the reason `openAgentsModal` states: the rows arrive with the fetch, so
     // a row queried on the dialog's own tick can race it.
     expect(await within(dialog).findByText("scout")).toBeTruthy();
@@ -924,7 +924,7 @@ describe("SpacesList", () => {
     // The empty path, which no test here used to take: every other open goes
     // through `openAgentsModal`, which WAITS FOR A ROW, so `[]` was only ever
     // reachable as the transient pre-fetch paint that helper is written to avoid.
-    // The state is real — `list_agent_config` can answer `[]`, and the hook
+    // The state is real — `list_agent_definition_reports` can answer `[]`, and the hook
     // degrades a FAILED fetch to `[]` — and the dialog's orphan scan, its
     // thinking-level union and the per-row `stored` lookup all read those rows.
     //
@@ -937,7 +937,7 @@ describe("SpacesList", () => {
     // is the empty/unknown-rows arm, `Loading…` is asserted absent, and this test
     // proves "an empty answer renders instead of throwing" — not "a hung IPC is
     // distinguishable from an empty answer", which the component cannot express.
-    mockedListAgentConfig.mockResolvedValue([]);
+    mockedListAgentDefinitionReports.mockResolvedValue([]);
     render(<SpacesList />);
     fireEvent.click(screen.getByRole("button", { name: "Agents" }));
     const dialog = await screen.findByRole("dialog");
@@ -950,7 +950,7 @@ describe("SpacesList", () => {
     expect(within(dialog).getByPlaceholderText("Search agents…")).toBeTruthy();
     expect(screen.getByRole("dialog")).toBe(dialog);
     // One fetch for the mount (no retry storm against the empty answer).
-    expect(mockedListAgentConfig).toHaveBeenCalledTimes(1);
+    expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(1);
   });
 
   it("picking_a_model_saves_agentOverrides_through_a_read_modify_write", async () => {
@@ -1413,11 +1413,11 @@ describe("SpacesList", () => {
       // …and the catalog the edit invalidated is gone anyway — the assertion the
       // eviction test uses (the next MOUNT of the hook, since the pane owns the
       // fetch): unmount and re-mount with the same Space key.
-      expect(mockedListAgentConfig).toHaveBeenCalledTimes(1);
+      expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(1);
       first.unmount();
       render(<SpacesList />);
       await waitFor(() =>
-        expect(mockedListAgentConfig).toHaveBeenCalledTimes(2),
+        expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(2),
       );
     } finally {
       useSettings.setState({ setSettings: realPublish });
@@ -1610,7 +1610,7 @@ describe("SpacesList", () => {
           failSave = () => reject(new Error("boom"));
         }),
     );
-    mockedListAgentConfig.mockResolvedValue([
+    mockedListAgentDefinitionReports.mockResolvedValue([
       agentRow({ override: { model: null, thinking: "max", tools: null, permission: null } }),
     ]);
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -1670,13 +1670,13 @@ describe("SpacesList", () => {
     fireEvent.click(await screen.findByText("Qwen3.8"));
     await waitFor(() => expect(mockedSaveSettings).toHaveBeenCalledTimes(1));
     // One fetch so far — the mount's.
-    expect(mockedListAgentConfig).toHaveBeenCalledTimes(1);
+    expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(1);
     // …the pane unmounts (Settings view) and mounts again, same Space key…
     first.unmount();
     render(<SpacesList />);
     // …and the catalog is re-fetched rather than served from the entry the write
     // invalidated.
-    await waitFor(() => expect(mockedListAgentConfig).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(2));
   });
 
   // ---------------------------------------------------------------------------

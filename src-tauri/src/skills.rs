@@ -66,7 +66,7 @@ impl SkillInfo {
 /// ADR 0065. UI-only: never interpolated into a prompt tag.
 ///
 /// `PartialEq` is derived so a DTO CARRYING this can be compared as a whole
-/// (`commands::agents::AgentConfigDto` needs it for its tests) — derived HERE
+/// (`commands::agents::AgentDefinitionReportDto` needs it for its tests) — derived HERE
 /// rather than mirroring this struct into a second Rust shape, which is the
 /// Rust↔Rust twin ADR 0065 exists to forbid. Both users of `Shadowed<T>`
 /// benefit from the one derivation.

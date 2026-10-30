@@ -2,7 +2,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
-  AgentConfigDto,
+  AgentDefinitionReportDto,
   AgentFrontmatterNote,
   AgentPermissionAction,
   AgentPermissionBlock,
@@ -24,7 +24,7 @@ import { makeSettings } from "../test/fixtures";
  * factory pattern.
  */
 
-function row(overrides: Partial<AgentConfigDto> = {}): AgentConfigDto {
+function row(overrides: Partial<AgentDefinitionReportDto> = {}): AgentDefinitionReportDto {
   return {
     name: "scout",
     description: "Fast recon",
@@ -170,7 +170,7 @@ function settings(overrides: Partial<AppSettings> = {}): AppSettings {
  * write state, so no single-`render` test can see that transition.
  */
 function renderControlled(props: {
-  rows: AgentConfigDto[];
+  rows: AgentDefinitionReportDto[];
   agentOverrides: AgentOverrides;
 }): { patches: AgentOverrides[] } {
   const patches: AgentOverrides[] = [];
@@ -206,7 +206,7 @@ function innerDialog(): HTMLElement {
 }
 
 function openDialog(props: {
-  rows?: AgentConfigDto[];
+  rows?: AgentDefinitionReportDto[];
   agentOverrides?: AgentOverrides;
   noSpaceOpen?: boolean;
 } = {}) {

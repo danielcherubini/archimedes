@@ -1,8 +1,8 @@
 /**
  * The per-Space CATALOG commands: the fetchers that are handed to the ONE shared
  * row-cache machine (`useSkillCatalog`, `useAgentCatalog`,
- * `useMentionCatalogs` — all through `useCatalogRow`), plus the Agent-config
- * listing that shares their Space-scoping contract.
+ * `useMentionCatalogs` — all through `useCatalogRow`), plus the Agent-definition
+ * report that shares their Space-scoping contract.
  *
  * This grouping is Phase C's, measured, not the improvement report's: the report
  * filed all six under `spaces`, but they have nothing in common with Space
@@ -14,8 +14,8 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
-  AgentConfigDto,
   AgentDefinitionDto,
+  AgentDefinitionReportDto,
   CompletionDirDto,
   FileListDto,
   McpServerInfo,
@@ -40,11 +40,11 @@ export async function listAgentDefinitionsForSpace(spacePath: string | null): Pr
 }
 
 
-/** The effective Agent config for the Space's definitions — the sidebar Agents modal's data source (ADR 0068). `cwd: null` = app-scope (user-level definitions only; the override map is global and unaffected). */
-export async function listAgentConfig(
+/** The Agent-definition report for the Space's definitions — the sidebar Agents modal's data source (ADR 0068). `cwd: null` = app-scope (user-level definitions only; the override map is global and unaffected). */
+export async function listAgentDefinitionReports(
   cwd: string | null,
-): Promise<AgentConfigDto[]> {
-  return invoke<AgentConfigDto[]>("list_agent_config", {
+): Promise<AgentDefinitionReportDto[]> {
+  return invoke<AgentDefinitionReportDto[]>("list_agent_definition_reports", {
     cwd: cwd ?? null,
   });
 }

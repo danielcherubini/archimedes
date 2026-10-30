@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { TrashIcon } from "lucide-react";
 import type {
-  AgentConfigDto,
+  AgentDefinitionReportDto,
   AgentFrontmatterNote,
   AgentOverride,
   AgentOverrideFields,
@@ -30,7 +30,7 @@ import {
  * from the Space rail beside **Skills**.
  *
  * One row per **Agent definition** the ACTIVE **Space** can see (project-level
- * rows AND the global ones — `list_agent_config(cwd)` discovers with that `cwd`),
+ * rows AND the global ones — `list_agent_definition_reports(cwd)` discovers with that `cwd`),
  * each carrying the three fields an **Agent override** can set, with the value
  * AND the layer that supplied it (`override` / `file` / `Inherits parent`). The
  * effective values and their layers come from Rust — the same resolver a real
@@ -120,7 +120,7 @@ function editedKey(name: string, field: keyof AgentOverride): string {
 const NO_KEYS: ReadonlySet<string> = new Set();
 
 interface AgentsDialogProps {
-  rows: AgentConfigDto[];
+  rows: AgentDefinitionReportDto[];
   /**
    * True while NO **Space** is open. This changes the COPY only — the override
    * map is GLOBAL, so nothing is disabled: with no Space the rows are the
@@ -500,7 +500,7 @@ function AgentRow({
   edited,
   onPatch,
 }: {
-  row: AgentConfigDto;
+  row: AgentDefinitionReportDto;
   /** The dialog's search needle — the shadow report is filtered by the SAME
    *  needle the rows use, so it can never contradict the list above it. */
   needle: string;
@@ -763,7 +763,7 @@ function AgentRow({
  *
  *  The empty case returns `null` like `ShadowReport`: a file that says nothing
  *  about permissions has nothing to disclose, and the ordinary row stays lean. */
-function PermissionReport({ row }: { row: AgentConfigDto }) {
+function PermissionReport({ row }: { row: AgentDefinitionReportDto }) {
   // `?? []` is the same IPC tolerance `ShadowReport` keeps for a row that
   // genuinely predates the field — a bare `flatMap` over such a row yields
   // `undefined` entries that throw on the first property access. `filePermission`
@@ -899,7 +899,7 @@ function ShadowReport({
   row,
   needle,
 }: {
-  row: AgentConfigDto;
+  row: AgentDefinitionReportDto;
   needle: string;
 }) {
   // `?? []` is the same IPC tolerance `SkillsDialog` keeps for a row that

@@ -1,4 +1,7 @@
-import { listAgentConfig, type AgentConfigDto } from "../lib/tauri";
+import {
+  listAgentDefinitionReports,
+  type AgentDefinitionReportDto,
+} from "../lib/tauri";
 import { useCatalogRow } from "./useCatalogRow";
 
 /**
@@ -36,7 +39,7 @@ import { useCatalogRow } from "./useCatalogRow";
  *
  * **This fetch is NOT a local disk walk.** `useSkillCatalog`'s doc-comment says
  * discovery is local and therefore needs no loading state, and copying that
- * sentence here would be false: `list_agent_config` calls `effective_catalog`,
+ * sentence here would be false: `list_agent_definition_reports` calls `effective_catalog`,
  * which performs per-provider `GET /v1/models` discovery (cached per provider,
  * but a cold or invalidated cache is a real network round trip). So this fetch
  * can be NETWORK-BOUND, and it runs on EVERY Space switch — which is exactly why
@@ -59,17 +62,17 @@ import { useCatalogRow } from "./useCatalogRow";
  * `useSkillCatalog`'s. `useAgentCatalog.test.ts` pins all four rules through this
  * hook, unmodified.
  */
-const cache = new Map<string, Promise<AgentConfigDto[]>>();
+const cache = new Map<string, Promise<AgentDefinitionReportDto[]>>();
 
-export function useAgentCatalog(spacePath: string | null): AgentConfigDto[] {
+export function useAgentCatalog(spacePath: string | null): AgentDefinitionReportDto[] {
   // `useCatalogPayload`'s `[spacePath, fetchName]` deps stay inert because both
   // arguments here are module constants, so the effect re-runs on a Space change
   // and on nothing else.
-  return useCatalogRow<AgentConfigDto>(
+  return useCatalogRow<AgentDefinitionReportDto>(
     cache,
     spacePath,
-    listAgentConfig,
-    "listAgentConfig",
+    listAgentDefinitionReports,
+    "listAgentDefinitionReports",
   );
 }
 

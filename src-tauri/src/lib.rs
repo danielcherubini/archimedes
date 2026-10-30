@@ -433,7 +433,7 @@ pub fn run() {
             commands::settings::test_search_provider,
             commands::mcp::list_mcp_servers_effective,
             commands::agents::list_agent_definitions_for_space,
-            commands::agents::list_agent_config,
+            commands::agents::list_agent_definition_reports,
             commands::spaces::list_spaces,
             commands::spaces::delete_space,
             commands::spaces::space_for_path,

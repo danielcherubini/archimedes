@@ -1,7 +1,7 @@
 //! The **Agent definition** listing commands: the two read-only surfaces over
 //! `crate::agents::discover_agents` — the app-scope / `@`-mention listings
 //! (`AgentDefinitionDto`, the minimal picker shape) and the **Agents** modal's
-//! effective-config report (`AgentConfigDto`, ADR 0068).
+//! Agent-definition report (`AgentDefinitionReportDto`, ADR 0068).
 //!
 //! ADR 0023's Settings → Subagents section is GONE (the sidebar modal is the
 //! single Agent surface now); the app-scope listing command was retired too
@@ -78,7 +78,7 @@ pub async fn list_agent_definitions_for_space(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// The **Agents** modal's effective config (ADR 0068).
+// The **Agents** modal's Agent-definition report (ADR 0068).
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// One field-triple as the resolver or a file sees it: the three fields the
@@ -146,8 +146,9 @@ pub struct SourceFields {
     pub permission: OverrideSource,
 }
 
-/// One row of the **Agents** modal: what a definition's file says, what the
-/// user stored over it, what will ACTUALLY run, and which layer supplied each.
+/// One row of the **Agents** modal's Agent-definition report: what a
+/// definition's file says, what the user stored over it, what will ACTUALLY
+/// run, and which layer supplied each.
 ///
 /// Wire-out only (no `Deserialize`). `AgentDefinitionDto` is NOT widened to
 /// carry this — that DTO deliberately excludes `path` / `system_prompt` /
@@ -156,7 +157,7 @@ pub struct SourceFields {
 /// contract.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AgentConfigDto {
+pub struct AgentDefinitionReportDto {
     pub name: String,
     pub description: String,
     /// `"space" | "user"` (the `AgentScope` Display form).
@@ -244,18 +245,18 @@ fn stored_fields(layer: &crate::agent::harness::launch::OverrideLayer<'_>) -> Ov
 /// The override comes from Task 1's shared `override_layer` selector — there is
 /// deliberately NO second selector here, because two selectors is how the
 /// command and the dispatch drift.
-pub(crate) fn agent_config(
+pub(crate) fn agent_definition_reports(
     settings: &Settings,
     defs: &[AgentDefinition],
     catalog: &ModelCatalog,
-) -> Vec<AgentConfigDto> {
+) -> Vec<AgentDefinitionReportDto> {
     defs.iter()
         .map(|def| {
             // The `Some(..)` is not optional — `override_layer` takes
             // `Option<&Settings>` and the command always HAS settings.
             let layer = override_layer(Some(settings), &def.name);
             let resolved = resolve_agent_launch(&LaunchConfig::default(), def, &layer, catalog);
-            AgentConfigDto {
+            AgentDefinitionReportDto {
                 name: def.name.clone(),
                 description: def.description.clone(),
                 scope: def.scope.to_string(),
@@ -323,13 +324,13 @@ pub(crate) fn agent_config(
 /// ADR 0063's typed `{kind, message}` surface and the frontend's
 /// `describeIpcError` path.
 #[tauri::command]
-pub async fn list_agent_config(
+pub async fn list_agent_definition_reports(
     state: State<'_, Arc<SessionManager>>,
     cwd: Option<String>,
-) -> Result<Vec<AgentConfigDto>, AgentsError> {
+) -> Result<Vec<AgentDefinitionReportDto>, AgentsError> {
     let settings = crate::config::load_settings(state.config_dir());
     let catalog = state.effective_catalog(None).await;
-    Ok(agent_config(
+    Ok(agent_definition_reports(
         &settings,
         &crate::agents::discover_agents(cwd.as_deref().map(Path::new)),
         &catalog,
@@ -644,7 +645,7 @@ mod tests {
     }
 
     // ══════════════════════════════════════════════════════════════════════
-    // `agent_config` — the Agents modal's rows (ADR 0068).
+    // `agent_definition_reports` — the Agents modal's rows (ADR 0068).
     //
     // Every test here calls the PURE CORE, not the command: `tauri::State` has
     // no public constructor (it is produced only by `StateManager::get`, i.e.
@@ -747,7 +748,7 @@ mod tests {
     }
 
     /// Exactly one row, or a failure naming what came back.
-    fn one_row(rows: &[AgentConfigDto]) -> &AgentConfigDto {
+    fn one_row(rows: &[AgentDefinitionReportDto]) -> &AgentDefinitionReportDto {
         assert_eq!(rows.len(), 1, "expected exactly one row: {rows:?}");
         &rows[0]
     }
@@ -758,12 +759,13 @@ mod tests {
     /// discovery's own deterministic order (sorted case-insensitively by name,
     /// `path` as the tie-break).
     #[test]
-    fn agent_config_lists_a_space_level_and_a_user_level_definition_with_their_identity() {
+    fn agent_definition_reports_lists_a_space_level_and_a_user_level_definition_with_their_identity(
+    ) {
         let defs = vec![
             definition("alpha", AgentScope::Space),
             definition("zeta", AgentScope::User),
         ];
-        let rows = agent_config(&Settings::default(), &defs, &catalog());
+        let rows = agent_definition_reports(&Settings::default(), &defs, &catalog());
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].name, "alpha");
         assert_eq!(rows[0].scope, "space");
@@ -785,7 +787,7 @@ mod tests {
     /// found — the two sides can never be handed different inputs, and the
     /// `path` assertion below is what proves it.
     #[test]
-    fn agent_config_and_the_dispatch_resolve_the_same_row() {
+    fn agent_definition_reports_and_the_dispatch_resolve_the_same_row() {
         let _lock = crate::test_support::env_lock();
         let original = std::env::var_os("HOME");
         let _restore = RestoreHome(original.clone());
@@ -914,7 +916,8 @@ mod tests {
             // SIDE 2 — the modal's command, fed the definitions the DISPATCH's
             // own discovery just found, over the same settings file.
             let defs = crate::agents::discover_agents(Some(&space));
-            let rows = agent_config(&crate::config::load_settings(&config_dir), &defs, &cat);
+            let rows =
+                agent_definition_reports(&crate::config::load_settings(&config_dir), &defs, &cat);
             let discovered = defs
                 .iter()
                 .find(|d| d.name == "scout")
@@ -956,13 +959,14 @@ mod tests {
     /// `an_unmentionable_name_is_hidden_from_the_picker_but_kept_elsewhere`
     /// pins for the picker — the new command must NOT inherit that filter.
     #[test]
-    fn agent_config_lists_an_unmentionable_name_the_picker_hides() {
+    fn agent_definition_reports_lists_an_unmentionable_name_the_picker_hides() {
         let def = definition("has space", AgentScope::User);
         assert!(
             !crate::skills::is_mentionable_name(&def.name),
             "the fixture must be a name the `@`-mention picker filters out"
         );
-        let rows = agent_config(&Settings::default(), std::slice::from_ref(&def), &catalog());
+        let rows =
+            agent_definition_reports(&Settings::default(), std::slice::from_ref(&def), &catalog());
         let row = one_row(&rows);
         assert_eq!(row.name, "has space");
     }
@@ -971,7 +975,7 @@ mod tests {
     /// collision the deleted Settings section structurally COULD NOT see (it
     /// read user-level roots only). This is the feature's proof, not a bonus.
     #[test]
-    fn agent_config_carries_the_shadowing_report_on_the_winning_row() {
+    fn agent_definition_reports_carries_the_shadowing_report_on_the_winning_row() {
         let _lock = crate::test_support::env_lock();
         let original = std::env::var_os("HOME");
         let _restore = RestoreHome(original.clone());
@@ -998,7 +1002,7 @@ mod tests {
         )
         .unwrap();
 
-        let rows = agent_config(
+        let rows = agent_definition_reports(
             &Settings::default(),
             &crate::agents::discover_agents(Some(&space)),
             &catalog(),
@@ -1044,7 +1048,8 @@ mod tests {
     #[test]
     fn a_definition_with_no_collision_serializes_shadowed_as_an_empty_array() {
         let def = definition("scout", AgentScope::User);
-        let rows = agent_config(&Settings::default(), std::slice::from_ref(&def), &catalog());
+        let rows =
+            agent_definition_reports(&Settings::default(), std::slice::from_ref(&def), &catalog());
         let json = serde_json::to_string(&rows[0]).unwrap();
         assert!(
             json.contains("\"shadowed\":[]"),
@@ -1089,7 +1094,7 @@ mod tests {
         )
         .unwrap();
 
-        let rows = agent_config(
+        let rows = agent_definition_reports(
             &Settings::default(),
             &crate::agents::discover_agents(None),
             &catalog(),
@@ -1131,7 +1136,7 @@ mod tests {
     #[test]
     fn a_stale_pinned_model_reports_the_layer_that_won_and_still_shows_the_stale_value() {
         let def = definition("scout", AgentScope::User);
-        let rows = agent_config(
+        let rows = agent_definition_reports(
             &settings_with(&[("scout", model_override("fake/gone"))]),
             std::slice::from_ref(&def),
             &catalog(),
@@ -1157,7 +1162,7 @@ mod tests {
     fn an_override_model_wins_and_reports_the_layer_that_supplied_it() {
         let mut def = definition("scout", AgentScope::User);
         def.model = Some("fake/gone".to_string());
-        let rows = agent_config(
+        let rows = agent_definition_reports(
             &settings_with(&[("scout", model_override("fake/m1"))]),
             std::slice::from_ref(&def),
             &catalog(),
@@ -1176,7 +1181,7 @@ mod tests {
     /// advertises none and an empty set soft-passes.
     #[test]
     fn an_override_thinking_the_winning_model_lacks_is_demoted() {
-        let rows = agent_config(
+        let rows = agent_definition_reports(
             &settings_with(&[(
                 "scout",
                 AgentOverrideFields {
@@ -1213,7 +1218,7 @@ mod tests {
     /// An advertised override level DOES win (`fake/m3` advertises `high`).
     #[test]
     fn an_override_thinking_the_winning_model_advertises_is_effective() {
-        let rows = agent_config(
+        let rows = agent_definition_reports(
             &settings_with(&[(
                 "scout",
                 AgentOverrideFields {
@@ -1243,7 +1248,8 @@ mod tests {
             "list_agents".to_string(),
             "no_such_tool".to_string(),
         ]);
-        let rows = agent_config(&Settings::default(), std::slice::from_ref(&def), &catalog());
+        let rows =
+            agent_definition_reports(&Settings::default(), std::slice::from_ref(&def), &catalog());
         let row = one_row(&rows);
         assert_eq!(
             row.file.tools,
@@ -1267,7 +1273,7 @@ mod tests {
     fn an_empty_override_tools_list_speaks_not() {
         let mut def = definition("scout", AgentScope::User);
         def.tools = Some(vec!["bash".to_string()]);
-        let rows = agent_config(
+        let rows = agent_definition_reports(
             &settings_with(&[(
                 "scout",
                 AgentOverrideFields {
@@ -1327,7 +1333,7 @@ mod tests {
         // catch only what a rewrite of that match could hide — a wire spelling
         // that drifted toward a Space word — so they are a cheap regression net,
         // not the thing making "three layers" a fact.
-        let rows = agent_config(
+        let rows = agent_definition_reports(
             &settings_with(&[("scout", model_override("fake/m1"))]),
             std::slice::from_ref(&definition("scout", AgentScope::Space)),
             &catalog(),
@@ -1348,7 +1354,7 @@ mod tests {
     /// and the always-present nullable fields inside the three column structs.
     #[test]
     fn the_dto_wire_shape_is_the_camel_case_contract_the_modal_reads() {
-        let rows = agent_config(
+        let rows = agent_definition_reports(
             &Settings::default(),
             std::slice::from_ref(&definition("scout", AgentScope::User)),
             &catalog(),
@@ -1433,7 +1439,8 @@ mod tests {
         let mut def = definition("scout", AgentScope::User);
         def.permission = Some(block.clone());
         def.frontmatter_notes = notes.clone();
-        let rows = agent_config(&Settings::default(), std::slice::from_ref(&def), &catalog());
+        let rows =
+            agent_definition_reports(&Settings::default(), std::slice::from_ref(&def), &catalog());
         let row = one_row(&rows);
 
         // The declared block is carried VERBATIM (a REPORT — not a verdict).
@@ -1501,7 +1508,7 @@ mod tests {
             thinking: Some("low".into()),
             tools: None,
         };
-        let rows = agent_config(
+        let rows = agent_definition_reports(
             &settings_with(&[("Scout", capital.clone()), ("scout", scout.clone())]),
             std::slice::from_ref(&definition("scout", AgentScope::User)),
             &catalog(),

@@ -45,7 +45,7 @@ pub(crate) struct OverrideLayer<'a> {
 /// so a user can ask "why is scout running that model").
 ///
 /// The three `*_source` fields have TWO readers, and that sharing is the point:
-/// `commands::agents::agent_config` (the modal) and `resolve_launch` (the
+/// `commands::agents::agent_definition_reports` (the modal) and `resolve_launch` (the
 /// dispatch) both go through `resolve_agent_launch`, so a layer added to one
 /// and forgotten in the other is the drift this struct exists to prevent.
 pub(crate) struct ResolvedLaunch {
@@ -72,7 +72,7 @@ pub(crate) struct ResolvedLaunch {
 /// match in Task 2's test is what makes that a compile error rather than a
 /// silent label.
 ///
-/// `pub`, NOT `pub(crate)`: Task 2's `AgentConfigDto` is `pub` and carries a
+/// `pub`, NOT `pub(crate)`: Task 2's `AgentDefinitionReportDto` is `pub` and carries a
 /// source struct, and clippy's `private_interfaces` fires transitively down
 /// that graph under CI's `-D warnings`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -87,7 +87,7 @@ pub enum OverrideSource {
     /// overrides what a `parent` row shows, hence the modal's
     /// `Inherits parent` wording (ADR 0068). The label space has no word for
     /// "the explicit param itself" (no live modal can observe one, and
-    /// `list_agent_config` passes an empty `LaunchConfig`), so a field the
+    /// `list_agent_definition_reports` passes an empty `LaunchConfig`), so a field the
     /// explicit param supplied reports `Parent`.
     Parent,
 }
@@ -95,7 +95,7 @@ pub enum OverrideSource {
 /// Pick the stored entry for `agent_name` out of the settings (ADR 0066).
 ///
 /// THE one place that decides which stored entry applies — the dispatch and
-/// Task 2's `list_agent_config` both call it, so they cannot disagree about
+/// Task 2's `list_agent_definition_reports` both call it, so they cannot disagree about
 /// what the modal shows versus what runs. The scan is CASE-INSENSITIVE (ADR
 /// 0023's rule, moved out of the old `model` arm because it now has to find the
 /// entry ONCE for three fields) and the STORED KEY is never rewritten: the UI
@@ -147,7 +147,7 @@ fn first_speaking<T>(
 /// frontmatter > parent`), each field independently.
 ///
 /// This is the shared seam ADR 0068 asks for — `resolve_launch` (the dispatch)
-/// and `list_agent_config` (the modal) call it, so filtering and soft
+/// and `list_agent_definition_reports` (the modal) call it, so filtering and soft
 /// degradation exist in exactly one place.
 pub(crate) fn resolve_agent_launch(
     explicit: &LaunchConfig,
@@ -1727,7 +1727,7 @@ mod tests {
 
     // ── The resolver seam itself (`resolve_agent_launch` / `override_layer`) ──
     //
-    // ADR 0068: `list_agent_config` (Task 2) calls THIS function, so the
+    // ADR 0068: `list_agent_definition_reports` (Task 2) calls THIS function, so the
     // `source` values are the modal's contract, not a debug extra. They are
     // asserted here against `AgentDefinition` fixtures — no disk, no `HOME` —
     // because the command holds definitions discovery handed it and must be able
@@ -2247,7 +2247,7 @@ mod tests {
     /// Delegation to the shared `resolve_agent_launch` is NOT pinned here (an
     /// empty name never reaches it, so this body would stay green with the
     /// delegation deleted); it is pinned by the cross-module
-    /// `commands::agents::tests::agent_config_and_the_dispatch_resolve_the_same_row`,
+    /// `commands::agents::tests::agent_definition_reports_and_the_dispatch_resolve_the_same_row`,
     /// which calls this real `resolve_launch` and compares its row against the
     /// modal's. A same-seam test could not catch seam-internal drift, which is
     /// why that pin lives where it does.
