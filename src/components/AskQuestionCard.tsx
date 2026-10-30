@@ -233,7 +233,6 @@ export default function AskQuestionCard({
   // component doc above) so the Enter/Esc `onKeyDown` — which only fires with
   // focus INSIDE the card — works immediately for a standalone card.
   const cardRef = useRef<HTMLDivElement>(null);
-  const footerRef = useRef<HTMLDivElement>(null);
   // Anchoring: the ACP `tool_call` frame for this request is in the stream
   // (only a `main` ask with a `toolCallId` can anchor — the desktop has no
   // `tool_call` frame for child tool calls).
@@ -307,30 +306,6 @@ export default function AskQuestionCard({
   }, [queued, anchored, autoFocus]);
 
   const questions = askQuestionsOf(request);
-  const hasSelection = questions.some((q) => {
-    const d = drafts[q.id];
-    return !!d && (d.selected.length > 0 || d.other);
-  });
-  const layoutKey = questions
-    .map((q) => {
-      const d = drafts[q.id];
-      return `${q.id}:${d ? d.selected.join(",") : ""}:${d?.other ? "other" : ""}`;
-    })
-    .join(";");
-
-  // Keep the footer (with the submit button / shortcuts) in view when selections
-  // expand the card. Fires on option toggles/changes; `block: "nearest"` is a
-  // no-op if the footer is already in view.
-  useEffect(() => {
-    if (!hasSelection) return;
-    const rafId = requestAnimationFrame(() => {
-      const el = footerRef.current;
-      if (el && typeof el.scrollIntoView === "function") {
-        el.scrollIntoView({ block: "nearest", behavior: "smooth" });
-      }
-    });
-    return () => cancelAnimationFrame(rafId);
-  }, [layoutKey, hasSelection]);
 
   // SAFETY NET: a request this card has no questions to draw is still a GATE
   // — in the store (the sidebar `?`, a locked composer) and in the Worker (the
@@ -648,7 +623,6 @@ export default function AskQuestionCard({
 
       {/* Footer hints + actions. */}
       <div
-        ref={footerRef}
         data-testid="ask-footer"
         className="mt-3 flex items-center justify-between gap-2 px-3 pb-3"
       >

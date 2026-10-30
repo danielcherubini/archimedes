@@ -43,10 +43,10 @@ beforeEach(() => {
   resetStores();
   mockedRespond.mockReset();
   mockedRespond.mockResolvedValue(undefined);
-  // NOT the shared `setup.tsx` stub: this file asserts on the MOCK CONTEXTS of
-  // `scrollIntoView`, so each case needs a FRESH mock, and the `afterEach`
-  // below restores what was there at import. `src/test/setup.tsx`'s own
-  // deletion checklist names this file for exactly that reason.
+  // NOT the shared `setup.tsx` stub: this file asserts that `scrollIntoView`
+  // is NOT called on option selection, so each case needs a FRESH mock, and the
+  // `afterEach` below restores what was there at import. `src/test/setup.tsx`'s
+  // own deletion checklist names this file for exactly that reason.
   Element.prototype.scrollIntoView = vi.fn();
 });
 
@@ -453,47 +453,32 @@ describe("AskQuestionCard", () => {
     );
   });
 
-  it("scrolls footer into view when an option is selected", async () => {
+  it("does not trigger scrollIntoView when an option is selected", async () => {
     useInteractive.getState().addRequest("s1", singleRequest);
     render(<AskQuestionCard sessionId="s1" requestId="r1" />);
     fireEvent.click(screen.getByRole("button", { name: "Red" }));
-    const footer = screen.getByTestId("ask-footer");
-    await waitFor(() => {
-      expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({
-        block: "nearest",
-        behavior: "smooth",
-      });
-      const scrollMock = vi.mocked(Element.prototype.scrollIntoView);
-      expect(scrollMock.mock.contexts).toContain(footer);
-    });
+    await new Promise((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve)),
+    );
+    expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
   });
 
-  it("scrolls footer into view when 'Other (type your own)' is selected", async () => {
+  it("does not trigger scrollIntoView when 'Other (type your own)' is selected", async () => {
     useInteractive.getState().addRequest("s1", singleRequest);
     render(<AskQuestionCard sessionId="s1" requestId="r1" />);
     fireEvent.click(
       screen.getByRole("button", { name: "Other (type your own)" }),
     );
-    const footer = screen.getByTestId("ask-footer");
-    await waitFor(() => {
-      expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({
-        block: "nearest",
-        behavior: "smooth",
-      });
-      const scrollMock = vi.mocked(Element.prototype.scrollIntoView);
-      expect(scrollMock.mock.contexts).toContain(footer);
-    });
+    await new Promise((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve)),
+    );
+    expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
   });
 
   it("does not trigger scrollIntoView when typing into the note input", async () => {
     useInteractive.getState().addRequest("s1", singleRequest);
     render(<AskQuestionCard sessionId="s1" requestId="r1" />);
     fireEvent.click(screen.getByRole("button", { name: "Red" }));
-    await waitFor(() => {
-      expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
-    });
-    vi.mocked(Element.prototype.scrollIntoView).mockClear();
-
     const noteInput = screen.getByPlaceholderText("note (optional)");
     fireEvent.change(noteInput, { target: { value: "some note" } });
 
