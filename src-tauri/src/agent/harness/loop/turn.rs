@@ -252,6 +252,26 @@ impl AgentLoop {
                 _ = turn.cancelled() => return None,
             }
         }
+        // The FABRICATION GUARD: this conversion fires ONLY when the stream
+        // reported NO error event at all (`mid_stream_error.is_none()`) but
+        // ended on a synthesized / bare `Done(Error)` — a stream that simply
+        // stopped. It must never overwrite a real tier: `ProviderEvent::Error`
+        // sets `mid_stream_error` in the match above, so a wire that reports
+        // its in-stream error as a real event lands here with `Some` and this
+        // retryable string is never chosen over it.
+        //
+        // (Finding 1) That distinction is what makes ADR 0045's
+        // `context_overflow_is_never_retried` invariant reachable: an overflow
+        // reported MID-STREAM has to arrive as
+        // `ProviderError::ContextOverflow` — the ladder's only input is
+        // `Retryable`, so a fabricated `Retryable` here would turn a
+        // compact-in-the-turn recovery into 4 doomed re-issues of the identical
+        // oversized bytes. The OpenAI-completions wire used to be unable to
+        // deliver one (its parser had no `error` arm, so every in-stream error
+        // fell through to this fabrication); with the parser arm in place all
+        // three wires report mid-stream auth / overflow as a real
+        // `ProviderEvent::Error` and this branch only ever sees a stream that
+        // genuinely carried no error.
         if mid_stream_error.is_none() && acc.finish == Some(FinishReason::Error) {
             mid_stream_error = Some(ProviderError::Retryable(
                 "the model stream ended without a finish_reason".to_string(),
