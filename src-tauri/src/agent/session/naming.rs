@@ -1,11 +1,15 @@
-//! The session-naming PASS — the port of pi's `session-name` extension, in
-//! two halves. The PRIMITIVES (pi's `generateTitle`, decomposed): what text
-//! feeds the title prompt, how the model's answer is cleaned, which thinking
-//! level the request asks for, and which model the `sessionNamingModel`
-//! override names — pure functions, so each rule is testable on its own.
-//! The WIRE-UP: `maybe_name_session` (the `agent_end` hook the router calls,
-//! pi's handler) and the `name_session` task it spawns (the model call, the
-//! conditional write, the `session-titled` emit, the per-session bookkeeping).
+//! The session-naming PASS — two-stage async session titling with wire isolation
+//! (ADR 0086, amending ADR 0037). In two halves:
+//!
+//! 1. The PRIMITIVES (pi's `generateTitle`, decomposed and extended): what text
+//!    feeds the title prompt (first exchange for Stage 1, up to 5 interactions for
+//!    Stage 2), how the model's answer is cleaned, which thinking level the
+//!    request asks for, and which model the `sessionNamingModel` override names —
+//!    pure functions, so each rule is testable on its own.
+//! 2. The WIRE-UP: `maybe_name_session` (the `agent_end` hook the router calls)
+//!    and the `name_session` task it spawns (the model call with `{id}-title` wire
+//!    isolation, bounded `max_tokens: 100`, atomic `title_stage` transition in
+//!    SQLite, `session-titled` emit, and per-session bookkeeping).
 //!
 //! Like `router.rs`, this is a CHILD module of `session`, so it may see the
 //! parent's private items (the `SessionManager` fields, the naming bookkeep‐
@@ -21,7 +25,9 @@ use serde_json::json;
 
 use crate::agent::events::EventSink;
 use crate::agent::harness::catalog::{Model, ModelCatalog};
+use crate::agent::harness::compact::is_compaction_summary;
 use crate::agent::harness::model_key::ModelKey;
+use crate::agent::harness::provider::transport::TITLE_SESSION_SUFFIX;
 use crate::agent::harness::provider::{
     ChatMessage, ChatRole, FinishReason, MessageContent, ModelOptions, ModelRequest, ProviderEvent,
 };
@@ -87,6 +93,9 @@ pub(crate) fn first_exchange_text(messages: &[ChatMessage]) -> Option<String> {
     let mut found_user = false;
     let mut found_assistant = false;
     for m in messages {
+        if is_compaction_summary(m) {
+            continue;
+        }
         // The role decides WHICH side this row can fill, so it is matched
         // first and the non-excerpt roles leave immediately.
         let label = match m.role {
@@ -118,6 +127,175 @@ pub(crate) fn first_exchange_text(messages: &[ChatMessage]) -> Option<String> {
     // The user line is the only mandatory side, so "no lines" is exactly "no
     // user text at all" (an assistant row is only ever pushed after one).
     (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// Caps for multi-turn exchange formatting.
+pub(crate) const MULTI_TURN_PROMPT_CAP: usize = 400;
+pub(crate) const MULTI_TURN_SELECTION_CAP: usize = 200;
+pub(crate) const MULTI_TURN_ASSISTANT_CAP: usize = 400;
+pub(crate) const MULTI_TURN_TOTAL_CAP: usize = 2500;
+
+/// Count user interactions (prompts and answered ask selections).
+pub(crate) fn count_user_interactions(messages: &[ChatMessage]) -> usize {
+    let mut ask_tool_call_ids = std::collections::HashSet::new();
+    let mut count = 0;
+
+    for m in messages {
+        if is_compaction_summary(m) {
+            continue;
+        }
+        match m.role {
+            ChatRole::Assistant => {
+                if let Some(tool_calls) = &m.tool_calls {
+                    for tc in tool_calls {
+                        if tc.name == "ask" {
+                            ask_tool_call_ids.insert(tc.id.clone());
+                        }
+                    }
+                }
+            }
+            ChatRole::User if !message_text(&m.content).trim().is_empty() => {
+                count += 1;
+            }
+            ChatRole::Tool => {
+                if let Some(ref call_id) = m.tool_call_id {
+                    if ask_tool_call_ids.contains(call_id) {
+                        let text = message_text(&m.content);
+                        if text.trim_start().starts_with("User answers:") {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    count
+}
+
+/// Clean an ask tool selection text by extracting between `"User answers:\n"`
+/// and `"\n\nAnswer context:"` (or end of string), trimmed.
+pub(crate) fn clean_ask_selection(text: &str) -> String {
+    let after_prefix = if let Some(idx) = text.find("User answers:\n") {
+        &text[idx + "User answers:\n".len()..]
+    } else if let Some(idx) = text.find("User answers:") {
+        &text[idx + "User answers:".len()..]
+    } else {
+        text
+    };
+    let content = if let Some(idx) = after_prefix.find("\n\nAnswer context:") {
+        &after_prefix[..idx]
+    } else if let Some(idx) = after_prefix.find("\nAnswer context:") {
+        &after_prefix[..idx]
+    } else {
+        after_prefix
+    };
+    content.trim().to_string()
+}
+
+/// Multi-turn conversation excerpt collecting up to `max_interactions`
+/// interactions along with closing assistant responses.
+pub(crate) fn multi_turn_exchange_text(
+    messages: &[ChatMessage],
+    max_interactions: usize,
+) -> Option<String> {
+    if max_interactions == 0 {
+        return None;
+    }
+    let mut ask_tool_call_ids = std::collections::HashSet::new();
+    let mut lines: Vec<String> = Vec::new();
+    let mut pending_assistant: Option<String> = None;
+    let mut interactions_collected = 0;
+
+    for m in messages {
+        if is_compaction_summary(m) {
+            continue;
+        }
+        match m.role {
+            ChatRole::Assistant => {
+                if let Some(tool_calls) = &m.tool_calls {
+                    for tc in tool_calls {
+                        if tc.name == "ask" {
+                            ask_tool_call_ids.insert(tc.id.clone());
+                        }
+                    }
+                }
+                if interactions_collected > 0 {
+                    let text = message_text(&m.content);
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        pending_assistant = Some(trimmed.to_string());
+                    }
+                }
+            }
+            ChatRole::User => {
+                let text = message_text(&m.content);
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if interactions_collected >= max_interactions {
+                    break;
+                }
+                if let Some(asst) = pending_assistant.take() {
+                    lines.push(format!(
+                        "Assistant: {}",
+                        cap_chars(&asst, MULTI_TURN_ASSISTANT_CAP)
+                    ));
+                }
+                lines.push(format!(
+                    "User: {}",
+                    cap_chars(trimmed, MULTI_TURN_PROMPT_CAP)
+                ));
+                interactions_collected += 1;
+            }
+            ChatRole::Tool => {
+                let is_ask_answer = if let Some(ref call_id) = m.tool_call_id {
+                    if ask_tool_call_ids.contains(call_id) {
+                        let text = message_text(&m.content);
+                        text.trim_start().starts_with("User answers:")
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if is_ask_answer {
+                    if interactions_collected >= max_interactions {
+                        break;
+                    }
+                    if let Some(asst) = pending_assistant.take() {
+                        lines.push(format!(
+                            "Assistant: {}",
+                            cap_chars(&asst, MULTI_TURN_ASSISTANT_CAP)
+                        ));
+                    }
+                    let text = message_text(&m.content);
+                    let cleaned = clean_ask_selection(&text);
+                    lines.push(format!(
+                        "User (selection): {}",
+                        cap_chars(&cleaned, MULTI_TURN_SELECTION_CAP)
+                    ));
+                    interactions_collected += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(asst) = pending_assistant.take() {
+        lines.push(format!(
+            "Assistant: {}",
+            cap_chars(&asst, MULTI_TURN_ASSISTANT_CAP)
+        ));
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(cap_chars(&lines.join("\n"), MULTI_TURN_TOTAL_CAP))
+    }
 }
 
 /// The title request's single user message, VERBATIM pi's copy: the wording
@@ -314,6 +492,8 @@ pub(crate) struct NamingState {
 pub(crate) struct NamingRequest {
     session_id: String,
     db: Arc<Db>,
+    from_stage: i64,
+    to_stage: i64,
     /// `None` when no sink was ever wired (`set_sink`): the EMIT is skipped,
     /// the WRITE is not — a title still deserves persisting.
     sink: Option<Arc<dyn EventSink>>,
@@ -367,17 +547,16 @@ impl SessionManager {
             return;
         };
         // 3. The row. A missing row is pi's "ephemeral session" guard (with
-        //    nothing to name, there is nothing to do); a row that already
-        //    carries a title is pi's `getSessionName()` guard (decision 2: a
-        //    title — generated or user-chosen — is final); a SUBAGENT row is
-        //    the same idea as pi's ephemeral guard (a subagent's transcript
-        //    is hidden — `list_sessions` filters `is_subagent = 0` — so
-        //    naming it is meaningless). A read failure declines this turn and
-        //    the next `agent_end` retries.
+        //    nothing to name, there is nothing to do); a SUBAGENT row is
+        //    the same idea (a subagent's transcript is hidden —
+        //    `list_sessions` filters `is_subagent = 0` — so naming it is
+        //    meaningless); a row at title_stage >= 2 has settled its title
+        //    (ADR 0086 two-stage lifecycle). A read failure declines this
+        //    turn and the next `agent_end` retries.
         let Ok(Some(row)) = db.session(session_id) else {
             return;
         };
-        if row.title.is_some() || row.is_subagent {
+        if row.is_subagent || row.title_stage >= 2 {
             return;
         }
         // 4. The bookkeeping: the failure budget spent (pi's
@@ -404,18 +583,24 @@ impl SessionManager {
         else {
             return;
         };
-        // 6. The excerpt. No user text yet → decline, and the NEXT
-        //    `agent_end` tries again (a turn whose transcript is still all
-        //    tool calls has nothing to title from). The store frames ride a
-        //    DIFFERENT outbound path than the `RpcEvent` stream, so the
-        //    assistant row may or may not be in SQLite by now — the
-        //    assistant side is optional by design, and a title written from
-        //    the user line alone is the accepted outcome (no retry, no
-        //    re-read loop: the write is once-only either way).
+        // 6. The excerpt. Load the transcript and count user interactions
+        //    to determine whether to generate a Stage 1 title (turn 1) or
+        //    Stage 2 settled title (interaction 5).
         let Ok(messages) = SessionStore::new(db.clone()).load_messages(session_id) else {
             return;
         };
-        let Some(exchange) = first_exchange_text(&messages) else {
+        let interactions = count_user_interactions(&messages);
+        let (from_stage, to_stage, exchange) = if row.title_stage == 0 && interactions >= 1 {
+            let Some(exchange) = first_exchange_text(&messages) else {
+                return;
+            };
+            (0, 1, exchange)
+        } else if row.title_stage == 1 && interactions >= 5 {
+            let Some(exchange) = multi_turn_exchange_text(&messages, 5) else {
+                return;
+            };
+            (1, 2, exchange)
+        } else {
             return;
         };
         // A spawn needs a runtime. The router runs on a Worker pump task in
@@ -447,6 +632,8 @@ impl SessionManager {
         let request = NamingRequest {
             session_id: session_id.to_string(),
             db,
+            from_stage,
+            to_stage,
             // The sink is the EMIT's source only — its absence costs the
             // push, never the title.
             sink: self.sink.get().cloned(),
@@ -501,6 +688,14 @@ pub(crate) async fn name_session(request: NamingRequest) {
         return;
     }
 
+    let reasoning_effort =
+        resolve_naming_reasoning(&model, request.settings.session_naming_reasoning.as_deref());
+    let max_tokens = if reasoning_effort.is_some() {
+        None
+    } else {
+        Some(100)
+    };
+
     let model_request = ModelRequest {
         // The BARE id, NOT the composed `provider/id` key — the wire wants
         // the model's own name (`compact.rs::summarize` does the same).
@@ -514,19 +709,14 @@ pub(crate) async fn name_session(request: NamingRequest) {
         tools: Vec::new(),
         options: ModelOptions {
             temperature: Some(0.0),
-            max_tokens: None,
-            reasoning_effort: resolve_naming_reasoning(
-                &model,
-                request.settings.session_naming_reasoning.as_deref(),
-            ),
+            max_tokens,
+            reasoning_effort,
             stream: true,
         },
-        // The REAL session id, where pi issues the call under a fresh
-        // `crypto.randomUUID()`: ADR 0026's per-session request tracking
-        // wants EVERY request of the session attributed, and the footer's
-        // cost total comes from the event stream, which this call never
-        // touches.
-        session_id: Some(session_id.to_string()),
+        // ADR 0086 wire isolation: the {id}-title pseudo-session id ensures
+        // LiteLLM / proxy transport attaches an isolated x-litellm-session-id
+        // and a unique x-request-id for title generation.
+        session_id: Some(format!("{session_id}{TITLE_SESSION_SUFFIX}")),
     };
 
     let provider = (request.provider_factory)(&model);
@@ -570,27 +760,47 @@ pub(crate) async fn name_session(request: NamingRequest) {
             return;
         }
     };
-    // `Done(Length)` is the output-token limit (the answer is CUT OFF) and
-    // `Done(Error)` is the provider's own "the stream ended badly" — the same
-    // two cases `summarize` refuses to treat as a partial success.
-    if matches!(finish, FinishReason::Length | FinishReason::Error) {
-        eprintln!("session-name: the title answer was truncated ({finish:?}) for {session_id}");
+    // `Done(Error)` is the provider's own "the stream ended badly".
+    // For `Done(Length)`, only accept the cleaned title if it has at least 2 words
+    // and contains no newlines; otherwise treat truncation as a failure.
+    if finish == FinishReason::Error {
+        eprintln!("session-name: the title answer had an error ({finish:?}) for {session_id}");
         note_failure(&request.state, session_id);
         return;
     }
-    let Some(title) = clean_title(&text) else {
+    let cleaned = clean_title(&text);
+    if finish == FinishReason::Length {
+        let is_valid = match &cleaned {
+            Some(title) => {
+                let word_count = title.split_whitespace().count();
+                word_count >= 2 && !text.trim().contains('\n') && !title.contains('\n')
+            }
+            None => false,
+        };
+        if !is_valid {
+            eprintln!(
+                "session-name: the title answer was truncated ({finish:?}) with no valid title for {session_id}"
+            );
+            note_failure(&request.state, session_id);
+            return;
+        }
+    }
+    let Some(title) = cleaned else {
         // An answer that cleans to nothing is pi's `if (!title) onFailure()`:
         // writing `""` would label the session with nothing.
         eprintln!("session-name: the model answered with no usable title for {session_id}");
         note_failure(&request.state, session_id);
         return;
     };
-    // The write is CONDITIONAL in SQL (`WHERE title IS NULL`), and that
-    // condition IS pi's re-check-before-set race guard: a title that appeared
-    // while we were streaming — or a row that vanished with the session —
-    // means ours is dropped, and neither is a failure (nothing went wrong
-    // with naming).
-    match request.db.set_session_title(session_id, &title) {
+    // The write is CONDITIONAL in SQL (`WHERE title_stage = ?`), which guarantees
+    // the two-stage lifecycle 0 -> 1 -> 2. If the stage changed mid-flight (or
+    // the row vanished), the write is dropped harmlessly without counting as a failure.
+    match request.db.set_session_title_stage(
+        session_id,
+        &title,
+        request.from_stage,
+        request.to_stage,
+    ) {
         Ok(true) => {
             note_success(&request.state, session_id);
             // The push (Task 5's UI reads it: a live session's title arrives
@@ -680,9 +890,10 @@ mod tests {
     use tokio::sync::{mpsc, Mutex, Notify};
 
     use super::{
-        cap_chars, clean_title, first_exchange_text, message_text, note_failure,
-        resolve_naming_model, resolve_naming_reasoning, title_prompt, unrecognized_reasoning_log,
-        EXCERPT_CAP, MAX_FAILURES, TITLE_MAX_CHARS,
+        cap_chars, clean_ask_selection, clean_title, count_user_interactions, first_exchange_text,
+        message_text, multi_turn_exchange_text, note_failure, resolve_naming_model,
+        resolve_naming_reasoning, title_prompt, unrecognized_reasoning_log, EXCERPT_CAP,
+        MAX_FAILURES, TITLE_MAX_CHARS,
     };
     use super::{NamingState, SessionManager};
     use crate::agent::events::RpcEvent;
@@ -1472,8 +1683,8 @@ mod tests {
         }
 
         /// Record the `sessions` row — guard 3 reads it, and its two
-        /// columns ARE two guards (`title`, `is_subagent`). The row is born
-        /// with a NULL title (`record_session` never writes one), so an
+        /// columns ARE two guards (`title_stage`, `is_subagent`). The row is born
+        /// with stage 0 and no title (`record_session` never writes one), so an
         /// existing title is written through the feature's own writer.
         fn record_row(&self, id: &str, title: Option<&str>, is_subagent: bool) {
             self.db
@@ -1632,6 +1843,50 @@ mod tests {
                 .expect("the row exists")
                 .title
         }
+
+        fn stored_stage(&self, id: &str) -> i64 {
+            self.db
+                .session(id)
+                .expect("the row reads")
+                .expect("the row exists")
+                .title_stage
+        }
+
+        fn seed_multi_interaction_transcript(&self, id: &str, interaction_count: usize) {
+            let store = SessionStore::new(self.db.clone());
+            let start_seq = store.load_messages(id).map(|m| m.len()).unwrap_or(0);
+            for i in 0..interaction_count {
+                store
+                    .insert_message(
+                        id,
+                        (start_seq + i * 2) as u64,
+                        "user",
+                        &serde_json::to_string(&user(&format!("User message {}", i + 1))).unwrap(),
+                    )
+                    .expect("the user row writes");
+                store
+                    .insert_message(
+                        id,
+                        (start_seq + i * 2 + 1) as u64,
+                        "assistant",
+                        &serde_json::to_string(&assistant(&format!("Assistant message {}", i + 1)))
+                            .unwrap(),
+                    )
+                    .expect("the assistant row writes");
+            }
+        }
+
+        fn set_stage(&self, id: &str, stage: i64) {
+            let row = self
+                .db
+                .session(id)
+                .expect("the row reads")
+                .expect("the row exists");
+            let title = row.title.as_deref().unwrap_or("Test Title");
+            self.db
+                .set_session_title_stage(id, title, row.title_stage, stage)
+                .expect("the stage writes");
+        }
     }
 
     /// Let every task the router spawned run to its next await point — the
@@ -1660,16 +1915,20 @@ mod tests {
 
         // One request, in the shape the harness uses elsewhere: the BARE
         // model id (NOT the composed key — `compact.rs::summarize`), the
-        // REAL session id (ADR 0026's per-session attribution, unlike pi's
+        // wire-isolated `{id}-title` pseudo-session id (ADR 0086, unlike pi's
         // fresh `randomUUID`), no tools, temperature 0, and pi's prompt
         // wrapping the first exchange.
         let requests = h.provider.requests.lock().await;
         assert_eq!(requests.len(), 1);
         let req = &requests[0];
         assert_eq!(req.model, "m1");
-        assert_eq!(req.session_id.as_deref(), Some(id));
+        assert_eq!(
+            req.session_id.as_deref(),
+            Some(format!("{id}-title").as_str())
+        );
         assert!(req.tools.is_empty());
         assert_eq!(req.options.temperature, Some(0.0));
+        assert_eq!(req.options.max_tokens, Some(100));
         assert!(req.options.stream);
         assert_eq!(
             req.messages,
@@ -1825,7 +2084,7 @@ mod tests {
     #[tokio::test]
     async fn a_truncated_answer_is_a_failure_and_writes_nothing() {
         let mut h = harness(vec![Script::Events(vec![
-            ProviderEvent::TextDelta("Porting the session".to_string()),
+            ProviderEvent::TextDelta("   ".to_string()),
             ProviderEvent::Done(FinishReason::Length),
         ])]);
         let id = "arch_truncated";
@@ -1834,11 +2093,105 @@ mod tests {
         h.agent_end(id, false);
         h.await_request().await;
 
-        // A cut-off answer is an error, not a partial success (the
-        // `compact.rs::summarize` rule: half a title is not a title).
+        // A cut-off answer with no usable title parsed before truncation is an error.
         assert_eq!(h.state_of(id).expect("the pass ran").fails, 1);
         assert_eq!(h.stored_title(id), None);
         assert!(h.emitted().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_truncated_answer_with_trailing_newline_is_accepted() {
+        let mut h = harness(vec![Script::Events(vec![
+            ProviderEvent::TextDelta("Porting the session namer\n".to_string()),
+            ProviderEvent::Done(FinishReason::Length),
+        ])]);
+        let id = "arch_truncated_trailing_newline";
+        h.seed_session(id);
+
+        h.agent_end(id, false);
+        h.await_request().await;
+
+        assert_eq!(h.state_of(id).expect("the pass ran").fails, 0);
+        assert_eq!(
+            h.stored_title(id).as_deref(),
+            Some("Porting the session namer")
+        );
+        assert_eq!(
+            h.titled(),
+            vec![json!({ "sessionId": id, "title": "Porting the session namer" })]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_truncated_answer_with_valid_title_is_accepted() {
+        let mut h = harness(vec![Script::Events(vec![
+            ProviderEvent::TextDelta("Porting the session namer".to_string()),
+            ProviderEvent::Done(FinishReason::Length),
+        ])]);
+        let id = "arch_truncated_accepted";
+        h.seed_session(id);
+
+        h.agent_end(id, false);
+        h.await_request().await;
+
+        assert_eq!(h.state_of(id).expect("the pass ran").fails, 0);
+        assert_eq!(
+            h.stored_title(id).as_deref(),
+            Some("Porting the session namer")
+        );
+        assert_eq!(
+            h.titled(),
+            vec![json!({ "sessionId": id, "title": "Porting the session namer" })]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_truncated_answer_with_single_word_is_treated_as_failure() {
+        let mut h = harness(vec![Script::Events(vec![
+            ProviderEvent::TextDelta("Porting".to_string()),
+            ProviderEvent::Done(FinishReason::Length),
+        ])]);
+        let id = "arch_truncated_single_word";
+        h.seed_session(id);
+
+        h.agent_end(id, false);
+        h.await_request().await;
+
+        assert_eq!(h.state_of(id).expect("the pass ran").fails, 1);
+        assert_eq!(h.stored_title(id), None);
+        assert!(h.emitted().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_truncated_answer_with_newlines_is_treated_as_failure() {
+        let mut h = harness(vec![Script::Events(vec![
+            ProviderEvent::TextDelta("Here is the title:\nPorting the session".to_string()),
+            ProviderEvent::Done(FinishReason::Length),
+        ])]);
+        let id = "arch_truncated_newline";
+        h.seed_session(id);
+
+        h.agent_end(id, false);
+        h.await_request().await;
+
+        assert_eq!(h.state_of(id).expect("the pass ran").fails, 1);
+        assert_eq!(h.stored_title(id), None);
+        assert!(h.emitted().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reasoning_effort_present_omits_max_tokens() {
+        let h = harness(vec![Script::answering("Porting the session namer")]);
+        let id = "arch_reasoning_effort";
+        write_settings_json(&h.dir, json!({ "sessionNamingReasoning": "low" }));
+        h.seed_session(id);
+
+        h.agent_end(id, false);
+        h.await_request().await;
+
+        let req = h.one_request().await;
+        assert_eq!(req.options.reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(req.options.max_tokens, None);
     }
 
     #[tokio::test]
@@ -1944,8 +2297,8 @@ mod tests {
         assert_eq!(req.model, "m2", "the override's BARE id goes on the wire");
         assert_eq!(
             req.session_id.as_deref(),
-            Some(id),
-            "the request still belongs to the real session"
+            Some(format!("{id}-title").as_str()),
+            "the request belongs to the isolated title session"
         );
         assert_eq!(
             h.stored_title(id).as_deref(),
@@ -2183,5 +2536,384 @@ mod tests {
             !captured.exists(),
             "the unwind ran the removal — {captured:?} is gone"
         );
+    }
+
+    #[test]
+    fn count_user_interactions_counts_prompts_and_answered_asks_blocks() {
+        let messages = vec![
+            ChatMessage {
+                role: ChatRole::User,
+                content: MessageContent::Blocks(vec![ContentBlock::Text {
+                    text: "Prompt 1".into(),
+                }]),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: MessageContent::Text("Asking a question".into()),
+                tool_call_id: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "ask_call_1".into(),
+                    name: "ask".into(),
+                    arguments: json!({}),
+                }]),
+            },
+            ChatMessage {
+                role: ChatRole::Tool,
+                content: MessageContent::Blocks(vec![ContentBlock::Text {
+                    text: "User answers:\nchoice: Option A\n\nAnswer context:\nChoice details"
+                        .into(),
+                }]),
+                tool_call_id: Some("ask_call_1".into()),
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: MessageContent::Text("Done with turn 1".into()),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: ChatRole::User,
+                content: MessageContent::Text("Prompt 2".into()),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+        // 2 user prompts + 1 answered ask = 3 interactions
+        assert_eq!(count_user_interactions(&messages), 3);
+    }
+
+    #[test]
+    fn count_user_interactions_ignores_cancelled_asks_and_tool_outputs() {
+        let messages = vec![
+            ChatMessage {
+                role: ChatRole::System,
+                content: MessageContent::Text("System prompt".into()),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: ChatRole::User,
+                content: MessageContent::Text("   \n\t ".into()), // empty whitespace
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: MessageContent::Text("Calling tools".into()),
+                tool_call_id: None,
+                tool_calls: Some(vec![
+                    ToolCall {
+                        id: "bash_1".into(),
+                        name: "bash".into(),
+                        arguments: json!({ "command": "ls" }),
+                    },
+                    ToolCall {
+                        id: "ask_cancel".into(),
+                        name: "ask".into(),
+                        arguments: json!({}),
+                    },
+                ]),
+            },
+            ChatMessage {
+                role: ChatRole::Tool,
+                content: MessageContent::Text("User answers: in non-ask tool".into()),
+                tool_call_id: Some("bash_1".into()), // bash tool, not ask!
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: ChatRole::Tool,
+                content: MessageContent::Text("User cancelled the question.".into()),
+                tool_call_id: Some("ask_cancel".into()), // cancelled ask!
+                tool_calls: None,
+            },
+        ];
+        assert_eq!(count_user_interactions(&messages), 0);
+    }
+
+    #[test]
+    fn multi_turn_exchange_text_formats_up_to_5_interactions_with_caps() {
+        let long_user = "u".repeat(500);
+        let long_asst = "a".repeat(500);
+        let long_ask = "k".repeat(300);
+
+        let messages = vec![
+            // Preamble assistant before user — should be ignored
+            assistant("Preamble"),
+            // Turn 1: User prompt
+            user(&long_user),
+            assistant(&long_asst),
+            // Turn 2: User prompt 2
+            user("User 2"),
+            // Turn 3: Ask selection
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: MessageContent::Text("".into()),
+                tool_call_id: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "ask_1".into(),
+                    name: "ask".into(),
+                    arguments: json!({}),
+                }]),
+            },
+            ChatMessage {
+                role: ChatRole::Tool,
+                content: MessageContent::Text(format!(
+                    "User answers:\n{long_ask}\n\nAnswer context:\nContext"
+                )),
+                tool_call_id: Some("ask_1".into()),
+                tool_calls: None,
+            },
+            assistant("Turn 3 asst response"),
+            // Turn 4
+            user("User 4"),
+            assistant("Asst 4"),
+            // Turn 5
+            user("User 5"),
+            assistant("Asst 5"),
+            // Turn 6 (beyond 5 interactions)
+            user("User 6 should not be included"),
+            assistant("Asst 6"),
+        ];
+
+        let exchange =
+            multi_turn_exchange_text(&messages, 5).expect("should produce multi-turn excerpt");
+        let lines: Vec<&str> = exchange.lines().collect();
+
+        assert_eq!(lines[0], format!("User: {}", "u".repeat(400)));
+        assert_eq!(lines[1], format!("Assistant: {}", "a".repeat(400)));
+        assert_eq!(lines[2], "User: User 2");
+        assert_eq!(lines[3], format!("User (selection): {}", "k".repeat(200)));
+        assert_eq!(lines[4], "Assistant: Turn 3 asst response");
+        assert_eq!(lines[5], "User: User 4");
+        assert_eq!(lines[6], "Assistant: Asst 4");
+        assert_eq!(lines[7], "User: User 5");
+        assert_eq!(lines[8], "Assistant: Asst 5");
+        assert_eq!(lines.len(), 9);
+        assert!(!exchange.contains("User 6"));
+
+        // Verify total cap check
+        assert!(exchange.chars().count() <= 2500);
+    }
+
+    #[test]
+    fn multi_turn_exchange_text_returns_none_when_empty() {
+        assert_eq!(multi_turn_exchange_text(&[], 5), None);
+        assert_eq!(
+            multi_turn_exchange_text(&[assistant("Only assistant")], 5),
+            None
+        );
+        assert_eq!(multi_turn_exchange_text(&[user("   \n ")], 5), None);
+        assert_eq!(multi_turn_exchange_text(&[user("Valid prompt")], 0), None);
+    }
+
+    #[test]
+    fn compaction_summaries_are_ignored_by_interaction_counting_and_excerpts() {
+        let summary_user = ChatMessage {
+            role: ChatRole::User,
+            content: MessageContent::Text(
+                "Summary of previous conversation:\nPrevious work was done.".into(),
+            ),
+            tool_call_id: None,
+            tool_calls: None,
+        };
+        let summary_system = ChatMessage {
+            role: ChatRole::System,
+            content: MessageContent::Text(
+                "Summary of previous conversation:\nSystem compaction summary.".into(),
+            ),
+            tool_call_id: None,
+            tool_calls: None,
+        };
+        let summary_asst = ChatMessage {
+            role: ChatRole::Assistant,
+            content: MessageContent::Text(
+                "Summary of previous conversation:\nAsst summary.".into(),
+            ),
+            tool_call_id: None,
+            tool_calls: None,
+        };
+        let real_user = user("Real user prompt");
+        let real_asst = assistant("Real assistant answer");
+
+        let messages = vec![
+            summary_system.clone(),
+            summary_user.clone(),
+            summary_asst.clone(),
+            real_user.clone(),
+            real_asst.clone(),
+        ];
+
+        // Only 1 real user prompt, compaction summaries ignored
+        assert_eq!(count_user_interactions(&messages), 1);
+
+        // Excerpt should only contain the real interaction
+        let excerpt = multi_turn_exchange_text(&messages, 5).expect("should produce excerpt");
+        assert_eq!(
+            excerpt,
+            "User: Real user prompt\nAssistant: Real assistant answer"
+        );
+
+        // first_exchange_text should skip compaction summary even if marked User
+        let first = first_exchange_text(&messages).expect("should produce first exchange");
+        assert_eq!(
+            first,
+            "User: Real user prompt\nAssistant: Real assistant answer"
+        );
+    }
+
+    #[test]
+    fn clean_ask_selection_extracts_answers_and_strips_context() {
+        let raw =
+            "User answers:\nchoice: Option A\nother: Option B\n\nAnswer context:\nDetails here";
+        assert_eq!(
+            clean_ask_selection(raw),
+            "choice: Option A\nother: Option B"
+        );
+
+        let without_context = "User answers:\nsingle choice";
+        assert_eq!(clean_ask_selection(without_context), "single choice");
+    }
+
+    // ── Two-stage session titling integration tests ────────────────────────
+
+    #[tokio::test]
+    async fn stage_1_titles_on_first_turn_and_sets_stage_1() {
+        let mut h = harness(vec![Script::answering("First stage title")]);
+        let id = "s_stage1";
+        h.seed_session(id);
+
+        h.agent_end(id, false);
+        h.await_request().await;
+
+        let req = h.one_request().await;
+        assert_eq!(
+            req.session_id.as_deref(),
+            Some(format!("{id}-title").as_str())
+        );
+        assert_eq!(req.options.max_tokens, Some(100));
+        assert_eq!(h.stored_title(id).as_deref(), Some("First stage title"));
+        assert_eq!(h.stored_stage(id), 1);
+        assert_eq!(
+            h.titled(),
+            vec![json!({ "sessionId": id, "title": "First stage title" })]
+        );
+    }
+
+    #[tokio::test]
+    async fn stage_2_retitles_when_interactions_reach_5() {
+        let h = harness(vec![
+            Script::answering("Initial Stage 1 Title"),
+            Script::answering("Settled Stage 2 Title"),
+        ]);
+        let id = "s_stage2";
+        h.seed_session(id);
+
+        // Turn 1 -> Stage 1
+        h.agent_end(id, false);
+        h.await_request().await;
+        assert_eq!(h.stored_stage(id), 1);
+        assert_eq!(h.stored_title(id).as_deref(), Some("Initial Stage 1 Title"));
+
+        // Turns 2, 3, 4 (interactions 2, 3, 4) -> No request
+        h.seed_multi_interaction_transcript(id, 3);
+        h.agent_end(id, false);
+        drain_tasks().await;
+        assert_eq!(h.request_count().await, 1);
+        assert_eq!(h.stored_stage(id), 1);
+
+        // Interaction 5 reached
+        h.seed_multi_interaction_transcript(id, 1);
+        h.agent_end(id, false);
+        h.await_request().await;
+        assert_eq!(h.request_count().await, 2);
+
+        let requests = h.provider.requests.lock().await;
+        let req2 = &requests[1];
+        assert_eq!(
+            req2.session_id.as_deref(),
+            Some(format!("{id}-title").as_str())
+        );
+        assert_eq!(req2.options.max_tokens, Some(100));
+        let prompt_text = match &req2.messages[0].content {
+            MessageContent::Text(t) => t,
+            _ => panic!("expected text prompt"),
+        };
+        assert!(prompt_text.contains("User: Port the session namer"));
+        assert!(prompt_text.contains("User: User message 1"));
+        drop(requests);
+
+        assert_eq!(h.stored_stage(id), 2);
+        assert_eq!(h.stored_title(id).as_deref(), Some("Settled Stage 2 Title"));
+    }
+
+    #[tokio::test]
+    async fn subsequent_agent_end_after_stage_2_is_noop() {
+        let h = harness(vec![Script::answering("never")]);
+        let id = "s_after_stage2";
+        h.seed_session(id);
+        h.set_stage(id, 2);
+        h.seed_multi_interaction_transcript(id, 6);
+
+        h.agent_end(id, false);
+        drain_tasks().await;
+
+        assert_eq!(h.request_count().await, 0);
+        assert_eq!(h.stored_stage(id), 2);
+    }
+
+    #[tokio::test]
+    async fn stage_race_where_stage_changed_mid_flight_drops_write_silently() {
+        let mut h = harness(vec![Script::answering("Raced Title")]);
+        let id = "s_race";
+        h.seed_session(id);
+
+        let db = h.db.clone();
+        let session_id_owned = id.to_string();
+        h.set_on_call(move || {
+            // Stage changes from 0 to 2 mid-flight
+            let _ = db.set_session_title_stage(&session_id_owned, "Concurrent Title", 0, 2);
+        });
+
+        h.agent_end(id, false);
+        h.await_request().await;
+
+        let state = h.state_of(id).expect("the pass ran");
+        assert_eq!(state.fails, 0, "raced write drop is NOT a failure");
+        assert!(!state.in_flight);
+        assert_eq!(h.stored_stage(id), 2);
+        assert_eq!(h.stored_title(id).as_deref(), Some("Concurrent Title"));
+        assert!(h.emitted().is_empty(), "dropped write emits nothing");
+    }
+
+    #[tokio::test]
+    async fn resumed_session_at_stage_1_triggers_stage_2_at_turn_5() {
+        let h = harness(vec![Script::answering("Stage 2 Resumed Title")]);
+        let id = "s_resumed";
+        h.record_row(id, Some("Old Stage 1 Title"), false);
+        h.seed_config(id, &h.model());
+        // Currently at stage 1
+        assert_eq!(h.stored_stage(id), 1);
+
+        // Seed 4 user interactions
+        h.seed_multi_interaction_transcript(id, 4);
+
+        // Interaction 4 -> no request
+        h.agent_end(id, false);
+        drain_tasks().await;
+        assert_eq!(h.request_count().await, 0);
+        assert_eq!(h.stored_stage(id), 1);
+        assert_eq!(h.stored_title(id).as_deref(), Some("Old Stage 1 Title"));
+
+        // Interaction 5 -> triggers Stage 2 naming
+        h.seed_multi_interaction_transcript(id, 1);
+        h.agent_end(id, false);
+        h.await_request().await;
+
+        assert_eq!(h.request_count().await, 1);
+        assert_eq!(h.stored_stage(id), 2);
+        assert_eq!(h.stored_title(id).as_deref(), Some("Stage 2 Resumed Title"));
     }
 }

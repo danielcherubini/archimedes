@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-10-12
-superseded-by:
+superseded-by: 0086-two-stage-async-session-titling-with-wire-isolation.md
 ---
 
 # Session naming runs in the Supervisor, and `WHERE title IS NULL` is the entire write contract
@@ -35,3 +35,5 @@ superseded-by:
 - **Excerpt and title are capped in CHARS, never bytes.** 500 chars per side, 80 chars for the title, both by `.chars().take(n)`: pi's JS `.slice()` is char-based too, and a byte slice would panic mid-title on the emoji and CJK text that a real first message contains. One layer of matching surrounding quotes is stripped with pi's exact regex semantics (`"a" and "b"` keeps its quotes — the interior-quote guard), and unbalanced quotes are content.
 - **A naming pass runs on a thread with no tokio runtime → no naming.** `Handle::try_current()` is checked before the `in_flight` claim, so the hook declines rather than panicking; `route_event` runs on the Worker-inbound pump in practice, so this is a guard, not a path.
 - **A closed session can still be named if the write lands first, and never emits to a dead UI.** The task holds its own `Arc<Db>` and `Option<Arc<dyn EventSink>>`; a title computed after the row is deleted loses the predicate and writes nothing, and an unset sink (no `set_sink` yet) still persists the title while skipping the emit — a name deserves storing even when nobody can be told about it.
+
+*Amended 2026-10-30 by ADR 0086:* The single-stage lifecycle (`WHERE title IS NULL`) is replaced by a two-stage lifecycle (`title_stage: 0 -> 1 -> 2`), where Stage 1 names after the first exchange and Stage 2 retitles at 5 user interactions using a multi-turn excerpt. Future manual renames set `title_stage = 2` (superseding the old `WHERE title IS NULL` permanency). Wire isolation uses `{id}-title` pseudo-session IDs with unique request IDs, and token output is bounded with `max_tokens: 100` (or `None` when reasoning effort is forwarded).

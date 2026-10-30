@@ -68,6 +68,8 @@ pub struct SessionRow {
     /// D5 defect this column exists to avoid (ADR 0082). The column therefore
     /// has no `DEFAULT` (see the migration in `Db::open`).
     pub cost_usd: Option<f64>,
+    /// The session's title generation stage (0 = untitled, 1 = stage 1 title, 2 = stage 2 / settled title).
+    pub title_stage: i64,
 }
 
 /// A row from the `messages` table.
@@ -351,6 +353,25 @@ impl Db {
                 [],
             )?;
             seed_session_sort_order(&tx)?;
+            tx.commit()?;
+        }
+        let has_title_stage: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'title_stage'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_title_stage == 0 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "ALTER TABLE sessions ADD COLUMN title_stage INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+            // Existing titled sessions are migrated to stage 2 so they are preserved
+            // and not overwritten by an unexpected stage-2 re-title.
+            tx.execute(
+                "UPDATE sessions SET title_stage = 2 WHERE title IS NOT NULL",
+                [],
+            )?;
             tx.commit()?;
         }
         // One-time migration for pre-existing databases: give
@@ -642,7 +663,7 @@ impl Db {
     pub fn session(&self, id: &str) -> Result<Option<SessionRow>, DbError> {
         let guard = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = guard.prepare(
-            "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent, cost_usd \
+            "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent, cost_usd, title_stage \
              FROM sessions WHERE id = ?1",
         )?;
         let row = stmt
@@ -657,6 +678,7 @@ impl Db {
                     context_usage_json: row.get(6)?,
                     is_subagent: row.get::<_, i64>(7)? != 0,
                     cost_usd: row.get(8)?,
+                    title_stage: row.get(9)?,
                 })
             })?
             .next()
@@ -689,12 +711,12 @@ impl Db {
     pub fn list_sessions(&self, include_archived: bool) -> Result<Vec<SessionRow>, DbError> {
         let guard = self.conn.lock().expect("db mutex poisoned");
         let sql = if include_archived {
-            "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent, cost_usd
+            "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent, cost_usd, title_stage
              FROM sessions
              WHERE is_subagent = 0
              ORDER BY sort_order ASC, id DESC"
         } else {
-            "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent, cost_usd
+            "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent, cost_usd, title_stage
              FROM sessions
              WHERE archived = 0 AND is_subagent = 0
              ORDER BY sort_order ASC, id DESC"
@@ -712,6 +734,7 @@ impl Db {
                     context_usage_json: row.get(6)?,
                     is_subagent: row.get::<_, i64>(7)? != 0,
                     cost_usd: row.get(8)?,
+                    title_stage: row.get(9)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -803,20 +826,32 @@ impl Db {
         Ok(())
     }
 
-    /// Set a session's title ONLY when it has none (`title IS NULL`), so a
-    /// title that already exists — a generated one from an earlier turn, or
-    /// one a future rename affordance wrote — is never overwritten. The
-    /// `WHERE title IS NULL` IS the race guard: one statement under the `Db`
-    /// mutex, so a concurrent writer cannot slip between a check and a
-    /// write. Returns `true` when a row was written, `false` when the row is
-    /// missing or already titled (a missing row is a no-op, not an error —
-    /// mirroring `set_session_archived`).
-    pub fn set_session_title(&self, id: &str, title: &str) -> Result<bool, DbError> {
+    /// Set a session's title and transition its `title_stage` atomically, conditional
+    /// on its current stage matching `from_stage`.
+    ///
+    /// Returns `true` when a row was updated, `false` when the row is missing or
+    /// currently at a different stage.
+    pub fn set_session_title_stage(
+        &self,
+        id: &str,
+        title: &str,
+        from_stage: i64,
+        to_stage: i64,
+    ) -> Result<bool, DbError> {
         let n = self.conn.lock().expect("db mutex poisoned").execute(
-            "UPDATE sessions SET title = ?2 WHERE id = ?1 AND title IS NULL",
-            params![id, title],
+            "UPDATE sessions SET title = ?2, title_stage = ?4 WHERE id = ?1 AND title_stage = ?3",
+            params![id, title, from_stage, to_stage],
         )?;
         Ok(n > 0)
+    }
+
+    /// Set a session's initial title (transitioning from stage 0 to stage 1).
+    ///
+    /// Conditional on `title_stage == 0`: returns `true` when updated, or `false`
+    /// if the session is already at a later stage or missing. Delegates to
+    /// `set_session_title_stage(id, title, 0, 1)` for backwards compatibility.
+    pub fn set_session_title(&self, id: &str, title: &str) -> Result<bool, DbError> {
+        self.set_session_title_stage(id, title, 0, 1)
     }
 
     /// A session's messages in insertion order (the transcript order).
@@ -1327,7 +1362,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     is_subagent INTEGER NOT NULL DEFAULT 0,
     todos_json TEXT,
     cost_usd REAL,
-    sort_order INTEGER NOT NULL DEFAULT 0
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    title_stage INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY,
@@ -2452,8 +2488,8 @@ mod tests {
         }
     }
 
-    /// The session's title is written ONLY while it has none, and only once:
-    /// the first `set_session_title` writes the `NULL` title and returns
+    /// The session's title is written at stage 0 (transitioning to stage 1):
+    /// the first `set_session_title` writes the title and returns
     /// `true`, and both `session()` and `list_sessions()` read it back (the
     /// naming pass's write must reach the boot fetch that lists sessions).
     #[test]
@@ -2463,7 +2499,7 @@ mod tests {
         let db = Db::open(&path).expect("db should open");
         db.record_session(&title_session("sess-1"))
             .expect("record_session should succeed");
-        // A recorded session starts UNTITLED (`record_session` inserts NULL).
+        // A recorded session starts UNTITLED (`record_session` inserts NULL title and title_stage 0).
         assert_eq!(
             db.session("sess-1")
                 .expect("session should succeed")
@@ -2498,11 +2534,9 @@ mod tests {
         );
     }
 
-    /// A title that already exists is NEVER overwritten — a second
-    /// `set_session_title` returns `false` and leaves the FIRST title (the
-    /// generated title from an earlier turn, or one a future rename
-    /// affordance wrote, wins). This is the race guard: the naming pass may
-    /// fire on several turns, and only the first write lands.
+    /// Calling `set_session_title` again on a stage-1 session returns `false`
+    /// because `set_session_title` only advances from stage 0 to stage 1.
+    /// This leaves the existing title intact.
     #[test]
     fn set_session_title_never_overwrites_an_existing_title() {
         let dir = crate::test_support::ScratchDir::in_env_temp("db-title-test-", "scratch");
@@ -2540,6 +2574,172 @@ mod tests {
                 .expect("should not error"),
             "a missing row is a no-op returning false"
         );
+    }
+
+    #[test]
+    fn set_session_title_stage_transitions_from_0_to_1() {
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-title-stage-test-", "scratch");
+        let path = dir.join("t.db");
+        let db = Db::open(&path).expect("db should open");
+        db.record_session(&title_session("sess-1"))
+            .expect("record_session should succeed");
+
+        let initial = db.session("sess-1").unwrap().unwrap();
+        assert_eq!(initial.title_stage, 0);
+        assert_eq!(initial.title, None);
+
+        let ok = db
+            .set_session_title_stage("sess-1", "Stage 1 Title", 0, 1)
+            .expect("set_session_title_stage should succeed");
+        assert!(ok, "transition from 0 to 1 returns true");
+
+        let updated = db.session("sess-1").unwrap().unwrap();
+        assert_eq!(updated.title_stage, 1);
+        assert_eq!(updated.title.as_deref(), Some("Stage 1 Title"));
+
+        let listed = db.list_sessions(true).unwrap();
+        assert_eq!(listed[0].title_stage, 1);
+        assert_eq!(listed[0].title.as_deref(), Some("Stage 1 Title"));
+    }
+
+    #[test]
+    fn set_session_title_stage_transitions_from_1_to_2() {
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-title-stage-test-", "scratch");
+        let path = dir.join("t.db");
+        let db = Db::open(&path).expect("db should open");
+        db.record_session(&title_session("sess-1"))
+            .expect("record_session should succeed");
+
+        assert!(db
+            .set_session_title_stage("sess-1", "Stage 1 Title", 0, 1)
+            .expect("transition 0 -> 1 succeeds"));
+
+        let ok = db
+            .set_session_title_stage("sess-1", "Stage 2 Title", 1, 2)
+            .expect("set_session_title_stage should succeed");
+        assert!(ok, "transition from 1 to 2 returns true");
+
+        let updated = db.session("sess-1").unwrap().unwrap();
+        assert_eq!(updated.title_stage, 2);
+        assert_eq!(updated.title.as_deref(), Some("Stage 2 Title"));
+    }
+
+    #[test]
+    fn set_session_title_stage_fails_on_mismatched_from_stage() {
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-title-stage-test-", "scratch");
+        let path = dir.join("t.db");
+        let db = Db::open(&path).expect("db should open");
+        db.record_session(&title_session("sess-1"))
+            .expect("record_session should succeed");
+
+        // Attempt 1 -> 2 when currently at stage 0
+        let ok = db
+            .set_session_title_stage("sess-1", "Stage 2 Title", 1, 2)
+            .expect("query should succeed");
+        assert!(!ok, "transition from mismatched from_stage returns false");
+
+        let row = db.session("sess-1").unwrap().unwrap();
+        assert_eq!(row.title_stage, 0);
+        assert_eq!(row.title, None);
+
+        // Advance to stage 1
+        assert!(db
+            .set_session_title_stage("sess-1", "Stage 1 Title", 0, 1)
+            .unwrap());
+
+        // Attempt 0 -> 1 again when already at stage 1
+        let ok = db
+            .set_session_title_stage("sess-1", "Another Stage 1", 0, 1)
+            .expect("query should succeed");
+        assert!(!ok, "repeat 0 -> 1 returns false");
+        let row = db.session("sess-1").unwrap().unwrap();
+        assert_eq!(row.title_stage, 1);
+        assert_eq!(row.title.as_deref(), Some("Stage 1 Title"));
+
+        // Attempt 2 -> 3 when at stage 1
+        let ok = db
+            .set_session_title_stage("sess-1", "Stage 3", 2, 3)
+            .expect("query should succeed");
+        assert!(!ok, "transition from mismatched stage returns false");
+        let row = db.session("sess-1").unwrap().unwrap();
+        assert_eq!(row.title_stage, 1);
+        assert_eq!(row.title.as_deref(), Some("Stage 1 Title"));
+    }
+
+    #[test]
+    fn title_stage_migrates_existing_titled_sessions_to_stage_2_and_untitled_to_0() {
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-title-mig-test-", "scratch");
+        let path = dir.join("t.db");
+        // A pre-existing database: the `sessions` table WITHOUT `title_stage`.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                cwd TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                title TEXT,
+                capabilities_json TEXT NOT NULL,
+                archived INTEGER NOT NULL DEFAULT 0,
+                context_usage_json TEXT,
+                is_subagent INTEGER NOT NULL DEFAULT 0,
+                todos_json TEXT,
+                cost_usd REAL,
+                sort_order INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO sessions (id, cwd, created_at, title, capabilities_json)
+            VALUES ('s-titled', '/tmp', 1, 'Pre-existing Title', '{}');
+            INSERT INTO sessions (id, cwd, created_at, title, capabilities_json)
+            VALUES ('s-untitled', '/tmp', 2, NULL, '{}');",
+        )
+        .unwrap();
+        drop(conn);
+
+        // The next `Db::open` must SUCCEED (the migration adds title_stage and backfills titled rows).
+        let db = Db::open(&path).expect("the title_stage migration is one-time and idempotent");
+
+        // Verify column exists
+        let has: i64 = db
+            .conn
+            .lock()
+            .expect("db mutex poisoned")
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'title_stage'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has, 1, "the title_stage column is in place after migration");
+
+        // Verify row values
+        let titled = db.session("s-titled").unwrap().expect("s-titled exists");
+        assert_eq!(titled.title.as_deref(), Some("Pre-existing Title"));
+        assert_eq!(
+            titled.title_stage, 2,
+            "pre-existing titled session migrated to stage 2"
+        );
+
+        let untitled = db
+            .session("s-untitled")
+            .unwrap()
+            .expect("s-untitled exists");
+        assert_eq!(untitled.title, None);
+        assert_eq!(
+            untitled.title_stage, 0,
+            "pre-existing untitled session migrated to stage 0"
+        );
+
+        // list_sessions projection agrees
+        let all = db.list_sessions(true).unwrap();
+        let titled_listed = all.iter().find(|s| s.id == "s-titled").unwrap();
+        assert_eq!(titled_listed.title_stage, 2);
+        let untitled_listed = all.iter().find(|s| s.id == "s-untitled").unwrap();
+        assert_eq!(untitled_listed.title_stage, 0);
+
+        // Idempotency: re-opening does not error or alter stage
+        drop(db);
+        let db2 = Db::open(&path).expect("re-opening migrated db succeeds");
+        let titled2 = db2.session("s-titled").unwrap().unwrap();
+        assert_eq!(titled2.title_stage, 2);
     }
 
     /// A re-`record_session` (the resume re-record) never clears the stored

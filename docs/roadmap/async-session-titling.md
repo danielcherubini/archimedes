@@ -201,7 +201,7 @@ Also update ADR 0037 / `CONTEXT.md` to document the two-stage lifecycle and `{id
 **Files:**
 - Modify: `src-tauri/src/agent/session/naming.rs`
 - Modify: `CONTEXT.md`
-- Create: `docs/decisions/0084-two-stage-async-session-titling-with-wire-isolation.md`
+- Create: `docs/decisions/0086-two-stage-async-session-titling-with-wire-isolation.md`
 - Test: `src-tauri/src/agent/session/naming.rs` (integration tests in `mod tests`)
 
 **What to implement:**
@@ -262,7 +262,7 @@ Also update ADR 0037 / `CONTEXT.md` to document the two-stage lifecycle and `{id
    - `stage_race_where_stage_changed_mid_flight_drops_write_silently`
    - `resumed_session_at_stage_1_triggers_stage_2_at_turn_5`
 6. Update documentation:
-   - Create ADR `docs/decisions/0084-two-stage-async-session-titling-with-wire-isolation.md` amending ADR 0037.
+   - Create ADR `docs/decisions/0086-two-stage-async-session-titling-with-wire-isolation.md` amending ADR 0037.
    - Update `CONTEXT.md` under **Session title** to record the two-stage lifecycle and `{id}-title` wire isolation.
    - Update comments in `naming.rs` (module header, step 3 guard, and `ModelRequest.session_id` attribution comment).
 
@@ -274,7 +274,7 @@ Also update ADR 0037 / `CONTEXT.md` to document the two-stage lifecycle and `{id
 - [ ] Update existing tests in `naming.rs` where `session_id` on `ModelRequest` changed to `{session_id}-title`.
 - [ ] Run `cargo test --lib agent::session::naming`
   - Verify all naming tests pass.
-- [ ] Write ADR `docs/decisions/0084-two-stage-async-session-titling-with-wire-isolation.md` and update `CONTEXT.md`.
+- [ ] Write ADR `docs/decisions/0086-two-stage-async-session-titling-with-wire-isolation.md` and update `CONTEXT.md`.
 - [ ] Run full project validation:
   - `cargo test` from `src-tauri/`
   - `cargo clippy --all-targets` from `src-tauri/`
@@ -288,7 +288,7 @@ Also update ADR 0037 / `CONTEXT.md` to document the two-stage lifecycle and `{id
 - [ ] Reaching 5 interactions triggers re-titling with multi-turn dialogue and advances `title_stage` to 2.
 - [ ] Turns after stage 2 do not invoke the provider.
 - [ ] Resuming a session with `title_stage == 2` never triggers titling.
-- [ ] ADR 0084 is written and `CONTEXT.md` is updated.
+- [ ] ADR 0086 is written and `CONTEXT.md` is updated.
 - [ ] `cargo test` is completely green.
 - [ ] `cargo clippy --all-targets` reports 0 warnings.
 - [ ] `pnpm test` and `pnpm build` are green.
