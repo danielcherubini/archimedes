@@ -8,6 +8,7 @@ use super::emit::TurnAccumulator;
 use super::AgentLoop;
 use super::CompactionRan;
 use super::CompactionTrigger;
+use crate::agent::events::CompactionReason;
 use crate::agent::events::RpcEvent;
 use crate::agent::harness::provider::openai::content_is_the_sanitise_placeholder;
 use crate::agent::harness::provider::{
@@ -100,7 +101,7 @@ impl AgentLoop {
         let due = trigger.is_some() || self.compactor.should_compact();
         if due {
             let t = trigger.unwrap_or(CompactionTrigger {
-                reason: "threshold",
+                reason: CompactionReason::Threshold,
                 will_retry: false,
             });
             let ran = self
@@ -119,7 +120,7 @@ impl AgentLoop {
             // re-issued. Settling here was the bug: it left the user watching
             // the indicator clear and typing "continue", the symptom ADR 0045
             // exists to end.
-            if t.reason == "overflow" && ran == CompactionRan::Skipped {
+            if t.reason == CompactionReason::Overflow && ran == CompactionRan::Skipped {
                 self.settle_error(std::mem::take(turn_tool_results));
                 return TurnFlow::Return;
             }
@@ -317,7 +318,7 @@ impl AgentLoop {
                 }
                 self.compactor.turn_abandoned(&self.messages);
                 self.force_compact = Some(CompactionTrigger {
-                    reason: "overflow",
+                    reason: CompactionReason::Overflow,
                     will_retry: true,
                 });
                 return TurnFlow::Continue;

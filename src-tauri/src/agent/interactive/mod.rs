@@ -2175,4 +2175,342 @@ mod tests {
             "the pending_sudo map is empty after the completion (no leaked dead-oneshot)"
         );
     }
+
+    // ---------------------------------------------------------------------
+    // (Finding 5) The `details` wire vocabulary — PRODUCER side.
+    //
+    // `details` is a VALUE vocabulary inside one frame (not an event *name*),
+    // which `src/lib/ipc/events.ts` (:21-31) explicitly endorses pinning by
+    // tests on each side. This is the Rust half; the TS half is task07b's
+    // `src/lib/toolDetailsRegistry.test.ts`. BOTH halves agree on ONE list —
+    // the frozen 34-key producer literal below, copied VERBATIM from
+    // task07b's plan section "The frozen producer list" (re-derived from the
+    // tree ONCE at HEAD 29b16df, vet round 2; re-verified against this tree at
+    // HEAD 1483d94 by the harness-loop grounding, indexed-assignment emission
+    // included). DO NOT re-derive it: a new emitter is a live wire change to
+    // report, never a silent edit of this constant.
+    // ---------------------------------------------------------------------
+
+    // THE details wire vocabulary — producer side. 34 keys. FROZEN in
+    // task07b's plan §"The frozen producer list" (re-derived from the tree
+    // ONCE at HEAD 29b16df, vet round 2); re-verified against this tree at
+    // HEAD 1483d94 by the harness-loop grounding (indexed-assignment
+    // emission included: web/tools.rs:314,317 add `renderer`/`rendererNote`
+    // post-build). Copy VERBATIM — drift between this Rust copy and the TS
+    // registry's PRODUCER_KEYS is the guard's own first test subject.
+    const PRODUCER_KEYS: [&str; 34] = [
+        "bytes",
+        "cancelled",
+        "command",
+        "customInput",
+        "description",
+        "diff",
+        "dir",
+        "entries",
+        "error",
+        "exitCode",
+        "extractor",
+        "lines",
+        "matches",
+        "occurrences",
+        "operation",
+        "path",
+        "provider",
+        "reason",
+        "renderer",
+        "rendererNote",
+        "responseId",
+        "resultCount",
+        "results",
+        "scope",
+        "skill",
+        "skills",
+        "status",
+        "stderr",
+        "stdout",
+        "title",
+        "todos",
+        "truncated",
+        "url",
+        "wordCount",
+    ];
+
+    /// One producer `details` shape: `(shape name, the details object,
+    /// whether the producing `ToolResult` is a failure)`.
+    ///
+    /// One fixture per shape GROUP from the frozen register — the shapes the
+    /// 39 production emission sites emit (`details: Some(json!({...}))` and
+    /// the `ok_text(.., Some(json!(..)))` second arg, across `web/tools.rs`,
+    /// `interactive/mod.rs`, `harness/ask.rs`, `tools/exec/bash.rs`,
+    /// `tools/exec/fs_tools.rs`, `tools/exec/search.rs`, `tools/exec/skills.rs`).
+    /// Each fixture is the WIRE shape, not an invented one: the sudo arms carry
+    /// `exitCode: null` on the never-ran paths (ADR 0080's amendment — never a
+    /// fabricated `-1`), and `renderer`/`rendererNote` are the OPTIONAL keys
+    /// `web/tools.rs` adds by indexed assignment only when a renderer was used.
+    fn producer_details_fixtures() -> Vec<(&'static str, Value, bool)> {
+        vec![
+            // The single-key failure shape (`web/tools.rs`'s seven error arms).
+            ("error", json!({ "error": "boom" }), true),
+            // The todo shapes (`interactive/mod.rs`'s todo_apply arms).
+            (
+                "todo read",
+                json!({ "operation": "read", "todos": [] }),
+                false,
+            ),
+            (
+                "todo write failure",
+                json!({
+                    "operation": "write",
+                    "todos": [{ "content": "a", "status": "pending" }],
+                    "error": "todoList required",
+                }),
+                true,
+            ),
+            // The skills shapes (`tools/exec/skills.rs`).
+            ("skill list", json!({ "skills": 2 }), false),
+            (
+                "skill dir",
+                json!({ "skill": "tester", "scope": "user", "dir": "/tmp/s" }),
+                false,
+            ),
+            (
+                "skill file",
+                json!({ "skill": "tester", "path": "SKILL.md" }),
+                false,
+            ),
+            // The file shapes (`tools/exec/fs_tools.rs`).
+            (
+                "read text",
+                json!({ "path": "/tmp/a.rs", "lines": 12 }),
+                false,
+            ),
+            (
+                "read image",
+                json!({ "path": "/tmp/a.png", "bytes": 2048 }),
+                false,
+            ),
+            (
+                "edit",
+                json!({
+                    "path": "/tmp/a.rs",
+                    "occurrences": 1,
+                    "diff": "--- a\n+++ b\n",
+                }),
+                false,
+            ),
+            ("ls", json!({ "entries": 3 }), false),
+            // The search shapes (`tools/exec/search.rs`).
+            (
+                "find / grep",
+                json!({ "matches": 40, "truncated": true }),
+                false,
+            ),
+            // The bash shape (`tools/exec/bash.rs`).
+            (
+                "bash",
+                json!({ "exitCode": 0, "truncated": false, "cancelled": false }),
+                false,
+            ),
+            // The sudo shapes (`interactive/mod.rs`'s eight sudo_exec arms):
+            // the ran arm (no `error`) and the failed arm.
+            (
+                "sudo ran",
+                json!({
+                    "command": "apt update",
+                    "reason": "install deps",
+                    "exitCode": 0,
+                    "stdout": "ok",
+                    "stderr": "",
+                }),
+                false,
+            ),
+            (
+                "sudo rejected (never ran: exitCode is null, not -1)",
+                json!({
+                    "command": "  ",
+                    "reason": "r",
+                    "exitCode": Value::Null,
+                    "stdout": "",
+                    "stderr": "",
+                    "error": "empty command",
+                }),
+                true,
+            ),
+            // The web shapes (`web/tools.rs`).
+            (
+                "web_search",
+                json!({
+                    "responseId": "r1",
+                    "provider": "duckduckgo",
+                    "resultCount": 1,
+                    "results": [{ "title": "t", "url": "u" }],
+                }),
+                false,
+            ),
+            (
+                "fetch_content (renderer keys present — the indexed-assignment pair)",
+                json!({
+                    "responseId": "r2",
+                    "url": "https://example.com",
+                    "title": "Example",
+                    "wordCount": 100,
+                    "status": 200,
+                    "extractor": "readable",
+                    "truncated": false,
+                    "renderer": "webview",
+                    "rendererNote": "note",
+                }),
+                false,
+            ),
+            (
+                "get_search_content matches",
+                json!({ "responseId": "r3", "matches": [] }),
+                false,
+            ),
+            (
+                "get_search_content cached",
+                json!({ "responseId": "r4" }),
+                false,
+            ),
+            // The ask shape (`harness/ask.rs`) — the two keys the old 32-key
+            // list missed, AND the `results` spanning key.
+            (
+                "ask",
+                json!({
+                    "results": [{ "question": "q", "selectedOptions": [] }],
+                    "customInput": Value::Null,
+                    "description": Value::Null,
+                }),
+                false,
+            ),
+        ]
+    }
+
+    /// (Finding 5 (b)) Every producer `details` shape round-trips through
+    /// [`tool_result_response_value`] UNCHANGED — byte-identical `Value`
+    /// equality — and the envelope's two documented `isError` behaviours hold
+    /// (a success omits it, a failure carries it). This is the gap the
+    /// pre-existing todo/sudo/ask round-trip pins never covered: the WEB and
+    /// exec shapes had no interactive-module round-trip at all.
+    #[test]
+    fn details_producer_shapes_round_trip_through_tool_result_response_value() {
+        let fixtures = producer_details_fixtures();
+        assert!(
+            !fixtures.is_empty(),
+            "the fixture collection is non-empty (the vacuity guard — a collapsed \
+             list must fail, not pass silently)"
+        );
+
+        for (name, details, is_error) in &fixtures {
+            let result = ToolResult {
+                content: vec![ContentBlock::Text {
+                    text: format!("the `{name}` shape"),
+                }],
+                details: Some(details.clone()),
+                is_error: *is_error,
+            };
+            let envelope = tool_result_response_value(&result);
+
+            // The `details` value survives VERBATIM (no key renamed, dropped,
+            // added, or re-cased on the way through the envelope).
+            assert_eq!(
+                &envelope["details"], details,
+                "the `{name}` details shape round-trips byte-identically through \
+                 tool_result_response_value"
+            );
+
+            // The envelope's documented `isError` behaviour.
+            if *is_error {
+                assert_eq!(
+                    envelope["isError"],
+                    Value::Bool(true),
+                    "a failure carries `isError` (`{name}`)"
+                );
+            } else {
+                assert!(
+                    envelope.get("isError").is_none(),
+                    "a success OMITS `isError` entirely (`{name}`) — not a false, \
+                     not a null"
+                );
+            }
+
+            // The `content` key is always there (the envelope's own shape pin).
+            assert!(
+                envelope["content"].is_array(),
+                "the envelope carries the `content` array (`{name}`)"
+            );
+        }
+    }
+
+    /// (Finding 5 (c)) The fixture union's key set EQUALS the frozen 34-key
+    /// producer list — set-equality BOTH ways, so a producer key with no
+    /// reader-side fixture and a fixture key that is not on the frozen list
+    /// both fail the same test. Plus the repo-census vacuity guards.
+    #[test]
+    fn details_producer_key_union_equals_the_frozen_list() {
+        use std::collections::BTreeSet;
+
+        // Vacuity guard 1: the frozen list itself is non-empty and is the
+        // declared width (a collapsed/edited-down array reddens here, not
+        // silently).
+        assert!(
+            !PRODUCER_KEYS.is_empty(),
+            "PRODUCER_KEYS is non-empty (the census vacuity guard)"
+        );
+        assert_eq!(
+            PRODUCER_KEYS.len(),
+            34,
+            "the frozen producer list is the declared 34 keys — a member added or \
+             removed here is a WIRE change to report, not a list edit"
+        );
+        let frozen: BTreeSet<&str> = PRODUCER_KEYS.into_iter().collect();
+        assert_eq!(
+            frozen.len(),
+            PRODUCER_KEYS.len(),
+            "the frozen list carries no duplicate key"
+        );
+
+        let fixtures = producer_details_fixtures();
+        assert!(!fixtures.is_empty(), "the fixture groups are non-empty");
+
+        // The union of every fixture's keys.
+        let mut union: BTreeSet<&str> = BTreeSet::new();
+        for (name, details, _) in &fixtures {
+            let obj = details
+                .as_object()
+                .unwrap_or_else(|| panic!("the `{name}` fixture is a details OBJECT"));
+            assert!(
+                !obj.is_empty(),
+                "the `{name}` fixture carries at least one key"
+            );
+            for key in obj.keys() {
+                union.insert(key.as_str());
+            }
+        }
+
+        // Set-equality BOTH ways (the finding's (c): a key on one side and not
+        // the other is drift between the two halves' copies of the agreement).
+        let missing_from_fixtures: Vec<&&str> =
+            frozen.iter().filter(|k| !union.contains(*k)).collect();
+        let not_on_the_frozen_list: Vec<&&str> =
+            union.iter().filter(|k| !frozen.contains(*k)).collect();
+        assert!(
+            missing_from_fixtures.is_empty(),
+            "every frozen PRODUCER_KEYS key appears in >= 1 fixture group — these \
+             do not: {missing_from_fixtures:?} (the cross-coverage guard against \
+             silent list <-> fixture drift)"
+        );
+        assert!(
+            not_on_the_frozen_list.is_empty(),
+            "no fixture emits a key that is NOT on the frozen producer list — \
+             these are unregistered: {not_on_the_frozen_list:?} (a new emitter is a \
+             live wire change to REPORT, never a silent edit of PRODUCER_KEYS)"
+        );
+        assert_eq!(
+            union.len(),
+            34,
+            "the fixture union is exactly the 34-key producer vocabulary, got {}",
+            union.len()
+        );
+    }
 }

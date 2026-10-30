@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::super::*;
 use super::support::*;
+use crate::agent::events::CompactionReason;
 use crate::agent::events::RpcEvent;
 use crate::agent::harness::provider::{
     ChatMessage, ChatRole, FinishReason, MessageContent, ProviderError, ProviderEvent, ToolCall,
@@ -43,14 +44,19 @@ async fn a_failed_summary_does_not_rewrite_the_transcript() {
         })
         .collect();
     loop_.force_compact = Some(CompactionTrigger {
-        reason: "threshold",
+        reason: CompactionReason::Threshold,
         will_retry: false,
     });
     // The failed compaction reports `Failed` — the outcome the overflow caller
     // now reads differently from `Skipped` (issue #90).
     assert_eq!(
         loop_
-            .run_compaction("threshold", false, None, &CancellationToken::new())
+            .run_compaction(
+                CompactionReason::Threshold,
+                false,
+                None,
+                &CancellationToken::new()
+            )
             .await,
         CompactionRan::Failed,
         "a failed compaction rewrote nothing"
@@ -120,7 +126,12 @@ async fn a_skipped_compaction_reports_no_shrink() {
     let len_before = loop_.messages.len();
     assert_eq!(
         loop_
-            .run_compaction("threshold", false, None, &CancellationToken::new())
+            .run_compaction(
+                CompactionReason::Threshold,
+                false,
+                None,
+                &CancellationToken::new()
+            )
             .await,
         CompactionRan::Skipped,
         "a skipped compaction shrank nothing"
@@ -222,16 +233,16 @@ async fn a_context_overflow_error_compacts_and_retries_the_turn() {
 
     // `reason` is the UI contract (ADR 0045) and `will_retry` is the loop's
     // promise that the turn continues on the other side of the indicator.
-    let start: Vec<String> = events
+    let start: Vec<CompactionReason> = events
         .iter()
         .filter_map(|e| match e {
-            RpcEvent::compaction_start { reason } => Some(reason.clone()),
+            RpcEvent::compaction_start { reason } => Some(*reason),
             _ => None,
         })
         .collect();
     assert_eq!(
         start,
-        vec!["overflow".to_string()],
+        vec![CompactionReason::Overflow],
         "exactly one compaction, for the overflow, got {kinds:?}"
     );
     let end = events.iter().find_map(|e| match e {
@@ -241,12 +252,12 @@ async fn a_context_overflow_error_compacts_and_retries_the_turn() {
             error_message,
             aborted,
             ..
-        } => Some((reason.clone(), *will_retry, *aborted, error_message.clone())),
+        } => Some((*reason, *will_retry, *aborted, error_message.clone())),
         _ => None,
     });
     assert_eq!(
         end,
-        Some(("overflow".to_string(), true, false, None)),
+        Some((CompactionReason::Overflow, true, false, None)),
         "the end frame repeats the reason and the retry promise; a compaction that SHRANK has no actionable error"
     );
 
@@ -273,7 +284,7 @@ async fn a_context_overflow_error_compacts_and_retries_the_turn() {
 }
 
 /// The SAME recovery for a mid-stream overflow — an SSE `error` event INSIDE
-/// the stream, which is what `map_anthropic_error` produces (a provider can
+/// the stream, which is what `parse_error_chunk` produces (a provider can
 /// accept the request and then fail it once it has read the prompt). The
 /// intercept sits where `mid_stream_error` is HANDLED (after the consumption
 /// loop), not where it is captured: a `continue` at the capture site would
@@ -315,7 +326,7 @@ async fn a_mid_stream_context_overflow_compacts_and_retries_the_turn() {
     assert!(
         events.iter().any(|e| matches!(
             e,
-            RpcEvent::compaction_start { reason } if reason == "overflow"
+            RpcEvent::compaction_start { reason } if reason == &CompactionReason::Overflow
         )),
         "the mid-stream overflow compacted the session, got {kinds:?}"
     );
@@ -326,7 +337,7 @@ async fn a_mid_stream_context_overflow_compacts_and_retries_the_turn() {
                 reason,
                 will_retry: true,
                 ..
-            }) if reason == "overflow"
+            }) if reason == &CompactionReason::Overflow
         ),
         "the end frame carries reason: overflow + will_retry: true, got {kinds:?}"
     );
@@ -459,7 +470,7 @@ async fn a_mid_stream_overflow_retracts_the_partial_reply() {
     assert!(
         events.iter().any(|e| matches!(
             e,
-            RpcEvent::compaction_start { reason } if reason == "overflow"
+            RpcEvent::compaction_start { reason } if reason == &CompactionReason::Overflow
         )),
         "the overflow recovery still fires its own compaction, got {kinds:?}"
     );
@@ -778,7 +789,7 @@ async fn a_mid_stream_overflow_closes_the_abandoned_tool_call() {
     assert!(
         events.iter().any(|e| matches!(
             e,
-            RpcEvent::compaction_start { reason } if reason == "overflow"
+            RpcEvent::compaction_start { reason } if reason == &CompactionReason::Overflow
         )),
         "the recovery still compacts, got {kinds:?}"
     );
@@ -890,16 +901,19 @@ async fn a_later_overflow_in_the_same_turn_gets_its_own_compact_and_retry() {
     let events =
         collect_events_until(&mut events_rx, |e| matches!(e, RpcEvent::agent_settled)).await;
     let kinds: Vec<String> = events.iter().map(|e| e.kind().to_string()).collect();
-    let starts: Vec<String> = events
+    let starts: Vec<CompactionReason> = events
         .iter()
         .filter_map(|e| match e {
-            RpcEvent::compaction_start { reason } => Some(reason.clone()),
+            RpcEvent::compaction_start { reason } => Some(*reason),
             _ => None,
         })
         .collect();
     assert_eq!(
         starts,
-        vec!["overflow".to_string(), "overflow".to_string()],
+        vec![
+            CompactionReason::Overflow,
+            CompactionReason::Overflow
+        ],
         "TWO episodes, TWO recoveries — the first successful model call reset the guard, got {kinds:?}"
     );
     assert_eq!(
@@ -971,7 +985,7 @@ async fn a_second_overflow_after_a_failed_recovery_gives_up_without_a_second_req
     else {
         unreachable!()
     };
-    assert_eq!(reason, "overflow");
+    assert_eq!(reason, &CompactionReason::Overflow);
     // (issue #90 item 1) `will_retry` describes what the loop is about to DO,
     // not why the compaction was triggered. The loop settles this turn — no
     // second request is spent — so the flag is `false`: pre-fix it echoed the
@@ -1075,7 +1089,7 @@ async fn a_stale_overflow_trigger_does_not_hijack_the_next_turn() {
     // The leak, spelled out: the PREVIOUS turn was cancelled after its
     // overflow queued this trigger, so it is still armed on the loop.
     loop_.force_compact = Some(CompactionTrigger {
-        reason: "overflow",
+        reason: CompactionReason::Overflow,
         will_retry: true,
     });
     loop_.handle_prompt(&text_prompt("hello")).await;
@@ -1155,7 +1169,7 @@ async fn a_compact_control_command_compacts_when_idle() {
     assert!(
         events.iter().all(|e| match e {
             RpcEvent::compaction_start { reason } | RpcEvent::compaction_end { reason, .. } =>
-                reason == "manual",
+                reason == &CompactionReason::Manual,
             _ => true,
         }),
         "a hand-triggered compaction carries the `manual` reason (ADR 0045), got {kinds:?}"
@@ -1245,7 +1259,7 @@ async fn abort_cancels_an_idle_compaction() {
                 aborted: true,
                 reason,
                 ..
-            } if reason == "manual"
+            } if reason == &CompactionReason::Manual
         ),
         "the compaction ended ABORTED with the manual reason, got {end:?}"
     );

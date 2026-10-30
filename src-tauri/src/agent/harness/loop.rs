@@ -29,6 +29,7 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, watch, Mutex as TokioMutex};
 use tokio_util::sync::CancellationToken;
 
+use crate::agent::events::CompactionReason;
 use crate::agent::events::EventSink;
 use crate::agent::events::RpcEvent;
 use crate::agent::harness::catalog::{Model, ModelCatalog};
@@ -86,9 +87,10 @@ pub enum ControlCmd {
 }
 
 /// A compaction the loop must run before its next model call, and what to
-/// report it as (`reason` is a UI contract — ADR 0045; `will_retry` is true
-/// only for overflow recovery, where the turn continues on the other side of
-/// the indicator with the SAME model call).
+/// report it as (`reason` is a UI contract — ADR 0045, and [`CompactionReason`]
+/// is its vocabulary; `will_retry` is true only for overflow recovery, where
+/// the turn continues on the other side of the indicator with the SAME model
+/// call).
 ///
 /// This replaced the `force_compact: bool` flag, which could carry the
 /// instruction "compact" but not the reason the mid-turn caller needed to
@@ -96,7 +98,7 @@ pub enum ControlCmd {
 /// wire (and the flag never had a production caller until the overflow).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CompactionTrigger {
-    pub reason: &'static str,
+    pub reason: CompactionReason,
     pub will_retry: bool,
 }
 
@@ -672,7 +674,7 @@ impl AgentLoop {
                                 fresh.clone();
                             fresh
                         };
-                        self.run_compaction("manual", false, instructions, &turn)
+                        self.run_compaction(CompactionReason::Manual, false, instructions, &turn)
                             .await;
                     }
                     None => break,
@@ -814,7 +816,7 @@ impl AgentLoop {
                     state.overflow_recovered = true;
                     self.compactor.turn_abandoned(&self.messages);
                     self.force_compact = Some(CompactionTrigger {
-                        reason: "overflow",
+                        reason: CompactionReason::Overflow,
                         will_retry: true,
                     });
                     continue;
@@ -936,13 +938,15 @@ impl AgentLoop {
     /// goes through `emit_cost_update`, so a priced summary call reaches the
     /// cost channel like any other priced call, and a `None` emits nothing).
     ///
-    /// `reason` is the TRIGGER (`manual` for `/compact`, `threshold` for the
-    /// context-pressure check, `overflow` for a provider context-overflow
-    /// recovery) — it rides both events and the renderer's `compaction_update`
-    /// state frame. `will_retry` is the event's "the turn continues on the
-    /// other side of this compaction" flag. `instructions` are the user's
-    /// extra summary instructions (`/compact <args>`); the automatic paths
-    /// (threshold / overflow) pass `None`.
+    /// `reason` is the TRIGGER ([`CompactionReason`] — `Manual` for `/compact`,
+    /// `Threshold` for the context-pressure check, `Overflow` for a provider
+    /// context-overflow recovery; the wire spellings `"manual"` / `"threshold"`
+    /// / `"overflow"` are the enum's serde contract) — it rides both events and
+    /// the renderer's `compaction_update` state frame. `will_retry` is the
+    /// event's "the turn continues on the other side of this compaction" flag.
+    /// `instructions` are the user's extra summary instructions
+    /// (`/compact <args>`); the automatic paths (threshold / overflow) pass
+    /// `None`.
     ///
     /// Returns [`CompactionRan`] — the three-way outcome, because a caller
     /// recovering from an overflow must NOT read "shrunk nothing" as one fact:
@@ -950,13 +954,13 @@ impl AgentLoop {
     /// is doomed), `Failed` means the SUMMARY call errored (which says nothing
     /// about the turn's own request, so the turn is re-issued).
     ///
-    /// For `reason: "overflow"` the SAME `compaction_end` also carries an
-    /// ACTIONABLE `error_message` when the transcript did not shrink (ADR 0045):
-    /// the one event the user sees must say what to do (a larger window, or that
-    /// the summary call failed and the transcript is unchanged). It is composed
-    /// HERE rather than by the caller because this is the only place that emits
-    /// `compaction_end` — a second one would double the transcript line and the
-    /// state frame.
+    /// For [`CompactionReason::Overflow`] the SAME `compaction_end` also carries
+    /// an ACTIONABLE `error_message` when the transcript did not shrink (ADR
+    /// 0045): the one event the user sees must say what to do (a larger window,
+    /// or that the summary call failed and the transcript is unchanged). It is
+    /// composed HERE rather than by the caller because this is the only place
+    /// that emits `compaction_end` — a second one would double the transcript
+    /// line and the state frame.
     ///
     /// `will_retry` is reconciled with the outcome HERE for the same reason: it
     /// is a promise about what the loop does next, and the only party that
@@ -964,14 +968,12 @@ impl AgentLoop {
     /// `Skipped` settles the turn, so it must not promise a retry.
     async fn run_compaction(
         &mut self,
-        reason: &str,
+        reason: CompactionReason,
         will_retry: bool,
         instructions: Option<String>,
         turn: &CancellationToken,
     ) -> CompactionRan {
-        self.emit(RpcEvent::compaction_start {
-            reason: reason.to_string(),
-        });
+        self.emit(RpcEvent::compaction_start { reason });
         let mut aborted = false;
         let mut error_message: Option<String> = None;
         // The compaction's own output (pi's `CompactionResult` shape), shown on
@@ -979,7 +981,7 @@ impl AgentLoop {
         let mut result: Option<Value> = None;
         // The overflow recovery's outcome needs a DIFFERENT message from the
         // transient ones (below): only the user can act on a window too small.
-        let overflow = reason == "overflow";
+        let overflow = reason == CompactionReason::Overflow;
         // What actually happened (the return value — see above).
         let mut ran = CompactionRan::Skipped;
         // The keep-recent budget comes from the COMPACTOR (its config copy +
@@ -1066,7 +1068,7 @@ impl AgentLoop {
         // straight through to a dead turn.
         let will_retry = will_retry && !(overflow && ran == CompactionRan::Skipped);
         self.emit(RpcEvent::compaction_end {
-            reason: reason.to_string(),
+            reason,
             result,
             aborted,
             will_retry,
