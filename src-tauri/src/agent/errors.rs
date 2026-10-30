@@ -317,6 +317,84 @@ impl From<ClipboardError> for tauri::ipc::InvokeError {
     }
 }
 
+/// Errors surfaced by the external-open command (`external_open`).
+///
+/// A NEWTYPE over [`crate::open`]`::Refusal`'s frozen kebab refusal codes
+/// (`empty`, `denied-scheme:{scheme}`, `bad-file-url:{href}`,
+/// `relative-without-cwd`) plus the opener plugin's `os-error:{e}`. `crate::open`
+/// is NOT touched by this migration — its code table and its own tests stand —
+/// and `message` IS the code VERBATIM, because the `externalOpen` wrapper logs
+/// exactly that string and a bug report is read from it.
+///
+/// `kind` is DERIVED from the code by [`OpenError::kind_of`] (a pure fn pinned
+/// by its own test), so the envelope gains the machine discriminator without
+/// editing the sentence by a single character.
+///
+/// Carries NO serde derive (ADR 0063's load-bearing half): the only route to the
+/// wire is the hand-written `From` below.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum OpenError {
+    /// `message` = the refusal code verbatim (`crate::open`'s vocabulary:
+    /// `empty` / `denied-scheme:{scheme}` / `relative-without-cwd` / `os-error:{e}`).
+    #[error("{0}")]
+    Code(String),
+}
+
+impl OpenError {
+    /// The `kind` for a refusal code: the code's own vocabulary, snake_cased.
+    ///
+    /// A total function over `&str` (the code space is open — the `os-error:`
+    /// and `denied-scheme:` payloads are free text), so the fallback arm is the
+    /// plan's named `other`, and `bad-file-url:{href}` — the fourth
+    /// `crate::open` refusal, which no command-level test reaches — deliberately
+    /// lands there rather than growing the frozen vocabulary. Frozen by
+    /// `open_error_kind_of_maps_the_refusal_codes`; the frontend mirror lands
+    /// `export type OpenErrorKind = "invalid_href" | "denied_scheme" |
+    /// "relative_without_cwd" | "os_error" | "other";`.
+    pub fn kind_of(code: &str) -> &'static str {
+        match code {
+            "empty" => "invalid_href",
+            s if s.starts_with("denied-scheme:") => "denied_scheme",
+            "relative-without-cwd" => "relative_without_cwd",
+            s if s.starts_with("os-error:") => "os_error",
+            // Includes `bad-file-url:{href}` (the fourth `crate::open` refusal,
+            // unreachable from this command's own tests) and any code a future
+            // policy adds — the sentence still reaches the user unchanged.
+            _ => "other",
+        }
+    }
+
+    /// The serialized `kind` discriminator (the wire contract — ADR 0063).
+    pub fn kind(&self) -> &'static str {
+        // Exhaustive on purpose: no catch-all arm, so a second variant has to
+        // be named here AND in the `From` match below (ADR 0063).
+        match self {
+            OpenError::Code(code) => Self::kind_of(code),
+        }
+    }
+}
+
+impl From<OpenError> for tauri::ipc::InvokeError {
+    fn from(err: OpenError) -> Self {
+        // Exhaustive on purpose: no catch-all arm — the second naming site ADR
+        // 0063 requires of every new variant.
+        let extra: Option<(&'static str, String)> = match &err {
+            // The refusal code IS the whole `message`, so no extra key — the
+            // `SessionError::Io` precedent.
+            OpenError::Code(_) => None,
+        };
+
+        let mut body = serde_json::Map::new();
+        body.insert("kind".into(), serde_json::Value::String(err.kind().into()));
+        body.insert("message".into(), serde_json::Value::String(err.to_string()));
+        if let Some((key, value)) = extra {
+            body.insert(key.into(), serde_json::Value::String(value));
+        }
+
+        tauri::ipc::InvokeError(serde_json::Value::Object(body))
+    }
+}
+
 /// Errors surfaced by file commands (`read_file_bytes`).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FilesError {
@@ -525,7 +603,7 @@ impl From<AgentsError> for tauri::ipc::InvokeError {
 
 #[cfg(test)]
 mod tests {
-    use super::{AttentionError, ClipboardError, HistoryError, SessionError};
+    use super::{AttentionError, ClipboardError, HistoryError, OpenError, SessionError};
 
     /// One wire-contract case: the error, its expected `kind`, and the
     /// expected extra field (key + value). A type alias because clippy's
@@ -1006,5 +1084,119 @@ mod tests {
         for (expected, err) in frozen {
             assert_eq!(&err.kind(), expected, "frozen spelling for {err:?}");
         }
+    }
+
+    /// The mirror pin for `OpenError`: object + `kind` + non-empty `message` ==
+    /// `Display`, and the `message` is the refusal code VERBATIM (the whole
+    /// point: the envelope adds `kind` without editing the code by a character).
+    #[test]
+    fn every_open_error_variant_reaches_the_wire_with_a_kind_and_a_nonempty_message() {
+        let cases: &[(&str, &str, OpenError)] = &[
+            ("invalid_href", "empty", OpenError::Code("empty".into())),
+            (
+                "denied_scheme",
+                "denied-scheme:javascript",
+                OpenError::Code("denied-scheme:javascript".into()),
+            ),
+            (
+                "relative_without_cwd",
+                "relative-without-cwd",
+                OpenError::Code("relative-without-cwd".into()),
+            ),
+            (
+                "os_error",
+                "os-error:xdg-open not found",
+                OpenError::Code("os-error:xdg-open not found".into()),
+            ),
+            (
+                "other",
+                "some-future-code",
+                OpenError::Code("some-future-code".into()),
+            ),
+        ];
+
+        for (expected_kind, expected_message, err) in cases {
+            let wire = tauri::ipc::InvokeError::from(err.clone()).0;
+            assert!(
+                wire.is_object(),
+                "{err:?} must reach the wire as an object: {wire}"
+            );
+            assert_eq!(
+                wire["kind"].as_str(),
+                Some(*expected_kind),
+                "kind for {err:?}"
+            );
+            let message = wire["message"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{} must carry a string `message`: {wire}", err));
+            assert!(
+                !message.is_empty(),
+                "`message` must be non-empty for {err:?}"
+            );
+            assert_eq!(
+                message,
+                err.to_string(),
+                "message must be the Display of {err:?}"
+            );
+            assert_eq!(
+                message, *expected_message,
+                "the refusal code reaches the wire verbatim for {err:?}"
+            );
+            assert_eq!(
+                wire.as_object().map(|m| m.len()),
+                Some(2),
+                "{err:?} contributes no field beyond kind + message: {wire}"
+            );
+        }
+    }
+
+    /// `kind_of`'s ENTIRE code table, frozen — including the `other` fallback
+    /// that catches a code the policy has not grown yet (and `bad-file-url:…`,
+    /// `crate::open`'s fourth refusal, which no command-level test reaches).
+    /// A code that silently changed kind, or a code whose sentence a reword
+    /// would move between arms, fails HERE.
+    #[test]
+    fn open_error_kind_of_maps_the_refusal_codes() {
+        let frozen: &[(&str, &str)] = &[
+            ("empty", "invalid_href"),
+            ("denied-scheme:javascript", "denied_scheme"),
+            ("denied-scheme:data", "denied_scheme"),
+            ("relative-without-cwd", "relative_without_cwd"),
+            ("os-error:no such file or directory", "os_error"),
+            // The documented fallback: an unknown code keeps its sentence and
+            // answers `other`; `bad-file-url:{href}` is in this arm on purpose
+            // (the frozen vocabulary is five values, not six).
+            ("bad-file-url:file://otherhost/x", "other"),
+            ("", "other"),
+            ("anything-else", "other"),
+        ];
+
+        for (code, expected_kind) in frozen {
+            assert_eq!(
+                OpenError::kind_of(code),
+                *expected_kind,
+                "kind_of({code:?}) is frozen"
+            );
+            assert_eq!(
+                OpenError::Code((*code).into()).kind(),
+                *expected_kind,
+                "OpenError::Code({code:?}).kind() agrees with kind_of"
+            );
+        }
+
+        // The vocabulary itself, frozen for the frontend mirror.
+        let spelled: Vec<&'static str> = frozen.iter().map(|(_, k)| *k).collect();
+        let unique: std::collections::BTreeSet<&str> = spelled.iter().copied().collect();
+        assert_eq!(
+            unique.into_iter().collect::<Vec<_>>(),
+            vec![
+                "denied_scheme",
+                "invalid_href",
+                "os_error",
+                "other",
+                "relative_without_cwd"
+            ],
+            "the OpenError `kind` vocabulary is exactly these five spellings"
+        );
     }
 }
