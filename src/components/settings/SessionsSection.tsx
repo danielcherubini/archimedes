@@ -30,14 +30,20 @@ function DetachedSessionRow({
   row,
   onReopen,
   onDelete,
+  recencyMap,
 }: {
   row: SessionInfo;
   onReopen: () => void;
   onDelete: () => void;
+  /** The boot recency map, selected ONCE at the section level and passed down.
+   *  Required: for a row whose transcript was never opened this boot it is the
+   *  only evidence there is, and the section's own rule (`recencyOf`, reached
+   *  through `relativeTimeFor`) is what reads it. */
+  recencyMap: Record<string, number>;
 }): ReactElement {
   const messages = useSessions((s) => s.messages[row.sessionId]);
   const title = titleFor(messages, basenameOfPath(row.cwd), row.title);
-  const time = relativeTimeFor(messages);
+  const time = relativeTimeFor(row.sessionId, messages, recencyMap);
   return (
     <SettingsDataRow>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
@@ -53,8 +59,9 @@ function DetachedSessionRow({
         {time !== null ? (
           <span className="text-ui-sm text-foreground-subtle">{time}</span>
         ) : (
-          // Empty slot — keeps the buttons aligned when no transcript was
-          // loaded this boot.
+          // Empty slot — keeps the buttons aligned when NEITHER side can prove
+          // recency: no transcript loaded this boot AND no boot-map stamp (the
+          // shape a Session that closed this boot is left in).
           <span className="size-4" />
         )}
         <Button
@@ -111,6 +118,14 @@ export default function SessionsSection({
   const historySessions = useSessions((s) => s.historySessions);
   const archivedSessions = useSessions((s) => s.archivedSessions);
   const messages = useSessions((s) => s.messages);
+  // The boot recency map — ONE subscription at the section level, passed down as
+  // a prop, so no row adds a subscription of its own. Safe under the streamed-
+  // slice rule: `sessionRecency` is a boot snapshot replaced whole by
+  // `setSessionRecency`, never a per-token slice (that hazard is `messages`, and
+  // a ROW still reads only its own transcript). Its identity changes only when
+  // `setSessionRecency` replaces the map whole, so an unrelated store write does
+  // not re-render this list off it.
+  const sessionRecency = useSessions((s) => s.sessionRecency);
   const deleteSession = useSessions((s) => s.deleteSession);
   const addSpace = useSessions((s) => s.addSpace);
   const openSession = useSessions((s) => s.openSession);
@@ -174,6 +189,7 @@ export default function SessionsSection({
             <DetachedSessionRow
               key={row.sessionId}
               row={row}
+              recencyMap={sessionRecency}
               onReopen={() => {
                 // `addSpace` inserts (or re-touches) the Space row and selects
                 // it; `openSession` then finds its owner and loads the

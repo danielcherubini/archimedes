@@ -13,7 +13,10 @@ import type { Message } from "./sessionTypes";
  * This is the successor of `sessionActivity.ts`'s `lastActivityOf` (which T04
  * deletes). It deliberately does NOT re-export that name, or any equivalent of
  * it: a call site must not be able to pick a side between two spellings of the
- * same walk. The transcript read below IS the move.
+ * same walk. The transcript read below IS the move. And it is the walk the
+ * DISPLAY takes too: `sessionTime.ts`'s `relativeTimeFor` delegates here for its
+ * number and only bucketizes it, so a row's label can never disagree with the
+ * number `sortByRecency` ordered it by.
  *
  * It imports no store (`sessionTitle.ts` / `sessionTypes.ts` are the
  * precedent — a `lib → store` edge is the cycle `sessionTypes.ts`'s header
