@@ -34,6 +34,42 @@ describe("MutedCaption (the quiet one-line caption, once)", () => {
     expect(screen.getByText("Enter submit · Esc cancel").tagName).toBe("P");
   });
 
+  it("renders a <div> when asked (the flex-container sites)", () => {
+    // The six container rows the fold cannot smuggle into a <span>: the agent
+    // rule rows, the two shadow-report rows and the subagent metrics row are
+    // BLOCKS whose `min-w-0` / `flex-wrap` / `truncate` behaviour depends on
+    // being a block-level box. A fold that turned them into spans would be a
+    // DOM change wearing a refactor's clothes — so the component offers `div`.
+    render(<MutedCaption as="div">edit *.md → allow</MutedCaption>);
+    expect(screen.getByText("edit *.md → allow").tagName).toBe("DIV");
+  });
+
+  it("forwards the attributes a DOM-identical fold needs (data-permission-rule, aria-hidden)", () => {
+    // The carry that makes the fold byte-identical rather than lossy:
+    //  - `data-permission-rule` is LOAD-BEARING — AgentsDialog.test.tsx's
+    //    `permissionLines()` reads `querySelectorAll("[data-permission-rule]")`,
+    //    so dropping it empties that helper and reddens the no-sort test;
+    //  - `aria-hidden` is the mention picker's prefix badge declaring itself
+    //    decorative (the row's text carries the announcement) — dropping it is
+    //    an a11y regression the fold must not smuggle in.
+    render(
+      <MutedCaption as="div" data-permission-rule="">
+        edit *.md → allow
+      </MutedCaption>,
+    );
+    const rule = screen.getByText("edit *.md → allow");
+    expect(rule.getAttribute("data-permission-rule")).toBe("");
+    // The pair still rides along on a row that brings its own attributes.
+    expect(classOf(rule)).toContain("text-ui-xs");
+
+    render(
+      <MutedCaption className="shrink-0" aria-hidden>
+        $
+      </MutedCaption>,
+    );
+    expect(screen.getByText("$").getAttribute("aria-hidden")).toBe("true");
+  });
+
   it("adds NO element of its own — the caption is the box, no wrapper", () => {
     const { container } = render(<MutedCaption>·</MutedCaption>);
     expect(container.children).toHaveLength(1);
