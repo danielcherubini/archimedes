@@ -85,7 +85,6 @@ const FINGERPRINT = "text-ui-xs text-foreground-subtlest";
  * counted for its code occurrence).
  */
 const BASELINE = [
-  "src/components/AgentsDialog.tsx",
   "src/components/MutedCaption.tsx",
   "src/components/SkillsDialog.tsx",
   "src/components/SubagentDelegatingCard.tsx",

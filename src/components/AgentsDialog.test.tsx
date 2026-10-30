@@ -826,7 +826,7 @@ describe("AgentsDialog", () => {
     // `user` winner, so wording keyed on the loser is false in shipped
     // configurations.
     expect(
-      screen.getByText("1 agent is hidden by a project agent with the same name"),
+      screen.getByText("1 agent is hidden by a space agent with the same name"),
     ).toBeTruthy();
   });
 
