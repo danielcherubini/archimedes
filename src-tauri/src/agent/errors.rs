@@ -7,6 +7,8 @@
 //! `Serialize` derive — is ADR 0063
 //! (`docs/decisions/0063-ipc-errors-carry-a-kind-and-a-message.md`).
 
+use crate::storage::DbError;
+
 /// Errors surfaced by the session layer.
 ///
 /// Carries NO serde derive, on purpose: the only route from here to the wire
@@ -102,6 +104,92 @@ impl From<SessionError> for tauri::ipc::InvokeError {
             SessionError::FolderMissing { path } => Some(("path", path.clone())),
             SessionError::InvalidPrompt { reason } => Some(("reason", reason.clone())),
             SessionError::SettleTimeout { detail } => Some(("detail", detail.clone())),
+        };
+
+        let mut body = serde_json::Map::new();
+        body.insert("kind".into(), serde_json::Value::String(err.kind().into()));
+        body.insert("message".into(), serde_json::Value::String(err.to_string()));
+        if let Some((key, value)) = extra {
+            body.insert(key.into(), serde_json::Value::String(value));
+        }
+
+        tauri::ipc::InvokeError(serde_json::Value::Object(body))
+    }
+}
+
+/// Errors surfaced by the history commands.
+///
+/// The five `DbError`-backed commands in `commands/history.rs`
+/// (`load_history`, `set_session_archived`, `delete_session`,
+/// `session_recency`, `reorder_sessions`). `list_sessions` is NOT one of them:
+/// it delegates to `SessionManager::list_sessions` and returns `SessionError`
+/// directly — the error type is chosen by the wire, not by the file (ADR 0063).
+///
+/// `From<DbError>` maps each `DbError` variant to its OWN kind, so "history
+/// won't load" can say whether SQLite, the disk or a JSON payload failed —
+/// the discrimination Finding 20 measured as lost when the commands flattened
+/// `DbError` to a `String`.
+///
+/// Carries NO serde derive, for `SessionError`'s reason (ADR 0063): the only
+/// route to the wire is the hand-written `From` below, so a payload the
+/// envelope cannot express is a compile error in this file, never a wrong
+/// sentence on the user's screen.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum HistoryError {
+    /// SQLite itself refused the statement or the transaction.
+    #[error("sqlite error: {0}")]
+    Sqlite(String),
+
+    /// The filesystem under the database failed.
+    #[error("io error: {0}")]
+    Io(String),
+
+    /// A stored JSON payload could not be decoded.
+    #[error("json error: {0}")]
+    Json(String),
+}
+
+impl HistoryError {
+    /// The serialized `kind` discriminator (the wire contract — ADR 0063).
+    /// Exhaustive: a new variant has to be named here AND in the `From` impl
+    /// below, which is the point.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            HistoryError::Sqlite(_) => "sqlite",
+            HistoryError::Io(_) => "io",
+            HistoryError::Json(_) => "json",
+        }
+    }
+}
+
+/// Each `DbError` variant keeps its own identity across the wire, and the
+/// `message` half is the inner error's `Display` — so the sentence the user
+/// reads is the one the flattened `String` carried before, byte-identical.
+impl From<DbError> for HistoryError {
+    fn from(e: DbError) -> Self {
+        match e {
+            DbError::Sqlite(e) => HistoryError::Sqlite(e.to_string()),
+            DbError::Io(e) => HistoryError::Io(e.to_string()),
+            DbError::Json(e) => HistoryError::Json(e.to_string()),
+        }
+    }
+}
+
+/// The IPC envelope: `{"kind", "message"}` — hand-built, no derive (ADR 0063).
+///
+/// No variant adds a field beyond those two: each newtype payload already IS
+/// the whole `message` (`"sqlite error: …"`), the `SessionError::Io` precedent.
+impl From<HistoryError> for tauri::ipc::InvokeError {
+    fn from(err: HistoryError) -> Self {
+        // Exhaustive on purpose: no catch-all arm, so a future variant is a
+        // compile error here rather than a runtime failure on screen. A variant
+        // that carries a field of its own has to name it here — the second of
+        // the two namings ADR 0063 requires of every new variant.
+        let extra: Option<(&'static str, String)> = match &err {
+            // The payload already IS the whole `message` ("sqlite error: …"),
+            // so no variant of this enum adds a key — the `SessionError::Io`
+            // precedent.
+            HistoryError::Sqlite(_) | HistoryError::Io(_) | HistoryError::Json(_) => None,
         };
 
         let mut body = serde_json::Map::new();
@@ -323,7 +411,7 @@ impl From<AgentsError> for tauri::ipc::InvokeError {
 
 #[cfg(test)]
 mod tests {
-    use super::SessionError;
+    use super::{HistoryError, SessionError};
 
     /// One wire-contract case: the error, its expected `kind`, and the
     /// expected extra field (key + value). A type alias because clippy's
@@ -520,5 +608,138 @@ mod tests {
         assert!(wire.is_object());
         assert_eq!(wire["kind"].as_str(), Some("discovery_failed"));
         assert_eq!(wire["message"].as_str(), Some(err.to_string().as_str()));
+    }
+
+    // -------------------------------------------------------------------
+    // HistoryError (Finding 20): the five `DbError`-backed history commands.
+    // -------------------------------------------------------------------
+
+    /// `From<DbError>` maps EACH `DbError` variant to its OWN `HistoryError`
+    /// kind — Finding 20's lost discrimination ("history won't load" must say
+    /// whether SQLite, the disk or a JSON payload failed). The `message` half is
+    /// the inner error's `Display`, so the sentence the user reads stays
+    /// byte-identical to the `.map_err(|e| e.to_string())` the commands did
+    /// before this enum existed.
+    #[test]
+    fn history_error_from_db_error_maps_each_variant_to_its_kind() {
+        use crate::storage::DbError;
+
+        let cases: Vec<(DbError, &str, String)> = vec![
+            (
+                DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows),
+                "sqlite",
+                "sqlite error: ".to_string(),
+            ),
+            (
+                DbError::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "permission denied",
+                )),
+                "io",
+                "io error: permission denied".to_string(),
+            ),
+            (
+                DbError::Json(
+                    serde_json::from_str::<serde_json::Value>("{")
+                        .expect_err("a lone brace is not JSON"),
+                ),
+                "json",
+                "json error: ".to_string(),
+            ),
+        ];
+
+        for (db_err, expected_kind, message_prefix) in cases {
+            let display = db_err.to_string();
+            let err = HistoryError::from(db_err);
+
+            assert_eq!(err.kind(), expected_kind, "kind for {err:?}");
+            assert!(
+                !err.to_string().is_empty(),
+                "`message` must be non-empty for {err:?}"
+            );
+            // The Display sentence is `DbError`'s own, character for character:
+            // the variant prefix plus the inner error's Display, which is what
+            // the commands flattened to a `String` before this enum existed.
+            assert_eq!(
+                err.to_string(),
+                display,
+                "the HistoryError sentence must be the DbError sentence verbatim"
+            );
+            assert!(
+                err.to_string().starts_with(&message_prefix),
+                "expected the sentence to start with {message_prefix:?}, got {:?}",
+                err.to_string()
+            );
+        }
+    }
+
+    /// The DRIFT PIN for the history wire vocabulary. These three spellings are
+    /// the frozen list the frontend mirror lands as
+    /// `export type HistoryErrorKind = "sqlite" | "io" | "json";`
+    /// (`src/lib/tauri/types.ts`, task14b) — so a spelling drift, or a fourth
+    /// variant nobody told the frontend about, fails HERE before CI sees it.
+    /// The shape is `protocol.rs`'s `compaction_reason_serde_spellings_are_frozen`,
+    /// applied to the hand-built envelope (no serde is involved to drift).
+    #[test]
+    fn history_error_kind_spellings_are_frozen() {
+        let frozen: &[(&str, HistoryError)] = &[
+            ("sqlite", HistoryError::Sqlite("no such table".into())),
+            ("io", HistoryError::Io("disk went away".into())),
+            ("json", HistoryError::Json("bad payload".into())),
+        ];
+
+        let spelled: Vec<&'static str> = frozen.iter().map(|(_, e)| e.kind()).collect();
+        assert_eq!(
+            spelled,
+            vec!["sqlite", "io", "json"],
+            "the HistoryError `kind` vocabulary is frozen (see the TS union above)"
+        );
+        for (expected, err) in frozen {
+            assert_eq!(&err.kind(), expected, "frozen spelling for {err:?}");
+        }
+    }
+
+    /// The mirror of `every_variant_reaches_the_wire_with_a_kind_and_a_nonempty_message`
+    /// for `HistoryError`: every variant reaches the wire as an OBJECT with a
+    /// `kind`, a non-empty `message` equal to `Display`, and NO field beyond
+    /// those two — the newtype payload already IS the whole `message`, exactly
+    /// the `SessionError::Io` precedent ADR 0063 records.
+    #[test]
+    fn every_history_error_variant_reaches_the_wire_with_a_kind_and_a_nonempty_message() {
+        let cases: &[(&str, HistoryError)] = &[
+            ("sqlite", HistoryError::Sqlite("no such table".into())),
+            ("io", HistoryError::Io("disk went away".into())),
+            ("json", HistoryError::Json("bad payload".into())),
+        ];
+
+        for (expected_kind, err) in cases {
+            let wire = tauri::ipc::InvokeError::from(err.clone()).0;
+            assert!(
+                wire.is_object(),
+                "{err:?} must reach the wire as an object, got {wire}"
+            );
+            assert_eq!(
+                wire["kind"].as_str(),
+                Some(*expected_kind),
+                "kind for {err:?}"
+            );
+            let message = wire["message"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{} must carry a string `message`: {wire}", err));
+            assert!(
+                !message.is_empty(),
+                "`message` must be non-empty for {err:?}: {wire}"
+            );
+            assert_eq!(
+                message,
+                err.to_string(),
+                "message must be the Display of {err:?}"
+            );
+            assert_eq!(
+                wire.as_object().map(|m| m.len()),
+                Some(2),
+                "{err:?} contributes no field beyond kind + message: {wire}"
+            );
+        }
     }
 }
