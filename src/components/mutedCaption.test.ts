@@ -79,15 +79,13 @@ const FINGERPRINT = "text-ui-xs text-foreground-subtlest";
 
 /**
  * The allowlist. A file named here is a KNOWN, ENUMERATED carrier of the pair;
- * anything else that spells it reddens the census. The list shrinks as each
- * site folds onto `MutedCaption`; the end state is the component alone, which
- * legitimately owns the pair (its doc-comment occurrence is stripped, so it is
- * counted for its code occurrence).
+ * anything else that spells it reddens the census. Only the component that
+ * exists to own the pair is listed — it is counted for its CODE occurrence,
+ * since the doc-comment copy is stripped before the match. A new entry has to
+ * be a deliberate edit to this list, and the honest reading of one is "this
+ * file should have rendered a `MutedCaption` instead".
  */
-const BASELINE = [
-  "src/components/MutedCaption.tsx",
-  "src/components/chat/ComposerMentions.tsx",
-];
+const BASELINE = ["src/components/MutedCaption.tsx"];
 
 const productionSources = (): string[] => PRODUCTION_FILES;
 
