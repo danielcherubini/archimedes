@@ -1308,7 +1308,7 @@ describe("SettingsPage (the attention-alert rows)", () => {
     render(<SettingsPage onBack={vi.fn()} />);
     await loaded();
     const toggle = await screen.findByRole("switch", {
-      name: "Notify when the app is waiting on you",
+      name: "Alert when the app is waiting on you",
     });
     // Alerts ship ON, so the loaded document reads as enabled — and opening
     // the page saves nothing.
@@ -1324,7 +1324,7 @@ describe("SettingsPage (the attention-alert rows)", () => {
     await loaded();
     expect(
       screen
-        .getByRole("switch", { name: "Notify when the app is waiting on you" })
+        .getByRole("switch", { name: "Alert when the app is waiting on you" })
         .getAttribute("aria-checked"),
     ).toBe("false");
   });
@@ -1334,7 +1334,7 @@ describe("SettingsPage (the attention-alert rows)", () => {
     await loaded();
     fireEvent.click(
       await screen.findByRole("switch", {
-        name: "Notify when the app is waiting on you",
+        name: "Alert when the app is waiting on you",
       }),
     );
     await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(1));
@@ -1351,7 +1351,7 @@ describe("SettingsPage (the attention-alert rows)", () => {
     // The switch reflects the saved document (optimistic state = what was written).
     expect(
       screen
-        .getByRole("switch", { name: "Notify when the app is waiting on you" })
+        .getByRole("switch", { name: "Alert when the app is waiting on you" })
         .getAttribute("aria-checked"),
     ).toBe("false");
   });
@@ -1360,7 +1360,7 @@ describe("SettingsPage (the attention-alert rows)", () => {
     render(<SettingsPage onBack={vi.fn()} />);
     await loaded();
     const trigger = await screen.findByRole("combobox", {
-      name: "Delay before notifying",
+      name: "Delay before alerting",
     });
     // The trigger DISPLAYS the stored delay (never a placeholder).
     expect(trigger.querySelector("[data-slot=select-value]")?.textContent).toBe(
@@ -1379,7 +1379,7 @@ describe("SettingsPage (the attention-alert rows)", () => {
     render(<SettingsPage onBack={vi.fn()} />);
     await loaded();
     fireEvent.click(
-      await screen.findByRole("combobox", { name: "Delay before notifying" }),
+      await screen.findByRole("combobox", { name: "Delay before alerting" }),
     );
     fireEvent.click(await screen.findByRole("option", { name: "60s" }));
     await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(1));
@@ -1394,7 +1394,7 @@ describe("SettingsPage (the attention-alert rows)", () => {
     // The select reloads from the saved document.
     expect(
       screen
-        .getByRole("combobox", { name: "Delay before notifying" })
+        .getByRole("combobox", { name: "Delay before alerting" })
         .querySelector("[data-slot=select-value]")?.textContent,
     ).toBe("60s");
   });
@@ -1411,7 +1411,7 @@ describe("SettingsPage (the attention-alert rows)", () => {
     render(<SettingsPage onBack={vi.fn()} />);
     await loaded();
     const trigger = await screen.findByRole("combobox", {
-      name: "Delay before notifying",
+      name: "Delay before alerting",
     });
     expect(trigger.querySelector("[data-slot=select-value]")?.textContent).toBe(
       "90s",
@@ -1430,12 +1430,12 @@ describe("SettingsPage (the attention-alert rows)", () => {
       );
     expect(index("Name sessions automatically")).toBeGreaterThanOrEqual(0);
     expect(index("Name sessions automatically")).toBeLessThan(
-      index("Notify when the app is waiting on you"),
+      index("Alert when the app is waiting on you"),
     );
-    expect(index("Notify when the app is waiting on you")).toBeLessThan(
-      index("Delay before notifying"),
+    expect(index("Alert when the app is waiting on you")).toBeLessThan(
+      index("Delay before alerting"),
     );
-    expect(index("Delay before notifying")).toBeLessThan(
+    expect(index("Delay before alerting")).toBeLessThan(
       index("Enabled tools"),
     );
   });

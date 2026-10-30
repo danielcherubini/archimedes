@@ -187,12 +187,12 @@ export default function GeneralSection({
           cancels a pending alert. Per-trigger toggles are deliberately absent
           (one switch, app-wide). */}
       <SettingsRow
-        label="Notify when the app is waiting on you"
-        description="An OS notification when a session has been waiting on you — finished, or needing an answer — for longer than the delay below. Nothing is sent while this window is focused, and typing, clicking or scrolling here cancels a pending notification."
+        label="Alert when the app is waiting on you"
+        description="An alert when a session has been waiting on you — finished, or needing an answer — for longer than the delay below. Nothing is sent while this window is focused, and typing, clicking or scrolling here cancels a pending alert."
         control={
           <Switch
             checked={settings.attentionAlertsEnabled}
-            aria-label="Notify when the app is waiting on you"
+            aria-label="Alert when the app is waiting on you"
             onCheckedChange={(checked) =>
               onSave({ attentionAlertsEnabled: checked })
             }
@@ -200,8 +200,8 @@ export default function GeneralSection({
         }
       />
       <SettingsRow
-        label="Delay before notifying"
-        description="How long a session must be waiting on you before the notification goes out. The delay is read when a countdown starts, so changing it does not re-time one already running."
+        label="Delay before alerting"
+        description="How long a session must be waiting on you before the alert goes out. The delay is read when a countdown starts, so changing it does not re-time one already running."
         control={
           <Select
             value={`${settings.attentionAlertDelaySecs}s`}
@@ -211,7 +211,7 @@ export default function GeneralSection({
               })
             }
           >
-            <SelectTrigger aria-label="Delay before notifying" className="w-48">
+            <SelectTrigger aria-label="Delay before alerting" className="w-48">
               <SelectValue>
                 {/* A hand-edited `settings.json` can hold a delay outside this
                     list (there is no clamping layer on purpose), and Radix
