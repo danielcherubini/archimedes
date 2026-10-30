@@ -14,7 +14,8 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::State;
 
-use crate::agent::{SessionInfo, SessionManager};
+use crate::agent::errors::HistoryError;
+use crate::agent::{SessionError, SessionInfo, SessionManager};
 use crate::storage::{Db, DbError, MessageRow, SessionRecency};
 
 #[derive(Debug, Clone, Serialize)]
@@ -48,11 +49,13 @@ pub struct HistoryPage {
 pub async fn list_sessions(
     state: State<'_, Arc<SessionManager>>,
     include_archived: Option<bool>,
-) -> Result<Vec<SessionInfo>, String> {
-    state
-        .list_sessions(include_archived.unwrap_or(false))
-        .await
-        .map_err(|e| e.to_string())
+) -> Result<Vec<SessionInfo>, SessionError> {
+    // Zero-cost direct return: the manager already answers with `SessionError`,
+    // so this command carries its own family's wire error and needs no mapping
+    // and no wrapper type. The error type is chosen by the WIRE, not by the
+    // file: the five `DbError`-backed commands below return `HistoryError`
+    // because their wire is the history surface (ADR 0063, Finding 20).
+    state.list_sessions(include_archived.unwrap_or(false)).await
 }
 
 /// A stored session's transcript page, in insertion order (ADR 0073).
@@ -86,8 +89,8 @@ pub async fn load_history(
     session_id: String,
     limit: Option<u32>,
     before_id: Option<i64>,
-) -> Result<HistoryPage, String> {
-    history_page(&state, &session_id, limit, before_id).map_err(|e| e.to_string())
+) -> Result<HistoryPage, HistoryError> {
+    history_page(&state, &session_id, limit, before_id).map_err(HistoryError::from)
 }
 
 /// Archive (or unarchive) a stored session (ADR 0016): sets the
@@ -97,22 +100,29 @@ pub async fn set_session_archived(
     state: State<'_, Arc<Db>>,
     session_id: String,
     archived: bool,
-) -> Result<bool, String> {
+) -> Result<bool, HistoryError> {
     state
         .set_session_archived(&session_id, archived)
-        .map_err(|e| e.to_string())
+        .map_err(HistoryError::from)
 }
 
 /// Delete a stored session; its messages are removed by the cascade.
 #[tauri::command]
-pub async fn delete_session(state: State<'_, Arc<Db>>, session_id: String) -> Result<(), String> {
-    state.delete_session(&session_id).map_err(|e| e.to_string())
+pub async fn delete_session(
+    state: State<'_, Arc<Db>>,
+    session_id: String,
+) -> Result<(), HistoryError> {
+    state
+        .delete_session(&session_id)
+        .map_err(HistoryError::from)
 }
 
 /// Every non-subagent session's recency as an explicit FIELD (ADR 0075).
 #[tauri::command]
-pub async fn session_recency(state: State<'_, Arc<Db>>) -> Result<Vec<SessionRecency>, String> {
-    session_recency_rows(&state).map_err(|e| e.to_string())
+pub async fn session_recency(
+    state: State<'_, Arc<Db>>,
+) -> Result<Vec<SessionRecency>, HistoryError> {
+    session_recency_rows(&state).map_err(HistoryError::from)
 }
 
 pub(crate) fn session_recency_rows(db: &Db) -> Result<Vec<SessionRecency>, DbError> {
@@ -122,8 +132,11 @@ pub(crate) fn session_recency_rows(db: &Db) -> Result<Vec<SessionRecency>, DbErr
 /// Rewrite the manual order of the given session ids in ONE transaction.
 /// Only a drag calls this (ADR 0075); the ids are the visible slice of ONE Space.
 #[tauri::command]
-pub async fn reorder_sessions(state: State<'_, Arc<Db>>, ids: Vec<String>) -> Result<(), String> {
-    reorder_session_rows(&state, &ids).map_err(|e| e.to_string())
+pub async fn reorder_sessions(
+    state: State<'_, Arc<Db>>,
+    ids: Vec<String>,
+) -> Result<(), HistoryError> {
+    reorder_session_rows(&state, &ids).map_err(HistoryError::from)
 }
 
 pub(crate) fn reorder_session_rows(db: &Db, ids: &[String]) -> Result<(), DbError> {
