@@ -67,9 +67,11 @@ export function makeSessionRow(
 /**
  * A `SpaceRow` from `list_spaces` / `addSpace`.
  *
- * `createdAt <= lastOpenedAt` by construction: the sidebar's ordering rule is
- * `lastOpenedAt` DESC and a fixture where a Space was opened before it was
- * created makes any ordering assertion meaningless.
+ * `lastOpenedAt` is bookkeeping only — the sidebar's ordering rule is the manual
+ * `sort_order` (ADR 0075): a newly created Space joins at the BOTTOM
+ * (`MAX + 1`) and nothing moves a row except a drag, so position is not evidence
+ * of recency. `createdAt <= lastOpenedAt` is still maintained by construction
+ * (the default below) so no fixture carries a Space opened before it existed.
  */
 export function makeSpaceRow(overrides: Partial<SpaceRow> = {}): SpaceRow {
   const createdAt = overrides.createdAt ?? 1_000;

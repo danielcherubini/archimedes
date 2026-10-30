@@ -553,7 +553,7 @@ interface SessionsState {
    * banner would otherwise linger on the paused transcript).
    */
   stalled: Record<string, { at: number; crashLog: string | null } | undefined>;
-  /** Mark a session stalled (the `session-stalled` event — the `StalledInfo` shape: `at` + `crashLog`). */
+  /** Mark a session stalled (the `session-stalled` event — the `StalledPayload` shape: `sessionId` + `at` + `crashLog`). */
   markStalled: (sessionId: string, at: number, crashLog: string | null) => void;
 
   addSession: (info: SessionInfo) => void;

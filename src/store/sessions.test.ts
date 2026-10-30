@@ -3611,8 +3611,9 @@ describe("activeSpacePath (the selected Space — the top tabs' state)", () => {
   it("boot (setSpaces, nothing active): the auto-selected session's space becomes active; no sessions → the most recent space", () => {
     // A stored session in /a (the input order is newest-first).
     useSessions.getState().setSpaces([space("/a"), space("/b")]);
-    // No sessions at all → the most recent space (the FIRST row —
-    // `list_spaces` order is `lastOpenedAt` desc).
+    // No sessions at all → the leftmost Space with something to show (the
+    // FIRST row — `list_spaces` returns the user's MANUAL order, `sort_order`
+    // ASC then `path` ASC; ADR 0075 — position is not recency).
     expect(useSessions.getState().activeSpacePath).toBe("/a");
     expect(useSessions.getState().activeSessionId).toBeNull();
 
@@ -3622,8 +3623,10 @@ describe("activeSpacePath (the selected Space — the top tabs' state)", () => {
       { ...info("h2", "/b"), archived: false },
     ]);
     useSessions.getState().setSpaces([space("/a"), space("/b")]);
-    // `autoSelectActive` lands on the most recent space's newest session
-    // (the /a session — first space, first stored session).
+    // `autoSelectActive` lands on the first space's newest session (first
+    // space in manual order, newest stored session of that space by
+    // `recencyOf` — ADR 0075: the space comes from position, the session from
+    // explicit recency evidence, never from the space's own timestamps).
     expect(useSessions.getState().activeSessionId).toBe("h1");
     expect(useSessions.getState().activeSpacePath).toBe("/a");
   });
