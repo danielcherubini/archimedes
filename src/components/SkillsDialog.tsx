@@ -119,7 +119,7 @@ const SKILL_ROW_INERT = "cursor-not-allowed opacity-50";
  */
 function shadowHeading(winnerScope: "space" | "user", count: number): string {
   return `${count} ${count === 1 ? "skill is" : "skills are"} hidden by a ${
-    winnerScope === "space" ? "project" : "global"
+    winnerScope === "space" ? "space" : "global"
   } skill with the same name`;
 }
 
@@ -354,15 +354,16 @@ export default function SkillsDialog({
                 {shadowHeading(group.scope, group.losers.length)}
               </p>
               {group.losers.map((loser) => (
-                <div
+                <MutedCaption
+                  as="div"
                   key={loser.path}
-                  className="flex min-w-0 items-center gap-2 text-ui-xs text-foreground-subtlest"
+                  className="flex min-w-0 items-center gap-2"
                 >
                   <span className="min-w-0 truncate">{loser.name}</span>
                   <span className="min-w-0 truncate" title={loser.path}>
                     {loser.path}
                   </span>
-                </div>
+                </MutedCaption>
               ))}
             </div>
           ))}
