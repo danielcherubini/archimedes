@@ -127,7 +127,7 @@ export default function AppearanceSection({
       />
       <SettingsRow
         label="Palette"
-        description="The color scheme. Dracula is dark-only — it overrides the Theme setting (including System)."
+        description="Which hues the app wears. Dracula is dark-only — it overrides the Theme setting (including System)."
         controlLayout="wide"
         control={
           <Select
