@@ -30,7 +30,7 @@ use crate::agent::tools::ContentBlock;
 use crate::config::{load_settings, Settings};
 use crate::storage::Db;
 
-use super::{EffectiveCatalog, ProviderFactory, SessionManager};
+use super::{EffectiveCatalog, ProviderFactory, SessionManager, SessionState};
 
 /// Per-side character cap on the conversation excerpt (pi: 500).
 pub(crate) const EXCERPT_CAP: usize = 500;
@@ -333,7 +333,7 @@ pub(crate) struct NamingRequest {
     /// task never re-reads the transcript, so the prompt always matches the
     /// transcript the guards accepted.
     exchange: String,
-    state: Arc<StdMutex<HashMap<String, NamingState>>>,
+    state: Arc<StdMutex<HashMap<String, SessionState>>>,
 }
 
 /// How the title stream ended, before the answer is judged.
@@ -382,25 +382,21 @@ impl SessionManager {
         }
         // 4. The bookkeeping: the failure budget spent (pi's
         //    `failCount >= 3`), or one of our requests still running. READ
-        //    ONLY (see the note above).
-        {
-            let state = self.naming.lock().unwrap_or_else(|p| p.into_inner());
-            if state
-                .get(session_id)
-                .is_some_and(|s| s.in_flight || s.fails >= MAX_FAILURES)
-            {
-                return;
-            }
+        //    ONLY (see the note above). The relay takes the `sessions` lock and
+        //    releases it before returning — no guard survives this call.
+        if self.naming_state(session_id, |state| {
+            state.is_some_and(|s| s.in_flight || s.fails >= MAX_FAILURES)
+        }) {
+            return;
         }
         // 5. The session's own model — the live `config_state` mirror, the
         //    same source `set_config_option` re-synthesizes from. Absent
         //    (a session that never resolved one) → nothing to ask.
         let Some(session_model) = self
-            .config_state
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(session_id)
-            .map(|c| c.model.clone())
+            .with_session(session_id, |row| {
+                row.config_state.as_ref().map(|c| c.model.clone())
+            })
+            .flatten()
         else {
             return;
         };
@@ -427,22 +423,21 @@ impl SessionManager {
         };
         // 7. Claim the session (the write lock RE-CHECKS step 4: the router
         //    is per-session today, and a second caller would otherwise slip
-        //    through the gap between the read and the claim).
-        {
-            let mut state = self.naming.lock().unwrap_or_else(|p| p.into_inner());
-            match state.get_mut(session_id) {
-                Some(s) if s.in_flight || s.fails >= MAX_FAILURES => return,
-                Some(s) => s.in_flight = true,
-                None => {
-                    state.insert(
-                        session_id.to_string(),
-                        NamingState {
-                            fails: 0,
-                            in_flight: true,
-                        },
-                    );
-                }
+        //    through the gap between the read and the claim). The relay owns
+        //    the `None => insert` arm (the entry is born WITH the claim, exactly
+        //    as the standalone naming map's entry was born before the merge) and
+        //    holds the lock for
+        //    the check-and-set only — the `spawn` below runs with no guard.
+        let claimed = self.claim_naming(session_id, |state| {
+            if state.in_flight || state.fails >= MAX_FAILURES {
+                false
+            } else {
+                state.in_flight = true;
+                true
             }
+        });
+        if !claimed {
+            return;
         }
         let request = NamingRequest {
             session_id: session_id.to_string(),
@@ -459,7 +454,7 @@ impl SessionManager {
             session_model,
             settings,
             exchange,
-            state: self.naming.clone(),
+            state: self.sessions.clone(),
         };
         handle.spawn(name_session(request));
     }
@@ -613,22 +608,28 @@ pub(crate) async fn name_session(request: NamingRequest) {
 /// The `in_flight` flag's owner: cleared on EVERY exit of `name_session`,
 /// including a panic (a `Drop` runs while unwinding) — which is why the flag
 /// is never cleared by hand at the return sites.
+///
+/// Holds the `SessionManager`'s merged per-session map (finding 13): the
+/// naming bookkeeping is the row's `naming` slice, so "no entry" now means
+/// either no row at all OR a row whose `naming` slice was cleared — and BOTH
+/// are the torn-down signal the no-op rule below is about.
 struct InFlightClaim {
     session_id: String,
-    state: Arc<StdMutex<HashMap<String, NamingState>>>,
+    state: Arc<StdMutex<HashMap<String, SessionState>>>,
 }
 
 impl Drop for InFlightClaim {
     fn drop(&mut self) {
         // A MISSING entry is not re-created: the session was torn down while
         // the request was in flight (`on_session_exited_expected` /
-        // `handle_crash` removed it), and reviving it would resurrect state
-        // for a session that no longer exists.
+        // `handle_crash` cleared the `naming` slice), and reviving it would
+        // resurrect state for a session that no longer exists.
         if let Some(state) = self
             .state
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .get_mut(&self.session_id)
+            .and_then(|row| row.naming.as_mut())
         {
             state.in_flight = false;
         }
@@ -643,11 +644,12 @@ impl Drop for InFlightClaim {
 /// An entry that is GONE is not re-created (the same rule `InFlightClaim`
 /// follows): the session was torn down while this request was in flight, and
 /// a late failure must not leave state behind for a session that is over.
-fn note_failure(state: &StdMutex<HashMap<String, NamingState>>, session_id: &str) {
+fn note_failure(state: &StdMutex<HashMap<String, SessionState>>, session_id: &str) {
     if let Some(state) = state
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .get_mut(session_id)
+        .and_then(|row| row.naming.as_mut())
     {
         state.fails += 1;
         if state.fails == MAX_FAILURES {
@@ -661,11 +663,12 @@ fn note_failure(state: &StdMutex<HashMap<String, NamingState>>, session_id: &str
 
 /// A title that landed clears the failure budget: a session that recovered
 /// is not a session that gave up.
-fn note_success(state: &StdMutex<HashMap<String, NamingState>>, session_id: &str) {
+fn note_success(state: &StdMutex<HashMap<String, SessionState>>, session_id: &str) {
     if let Some(state) = state
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .get_mut(session_id)
+        .and_then(|row| row.naming.as_mut())
     {
         state.fails = 0;
     }
@@ -1496,21 +1499,16 @@ mod tests {
             }
         }
 
-        /// Seed the live config mirror (`config_state`) — guard 5's model
-        /// source. A child module sees the parent's privates, so the test
-        /// seeds the map directly instead of spawning a Worker.
+        /// Seed the live config mirror (the row's `config_state` slice) —
+        /// guard 5's model source. A child module sees the parent's privates, so
+        /// the test seeds the slice directly instead of spawning a Worker.
         fn seed_config(&self, id: &str, model: &Model) {
-            self.manager
-                .config_state
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(
-                    id.to_string(),
-                    NativeConfigState {
-                        model: model.clone(),
-                        thinking_level: None,
-                    },
-                );
+            self.manager.with_session_entry(id, |row| {
+                row.config_state = Some(NativeConfigState {
+                    model: model.clone(),
+                    thinking_level: None,
+                });
+            });
         }
 
         /// Write the first exchange into `native_messages` — guard 6's
@@ -1568,22 +1566,18 @@ mod tests {
                 .unwrap_or_else(|p| p.into_inner()) = Some(Box::new(f));
         }
 
-        /// The session's naming bookkeeping (`None` = no entry ever made).
+        /// The session's naming bookkeeping (`None` = no entry ever made, or the
+        /// row's `naming` slice was cleared by a teardown).
         fn state_of(&self, id: &str) -> Option<NamingState> {
             self.manager
-                .naming
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .get(id)
-                .cloned()
+                .with_session(id, |row| row.naming.clone())
+                .flatten()
         }
 
         fn has_naming_entry(&self, id: &str) -> bool {
             self.manager
-                .naming
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .contains_key(id)
+                .with_session(id, |row| row.naming.is_some())
+                .unwrap_or(false)
         }
 
         /// Await the provider's "a request arrived" notify.
@@ -2037,34 +2031,22 @@ mod tests {
     }
 
     /// Seed the naming entry (mid-flight, two failures deep) and the `live`
-    /// entry the clean-exit teardown requires (it early-returns for a
+    /// slice the clean-exit teardown requires (it early-returns for a
     /// session that is not live).
     fn seed_teardown(h: &Harness, id: &str) {
-        h.manager
-            .live
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(
-                id.to_string(),
-                LiveWorkerSession {
-                    cwd: h.dir.to_path_buf(),
-                    close_kind: Arc::new(StdMutex::new(None)),
-                    pending_turn: Arc::new(StdMutex::new(None)),
-                    cancel_requested: Arc::new(StdMutex::new(false)),
-                    pending_modal_ids: StdMutex::new(HashSet::new()),
-                },
-            );
-        h.manager
-            .naming
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(
-                id.to_string(),
-                NamingState {
-                    fails: 2,
-                    in_flight: true,
-                },
-            );
+        h.manager.with_session_entry(id, |row| {
+            row.live = Some(LiveWorkerSession {
+                cwd: h.dir.to_path_buf(),
+                close_kind: Arc::new(StdMutex::new(None)),
+                pending_turn: Arc::new(StdMutex::new(None)),
+                cancel_requested: Arc::new(StdMutex::new(false)),
+                pending_modal_ids: StdMutex::new(HashSet::new()),
+            });
+            row.naming = Some(NamingState {
+                fails: 2,
+                in_flight: true,
+            });
+        });
     }
 
     #[test]
@@ -2092,17 +2074,12 @@ mod tests {
         // `Exited` clears the entry too.
         let h = harness(vec![Script::answering("never")]);
         let id = "arch_crashing";
-        h.manager
-            .naming
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(
-                id.to_string(),
-                NamingState {
-                    fails: MAX_FAILURES,
-                    in_flight: true,
-                },
-            );
+        h.manager.with_session_entry(id, |row| {
+            row.naming = Some(NamingState {
+                fails: MAX_FAILURES,
+                in_flight: true,
+            });
+        });
 
         h.manager.handle_crash(id, Some(1), None);
 
@@ -2118,21 +2095,19 @@ mod tests {
         // stderr log line.
         let h = harness(vec![Script::answering("never")]);
         let id = "arch_torn_down_mid_flight";
-        h.manager
-            .naming
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(
-                id.to_string(),
-                NamingState {
-                    fails: 1,
-                    in_flight: true,
-                },
-            );
+        h.manager.with_session_entry(id, |row| {
+            row.naming = Some(NamingState {
+                fails: 1,
+                in_flight: true,
+            });
+        });
         h.manager.handle_crash(id, Some(1), None);
         assert!(!h.has_naming_entry(id), "the crash cleared it");
 
-        let state = h.manager.naming.clone();
+        // The merged map (the naming bookkeeping is the row's `naming` slice —
+        // the crash cleared the slice, so the late failure finds no entry to
+        // count, whether or not the row itself survived holding `stalled`).
+        let state = h.manager.sessions.clone();
         note_failure(&state, id);
 
         assert!(
