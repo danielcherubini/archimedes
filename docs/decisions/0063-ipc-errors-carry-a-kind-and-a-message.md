@@ -81,3 +81,94 @@ Console-only sites are **out of scope**: logging a rejection is not rendering on
 - **`%APPDATA%\archimedes` is the Windows instruction, and it is not variable.** `dirs` 6.0.0 resolves the Windows data dir through `SHGetKnownFolderPath(FOLDERID_RoamingAppData)` (`dirs-6.0.0/src/win.rs:10`, `dirs-sys-0.5.0/src/lib.rs:150-178`), which **ignores `%APPDATA%`** — recorded in ADR 0025 as the reason `scripts/check-test-data-dir.sh` has no Windows arm, because a Windows "redirect" would move nothing and the check would pass for the wrong reason. Pointing a supporter at the Roaming path itself is therefore the only reliable instruction there. Worth knowing beside it: on Windows (and on macOS) `dirs::config_dir()` resolves to the SAME base as `dirs::data_dir()`, so `settings.json` sits in the very `archimedes` directory the logs live in; only on Linux are they separate (`~/.config/archimedes` vs `~/.local/share/archimedes`). Note in passing that `lib.rs`'s setup comment lists `%LOCALAPPDATA%/archimedes` among the app's on-disk dirs — `dirs::data_local_dir()` is never called in this crate, so nothing is written there today.
 - **The console-free release build is why any of this needed a file at all**: `src-tauri/src/main.rs:2` sets `windows_subsystem = "windows"` for release, so `eprintln!` has nowhere to go on a shipped Windows build and the crash log is the only trace a panic left. Recorded in `README.md`'s `## Diagnostics`, next to the paths.
 - **`kind` has exactly one reader today and it is a fallback** (`describeIpcError`'s rule 4). Nothing in `src/` branches on one of the seven error `kind` values — a grep for `unknown_session` / `folder_missing` / `settle_timeout` hits only `ipcError.test.ts`. That is not a licence to churn them: `kind` is a stable identifier a supporter quotes in a report, and it is the value a future consumer would switch on. But nobody should assume a hidden switch is already there, and nobody should add one to this file — the place a `kind` earns behaviour is Rust, beside the variant.
+
+## Amendment (2026-10-30) — the error type is chosen by the wire, not by the file
+
+Added when Finding 20 of `docs/reviews/2026-10-30-codebase-improvement.md` was implemented
+(`docs/roadmap/improvement-correctness-seams-task14-error-envelope-rust.md`). The decision above is
+unchanged and not renumbered; this section settles a competing rule that had grown up beside it and
+records the vocabulary the migration added.
+
+### The sentence
+
+**The error type is chosen by the wire, not by the file.**
+
+`d509958` ("expose `session_recency`, `reorder_sessions` and `reorder_spaces` as commands") chose
+**both** dialects in one commit and then wrote down the rule that produced it: *"Error types follow the
+file they live in: `String` via `map_err(to_string)` in `history.rs`, `SpacesError::Database` in
+``spaces.rs."* That is a per-**file** rule standing against this ADR's per-**wire** rule, and it is what
+this amendment rejects. It cost two commands that wrap the same `DbError` from the same layer for the
+same user gesture (`reorder_sessions` in `history.rs`, `reorder_spaces` in `spaces.rs`) two different
+dialects for no reason a reader could recover. It also decides a split the migration had to make:
+`commands/history.rs::list_sessions` returns `SessionError` (it delegates to `SessionManager`, so its
+wire is the session wire) while the five `DbError`-backed commands beside it return `HistoryError`. The
+discriminator is the wire surface a command answers on, never the module it is declared in.
+
+### The kind vocabulary this migration added
+
+All hand-built in `src-tauri/src/agent/errors.rs`, all with **no `Serialize` derive** — the load-bearing
+half of this ADR, unchanged: no derive means Tauri's blanket `impl<T: Serialize> From<T> for InvokeError`
+cannot win, so a payload the envelope cannot express is a compile error in that file. Each enum's
+`kind()` match and its `From` match are exhaustive with no catch-all arm, so a new variant must be named
+twice. The spellings below are frozen by drift pins in that file's test module (the shape of
+`compaction_reason_serde_spellings_are_frozen`), and the frontend mirror copies those frozen lists
+rather than guessing:
+
+| error type | kinds (frozen) | frozen by |
+|---|---|---|
+| `HistoryError` | `sqlite` · `io` · `json` | `history_error_kind_spellings_are_frozen` |
+| `AttentionError` | `attention_empty_body` · `attention_no_runtime` | `attention_error_kind_spellings_are_frozen` |
+| `ClipboardError` | `clipboard` · `encode` | `clipboard_error_kind_spellings_are_frozen` |
+| `OpenError` | `invalid_href` · `denied_scheme` · `relative_without_cwd` · `os_error` · `other` | `open_error_kind_of_maps_the_refusal_codes` |
+| `UpdateError` | `release_not_found` · `endpoints_not_configured` · `network` · `invalid_target` · `signature_mismatch` · `install_failed` · `install_in_progress` · `no_update_available` · `unsupported_platform` · `invalid_update_format` · `authentication_failed` · `io` · `other` | `update_error_kind_of_maps_the_frozen_code_table` |
+
+`AttentionError`'s two kinds were a genuine open choice (the bare `empty_body` / `no_runtime` was the
+other candidate). The family-prefixed pair was taken and is frozen by the pin, for the reason this ADR
+already gives for `kind` being a supporter-quotable identifier: one frontend union holds every family's
+kinds, and a bare `empty_body` does not say which wire it came from.
+
+Two files commands reuse an existing type instead of growing a new one: `list_space_files` and
+`list_completion_entries` answer `FilesError` (zero new enum; the reuse is decided here, the signature
+retypes in that same phantom batch). `list_skills` answers with **no error type at all** (see below).
+`commands/open.rs` and `commands/update.rs` wrap code tables owned elsewhere — `crate::open`'s
+`Refusal::code()` and `map_check_error` — as newtypes whose `message` **IS** the code verbatim, so the
+envelope adds `kind` without editing a sentence a bug report is read from.
+
+**`message` stayed byte-identical to the pre-migration sentence for every migrated command.** That is
+the wire wall the migration was gated on, not a nicety: the frontend renders `message` and nothing else
+(`describeIpcError`'s rule 3), `UpdateSection.test.tsx` pins `release-not-found` and `install-failed`
+reaching the UI, and `AGENTS.md`'s release ceremony quotes `release-not-found` as what an installed
+client reads when a draft 404s. `kind` is the only addition; no `Ok` payload changed.
+
+### The phantom note: five commands typed an error that cannot exist
+
+Five commands declared `Result<_, String>` while **no code path constructed an `Err`** — the error type
+typed a branch that cannot be taken: `get_stalled_info`, `attention_disarm`, `list_skills`,
+`list_space_files`, `list_completion_entries`. (The finding's "3 commands with no error type" predates
+this census.) The rule they migrate to: four carry a typed error of their family that is still never
+constructed (`SessionError`, `AttentionError`, `FilesError` ×2); `list_skills` is the one genuinely
+infallible retirement and returns a bare `Vec<SkillInfo>` — its doc already said "Never fails", and
+discovery is total (a missing root or unreadable file is skipped). Those five signatures are the
+phantom/small batch (`commands/sessions.rs`, `skills.rs`, `files/mod.rs`, `attention_disarm`) and land
+in that commit, not the one that amended this file; the `AttentionError` they depend on is on the tree
+first, and its frozen kinds are the arbiter that batch's tests assert against. The consequence for the
+grep-level guard that checks every `#[tauri::command]` returns a typed error: its allowlist needs exactly
+one entry, and the reason it must cite is *"the command constructs no `Err` on any path"*.
+
+This also re-scopes the Consequences bullet about `ipc <name> FAILED: <Display>` in `supervisor.log`:
+that line exists for a **typed-envelope command that actually rejects**. A never-constructed phantom
+never writes it, and an infallible command cannot write it at all — so the log line is evidence that a
+rejection happened, not a per-command guarantee that one could.
+
+### One free-text match the envelope does not yet cover
+
+`src/components/settings/McpSection.tsx` decides whether to offer the OAuth button by testing
+`result.error.includes("needs-auth")` — a match against the **free-text `message`**, not a `kind`. It
+works today because `test_mcp_server` → `agent::mcp::manager::test_server` (a free function, not
+`ensure_connected`) propagates the raw marker from `agent/mcp/http.rs`'s 401-on-OAuth arm, so the wire
+payload is `{"kind":"mcp_test_failed","message":"needs-auth"}` and `describeIpcError` hands back that
+string. The `kind` is always `mcp_test_failed`, so there is **no machine discriminator** on the auth
+case, and any Rust-side reword of that sentence breaks the badge silently while the envelope stays
+valid. Naming it here so nobody reads the badge as an example of switching on `kind`: it is the
+opposite — the case for giving the auth arm its own kind, which is a frontend-and-settings change
+tracked separately, not a reword of the sentence.
