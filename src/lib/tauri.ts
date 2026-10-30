@@ -56,6 +56,11 @@ export type {
   SpaceRow,
   SpaceCheck,
   CloseReasonStr,
+  // (task07a / finding 4) The compaction trigger vocabulary. TYPE-ONLY — it
+  // vanishes at runtime, so `TAURI_RUNTIME_API` does NOT gain it (the
+  // `AccessRule`/`AccessDirection` precedent). The `compaction_update` frame's
+  // `reason` field and the store's `compacting` value are both this union.
+  CompactionReason,
   StopReason,
   PermissionOutcome,
   PermissionOption,

@@ -479,15 +479,21 @@ describe("summarizeToolCall", () => {
   // The compaction card (issue #90): the trigger reason is the only thing the
   // header has to show, and the raw wire value must not reach the user.
   it("shows the compaction trigger as prose, never the raw reason", () => {
-    expect(summarizeToolCall("compaction", { reason: "manual" })).toBe(
-      "requested with /compact",
-    );
-    expect(summarizeToolCall("compaction", { reason: "threshold" })).toBe(
-      "context over threshold",
-    );
-    expect(summarizeToolCall("compaction", { reason: "overflow" })).toBe(
-      "provider context overflow",
-    );
+    for (const reason of ["manual", "threshold", "overflow"] as const) {
+      let label: string;
+      switch (reason) {
+        case "manual":
+          label = "requested with /compact";
+          break;
+        case "threshold":
+          label = "context over threshold";
+          break;
+        case "overflow":
+          label = "provider context overflow";
+          break;
+      }
+      expect(summarizeToolCall("compaction", { reason })).toBe(label);
+    }
     // An unknown/absent reason shows nothing rather than a JSON dump — the
     // default branch would otherwise print `{"reason":"…"}`.
     expect(summarizeToolCall("compaction", {})).toBeUndefined();

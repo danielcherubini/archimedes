@@ -20,7 +20,7 @@ import {
   finalizeSessionMessages,
   rowToMessages,
 } from "../lib/transcript/reducer";
-import type { AcpSessionUpdate } from "../lib/tauri";
+import type { AcpSessionUpdate, CompactionReason } from "../lib/tauri";
 import { useInteractive } from "./interactive";
 import { useSubagents } from "./subagents";
 // Driven (not mocked) by the close-path tests below: the figure has to be read
@@ -1571,12 +1571,12 @@ describe("compacting (the working indicator's compaction state)", () => {
     });
   });
 
-  const active = (reason: string): AcpSessionUpdate => ({
+  const active = (reason: CompactionReason): AcpSessionUpdate => ({
     sessionUpdate: "compaction_update",
     active: true,
     reason,
   });
-  const settled = (reason: string): AcpSessionUpdate => ({
+  const settled = (reason: CompactionReason): AcpSessionUpdate => ({
     sessionUpdate: "compaction_update",
     active: false,
     reason,
@@ -1590,7 +1590,7 @@ describe("compacting (the working indicator's compaction state)", () => {
   });
 
   it("all three reasons are stored verbatim (the indicator's label is reason-independent, the state is not)", () => {
-    for (const reason of ["manual", "threshold", "overflow"]) {
+    for (const reason of ["manual", "threshold", "overflow"] as const) {
       useSessions
         .getState()
         .applySessionUpdates([{ sessionId: "s1", update: active(reason) }]);
