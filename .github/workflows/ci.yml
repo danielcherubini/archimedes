@@ -410,6 +410,18 @@ jobs:
       - name: Prove the temp-dir census guard can fail
         run: bash scripts/check-temp-dir-census.sh --self-test
 
+      # Finding 8 shipped two IPC commands nobody called, because nothing in the
+      # build asks whether the half of a `generate_handler!` entry that matters —
+      # that someone invokes it — holds. This guard checks both directions against
+      # the real checkout, and its premise mode runs next because a command-walk
+      # that silently extracted nothing would be exactly the green that let the
+      # dead commands through.
+      - name: Check every IPC command has a consumer
+        run: bash scripts/check-commands.sh
+
+      - name: Prove the command-consumer guard can fail
+        run: bash scripts/check-commands.sh --self-test
+
       - name: Test the updater-manifest composer
         run: bash scripts/compose-updater-manifest.test.sh
 

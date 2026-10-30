@@ -431,7 +431,6 @@ pub fn run() {
             commands::settings::auth_mcp_server,
             commands::settings::test_search_provider,
             commands::mcp::list_mcp_servers_effective,
-            commands::agents::list_agent_definitions,
             commands::agents::list_agent_definitions_for_space,
             commands::agents::list_agent_config,
             commands::spaces::list_spaces,
