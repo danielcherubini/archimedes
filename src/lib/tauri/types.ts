@@ -276,20 +276,6 @@ export interface SessionClosedPayload {
 }
 
 
-/**
- * The `session-stalled` event payload (a Worker crash, ADR 0025 Task 4 —
- * the `StalledInfo` shape + the session id, camelCase over the wire). The
- * frontend's banner reads it; the Rust `get_stalled_info` command is the PULL
- * form (the same `StalledInfo`, no `sessionId` — the command's parameter).
- */
-export interface StalledInfo {
-  /** Unix milliseconds (the crash time). */
-  at: number;
-  /** The crashed Worker's own `crash-<ts>-worker-<pid>.log` — selected by the pid of the child the Supervisor reaped, and FROZEN at crash time (the `session-stalled` push and the Rust `get_stalled_info` command name the same path). `null` when the pid matched no log — never another Worker's crash. */
-  crashLog: string | null;
-}
-
-
 export interface StalledPayload {
   sessionId: string;
   at: number;

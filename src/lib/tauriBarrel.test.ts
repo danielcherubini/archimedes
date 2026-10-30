@@ -297,7 +297,6 @@ const TAURI_PUBLIC_API = [
   "SpaceCheck",
   "spaceForPath",
   "SpaceRow",
-  "StalledInfo",
   "StalledPayload",
   "startSession",
   "StopReason",

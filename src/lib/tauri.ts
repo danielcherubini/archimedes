@@ -66,7 +66,6 @@ export type {
   AcpSessionUpdate,
   SessionUpdatePayload,
   SessionClosedPayload,
-  StalledInfo,
   StalledPayload,
   PermissionRequestPayload,
   AskQuestionDto,
