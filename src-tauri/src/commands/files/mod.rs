@@ -56,7 +56,7 @@ pub async fn read_file_bytes(path: String) -> Result<Option<Vec<u8>>, FilesError
 /// walk, never an error: the picker degrades to "no files"). Reads NO file
 /// bytes — names only.
 #[tauri::command]
-pub async fn list_space_files(space_path: Option<String>) -> Result<FileListDto, String> {
+pub async fn list_space_files(space_path: Option<String>) -> Result<FileListDto, FilesError> {
     let empty = || FileListDto {
         entries: vec![],
         truncated: false,
@@ -181,7 +181,9 @@ pub async fn list_space_files(space_path: Option<String>) -> Result<FileListDto,
 /// adds no reach a user lacks (typing the target works), and dropping it would
 /// break `~/.local/bin` and most of macOS `~/Library`.
 #[tauri::command]
-pub async fn list_completion_entries(query: Option<String>) -> Result<CompletionDirDto, String> {
+pub async fn list_completion_entries(
+    query: Option<String>,
+) -> Result<CompletionDirDto, FilesError> {
     let empty = || CompletionDirDto {
         entries: vec![],
         truncated: false,
