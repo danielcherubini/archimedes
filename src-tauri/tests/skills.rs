@@ -748,8 +748,7 @@ async fn list_skills_command_is_a_thin_wrapper() {
     // user skill — it is walked first).
     let rows =
         archimedes_lib::commands::skills::list_skills(Some(dir.to_str().unwrap().to_string()))
-            .await
-            .unwrap();
+            .await;
     assert_eq!(
         find_row(&rows, "alpha").scope,
         SkillScope::Space,
@@ -758,9 +757,7 @@ async fn list_skills_command_is_a_thin_wrapper() {
 
     // `None` → user-level skills only: Ok, and every row is `User`-scoped
     // (deterministic for ANY real `HOME` contents — no `Space` rows).
-    let none_rows = archimedes_lib::commands::skills::list_skills(None)
-        .await
-        .unwrap();
+    let none_rows = archimedes_lib::commands::skills::list_skills(None).await;
     assert!(
         none_rows.iter().all(|s| s.scope == SkillScope::User),
         "None must return user-level skills only: {none_rows:?}"
