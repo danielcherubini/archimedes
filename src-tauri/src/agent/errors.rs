@@ -395,6 +395,93 @@ impl From<OpenError> for tauri::ipc::InvokeError {
     }
 }
 
+/// The updater family's wire error (`check_update`, `install_update`).
+///
+/// A NEWTYPE over the FROZEN kebab-code vocabulary `map_check_error` produces
+/// in `commands/update.rs` (`release-not-found`, `endpoints-not-configured`,
+/// `network:{s}`, `invalid-target:{t}`, `signature-mismatch`, `install-failed`,
+/// `install-in-progress`, `no-update-available`, `unsupported-platform`,
+/// `invalid-update-format`, `authentication-failed`, `io:{s}`,
+/// `update-error:{s}`). `message` IS the code verbatim — the frontend renders it
+/// (`UpdateSection.tsx` through `describeIpcError`) and `UpdateSection.test.tsx`
+/// pins `release-not-found` / `install-failed` reaching the UI, so this type is
+/// ALLOWED TO CHANGE NOTHING about the sentence. `map_check_error` itself is not
+/// a command and is unchanged.
+///
+/// `kind` is derived by [`UpdateError::kind_of`] (a pure fn pinned by its own
+/// test), which is the whole gain of the migration: the machine-readable
+/// discriminator appears, the human-readable code does not move.
+///
+/// Carries NO serde derive (ADR 0063's load-bearing half): the only route to the
+/// wire is the hand-written `From` below, so an unencodable payload is a compile
+/// error in this file rather than the encoder's complaint on the user's screen.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct UpdateError(pub String);
+
+impl UpdateError {
+    /// The `kind` for an updater code: the code's own vocabulary, snake_cased.
+    ///
+    /// Total over `&str` because three of the codes carry a free-text detail
+    /// after a colon (`network:{s}`, `io:{s}`, `update-error:{s}`), so those
+    /// three are matched by PREFIX. `update-error:` answers `other` on purpose:
+    /// it is `map_check_error`'s own fallback arm — the plugin's open enum
+    /// beyond the named codes — and mirroring the fallback in both layers keeps
+    /// "a code nobody named" one answer instead of two. Frozen by
+    /// `update_error_kind_of_maps_the_frozen_code_table`; the frontend mirror
+    /// lands the same thirteen values in `src/lib/tauri/types.ts`.
+    pub fn kind_of(code: &str) -> &'static str {
+        match code {
+            "release-not-found" => "release_not_found",
+            "endpoints-not-configured" => "endpoints_not_configured",
+            "signature-mismatch" => "signature_mismatch",
+            "install-failed" => "install_failed",
+            "install-in-progress" => "install_in_progress",
+            "no-update-available" => "no_update_available",
+            "unsupported-platform" => "unsupported_platform",
+            "invalid-update-format" => "invalid_update_format",
+            "authentication-failed" => "authentication_failed",
+            s if s.starts_with("network:") => "network",
+            s if s.starts_with("invalid-target:") => "invalid_target",
+            s if s.starts_with("io:") => "io",
+            // `update-error:{…}` (map_check_error's own fallback) and anything a
+            // future plugin bump surfaces: the sentence still reaches the user
+            // unchanged, and `kind` declines to guess.
+            _ => "other",
+        }
+    }
+
+    /// The serialized `kind` discriminator (the wire contract — ADR 0063).
+    pub fn kind(&self) -> &'static str {
+        // Exhaustive on purpose: the newtype has one shape today, and naming it
+        // here is the second of the two namings ADR 0063 requires — a second
+        // variant or a second field has to be accounted for at compile time.
+        match self {
+            UpdateError(code) => Self::kind_of(code),
+        }
+    }
+}
+
+impl From<UpdateError> for tauri::ipc::InvokeError {
+    fn from(err: UpdateError) -> Self {
+        // Exhaustive on purpose: no catch-all arm (ADR 0063).
+        let extra: Option<(&'static str, String)> = match &err {
+            // The code IS the whole `message` ("release-not-found"), so no extra
+            // key — the `SessionError::Io` precedent.
+            UpdateError(_) => None,
+        };
+
+        let mut body = serde_json::Map::new();
+        body.insert("kind".into(), serde_json::Value::String(err.kind().into()));
+        body.insert("message".into(), serde_json::Value::String(err.to_string()));
+        if let Some((key, value)) = extra {
+            body.insert(key.into(), serde_json::Value::String(value));
+        }
+
+        tauri::ipc::InvokeError(serde_json::Value::Object(body))
+    }
+}
+
 /// Errors surfaced by file commands (`read_file_bytes`).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FilesError {
@@ -603,7 +690,9 @@ impl From<AgentsError> for tauri::ipc::InvokeError {
 
 #[cfg(test)]
 mod tests {
-    use super::{AttentionError, ClipboardError, HistoryError, OpenError, SessionError};
+    use super::{
+        AttentionError, ClipboardError, HistoryError, OpenError, SessionError, UpdateError,
+    };
 
     /// One wire-contract case: the error, its expected `kind`, and the
     /// expected extra field (key + value). A type alias because clippy's
@@ -1198,5 +1287,155 @@ mod tests {
             ],
             "the OpenError `kind` vocabulary is exactly these five spellings"
         );
+    }
+
+    /// `kind_of`'s ENTIRE frozen code table, every arm named — the thirteen
+    /// codes `map_check_error` (in `commands/update.rs`, UNCHANGED by this
+    /// migration) can produce, plus the `other` fallback. `release-not-found` is
+    /// the row `UpdateSection.test.tsx` and `AGENTS.md`'s release ceremony both
+    /// quote, so it is asserted twice: as a `kind`, and as a `message` that is
+    /// the code byte-identical.
+    #[test]
+    fn update_error_kind_of_maps_the_frozen_code_table() {
+        let frozen: &[(&str, &str)] = &[
+            ("release-not-found", "release_not_found"),
+            ("endpoints-not-configured", "endpoints_not_configured"),
+            ("network:404 Not Found", "network"),
+            ("invalid-target:linux-x86_64", "invalid_target"),
+            (
+                "invalid-target:linux-x86_64,linux-aarch64",
+                "invalid_target",
+            ),
+            ("signature-mismatch", "signature_mismatch"),
+            ("install-failed", "install_failed"),
+            ("install-in-progress", "install_in_progress"),
+            ("no-update-available", "no_update_available"),
+            ("unsupported-platform", "unsupported_platform"),
+            ("invalid-update-format", "invalid_update_format"),
+            ("authentication-failed", "authentication_failed"),
+            ("io:permission denied", "io"),
+            // map_check_error's own catch-all, mirrored as `other` here.
+            ("update-error:semver parse failed", "other"),
+            ("", "other"),
+            ("a-code-nobody-named-yet", "other"),
+        ];
+
+        for (code, expected_kind) in frozen {
+            assert_eq!(
+                UpdateError::kind_of(code),
+                *expected_kind,
+                "kind_of({code:?}) is frozen"
+            );
+            // The newtype agrees with the pure fn, and its Display is the code
+            // VERBATIM — the byte-identity half of the wire contract.
+            let err = UpdateError((*code).into());
+            assert_eq!(err.kind(), *expected_kind, "UpdateError({code:?}).kind()");
+            assert_eq!(
+                err.to_string(),
+                *code,
+                "the updater code must reach the wire as the message, unchanged"
+            );
+        }
+
+        // The vocabulary itself, frozen for the frontend mirror.
+        let unique: std::collections::BTreeSet<&'static str> = frozen
+            .iter()
+            .map(|(_, kind)| *kind)
+            .filter(|kind| *kind != "other")
+            .collect();
+        assert_eq!(
+            unique.into_iter().collect::<Vec<_>>(),
+            vec![
+                "authentication_failed",
+                "endpoints_not_configured",
+                "install_failed",
+                "install_in_progress",
+                "invalid_target",
+                "invalid_update_format",
+                "io",
+                "network",
+                "no_update_available",
+                "release_not_found",
+                "signature_mismatch",
+                "unsupported_platform",
+            ],
+            "the UpdateError `kind` vocabulary (besides `other`) is exactly these \
+             twelve spellings — the thirteenth value in the frontend union is `other`"
+        );
+    }
+
+    /// The mirror pin for `UpdateError`: object + `kind` + non-empty `message`
+    /// == `Display`, exactly 2 keys, and for the SECURITY-relevant
+    /// `signature-mismatch` and the ceremony-pinned `release-not-found` the
+    /// sentence is asserted as a literal so a reword cannot slip through.
+    #[test]
+    fn every_update_error_variant_reaches_the_wire_with_a_kind_and_a_nonempty_message() {
+        let cases: &[(&str, &str, UpdateError)] = &[
+            (
+                "release_not_found",
+                "release-not-found",
+                UpdateError("release-not-found".into()),
+            ),
+            (
+                "signature_mismatch",
+                "signature-mismatch",
+                UpdateError("signature-mismatch".into()),
+            ),
+            (
+                "install_in_progress",
+                "install-in-progress",
+                UpdateError("install-in-progress".into()),
+            ),
+            (
+                "no_update_available",
+                "no-update-available",
+                UpdateError("no-update-available".into()),
+            ),
+            (
+                "network",
+                "network:boom",
+                UpdateError("network:boom".into()),
+            ),
+            (
+                "other",
+                "update-error:x",
+                UpdateError("update-error:x".into()),
+            ),
+        ];
+
+        for (expected_kind, expected_message, err) in cases {
+            let wire = tauri::ipc::InvokeError::from(err.clone()).0;
+            assert!(
+                wire.is_object(),
+                "{err:?} must reach the wire as an object: {wire}"
+            );
+            assert_eq!(
+                wire["kind"].as_str(),
+                Some(*expected_kind),
+                "kind for {err:?}"
+            );
+            let message = wire["message"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{} must carry a string `message`: {wire}", err));
+            assert!(
+                !message.is_empty(),
+                "`message` must be non-empty for {err:?}"
+            );
+            assert_eq!(
+                message,
+                err.to_string(),
+                "message must be the Display of {err:?}"
+            );
+            assert_eq!(
+                message, *expected_message,
+                "the updater code reaches the wire verbatim for {err:?} — the \
+                 frontend renders this string and UpdateSection.test.tsx pins it"
+            );
+            assert_eq!(
+                wire.as_object().map(|m| m.len()),
+                Some(2),
+                "{err:?} contributes no field beyond kind + message: {wire}"
+            );
+        }
     }
 }
