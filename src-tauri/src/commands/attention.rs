@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use crate::agent::errors::AttentionError;
 use crate::attention::{AlertText, AttentionTimer};
 
 /// The longest title the OS is asked to render, in CHARS.
@@ -108,7 +109,9 @@ pub async fn attention_arm(
 /// Disarm the attention countdown. Idempotent — the renderer calls it for
 /// EVERY disarm reason (activity, evidence, a disabled setting, unmount).
 #[tauri::command]
-pub async fn attention_disarm(timer: tauri::State<'_, Arc<AttentionTimer>>) -> Result<(), String> {
+pub async fn attention_disarm(
+    timer: tauri::State<'_, Arc<AttentionTimer>>,
+) -> Result<(), AttentionError> {
     timer.disarm();
     Ok(())
 }

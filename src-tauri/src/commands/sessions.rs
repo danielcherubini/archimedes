@@ -251,7 +251,7 @@ pub async fn compact_session(
 pub async fn get_stalled_info(
     state: State<'_, Arc<SessionManager>>,
     session_id: String,
-) -> Result<Option<StalledInfo>, String> {
+) -> Result<Option<StalledInfo>, crate::agent::SessionError> {
     Ok(state.stalled_info(&session_id))
 }
 
