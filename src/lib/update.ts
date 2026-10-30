@@ -15,8 +15,12 @@
  *
  * * [`CheckOutcome`] has THREE possible outcomes, and the third is a
  *   rejection. `upToDate` is an ANSWER — the endpoint said nothing is newer —
- *   while a failed check REJECTS with the Rust typed code (`release-not-found`,
- *   `network:…`). A 404 on `latest.json` arrives as `release-not-found` and NOT
+ *   while a failed check REJECTS with the `UpdateError` envelope
+ *   (`{kind, message}` — ADR 0063, task14) whose `message` is the typed code
+ *   verbatim (`release-not-found`, `network:…`; `kind` is the snake_case
+ *   discriminator, `update_error_kind_of_maps_the_frozen_code_table` freezes
+ *   the table, and `UpdateErrorKind` in `./errors` mirrors it). A 404 on
+ *   `latest.json` arrives as `release-not-found` and NOT
  *   as `upToDate`, so a caller must never collapse the rejection into "current":
  *   that is how every installed client would read a broken endpoint as being up
  *   to date forever.
