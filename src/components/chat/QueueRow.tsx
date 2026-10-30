@@ -6,6 +6,7 @@ import { cn } from "../lib/utils";
 import { MutedCaption } from "../MutedCaption";
 import AttachmentStrip from "./AttachmentStrip";
 import { draftIsMarkerOnly, renumberImageMarkers } from "../../lib/chatAttachments";
+import { usePrefersReducedMotion } from "../../hooks/usePrefersReducedMotion";
 import { useQueuedPrompts, type QueuedPrompt } from "../../store/queuedPrompts";
 
 /**
@@ -93,20 +94,6 @@ function exitTarget(prompt: QueuedPrompt) {
   return { opacity: 1, y: 0, x: 0 };
 }
 
-/**
- * `typeof … !== "function"` and NOT `"matchMedia" in window`: this jsdom (and
- * any browser with the property stripped) exposes the PROPERTY with no function
- * behind it, so an `in` test passes and the call throws — the shape at
- * `ui/braille-loader.tsx:29-30`. `lib/theme.ts:16` and
- * `QueuedSummaryContent.tsx:65` guard the way this does.
- */
-function prefersReducedMotion(): boolean {
-  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
-    return false;
-  }
-  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-}
-
 export default function QueueRow({
   sessionId,
   prompt,
@@ -118,7 +105,7 @@ export default function QueueRow({
   const markLeaving = useQueuedPrompts((s) => s.markLeaving);
   const forget = useQueuedPrompts((s) => s.forget);
 
-  const reducedMotion = prefersReducedMotion();
+  const reducedMotion = usePrefersReducedMotion();
 
   // Reduced motion has no exit animation to wait for, so `onAnimationComplete`
   // never arrives — without this effect the entry would sit `leaving` forever
