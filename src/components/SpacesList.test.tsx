@@ -526,7 +526,11 @@ describe("SpacesList", () => {
   it("renders an empty time slot (no time text) for a session with no loaded messages", () => {
     // A stored session in the ACTIVE space (`/tmp/alpha`) that was not
     // opened this boot: no loaded messages → the title falls back to
-    // the space's base name (`alpha`) and the time slot is empty.
+    // the space's base name (`alpha`) and the time slot is empty. The slot now
+    // means NEITHER evidence survives — no transcript AND no `sessionRecency`
+    // stamp (this fixture seeds no map entry, so the row still renders empty);
+    // a stamped row prints its stamp, which is the pin added in the archive
+    // describe below.
     useSessions.setState({
       historySessions: [
         makeSessionRow({ sessionId: "h1", cwd: "/tmp/alpha" }),
@@ -2086,6 +2090,28 @@ describe("SpacesList (archive, ADR 0016)", () => {
     // header row — a bare `getByText("2")` would match a count anywhere in the
     // pane.
     expect(rowOf("Archived").getByText("2")).toBeTruthy();
+  });
+
+  it("prints the boot recency label when a stored row has no transcript but the map has a stamp (the Archived-symptom closed)", () => {
+    // FINDING 11'S SYMPTOM, IN THE DOM. `recencyOf` — the number `sortByRecency`
+    // orders the Archived list by and the Landing pick decides by — fell back to
+    // the boot `sessionRecency` stamp for a session with no loaded transcript,
+    // while `relativeTimeFor` rendered an EMPTY slot for the same row. The list
+    // was ordered by a number its own row refused to print. `relativeTimeFor`
+    // now delegates to `recencyOf`, so the stamp prints.
+    //
+    // `h2` is seed()'s ONE transcript-less stored row (`messages` holds only
+    // `s1` and `h1`, and `h2` carries no stored `title`), and it lives in
+    // `/tmp/beta` — so the selected Space moves there and the row renders under
+    // its base name "beta". Nothing else is invented: the row, its Space and the
+    // reset all come from seed()'s fixture (`resetStores()` runs inside it).
+    useSessions.setState({
+      activeSpacePath: "/tmp/beta",
+      sessionRecency: { h2: Date.now() - 5 * 60_000 },
+    });
+    render(<SpacesList />);
+    // The stamp buckets to exactly `5m` against the wall clock the component uses.
+    expect(rowOf("beta").getByText("5m")).toBeTruthy();
   });
 
   it("renders the empty state with NO Space selected, even though archived rows exist", () => {

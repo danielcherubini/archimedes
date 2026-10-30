@@ -600,10 +600,11 @@ export default function SpacesList() {
             list just scrolls). The rows render the MANUAL order: ONE
             sequence spanning live and stored (`activeView.sessionIds`),
             with no group headers — a row's live-ness stays visible as its
-            `SessionStatusMark`, never as its position. The row's time is
-            still its last message, and it is now deliberately DECOUPLED
-            from its slot (pinned by "updates a row's relative time while
-            its POSITION stays frozen").
+            `SessionStatusMark`, never as its position. The row's time is the
+            ONE recency number (`recencyOf`: its last message, else the boot
+            map's stamp), and it is deliberately DECOUPLED from its slot
+            (pinned by "updates a row's relative time while its POSITION stays
+            frozen").
 
             A ROW IS THE DROP TARGET (spec §Drag mechanics): `drag.dragProps(id)`
             rides through `SessionListRow` into `RowButton`'s `...rest`, and the
@@ -623,6 +624,7 @@ export default function SpacesList() {
                 onOpen={openSession}
                 drag={drag.dragProps(id)}
                 dropEdge={drag.overId === id ? drag.overEdge : null}
+                recencyMap={sessionRecency}
               />
             ))}
           </div>
@@ -741,6 +743,7 @@ function SessionRow({
   onOpen,
   drag,
   dropEdge,
+  recencyMap,
 }: {
   sessionId: string;
   spaceName: string;
@@ -750,6 +753,11 @@ function SessionRow({
   drag?: DragReorderHandlers;
   /** Which edge of this row to mark, or `null` when it is not the target. */
   dropEdge?: DropEdge | null;
+  /** The boot recency map, passed DOWN from the pane (which already selects it
+   *  for `spaceViewFor`) so this row adds NO subscription of its own. Required:
+   *  `relativeTimeFor` reads it through `recencyOf`, and a row with no loaded
+   *  transcript has nothing else to print. */
+  recencyMap: Record<string, number>;
 }) {
   const messages = useSessions((s) => s.messages[sessionId]);
   const isLive = useSessions((s) => s.sessions.some((x) => x.sessionId === sessionId));
@@ -773,7 +781,10 @@ function SessionRow({
   // ("paint and click are not the same tick"), not drift this row could hide.
   const inTurn = useSessions((s) => !!s.inTurn[sessionId]);
   const stopSession = useSessions((s) => s.stopSession);
-  const time = relativeTimeFor(messages);
+  // The triple `recencyOf` takes: this row's own transcript (the FRESHER
+  // evidence, already subscribed) plus the boot map the pane handed down, so the
+  // no-transcript arm prints the same stamp the list was ordered by.
+  const time = relativeTimeFor(sessionId, messages, recencyMap);
   const title = titleFor(messages, spaceName, storedTitle);
 
   // Stop first: it is the action that pertains to a session that is RUNNING, so the
@@ -952,6 +963,7 @@ function ArchivedSection({
                 active={activeSessionId === session.sessionId}
                 onOpen={onOpen}
                 onDelete={onDelete}
+                recencyMap={sessionRecency}
               />
             ))
           )}
@@ -964,8 +976,10 @@ function ArchivedSection({
 /**
  * One archived-session row (the `SessionRow` visual pattern): 16px
  * leading slot (empty — archived sessions are NEVER live, so no
- * spinner), the title, and the relative time (empty slot when the
- * transcript was not loaded this boot). NO `· {spaceName}` suffix: the
+ * spinner), the title, and the relative time (empty slot only when
+ * NEITHER the transcript nor the boot recency map proves recency — the
+ * Archived list is sorted by that map, so a row it stamped now prints
+ * the stamp it was sorted by). NO `· {spaceName}` suffix: the
  * section is scoped to the active Space, so a row here can never belong to
  * another Space and the cue would only repeat what the header already says.
  * (`spaceName` still feeds `titleFor` as the last-resort label when the
@@ -979,18 +993,24 @@ function ArchivedSessionRow({
   active,
   onOpen,
   onDelete,
+  recencyMap,
 }: {
   session: SessionInfo;
   active: boolean;
   onOpen: (sessionId: string) => void;
   onDelete: (session: SessionInfo) => void;
+  /** The boot recency map the SECTION already selects (it is the very value
+   *  `archivedInSpace` sorted these rows by). Passed down, never indexed here:
+   *  `recencyOf` does the reading, so the label a row prints is the number that
+   *  ordered it. */
+  recencyMap: Record<string, number>;
 }) {
   const messages = useSessions((s) => s.messages[session.sessionId]);
   const spaces = useSessions((s) => s.spaces);
   const unarchiveSession = useSessions((s) => s.unarchiveSession);
   const spaceName = spaceNameFor(session.cwd, spaces);
   const title = titleFor(messages, spaceName, session.title);
-  const time = relativeTimeFor(messages);
+  const time = relativeTimeFor(session.sessionId, messages, recencyMap);
   // Unarchive first, Delete OUTERMOST: Delete is the only destructive action on
   // this row (confirm dialog), so it sits furthest from the content. The live
   // row deliberately does NOT copy this rule — Archive there is reversible and
