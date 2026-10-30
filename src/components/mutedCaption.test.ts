@@ -86,7 +86,6 @@ const FINGERPRINT = "text-ui-xs text-foreground-subtlest";
  */
 const BASELINE = [
   "src/components/MutedCaption.tsx",
-  "src/components/SubagentDelegatingCard.tsx",
   "src/components/chat/ComposerMentions.tsx",
 ];
 
