@@ -152,7 +152,7 @@ export default function GeneralSection({
       />
       <SettingsRow
         label="Session naming model"
-        description="Model used to write session names (the session's own model when unset)"
+        description="Model used to write session titles (the session's own model when unset)"
         control={
           // The SHARED `ModelPicker` again (the "Default model" row's
           // shape): the same catalog derivation + the unset row, whose
