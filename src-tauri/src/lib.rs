@@ -5,6 +5,7 @@ pub mod commands;
 pub mod config;
 pub mod navigation_guard;
 pub mod open;
+pub(crate) mod roots;
 pub mod skills;
 pub mod storage;
 #[doc(hidden)]
