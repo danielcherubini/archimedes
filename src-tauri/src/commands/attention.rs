@@ -97,13 +97,18 @@ pub async fn attention_arm(
     delay_secs: u64,
     title: String,
     body: String,
-) -> Result<(), String> {
-    let text = alert_text(&title, &body)?;
+) -> Result<(), AttentionError> {
+    // `alert_text` stays a non-command `String` helper (its inline tests pin its
+    // sentence); the command is the boundary that chooses the wire type, and the
+    // only reason it can refuse here is the empty body — so the `String` maps
+    // onto `EmptyBody`, whose `#[error(…)]` carries that sentence VERBATIM
+    // (task14's frozen pair), keeping the wire `message` byte-identical.
+    let text = alert_text(&title, &body).map_err(|_| AttentionError::EmptyBody)?;
     timer
         .arm(countdown(delay_secs), text.title, text.body)
         // A refusal, not a crash: the renderer logs this through `logFailure`
         // and the chat carries on (a notification failure must never break it).
-        .map_err(|_| "attention_arm: no tokio runtime to hold the countdown".to_string())
+        .map_err(|_| AttentionError::NoRuntime)
 }
 
 /// Disarm the attention countdown. Idempotent — the renderer calls it for
