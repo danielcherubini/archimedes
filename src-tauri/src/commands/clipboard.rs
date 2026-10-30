@@ -9,6 +9,7 @@
 
 use image::ImageEncoder;
 
+use crate::agent::errors::ClipboardError;
 use crate::agent::MAX_IMAGE_BYTES;
 
 /// 100 MiB — tier 1 (DoS guard) for the RAW clipboard RGBA: `width *
@@ -81,21 +82,32 @@ pub fn rgba_to_png_bytes(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>
 ///
 /// `Ok(None)` — no image on the clipboard (text-only or empty). The read is
 /// blocking (a compositor round-trip) so it runs on a worker thread.
+///
+/// The one command in the ADR 0063 small-batch whose `Err` is REAL (task14c):
+/// acquiring the clipboard, reading it, PNG-encoding it and the blocking thread
+/// itself can all fail. Those paths now carry [`ClipboardError`] — arboard
+/// failures are `Clipboard`, encode/cap/thread failures are `Encode` — and the
+/// two byte-cap sentences that live in [`rgba_to_png_bytes`] reach the wire
+/// through `Encode`'s `{0}` UNCHANGED (task14's frozen `#[error(…)]` adds its
+/// own family prefix; the sentence inside it is not edited by a character).
 #[tauri::command]
-pub async fn read_clipboard_image() -> Result<Option<Vec<u8>>, String> {
+pub async fn read_clipboard_image() -> Result<Option<Vec<u8>>, ClipboardError> {
     tauri::async_runtime::spawn_blocking(|| {
-        let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+        let mut clipboard =
+            arboard::Clipboard::new().map_err(|e| ClipboardError::Clipboard(e.to_string()))?;
         let image = match clipboard.get_image() {
             Ok(image) => image,
             // No image on the clipboard (text-only or empty) — not an error
             // for the caller: just "nothing to stage".
             Err(arboard::Error::ContentNotAvailable) => return Ok(None),
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(ClipboardError::Clipboard(e.to_string())),
         };
-        rgba_to_png_bytes(image.width as u32, image.height as u32, &image.bytes).map(Some)
+        rgba_to_png_bytes(image.width as u32, image.height as u32, &image.bytes)
+            .map(Some)
+            .map_err(ClipboardError::Encode)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| ClipboardError::Encode(e.to_string()))?
 }
 
 #[cfg(test)]
