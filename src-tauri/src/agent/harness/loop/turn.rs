@@ -47,13 +47,15 @@ pub(super) struct TurnLoopState {
 impl AgentLoop {
     /// Prepare the transcript and bookkeeping for a new turn.
     pub(super) fn begin_turn(&mut self, text: &str, images: &[ImageRef]) {
-        // A queued compaction belongs to the turn that queued it, and this turn
-        // has queued none: drop whatever a PREVIOUS turn left behind (see the
-        // field — a Stop racing an overflow recovery exits BEFORE the trigger is
-        // consumed). Without this the fresh prompt turn inherits the dead turn's
-        // `overflow` trigger, compacts for a reason it never hit, and — `run_compaction`
-        // having shrunk nothing — settles as an error without a model call.
-        self.force_compact = None;
+        // (finding 6) A queued compaction belongs to the turn that queued it,
+        // and this turn has queued none: `enter_turn()` is the ONE clear of the
+        // latch (see [`TurnControl`]) — calling it HERE is what makes the
+        // one-turn lifetime a method rather than a rule this function has to
+        // remember. Without it the fresh prompt turn inherits the dead turn's
+        // `overflow` trigger, compacts for a reason it never hit, and —
+        // `run_compaction` having shrunk nothing — settles as an error without
+        // a model call.
+        self.turn_control.enter_turn();
         let content = if images.is_empty() {
             MessageContent::Text(text.to_string())
         } else {
@@ -97,7 +99,7 @@ impl AgentLoop {
         turn: &CancellationToken,
         turn_tool_results: &mut Vec<Value>,
     ) -> TurnFlow {
-        let trigger = self.force_compact.take();
+        let trigger = self.turn_control.take();
         let due = trigger.is_some() || self.compactor.should_compact();
         if due {
             let t = trigger.unwrap_or(CompactionTrigger {
@@ -317,10 +319,7 @@ impl AgentLoop {
                     self.emit(RpcEvent::message_retracted);
                 }
                 self.compactor.turn_abandoned(&self.messages);
-                self.force_compact = Some(CompactionTrigger {
-                    reason: CompactionReason::Overflow,
-                    will_retry: true,
-                });
+                self.turn_control.arm(CompactionReason::Overflow, true);
                 return TurnFlow::Continue;
             }
         }
@@ -551,6 +550,21 @@ impl AgentLoop {
                         }
                     }
                     Some(Decision::Deny) => self.deny_tool_result(tc),
+                    // (finding 6) What reaches here: `Some(Decision::Allow)`,
+                    // `None` (an ungated tool), and `Some(Decision::Confine)`
+                    // — and `Confine` can ONLY be `bash`, because
+                    // `decision_for`'s fourth parameter is the `PolicedTool`
+                    // type and its `Confine` arm is spelled for `Shell` alone:
+                    // a path tool's `Decision` is structurally incapable of
+                    // being `Confine` (pinned by
+                    // `path_tool_decisions_can_never_be_confine_at_the_type_level`).
+                    // So dispatching IS the confined run: the `bash` executor
+                    // reads `ctx.file_policy.shell` and sandboxes itself
+                    // (Task 5's Landlock). Before the type, this arm silently
+                    // ingested a `Confine` a mis-threaded `is_shell` boolean
+                    // could produce for a path tool — an unsandboxed `read`
+                    // under a tier that meant refusal; that combination is now
+                    // unrepresentable at the SOURCE rather than explained here.
                     _ => self.dispatch_tool(tc, turn).await,
                 }
             };

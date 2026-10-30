@@ -43,10 +43,11 @@ async fn a_failed_summary_does_not_rewrite_the_transcript() {
             tool_calls: None,
         })
         .collect();
-    loop_.force_compact = Some(CompactionTrigger {
-        reason: CompactionReason::Threshold,
-        will_retry: false,
-    });
+    // (finding 6) The same typed `arm()` the production overflow producers
+    // use — the trigger this test pre-arms is a THRESHOLD one, and the test
+    // then triggers the compaction itself via `run_compaction` below; the
+    // assertions are untouched.
+    loop_.turn_control.arm(CompactionReason::Threshold, false);
     // The failed compaction reports `Failed` — the outcome the overflow caller
     // now reads differently from `Skipped` (issue #90).
     assert_eq!(
@@ -1088,10 +1089,10 @@ async fn a_stale_overflow_trigger_does_not_hijack_the_next_turn() {
     );
     // The leak, spelled out: the PREVIOUS turn was cancelled after its
     // overflow queued this trigger, so it is still armed on the loop.
-    loop_.force_compact = Some(CompactionTrigger {
-        reason: CompactionReason::Overflow,
-        will_retry: true,
-    });
+    // (finding 6) Armed through the same typed `arm()` production uses — the
+    // latch's ONE-TURN lifetime is what this test pins, and `enter_turn()`
+    // (called by `begin_turn`) is the only clear. Assertions unchanged.
+    loop_.turn_control.arm(CompactionReason::Overflow, true);
     loop_.handle_prompt(&text_prompt("hello")).await;
     let events =
         collect_events_until(&mut events_rx, |e| matches!(e, RpcEvent::agent_settled)).await;
