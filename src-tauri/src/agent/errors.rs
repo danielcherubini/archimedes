@@ -203,6 +203,120 @@ impl From<HistoryError> for tauri::ipc::InvokeError {
     }
 }
 
+/// Errors surfaced by the two attention commands (`attention_arm`,
+/// `attention_disarm`).
+///
+/// The two `#[error(…)]` sentences are the ones `commands/attention.rs`
+/// produced as bare `Err(String)`s — moved here VERBATIM so the wire `message`
+/// is byte-identical to the sentence the renderer logged before this enum
+/// existed (Finding 20's wire wall). `alert_text` and `AttentionTimer::arm`
+/// keep their own `String` errors as non-command helpers; the command maps them
+/// onto these two variants.
+///
+/// Carries NO serde derive (ADR 0063's load-bearing half): the only route to
+/// the wire is the hand-written `From` below.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AttentionError {
+    /// The renderer composed an alert with no body, so there is nothing to show.
+    #[error("attention_arm: empty alert body (the renderer composed nothing)")]
+    EmptyBody,
+
+    /// There is no tokio runtime to hold the countdown, so the alert can never fire.
+    #[error("attention_arm: no tokio runtime to hold the countdown")]
+    NoRuntime,
+}
+
+impl AttentionError {
+    /// The serialized `kind` discriminator (the wire contract — ADR 0063).
+    ///
+    /// The FROZEN spelling pair is `attention_empty_body` / `attention_no_runtime`
+    /// — the family-prefixed candidate the plan offered first, chosen for
+    /// `SettingsError::mcp_test_failed`'s reason: a bare `empty_body` says nothing
+    /// about which wire it came from once several families share one frontend
+    /// union. `attention_error_kind_spellings_are_frozen` freezes it; the frontend
+    /// mirror lands `export type AttentionErrorKind = "attention_empty_body" | "attention_no_runtime";`
+    /// (`src/lib/tauri/types.ts`, task14b) by copying THAT list, never by guessing.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            AttentionError::EmptyBody => "attention_empty_body",
+            AttentionError::NoRuntime => "attention_no_runtime",
+        }
+    }
+}
+
+impl From<AttentionError> for tauri::ipc::InvokeError {
+    fn from(err: AttentionError) -> Self {
+        // Exhaustive on purpose: no catch-all arm, so a new variant has to be
+        // named here AND in `kind()` (ADR 0063).
+        let extra: Option<(&'static str, String)> = match &err {
+            // Both variants are field-less: the `#[error(…)]` sentence IS the
+            // whole payload, so nothing is added beyond kind + message.
+            AttentionError::EmptyBody | AttentionError::NoRuntime => None,
+        };
+
+        let mut body = serde_json::Map::new();
+        body.insert("kind".into(), serde_json::Value::String(err.kind().into()));
+        body.insert("message".into(), serde_json::Value::String(err.to_string()));
+        if let Some((key, value)) = extra {
+            body.insert(key.into(), serde_json::Value::String(value));
+        }
+
+        tauri::ipc::InvokeError(serde_json::Value::Object(body))
+    }
+}
+
+/// Errors surfaced by the clipboard image command (`read_clipboard_image`).
+///
+/// The two sentences the command can produce are the arboard error's own
+/// `Display` and the two-tier byte-cap sentences that live in
+/// `commands/clipboard.rs::rgba_to_png_bytes` (a non-command helper whose own
+/// tests pin them). This enum adds the family prefix the `kind` already names;
+/// the inner sentence is forwarded unchanged.
+///
+/// Carries NO serde derive (ADR 0063's load-bearing half).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ClipboardError {
+    /// The clipboard could not be acquired or read (an arboard failure).
+    #[error("clipboard error: {0}")]
+    Clipboard(String),
+
+    /// The clipboard image was read but could not be PNG-encoded within the caps.
+    #[error("clipboard image encode failed: {0}")]
+    Encode(String),
+}
+
+impl ClipboardError {
+    /// The serialized `kind` discriminator (the wire contract — ADR 0063).
+    /// Frozen by `clipboard_error_kind_spellings_are_frozen`; the frontend
+    /// mirror lands `export type ClipboardErrorKind = "clipboard" | "encode";`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ClipboardError::Clipboard(_) => "clipboard",
+            ClipboardError::Encode(_) => "encode",
+        }
+    }
+}
+
+impl From<ClipboardError> for tauri::ipc::InvokeError {
+    fn from(err: ClipboardError) -> Self {
+        // Exhaustive on purpose: no catch-all arm (ADR 0063).
+        let extra: Option<(&'static str, String)> = match &err {
+            // The newtype payload lives inside `message`, so no extra key — the
+            // `SessionError::Io` precedent.
+            ClipboardError::Clipboard(_) | ClipboardError::Encode(_) => None,
+        };
+
+        let mut body = serde_json::Map::new();
+        body.insert("kind".into(), serde_json::Value::String(err.kind().into()));
+        body.insert("message".into(), serde_json::Value::String(err.to_string()));
+        if let Some((key, value)) = extra {
+            body.insert(key.into(), serde_json::Value::String(value));
+        }
+
+        tauri::ipc::InvokeError(serde_json::Value::Object(body))
+    }
+}
+
 /// Errors surfaced by file commands (`read_file_bytes`).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FilesError {
@@ -411,7 +525,7 @@ impl From<AgentsError> for tauri::ipc::InvokeError {
 
 #[cfg(test)]
 mod tests {
-    use super::{HistoryError, SessionError};
+    use super::{AttentionError, ClipboardError, HistoryError, SessionError};
 
     /// One wire-contract case: the error, its expected `kind`, and the
     /// expected extra field (key + value). A type alias because clippy's
@@ -740,6 +854,157 @@ mod tests {
                 Some(2),
                 "{err:?} contributes no field beyond kind + message: {wire}"
             );
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // AttentionError / ClipboardError (Finding 20): the small families whose
+    // enums land here so their command files (task14c's) have a wire error to
+    // return. The kind vocabularies below are FROZEN by these pins — the
+    // frontend mirrors copy these lists, never guess.
+    // -------------------------------------------------------------------
+
+    /// The mirror pin for `AttentionError`: object + `kind` + non-empty
+    /// `message` == `Display` + exactly 2 keys (both variants are field-less —
+    /// the `#[error(…)]` sentence IS the payload).
+    #[test]
+    fn every_attention_error_variant_reaches_the_wire_with_a_kind_and_a_nonempty_message() {
+        let cases: &[(&str, AttentionError)] = &[
+            ("attention_empty_body", AttentionError::EmptyBody),
+            ("attention_no_runtime", AttentionError::NoRuntime),
+        ];
+
+        for (expected_kind, err) in cases {
+            let wire = tauri::ipc::InvokeError::from(err.clone()).0;
+            assert!(
+                wire.is_object(),
+                "{err:?} must reach the wire as an object: {wire}"
+            );
+            assert_eq!(
+                wire["kind"].as_str(),
+                Some(*expected_kind),
+                "kind for {err:?}"
+            );
+            let message = wire["message"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{} must carry a string `message`: {wire}", err));
+            assert!(
+                !message.is_empty(),
+                "`message` must be non-empty for {err:?}"
+            );
+            assert_eq!(
+                message,
+                err.to_string(),
+                "message must be the Display of {err:?}"
+            );
+            assert_eq!(
+                wire.as_object().map(|m| m.len()),
+                Some(2),
+                "{err:?} contributes no field beyond kind + message: {wire}"
+            );
+        }
+    }
+
+    /// The DRIFT PIN for the attention wire vocabulary. Both sentences are
+    /// quoted because they are the byte-identity contract with the pre-migration
+    /// `Err(String)`s of `commands/attention.rs` — the wire `message` the
+    /// renderer's `logFailure` line carries must not change character.
+    /// The frontend mirror lands
+    /// `export type AttentionErrorKind = "attention_empty_body" | "attention_no_runtime";`
+    /// (`src/lib/tauri/types.ts`, task14b) by copying THIS list.
+    #[test]
+    fn attention_error_kind_spellings_are_frozen() {
+        let frozen: &[(&str, AttentionError, &str)] = &[
+            (
+                "attention_empty_body",
+                AttentionError::EmptyBody,
+                "attention_arm: empty alert body (the renderer composed nothing)",
+            ),
+            (
+                "attention_no_runtime",
+                AttentionError::NoRuntime,
+                "attention_arm: no tokio runtime to hold the countdown",
+            ),
+        ];
+
+        let spelled: Vec<&'static str> = frozen.iter().map(|(_, e, _)| e.kind()).collect();
+        assert_eq!(
+            spelled,
+            vec!["attention_empty_body", "attention_no_runtime"],
+            "the AttentionError `kind` vocabulary is frozen (the family-prefixed \
+             candidate pair, chosen once; see AttentionError::kind)"
+        );
+        for (expected_kind, err, expected_message) in frozen {
+            assert_eq!(&err.kind(), expected_kind, "frozen spelling for {err:?}");
+            assert_eq!(
+                &err.to_string(),
+                expected_message,
+                "the sentence the pre-migration Err(String) carried is byte-identical on the wire"
+            );
+        }
+    }
+
+    /// The mirror pin for `ClipboardError` (the `SessionError::Io` shape: the
+    /// newtype payload lives inside `message`, so no extra key).
+    #[test]
+    fn every_clipboard_error_variant_reaches_the_wire_with_a_kind_and_a_nonempty_message() {
+        let cases: &[(&str, ClipboardError)] = &[
+            (
+                "clipboard",
+                ClipboardError::Clipboard("clipboard init failed".into()),
+            ),
+            ("encode", ClipboardError::Encode("png encode failed".into())),
+        ];
+
+        for (expected_kind, err) in cases {
+            let wire = tauri::ipc::InvokeError::from(err.clone()).0;
+            assert!(
+                wire.is_object(),
+                "{err:?} must reach the wire as an object: {wire}"
+            );
+            assert_eq!(
+                wire["kind"].as_str(),
+                Some(*expected_kind),
+                "kind for {err:?}"
+            );
+            let message = wire["message"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{} must carry a string `message`: {wire}", err));
+            assert!(
+                !message.is_empty(),
+                "`message` must be non-empty for {err:?}"
+            );
+            assert_eq!(
+                message,
+                err.to_string(),
+                "message must be the Display of {err:?}"
+            );
+            assert_eq!(
+                wire.as_object().map(|m| m.len()),
+                Some(2),
+                "{err:?} contributes no field beyond kind + message: {wire}"
+            );
+        }
+    }
+
+    /// The DRIFT PIN for the clipboard wire vocabulary. The frontend mirror
+    /// lands `export type ClipboardErrorKind = "clipboard" | "encode";`
+    /// (`src/lib/tauri/types.ts`, task14b) by copying THIS list.
+    #[test]
+    fn clipboard_error_kind_spellings_are_frozen() {
+        let frozen: &[(&str, ClipboardError)] = &[
+            ("clipboard", ClipboardError::Clipboard("x".into())),
+            ("encode", ClipboardError::Encode("x".into())),
+        ];
+
+        let spelled: Vec<&'static str> = frozen.iter().map(|(_, e)| e.kind()).collect();
+        assert_eq!(
+            spelled,
+            vec!["clipboard", "encode"],
+            "the ClipboardError `kind` vocabulary is frozen"
+        );
+        for (expected, err) in frozen {
+            assert_eq!(&err.kind(), expected, "frozen spelling for {err:?}");
         }
     }
 }
