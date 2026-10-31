@@ -97,6 +97,17 @@ const SESSION_COLUMNS: [&str; 9] = [
     "cost_usd",
 ];
 
+const SESSION_ROW_FIELDS: usize = 9;
+// Compile-time arity tie ONLY: the length of the const list must equal
+// SESSION_ROW_FIELDS. It cannot see a column appended to both the const AND the
+// field count in one edit, and it cannot see the SELECT statement at all — the
+// per-row-type drift-guard TEST
+// (`session_row_from_maps_the_select_const_columns_in_order`, in
+// `storage/db/tests/`) is the guard. What this tie does buy: renumbering one
+// literal without the other fails to compile, so a half-finished edit is
+// rejected at once. It is kept for that fast rejection, not as the guard.
+const _: [(); SESSION_COLUMNS.len()] = [(); SESSION_ROW_FIELDS];
+
 /// Map one row of [`SESSION_COLUMNS`] onto a [`SessionRow`], index for index.
 ///
 /// The ONE place a `SessionRow` is constructed (3 call sites: `session`, both
@@ -148,6 +159,13 @@ const MESSAGE_COLUMNS: [&str; 6] = [
     "created_at",
 ];
 
+const MESSAGE_ROW_FIELDS: usize = 6;
+// Compile-time arity tie ONLY — see SESSION_ROW_FIELDS above for the honest
+// scope: it catches a half-renumbered edit, it cannot see the SELECT, and the
+// drift-guard TEST (`message_row_from_maps_the_select_const_columns_in_order`)
+// is the guard.
+const _: [(); MESSAGE_COLUMNS.len()] = [(); MESSAGE_ROW_FIELDS];
+
 /// Map one row of [`MESSAGE_COLUMNS`] onto a [`MessageRow`], index for index.
 ///
 /// The ONE place a `MessageRow` is constructed (3 call sites: `messages_for`,
@@ -185,6 +203,12 @@ pub struct SpaceRow {
 /// Adding it here would change the wire type `Vec<SpaceRow>` that
 /// `commands/spaces.rs` returns, so its absence is a decision, not an omission.
 const SPACE_COLUMNS: [&str; 4] = ["path", "created_at", "last_opened_at", "trusted"];
+
+const SPACE_ROW_FIELDS: usize = 4;
+// Compile-time arity tie ONLY — see SESSION_ROW_FIELDS above for the honest
+// scope; the drift-guard TEST
+// (`space_row_from_maps_the_select_const_columns_in_order`) is the guard.
+const _: [(); SPACE_COLUMNS.len()] = [(); SPACE_ROW_FIELDS];
 
 /// Map one row of [`SPACE_COLUMNS`] onto a [`SpaceRow`], index for index.
 ///
