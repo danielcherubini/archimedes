@@ -161,6 +161,30 @@ the guard is a new test, named in output) · `cargo clippy --all-targets` 0 warn
 - **A1 vet round 2 → APPROVE.** The reviewer measured the closure rather than reading it: broken idiom FALSE GREEN 5/5 vs fixed idiom RED 5/5 on a 620 KB corpus; `grep -rn 'dotted-name dir(s)'` returns exactly five pins (`.test.sh:446`, `.test.sh:462`, `.sh:1183`, `.sh:1193`, doc `:194`) — no sixth; and the planned 18d fixture run against the UNMODIFIED script exits 1 naming `betaenrollmentagent` UNATTRIBUTED, exactly the red Step 1 predicts.
 - **A2 vet round 1 → APPROVE.** The proposed call is not novel — `let child_rows = wait_for_rows(&h.db, &child_id, 2).await;` already exists in the converted sibling test, so `&h.db` → `&Db` and `&child_id` → `&str` are proven coercions. Guard occurrence count grep-verified 4 → 3; the split needle defeats self-matching; `env!("CARGO_MANIFEST_DIR")` is compile-time, so the path is CWD-independent. Two nits: `use …Db` is at line 32 not 27, and the hand-copied `1652` baseline is not in the grounding — re-derive at run time, do not treat it as a contract. (A third nit raised there — "helper closes at 290 not 292" — was itself WRONG: the implementer checked, 292 is correct and 290 is the `sleep` line. Do not repeat it.)
 
+### Review loop (roadmap Step 5)
+
+- **Round 1 → 4 REAL 🟡 + 2 🟢.** The code was sound; the DURABLE RECORD was not. §9a's heading, opener and
+  third bullet still asserted the pre-fix single-shape world (`defeats the shape rule`, `Live on main, unfixed`,
+  `cannot exclude it`) while the same section's tail said the fix had landed; the front-matter `verified-by` stamp
+  certified the single-shape analysis and cited only case 18c; **ADR 0078 — the decision authority for the census —
+  still described one shape and the no-dot invariant alone**; and §9a cited case 17 for a claim case 17 does not
+  prove, because **no case anywhere planted a dash-free dir on Linux**, so nothing pinned the new shape as
+  Darwin-only. Fixed in `30c581c` (case 17b + guard message scope) and `e82296e` (the three docs).
+- **The reviewer corrected MY framing, not just the children's.** I floated `>= want` + `assert_eq!(len, 3)` as a
+  possible 30 s stall on overshoot. False: an overshoot returns 4 rows immediately and fails FAST; only a
+  stuck-*below* read hits the deadline, and that is the contract. Non-issue.
+- **Item I called a possible latent #138 is NOT one.** I named `ipc.rs:902` as a structural twin needing the same
+  fix; the reviewer read it — in-process writer, presence-not-count assert — and so for `ipc.rs:447` and
+  `session_native.rs:277`. **Do not open a "latent #138" issue; the sites are legal.** The residual point stands as
+  a suggestion only: the read-discipline guard covers one file.
+- **Round 2 → APPROVE, one 🟢 nit**, fixed in `8c770d2`: the new stamp claimed a re-run at `5c90fdf` of a case list
+  including 17b, but 17b landed in the descendant `30c581c`. A temporal falsehood of exactly the class this doc
+  exists to prevent, introduced by the fix for the previous temporal falsehood.
+- **Loop exit:** round 2 had zero actionable findings and the nit was verified byte-level (4 content lines, all in
+  front-matter) plus the frontend gate re-run — the leg that matters, since
+  `src/lib/subagentSheetLayout.test.ts` reads `docs/features/`. No round 3 was dispatched; that is a judgement
+  about a 2-line front-matter edit, not a measured clean re-review.
+
 ### Findings the children raised, and how the orchestrator adjudicated them
 
 - **A1 child reported "`docs/roadmap/` is NOT gitignored" — WRONG, and the reason is worth keeping.** It ran
