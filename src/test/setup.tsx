@@ -83,10 +83,8 @@ beforeAll(() => {
   );
 
   // The scroll + pointer-capture APIs are plain prototype assignments, NOT
-  // `vi.stubGlobal` — they are not globals, and per-file code asserts on these
-  // exact functions (`AskQuestionCard.test.tsx` reads
-  // `Element.prototype.scrollIntoView`'s mock contexts), so they must stay
-  // ordinary writable properties a file can overwrite and restore.
+  // `vi.stubGlobal` — they are not globals.
+  // AskQuestionCard.test.tsx asserts scrollIntoView is never called on option selection, so it must stay an overwritable prototype property.
   Element.prototype.scrollIntoView = vi.fn();
   Element.prototype.hasPointerCapture = vi.fn(() => false);
   Element.prototype.setPointerCapture = vi.fn();
@@ -109,11 +107,12 @@ beforeAll(() => {
  *    `if (typeof window.matchMedia !== "function")` before installing their
  *    own, so the global stub skips that branch and their `vi.spyOn` wraps the
  *    SHARED stub instead of the jsdom absence.
- *  - `components/AskQuestionCard.test.tsx:48-50` — captures
- *    `Element.prototype.scrollIntoView` at module scope and restores it in
- *    `afterEach` (deleting it when it was `undefined`). With the global stub in
- *    place the capture finds a function, so the delete branch is dead code
- *    there; harmless, but it is a branch that no longer proves what it says.
+ *  - `components/AskQuestionCard.test.tsx` — captures
+ *    `Element.prototype.scrollIntoView` at module scope, replaces it with a
+ *    fresh mock per test to verify option selection is quiet (asserting
+ *    `not.toHaveBeenCalled`), and restores it in `afterEach`. With the global
+ *    stub in place the capture finds a function, so the delete branch is dead
+ *    code there; harmless, but it is a branch that no longer proves what it says.
  *  - `lib/theme.test.ts`, `lib/settings.test.ts`,
  *    `lib/archimedes-film/compositor.test.ts` — `vi.unstubAllGlobals()`, which
  *    strips the global `matchMedia` stub for the remainder of the file. They

@@ -68,6 +68,8 @@ pub struct SessionRow {
     /// D5 defect this column exists to avoid (ADR 0082). The column therefore
     /// has no `DEFAULT` (see the migration in `Db::open`).
     pub cost_usd: Option<f64>,
+    /// The session's title generation stage (0 = untitled, 1 = stage 1 title, 2 = stage 2 / settled title).
+    pub title_stage: i64,
 }
 
 /// The ONE `sessions` SELECT list every `SessionRow` read uses, as a const
@@ -85,7 +87,7 @@ pub struct SessionRow {
 /// asserts `column_count() == SESSION_ROW_FIELDS` before any value) is the
 /// guard. The const is what makes that test able to speak about the SELECT at
 /// all; it is not itself a compile-time check of the SELECT text.
-const SESSION_COLUMNS: [&str; 9] = [
+const SESSION_COLUMNS: [&str; 10] = [
     "id",
     "cwd",
     "created_at",
@@ -95,9 +97,10 @@ const SESSION_COLUMNS: [&str; 9] = [
     "context_usage_json",
     "is_subagent",
     "cost_usd",
+    "title_stage",
 ];
 
-const SESSION_ROW_FIELDS: usize = 9;
+const SESSION_ROW_FIELDS: usize = 10;
 // Compile-time arity tie ONLY: the length of the const list must equal
 // SESSION_ROW_FIELDS. It cannot see a column appended to both the const AND the
 // field count in one edit, and it cannot see the SELECT statement at all — the
@@ -127,6 +130,7 @@ fn session_row_from(row: &Row<'_>) -> rusqlite::Result<SessionRow> {
         context_usage_json: row.get(6)?,
         is_subagent: row.get::<_, i64>(7)? != 0,
         cost_usd: row.get(8)?,
+        title_stage: row.get(9)?,
     })
 }
 
@@ -491,6 +495,23 @@ impl Db {
                 [],
             )?;
             seed_session_sort_order(tx)?;
+            Ok(())
+        })?;
+        // `title_stage` (ADR: two-stage async titling) is the same shape as the
+        // gates above — an ALTER PAIRED with a data step — so it runs through the
+        // same factory: a crash rolls the ALTER back with the backfill, and the
+        // next open re-runs the whole gate instead of seeding stage 2 twice.
+        gate(&mut conn, "sessions", "title_stage", |tx| {
+            tx.execute(
+                "ALTER TABLE sessions ADD COLUMN title_stage INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+            // Existing titled sessions are migrated to stage 2 so they are preserved
+            // and not overwritten by an unexpected stage-2 re-title.
+            tx.execute(
+                "UPDATE sessions SET title_stage = 2 WHERE title IS NOT NULL",
+                [],
+            )?;
             Ok(())
         })?;
         // One-time migration for pre-existing databases: give
@@ -932,20 +953,32 @@ impl Db {
         Ok(())
     }
 
-    /// Set a session's title ONLY when it has none (`title IS NULL`), so a
-    /// title that already exists — a generated one from an earlier turn, or
-    /// one a future rename affordance wrote — is never overwritten. The
-    /// `WHERE title IS NULL` IS the race guard: one statement under the `Db`
-    /// mutex, so a concurrent writer cannot slip between a check and a
-    /// write. Returns `true` when a row was written, `false` when the row is
-    /// missing or already titled (a missing row is a no-op, not an error —
-    /// mirroring `set_session_archived`).
-    pub fn set_session_title(&self, id: &str, title: &str) -> Result<bool, DbError> {
+    /// Set a session's title and transition its `title_stage` atomically, conditional
+    /// on its current stage matching `from_stage`.
+    ///
+    /// Returns `true` when a row was updated, `false` when the row is missing or
+    /// currently at a different stage.
+    pub fn set_session_title_stage(
+        &self,
+        id: &str,
+        title: &str,
+        from_stage: i64,
+        to_stage: i64,
+    ) -> Result<bool, DbError> {
         let n = self.conn.lock().expect("db mutex poisoned").execute(
-            "UPDATE sessions SET title = ?2 WHERE id = ?1 AND title IS NULL",
-            params![id, title],
+            "UPDATE sessions SET title = ?2, title_stage = ?4 WHERE id = ?1 AND title_stage = ?3",
+            params![id, title, from_stage, to_stage],
         )?;
         Ok(n > 0)
+    }
+
+    /// Set a session's initial title (transitioning from stage 0 to stage 1).
+    ///
+    /// Conditional on `title_stage == 0`: returns `true` when updated, or `false`
+    /// if the session is already at a later stage or missing. Delegates to
+    /// `set_session_title_stage(id, title, 0, 1)` for backwards compatibility.
+    pub fn set_session_title(&self, id: &str, title: &str) -> Result<bool, DbError> {
+        self.set_session_title_stage(id, title, 0, 1)
     }
 
     /// A session's messages in insertion order (the transcript order).
@@ -1425,7 +1458,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     is_subagent INTEGER NOT NULL DEFAULT 0,
     todos_json TEXT,
     cost_usd REAL,
-    sort_order INTEGER NOT NULL DEFAULT 0
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    title_stage INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY,

@@ -1079,8 +1079,8 @@ fn title_session(id: &str) -> SessionInfo {
     }
 }
 
-/// The session's title is written ONLY while it has none, and only once:
-/// the first `set_session_title` writes the `NULL` title and returns
+/// The session's title is written at stage 0 (transitioning to stage 1):
+/// the first `set_session_title` writes the title and returns
 /// `true`, and both `session()` and `list_sessions()` read it back (the
 /// naming pass's write must reach the boot fetch that lists sessions).
 #[test]
@@ -1090,7 +1090,7 @@ fn set_session_title_writes_a_null_title_and_reads_back() {
     let db = Db::open(&path).expect("db should open");
     db.record_session(&title_session("sess-1"))
         .expect("record_session should succeed");
-    // A recorded session starts UNTITLED (`record_session` inserts NULL).
+    // A recorded session starts UNTITLED (`record_session` inserts NULL title and title_stage 0).
     assert_eq!(
         db.session("sess-1")
             .expect("session should succeed")
@@ -1123,6 +1123,172 @@ fn set_session_title_writes_a_null_title_and_reads_back() {
         Some("Refactor the auth middleware"),
         "list_sessions reads the title back"
     );
+}
+
+#[test]
+fn set_session_title_stage_transitions_from_0_to_1() {
+    let dir = crate::test_support::ScratchDir::in_env_temp("db-title-stage-test-", "scratch");
+    let path = dir.join("t.db");
+    let db = Db::open(&path).expect("db should open");
+    db.record_session(&title_session("sess-1"))
+        .expect("record_session should succeed");
+
+    let initial = db.session("sess-1").unwrap().unwrap();
+    assert_eq!(initial.title_stage, 0);
+    assert_eq!(initial.title, None);
+
+    let ok = db
+        .set_session_title_stage("sess-1", "Stage 1 Title", 0, 1)
+        .expect("set_session_title_stage should succeed");
+    assert!(ok, "transition from 0 to 1 returns true");
+
+    let updated = db.session("sess-1").unwrap().unwrap();
+    assert_eq!(updated.title_stage, 1);
+    assert_eq!(updated.title.as_deref(), Some("Stage 1 Title"));
+
+    let listed = db.list_sessions(true).unwrap();
+    assert_eq!(listed[0].title_stage, 1);
+    assert_eq!(listed[0].title.as_deref(), Some("Stage 1 Title"));
+}
+
+#[test]
+fn set_session_title_stage_transitions_from_1_to_2() {
+    let dir = crate::test_support::ScratchDir::in_env_temp("db-title-stage-test-", "scratch");
+    let path = dir.join("t.db");
+    let db = Db::open(&path).expect("db should open");
+    db.record_session(&title_session("sess-1"))
+        .expect("record_session should succeed");
+
+    assert!(db
+        .set_session_title_stage("sess-1", "Stage 1 Title", 0, 1)
+        .expect("transition 0 -> 1 succeeds"));
+
+    let ok = db
+        .set_session_title_stage("sess-1", "Stage 2 Title", 1, 2)
+        .expect("set_session_title_stage should succeed");
+    assert!(ok, "transition from 1 to 2 returns true");
+
+    let updated = db.session("sess-1").unwrap().unwrap();
+    assert_eq!(updated.title_stage, 2);
+    assert_eq!(updated.title.as_deref(), Some("Stage 2 Title"));
+}
+
+#[test]
+fn set_session_title_stage_fails_on_mismatched_from_stage() {
+    let dir = crate::test_support::ScratchDir::in_env_temp("db-title-stage-test-", "scratch");
+    let path = dir.join("t.db");
+    let db = Db::open(&path).expect("db should open");
+    db.record_session(&title_session("sess-1"))
+        .expect("record_session should succeed");
+
+    // Attempt 1 -> 2 when currently at stage 0
+    let ok = db
+        .set_session_title_stage("sess-1", "Stage 2 Title", 1, 2)
+        .expect("query should succeed");
+    assert!(!ok, "transition from mismatched from_stage returns false");
+
+    let row = db.session("sess-1").unwrap().unwrap();
+    assert_eq!(row.title_stage, 0);
+    assert_eq!(row.title, None);
+
+    // Advance to stage 1
+    assert!(db
+        .set_session_title_stage("sess-1", "Stage 1 Title", 0, 1)
+        .unwrap());
+
+    // Attempt 0 -> 1 again when already at stage 1
+    let ok = db
+        .set_session_title_stage("sess-1", "Another Stage 1", 0, 1)
+        .expect("query should succeed");
+    assert!(!ok, "repeat 0 -> 1 returns false");
+    let row = db.session("sess-1").unwrap().unwrap();
+    assert_eq!(row.title_stage, 1);
+    assert_eq!(row.title.as_deref(), Some("Stage 1 Title"));
+
+    // Attempt 2 -> 3 when at stage 1
+    let ok = db
+        .set_session_title_stage("sess-1", "Stage 3", 2, 3)
+        .expect("query should succeed");
+    assert!(!ok, "transition from mismatched stage returns false");
+    let row = db.session("sess-1").unwrap().unwrap();
+    assert_eq!(row.title_stage, 1);
+    assert_eq!(row.title.as_deref(), Some("Stage 1 Title"));
+}
+
+#[test]
+fn title_stage_migrates_existing_titled_sessions_to_stage_2_and_untitled_to_0() {
+    let dir = crate::test_support::ScratchDir::in_env_temp("db-title-mig-test-", "scratch");
+    let path = dir.join("t.db");
+    // A pre-existing database: the `sessions` table WITHOUT `title_stage`.
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            cwd TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            title TEXT,
+            capabilities_json TEXT NOT NULL,
+            archived INTEGER NOT NULL DEFAULT 0,
+            context_usage_json TEXT,
+            is_subagent INTEGER NOT NULL DEFAULT 0,
+            todos_json TEXT,
+            cost_usd REAL,
+            sort_order INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO sessions (id, cwd, created_at, title, capabilities_json)
+        VALUES ('s-titled', '/tmp', 1, 'Pre-existing Title', '{}');
+        INSERT INTO sessions (id, cwd, created_at, title, capabilities_json)
+        VALUES ('s-untitled', '/tmp', 2, NULL, '{}');",
+    )
+    .unwrap();
+    drop(conn);
+
+    // The next `Db::open` must SUCCEED (the migration adds title_stage and backfills titled rows).
+    let db = Db::open(&path).expect("the title_stage migration is one-time and idempotent");
+
+    // Verify column exists
+    let has: i64 = db
+        .conn
+        .lock()
+        .expect("db mutex poisoned")
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'title_stage'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(has, 1, "the title_stage column is in place after migration");
+
+    // Verify row values
+    let titled = db.session("s-titled").unwrap().expect("s-titled exists");
+    assert_eq!(titled.title.as_deref(), Some("Pre-existing Title"));
+    assert_eq!(
+        titled.title_stage, 2,
+        "pre-existing titled session migrated to stage 2"
+    );
+
+    let untitled = db
+        .session("s-untitled")
+        .unwrap()
+        .expect("s-untitled exists");
+    assert_eq!(untitled.title, None);
+    assert_eq!(
+        untitled.title_stage, 0,
+        "pre-existing untitled session migrated to stage 0"
+    );
+
+    // list_sessions projection agrees
+    let all = db.list_sessions(true).unwrap();
+    let titled_listed = all.iter().find(|s| s.id == "s-titled").unwrap();
+    assert_eq!(titled_listed.title_stage, 2);
+    let untitled_listed = all.iter().find(|s| s.id == "s-untitled").unwrap();
+    assert_eq!(untitled_listed.title_stage, 0);
+
+    // Idempotency: re-opening does not error or alter stage
+    drop(db);
+    let db2 = Db::open(&path).expect("re-opening migrated db succeeds");
+    let titled2 = db2.session("s-titled").unwrap().unwrap();
+    assert_eq!(titled2.title_stage, 2);
 }
 
 /// A title that already exists is NEVER overwritten — a second
@@ -2242,7 +2408,8 @@ CREATE TABLE sessions (
     is_subagent INTEGER NOT NULL DEFAULT 0,
     todos_json TEXT,
     cost_usd REAL,
-    sort_order INTEGER NOT NULL DEFAULT 0
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    title_stage INTEGER NOT NULL DEFAULT 0
 );
 ",
     spaces_with_sort_order
@@ -2261,7 +2428,8 @@ CREATE TABLE sessions (
     is_subagent INTEGER NOT NULL DEFAULT 0,
     todos_json TEXT,
     cost_usd REAL,
-    sort_order INTEGER NOT NULL DEFAULT 0
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    title_stage INTEGER NOT NULL DEFAULT 0
 );
 ",
     spaces_with_sort_order
@@ -2281,7 +2449,8 @@ CREATE TABLE sessions (
     context_usage_json TEXT,
     is_subagent INTEGER NOT NULL DEFAULT 0,
     todos_json TEXT,
-    sort_order INTEGER NOT NULL DEFAULT 0
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    title_stage INTEGER NOT NULL DEFAULT 0
 );
 ",
     spaces_with_sort_order
@@ -2303,7 +2472,8 @@ CREATE TABLE sessions (
     is_subagent INTEGER NOT NULL DEFAULT 0,
     todos_json TEXT,
     cost_usd REAL,
-    sort_order INTEGER NOT NULL DEFAULT 0
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    title_stage INTEGER NOT NULL DEFAULT 0
 );
 ",
     spaces_without_sort_order
@@ -2323,7 +2493,8 @@ CREATE TABLE sessions (
     context_usage_json TEXT,
     is_subagent INTEGER NOT NULL DEFAULT 0,
     todos_json TEXT,
-    cost_usd REAL
+    cost_usd REAL,
+    title_stage INTEGER NOT NULL DEFAULT 0
 );
 ",
     spaces_with_sort_order
@@ -2331,13 +2502,13 @@ CREATE TABLE sessions (
 
 /// Isolation is these fixtures' load-bearing property, so it is ASSERTED rather
 /// than commented: each `SCHEMA_WITHOUT_*` must omit EXACTLY ONE gated column
-/// across both tables, and must carry the other eight. If a fixture silently
+/// across both tables and carry every other one. If a fixture silently
 /// loses a second column, the sibling gate fires inside that test and the test
 /// stops being about its own gate — this fails first, with the fixture named.
 #[test]
 fn each_cluster_schema_omits_exactly_one_gated_column() {
     // (table, column) for every gate `Db::open` probes, in probe order.
-    const GATED: [(&str, &str); 8] = [
+    const GATED: [(&str, &str); 9] = [
         ("spaces", "trusted"),
         ("sessions", "archived"),
         ("sessions", "context_usage_json"),
@@ -2346,6 +2517,7 @@ fn each_cluster_schema_omits_exactly_one_gated_column() {
         ("sessions", "cost_usd"),
         ("spaces", "sort_order"),
         ("sessions", "sort_order"),
+        ("sessions", "title_stage"),
     ];
     let fixtures: [(&str, &str); 5] = [
         ("SCHEMA_WITHOUT_ARCHIVED", SCHEMA_WITHOUT_ARCHIVED),
@@ -3320,7 +3492,7 @@ fn session_row_from_maps_the_select_const_columns_in_order() {
     // which is the one edit the arity tie cannot see) reddens THIS assert,
     // because nothing forces this literal to follow the prod const. Order is
     // pinned too, so a reorder fails here as well as in the value asserts.
-    const EXPECTED_SESSION_COLUMNS: [&str; 9] = [
+    const EXPECTED_SESSION_COLUMNS: [&str; 10] = [
         "id",
         "cwd",
         "created_at",
@@ -3330,12 +3502,13 @@ fn session_row_from_maps_the_select_const_columns_in_order() {
         "context_usage_json",
         "is_subagent",
         "cost_usd",
+        "title_stage",
     ];
     assert_eq!(
         SESSION_COLUMNS.as_slice(),
         EXPECTED_SESSION_COLUMNS.as_slice(),
         "SESSION_COLUMNS drifted from the column list session_row_from maps: the \
-         mapper reads these 9 columns in THIS order (field names in the same \
+         mapper reads these 10 columns in THIS order (field names in the same \
          order), so a column added to or moved in the const must be matched here \
          AND by a field in session_row_from"
     );
