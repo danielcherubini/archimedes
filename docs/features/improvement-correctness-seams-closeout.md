@@ -490,3 +490,78 @@ Cite the **PR number** for any of this after merge; the per-commit SHAs above ar
 | F14-wire glossary renames | task15 | `list_agent_definition_reports`, `AgentDefinitionReportDto`, `list_space_listing`/`ListingDto` | task15 |
 | F12 storage shape | task12 | `storage/db.rs` + `storage/db/tests/` | task12 |
 | F17 test-tree moves | task12b | `harness/launch/tests/`, `tools/sandbox/tests/` | task12b |
+
+---
+
+## Durable decisions the status file carried that this doc did not yet hold (moved 2026-10-31, before deletion)
+
+The roadmap family's `Decisions log` was the only copy of the items below. Everything else in that log
+is either recorded above (the gates, the false findings, the F5 TS/Rust registry split, the wave
+schedule, what each task shipped) or is a property AGENTS.md already carries as a repo fact — the one
+compilation unit, `cargo test --lib` not rebuilding `fake_worker`, the mingw check as the only local
+Windows proof, the two known frontend flakes, "plans carry stale baselines", and the `docs/roadmap/`
+deletion rules. Those are not repeated here.
+
+### `get_stalled_info` was KEPT on purpose — it is not an orphan the guard missed
+
+The audit called it dead IPC. It was **kept by decision** (status Decisions log, 2026-10-30): it is the
+**pull half of ADR 0025**, whose amendment is the alternative reading — `docs/decisions/0025-sessions-in-worker-processes.md:44`,
+"the pushed event and the pulled `stalled_info` can no longer name different files for one crash". The
+report's rule is never a silent delete, so task13 exempted it in the CI guard with that citation rather
+than removing it: the sole entry of `scripts/check-commands.sh:71–73`'s allowlist, whose reason names both
+the ADR and the live consumer `src-tauri/tests/ipc.rs:518–528`. The guard additionally asserts
+`get_stalled_info` appears in the extracted handler block **independently of the allowlist's contents**
+(`check-commands.sh:446–457`) — so a future reader cannot conclude from "registered but no TS consumer"
+that deleting it is safe; deleting it requires amending ADR 0025 first. The paired decision —
+`list_agent_definitions` was **dropped**, not retained — landed in the same task (the command, its
+`generate_handler!` entry, its docs, its standalone test and the part-2 assertion of
+`an_unmentionable_name_is_hidden_from_the_picker_but_kept_elsewhere`; parts 1 and 2 of that test stay).
+
+### task05 knowingly traded a synchronous first render for the subscription
+
+Finding 18's fix swaps QueueRow's local `prefersReducedMotion()` for `usePrefersReducedMotion`, and that
+hook **seeds `false` and learns in an effect** — so a reduced-motion user's first render of QueueRow is
+animate-ready, where the deleted local copy answered synchronously. **Accepted deliberately**, with this
+evidence: QueueRow's sibling in the same queue stack, `QueuedSummaryContent.tsx`, already used the hook,
+and the hook's own doc explicitly blesses the false seed "for the summary roll"; the one component the
+doc says needs a synchronous answer is `src/components/ui/braille-loader.tsx`, which keeps its own
+synchronous `useState(getPrefersReducedMotion)` initialiser — the hook doc names that duplication as
+deliberate, "do not 'unify' it" (both still true at `main`). The guard was that
+`QueueRow.test.tsx:396`/`:407` stay byte-for-byte UNMODIFIED — they are no-`await` by design, because a
+`forget` that is not same-tick strands the entry — and the instruction to the implementer was to STOP AND
+REPORT rather than weaken either test if the swap broke one. Both pins shipped untouched. Anyone tempted
+to "fix" the first frame by seeding synchronously should read the hook doc first: the two details there
+(the `matchMedia` guard, the `addListener` fallback) are load-bearing for tests and WebKitGTK.
+
+### Open, unowned: `SessionListRow.tsx`'s `time` prop doc went stale and nobody fixed it
+
+Wave 1 assigned owners for the two stale comments its file sets left outside them. One landed: the
+`map_anthropic_error` mention in `loop/tests/compaction_overflow.rs` was folded into task08 and is gone
+(`grep -rn map_anthropic_error src-tauri/src` now returns one hit, a moved-test comment in
+`provider/types.rs:551`). **The other did not**: `src/components/SessionListRow.tsx:99` still reads
+"The relative time of last activity, or `null` for no loaded transcript", but since task04 the value comes
+from `relativeTimeFor` → `recencyOf`, which returns `null` only when there is **no evidence at all** — no
+loaded transcript AND no boot-recency entry for that id (`src/lib/sessionRecency.ts:42–50`). A session with
+no transcript but a recency stamp now prints a time. No task owned that file, no follow-up file survived,
+and the squash does not touch it, so this line is its only remaining record. One-line reword; needs an owner.
+
+### Two measurement facts this run learned the hard way
+
+- **The Rust gate emits one `test result:` line per test binary — sum them, never read one line.** A gate
+  figure in this run was mis-measured exactly that way and reported `0 ignored` where the summed truth was
+  **4 ignored** (`agent/boundary.rs`, `agent/tools/exec/tests/search.rs`, `lib.rs`,
+  `tests/attention_alert_survives.rs` — all pre-existing, none touched by this feature). The 4 holds at
+  every gate in this doc, and main added none.
+- **Never give a Rust implementation child its own worktree on this machine.** `src-tauri/target` is
+  **173 GB** on a volume at **89 %** (re-measured at close-out; 152 GB when the decision was taken), so a
+  second cargo target dir does not fit and a cold rebuild costs more (~10+ min per width-1 wave) than the
+  pipelined planning it would unlock (~5 min) returns — which is why the Rust chain ran serialized in the
+  primary tree with planning pipelining OFF for waves 4–10. Frontend worktrees cost ~0 real disk (hardlinks
+  from the pnpm store; `df` unchanged), so the asymmetry is Rust-specific, not a general ban.
+
+### Dispatch lesson: consumed-`specify` plans carry no `Commit:` field
+
+Telling a planning child to "commit with the plan's suggested message" promises a field that does not
+exist in the consumed-mode plan shape. Two of four Wave-1 children hit it and composed house-style
+messages instead — the right outcome, but the instruction was false to the child. Either say "write a
+conventional-commit message in the repo's style" or add the field to the plan at vet time.
