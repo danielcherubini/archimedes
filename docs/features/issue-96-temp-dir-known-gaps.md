@@ -190,13 +190,14 @@ it is rewritten rather than left as a prediction:
   `mapssyncd`, `privatecloudcomputed`, the `remotemanagement` subscribers and so on,
   written by the OS during a ~90s suite. Linux does not have this problem: Ubuntu's
   fresh-runner `/tmp` snapshotted 13 directories and verified clean.
-- The fix is a **Darwin-only shape rule**: a candidate whose name contains a dot is
-  not counted, and the count is always announced (`excluded: N dotted-name dir(s)
-  …`) so the exclusion is never silent. It is a shape, not a name list — deliberately
-  **not** `com.apple.*`, which would need widening every time a daemon appears. It
-  rests on an invariant that is now **pinned by a test** (`.test.sh` case 18c): no
-  Archimedes minter prefix contains a dot. If someone mints a dotted prefix, a test
-  reddens instead of the leak becoming invisible.
+- The fix is a **Darwin-only shape rule**: a candidate whose name contains a dot,
+  or contains no dash, is not counted, and the count is always announced
+  (`excluded: N shape-mismatched dir(s) …`) so the exclusion is never silent. It is
+  a shape, not a name list — deliberately **not** `com.apple.*`, which would need
+  widening every time a daemon appears. It rests on an invariant that is now
+  **pinned by a test** (`.test.sh` cases 18c and 18c(2)): no Archimedes minter
+  prefix contains a dot, and none is dash-free. If someone mints a dotted or
+  dash-free prefix, a test reddens instead of the leak becoming invisible.
 - **The remaining macOS unknown**: the exclusion is exercised in CI only by
   injected-platform cases (`ARCHIMEDES_CENSUS_UNAME_S`), never by a real Darwin
   `uname -s` on this box, because no macOS is available locally. The `getconf
@@ -244,8 +245,28 @@ it starts costing rounds: (a) extend the Darwin exclusion to a second *shape* th
 still cannot match an Archimedes prefix, and re-pin the no-dot invariant test
 (`.test.sh` case 18c) to cover the new shape too; or (b) snapshot the base
 immediately before `cargo test` rather than at job start, shrinking the window a
-daemon can write into. (a) trades guard precision for green CI and needs a reviewer;
-(b) costs nothing in precision. **Needs an owner, not a drive-by entry.**
+daemon can write into. **(b) is already implemented** — the ci.yml step is literally
+`Snapshot the temp dir before cargo test` and sits directly above the `cargo test`
+steps — so there is no window left to shrink: ~100% of the exposure is the suite's
+own runtime, which the delta must straddle by design, and **(a) is the only live
+option**. (a) trades guard precision for green CI and needs a reviewer; (b) costs
+nothing in precision because it is already in place. The exclusion is Darwin-only: a
+dotted or dash-free dir on Linux is STILL a leak (`.test.sh` case 17). Do not weaken
+that. **Owner: roadmap task A1 — the shape change is the fix, not a future option.**
+The shape and the re-pinned invariant live in `scripts/check-temp-dir-census.sh` /
+`.test.sh` (case 18c plus the no-dash twin 18c(2), the positive case 18d, and the
+teeth case 19).
+
+The second recorded occurrence is the PR #140 writeup
+(`docs/research/windows-child-console-window.md`): the macOS job failed at step 17,
+the temp-dir census, on an unattributed `betaenrollmentagent` directory, while
+`cargo test` passed on that same run (1602 passed), and the sibling macOS run of the
+identical SHA passed the same step. The exclusion count moved between the first
+(§9a above) and this occurrence — 3 dotted-name dirs on the first run, 5 on this one
+— **as reported by issue #139; the 3→5 figures are issue-provided and have not been
+re-measured in this repo** (the run ids are not present in the tree, no macOS and no
+run logs exist here, and `excluded: 5` appears in no artifact this doc can cite). A
+doc correction must not launder an issue's numbers into a measured record.
 
 ## 10. `ScratchDir::drop` cannot tell you it failed — and on Windows nothing else can either
 

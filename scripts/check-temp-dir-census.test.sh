@@ -443,7 +443,7 @@ assert_contains "the clean message still appears" "census clean" "$output"
 # The exclusion must be VISIBLE, never silent — a silent exclusion is the
 # vacuous-green failure mode this guard exists to prevent, so the count and the
 # reason are asserted, not just the exit code.
-assert_contains "the exclusion is announced with its count" "excluded: 2 dotted-name dir(s)" "$output"
+assert_contains "the exclusion is announced with its count" "excluded: 2 shape-mismatched dir(s)" "$output"
 # The BASE is asserted by its own component, not in full: `--base` is
 # canonicalised, so on macOS `$tmp_root` spells as `/private/var/…` here. The
 # component plus the dash after it is the part that is spelling-independent.
@@ -459,7 +459,7 @@ run_check_env "ARCHIMEDES_CENSUS_UNAME_S=Darwin" verify --state "$state" --base 
 assert_eq "a dot-free directory on DARWIN is still a leak" "1" "$status"
 assert_contains "and it is named" "planted-darwin-leak-1a2b3c4d" "$output"
 assert_not_contains "the excluded daemon dir is not itself listed as a failure" "com.apple.Maps.mapssyncd" "$output"
-assert_contains "and the exclusion is STILL announced on the failing path" "excluded: 2 dotted-name dir(s)" "$output"
+assert_contains "and the exclusion is STILL announced on the failing path" "excluded: 2 shape-mismatched dir(s)" "$output"
 
 # 18c. A DOTTED NAME THAT IS ALSO A KNOWN MINTER PREFIX would be an Archimedes
 #      leak wearing a daemon's shape. It cannot exist today — verified against
@@ -467,13 +467,81 @@ assert_contains "and the exclusion is STILL announced on the failing path" "excl
 #      prefix on disk, contains a dot — but if a future minter broke that
 #      invariant the exclusion WOULD hide it. So the invariant is asserted here,
 #      which is what makes "the shape is safe" a checked claim instead of an
-#      assumed one.
-if grep -rqE '(in_env_temp|in_tmpfs|in_dir)\(\s*"[^"]*\.' src-tauri/src src-tauri/tests 2>/dev/null; then
+#      assumed one. (Re-expressed in the pipe-safe form: command substitution +
+#      final lone `[[ -n ]]` negated test, no `| grep -q .` at the tail — under
+#      the harness's `set -euo pipefail` a trailing `grep -q .` can SIGPIPE its
+#      own upstream into a false green when a dotted literal IS present.)
+if [[ -n "$(grep -rE '(in_env_temp|in_tmpfs|in_dir)\(\s*"[^"]*\.' src-tauri/src src-tauri/tests 2>/dev/null)" ]]; then
   echo "FAIL no minter prefix contains a dot (the Darwin dotted-name exclusion depends on this)"
   grep -rnE '(in_env_temp|in_tmpfs|in_dir)\(\s*"[^"]*\.' src-tauri/src src-tauri/tests | sed 's/^/       /'
   failures=$((failures + 1))
 else
   echo "ok   no minter prefix contains a dot (the Darwin dotted-name exclusion depends on this)"
+fi
+
+# 18c(2). A MINTER PREFIX WITH NO DASH would be an Archimedes leak wearing the
+#      shape `betaenrollmentagent` wears. It cannot exist today — every one of
+#      the 91 distinct `in_env_temp`/`in_tmpfs`/`in_dir` prefixes in this tree
+#      ends in a dash — but if a future minter ever mints a dash-free prefix,
+#      the second Darwin shape would hide it. So the invariant is asserted here,
+#      the no-dash twin of the no-dot invariant above: a future dash-free
+#      minter reddens this check instead of quietly becoming invisible behind
+#      the dash-free shape. NOTE on the pattern: a literal `[^"-]*` character
+#      class does NOT encode "dash-free" (a `[^"-]*` run still allows dashes
+#      outside the run, and a `[^"]*[^-]` trailing class matches any name ending
+#      in a non-dash). The check is therefore "are there any extracted prefixes
+#      with no dash": `grep -v -- '-'` inside a command substitution, tested by
+#      a final LONE `[[ -n ]]` — no `| grep -q .` at the tail (see 18c's note:
+#      under `set -euo pipefail` a trailing `grep -q .` can SIGPIPE its own
+#      upstream into a false green exactly when a dash-free prefix IS present).
+if [[ -n "$(grep -rhoE '(in_env_temp|in_tmpfs|in_dir)\(\s*"[^"]*"' src-tauri/src src-tauri/tests 2>/dev/null | sed -E 's/^[^"]*"//; s/"$//' | sort -u | grep -v -- '-')" ]]; then
+  echo "FAIL a minter prefix is dash-free (the Darwin second shape depends on this)"
+  grep -rhoE '(in_env_temp|in_tmpfs|in_dir)\(\s*"[^"]*"' src-tauri/src src-tauri/tests | sed -E 's/^[^"]*"//; s/"$//' | sort -u | grep -v -- '-' | sed 's/^/       /'
+  failures=$((failures + 1))
+else
+  echo "ok   no minter prefix is dash-free (the Darwin second shape depends on this)"
+fi
+
+# 18d. THE POSITIVE HALF OF THE SECOND SHAPE: a DOT-FREE AND DASH-FREE name on
+#      Darwin is EXCLUDED and the run is clean. The daemon of issue #139
+#      (`betaenrollmentagent`) has zero dots AND zero dashes, so it reaches the
+#      exclusion only through the new shape — `dotted_name` alone would leave it
+#      strict and red. Before this case, neither harness planted a dash-free
+#      name: 18's plants are dotted, 18b's and Case 14's contain dashes. C1
+#      becomes a real assertion only here, where the count says EXACTLY which
+#      set was excluded.
+fixture darwin_dashfree
+run_check_env "ARCHIMEDES_CENSUS_UNAME_S=Darwin" snapshot --state "$state" --base "$base"
+assert_eq "Darwin snapshot exits 0" "0" "$status"
+mkdir -p "$base/betaenrollmentagent"
+run_check_env "ARCHIMEDES_CENSUS_UNAME_S=Darwin" verify --state "$state" --base "$base"
+assert_eq "a dot-free AND dash-free name on DARWIN is excluded and the run is clean" "0" "$status"
+assert_contains "the clean message still appears" "census clean" "$output"
+# The count reflects EXACTLY the excluded set: one planted dash-free dir, one
+# excluded — not zero (the exclusion must fire) and not "the failure was
+# silently swallowed" (exit 0 + clean already rules that out).
+assert_contains "the exclusion is announced with exactly the excluded set's count" "excluded: 1 shape-mismatched dir(s)" "$output"
+assert_contains "and it says why (daemons share the per-user TMPDIR)" "system daemons share the per-user TMPDIR" "$output"
+assert_contains "and it says why the shapes are safe (no minter name has a dot or a dash)" "no Archimedes minter name contains a dot or a dash" "$output"
+assert_not_contains "and the excluded name is never listed as a failure" "betaenrollmentagent" "$output"
+
+# 19. THE GUARD'S TEETH — an injected dash-free literal must trip the twin's
+#     FAIL branch. 18c(2) proves the REAL tree has no dash-free minter prefix;
+#     this case proves the CHECK ITSELF would catch one: it greps a throwaway
+#     synthetic tree that DOES contain a dash-free literal and asserts the FAIL
+#     branch fires (same pipeline, same pipe-safe form — command substitution +
+#     final LONE `[[ -n ]]`, no `| grep -q .`, which under `set -euo pipefail`
+#     can SIGPIPE its own upstream into a false green). This case was formerly a
+#     byte-identical copy of 18c(2); it now tests the pipeline's teeth instead
+#     of the corpus twice.
+synthetic="$tmp_root/synthetic-minter-tree"
+mkdir -p "$synthetic/src" "$synthetic/tests"
+printf 'ScratchDir::in_env_temp("syntheticdashfree", tag)\n' > "$synthetic/tests/synthetic.rs"
+if [[ -n "$(grep -rhoE '(in_env_temp|in_tmpfs|in_dir)\(\s*"[^"]*"' "$synthetic/src" "$synthetic/tests" 2>/dev/null | sed -E 's/^[^"]*"//; s/"$//' | sort -u | grep -v -- '-')" ]]; then
+  echo "ok   the dash-free check has teeth: an injected dash-free literal trips FAIL (case 19)"
+else
+  echo "FAIL the dash-free check did NOT catch an injected dash-free literal (case 19)"
+  failures=$((failures + 1))
 fi
 
 if ((failures > 0)); then
