@@ -20,7 +20,7 @@ import {
   finalizeSessionMessages,
   rowToMessages,
 } from "../lib/transcript/reducer";
-import type { AcpSessionUpdate } from "../lib/tauri";
+import type { AcpSessionUpdate, CompactionReason } from "../lib/tauri";
 import { useInteractive } from "./interactive";
 import { useSubagents } from "./subagents";
 // Driven (not mocked) by the close-path tests below: the figure has to be read
@@ -1571,12 +1571,12 @@ describe("compacting (the working indicator's compaction state)", () => {
     });
   });
 
-  const active = (reason: string): AcpSessionUpdate => ({
+  const active = (reason: CompactionReason): AcpSessionUpdate => ({
     sessionUpdate: "compaction_update",
     active: true,
     reason,
   });
-  const settled = (reason: string): AcpSessionUpdate => ({
+  const settled = (reason: CompactionReason): AcpSessionUpdate => ({
     sessionUpdate: "compaction_update",
     active: false,
     reason,
@@ -1590,7 +1590,7 @@ describe("compacting (the working indicator's compaction state)", () => {
   });
 
   it("all three reasons are stored verbatim (the indicator's label is reason-independent, the state is not)", () => {
-    for (const reason of ["manual", "threshold", "overflow"]) {
+    for (const reason of ["manual", "threshold", "overflow"] as const) {
       useSessions
         .getState()
         .applySessionUpdates([{ sessionId: "s1", update: active(reason) }]);
@@ -3611,8 +3611,9 @@ describe("activeSpacePath (the selected Space — the top tabs' state)", () => {
   it("boot (setSpaces, nothing active): the auto-selected session's space becomes active; no sessions → the most recent space", () => {
     // A stored session in /a (the input order is newest-first).
     useSessions.getState().setSpaces([space("/a"), space("/b")]);
-    // No sessions at all → the most recent space (the FIRST row —
-    // `list_spaces` order is `lastOpenedAt` desc).
+    // No sessions at all → the leftmost Space with something to show (the
+    // FIRST row — `list_spaces` returns the user's MANUAL order, `sort_order`
+    // ASC then `path` ASC; ADR 0075 — position is not recency).
     expect(useSessions.getState().activeSpacePath).toBe("/a");
     expect(useSessions.getState().activeSessionId).toBeNull();
 
@@ -3622,8 +3623,10 @@ describe("activeSpacePath (the selected Space — the top tabs' state)", () => {
       { ...info("h2", "/b"), archived: false },
     ]);
     useSessions.getState().setSpaces([space("/a"), space("/b")]);
-    // `autoSelectActive` lands on the most recent space's newest session
-    // (the /a session — first space, first stored session).
+    // `autoSelectActive` lands on the first space's newest session (first
+    // space in manual order, newest stored session of that space by
+    // `recencyOf` — ADR 0075: the space comes from position, the session from
+    // explicit recency evidence, never from the space's own timestamps).
     expect(useSessions.getState().activeSessionId).toBe("h1");
     expect(useSessions.getState().activeSpacePath).toBe("/a");
   });

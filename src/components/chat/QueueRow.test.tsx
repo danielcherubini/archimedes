@@ -28,6 +28,78 @@ function installMatchMediaStub(reduced: boolean) {
   return vi.spyOn(window, "matchMedia").mockImplementation(impl);
 }
 
+interface FakeSubscribingMediaQueryList {
+  matches: boolean;
+  media: string;
+  listeners: Array<() => void>;
+}
+
+/**
+ * The SUBSCRIBING stub — the registry pattern from
+ * `src/hooks/usePrefersReducedMotion.test.ts`, copied because this file's
+ * `installMatchMediaStub` above returns `vi.fn()` stubs for
+ * `addEventListener`/`removeEventListener` and DISCARDS the listeners, so it
+ * cannot fire a `change` event. A mid-session OS toggle is only drivable by a
+ * stub that records its listeners and replays them, which is exactly what the
+ * hook's `change` subscription needs.
+ */
+const subscribingRegistry: FakeSubscribingMediaQueryList[] = [];
+
+function installSubscribingMatchMediaStub(reduced: boolean) {
+  subscribingRegistry.length = 0;
+  const impl = ((query: string): MediaQueryList => {
+    const mql: FakeSubscribingMediaQueryList = {
+      matches: query === "(prefers-reduced-motion: reduce)" ? reduced : false,
+      media: query,
+      listeners: [],
+    };
+    const listeners = mql.listeners;
+    // `vi.restoreAllMocks()` (afterEach) never sees these — plain closures, so
+    // the recorded listeners survive to the `emitChange` step.
+    const queryList = {
+      get matches() {
+        return mql.matches;
+      },
+      set matches(value: boolean) {
+        mql.matches = value;
+      },
+      media: query,
+      addEventListener: (_type: string, listener: () => void) => {
+        listeners.push(listener);
+      },
+      removeEventListener: (_type: string, listener: () => void) => {
+        const index = listeners.indexOf(listener);
+        if (index >= 0) listeners.splice(index, 1);
+      },
+      addListener: (listener: () => void) => {
+        listeners.push(listener);
+      },
+      removeListener: (listener: () => void) => {
+        const index = listeners.indexOf(listener);
+        if (index >= 0) listeners.splice(index, 1);
+      },
+      dispatchEvent: () => true,
+      onchange: null,
+    };
+    subscribingRegistry.push(mql);
+    return queryList as unknown as MediaQueryList;
+  }) as unknown as (query: string) => MediaQueryList;
+  if (typeof window.matchMedia !== "function") {
+    window.matchMedia = impl;
+  }
+  vi.spyOn(window, "matchMedia").mockImplementation(impl);
+}
+
+/** Flip the recorded query's answer and dispatch `change`, as an OS toggle would. */
+function emitChange(matches: boolean) {
+  const mql = subscribingRegistry[0];
+  if (mql === undefined) throw new Error("no MediaQueryList was created");
+  mql.matches = matches;
+  act(() => {
+    mql.listeners.forEach((listener) => listener());
+  });
+}
+
 const SESSION = "s-queue";
 
 function attachment(id: string): ChatComposerAttachment {
@@ -340,5 +412,27 @@ describe("QueueRow exit paths", () => {
     // A `motion.div` writes inline transform/will-change styles on mount; a
     // plain div carries only the class list.
     expect(row.getAttribute("style")).toBeNull();
+  });
+
+  it("a mid-session OS toggle to reduce-motion flips a live row to the plain div and same-tick forget still removes a leaving row", () => {
+    // The subscription this swap EXISTS to add: the deleted local copy read the
+    // query once per render with no listener, so a `change` event could not
+    // reach it. This test uses the hook-test registry pattern (see
+    // `installSubscribingMatchMediaStub`) because the file's own
+    // `installMatchMediaStub` discards listeners and cannot fire `change`.
+    installSubscribingMatchMediaStub(false);
+    render(<Harness sessionId={SESSION} />);
+    // Animated branch: the `motion.div` carries inline styles.
+    expect(screen.getByTestId("queue-row").getAttribute("style")).not.toBeNull();
+    // The OS flips to reduce-motion while the row is mounted.
+    emitChange(true);
+    // The static branch took over without any remount: a plain div, no inline
+    // styles.
+    expect(screen.getByTestId("queue-row").getAttribute("style")).toBeNull();
+    // And the flipped row is not stranded: the same-tick `forget` effect covers
+    // a row that LEARNED reduced motion mid-session, not just one born with it
+    // (same assertion shape as the test above this one — no `await`).
+    fireEvent.click(screen.getByRole("button", { name: "Delete queued prompt" }));
+    expect(useQueuedPrompts.getState().bySession[SESSION]).toBeUndefined();
   });
 });

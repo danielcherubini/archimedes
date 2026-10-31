@@ -9,7 +9,6 @@ import {
   normalizeToolOutput,
   summarizeSubagentFor,
   summarizeToolCall,
-  subagentActivityFor,
   cleanModelName,
   extractThinkingFromModel,
   formatCost,
@@ -347,116 +346,6 @@ describe("summarizeSubagentFor (one subagent's summary)", () => {
   });
 });
 
-describe("subagentActivityFor (the one-line activity)", () => {
-  it("returns the one-line activity of a progress entry matching by task", () => {
-    const out = subagentActivityFor(
-      {
-        progress: [
-          {
-            agent: "a",
-            task: "task-a",
-            status: "running",
-            currentTool: "read",
-            currentToolArgs: "docs/foo.md",
-            currentToolStartedAt: Date.now() - 12000,
-          },
-        ],
-      },
-      "sub-a",
-      "task-a",
-    );
-    // `currentTool` + `currentToolArgs` + the live duration.
-    expect(out).toBe("read: docs/foo.md · 12s");
-  });
-  it("returns the one-line activity of a results entry matching by childSessionId", () => {
-    const out = subagentActivityFor(
-      {
-        results: [
-          {
-            agent: "a",
-            task: "task-a",
-            childSessionId: "sub-a",
-            exitCode: 0,
-            finalOutput: "line1\nline2",
-          },
-        ],
-      },
-      "sub-a",
-      "task-a",
-    );
-    // The LAST line of the final output (the `subagentActivityLine` treatment).
-    expect(out).toBe("line2");
-  });
-  it("returns `Done` for a results entry with no final output", () => {
-    const out = subagentActivityFor(
-      {
-        results: [
-          {
-            agent: "a",
-            task: "task-a",
-            childSessionId: "sub-a",
-            exitCode: 0,
-          },
-        ],
-      },
-      "sub-a",
-      "task-a",
-    );
-    expect(out).toBe("Done");
-  });
-  it("returns undefined when no entry matches the sessionId / task", () => {
-    const out = subagentActivityFor(
-      {
-        progress: [
-          { agent: "a", task: "task-a", status: "running" },
-        ],
-        results: [
-          { agent: "a", task: "task-a", childSessionId: "sub-a" },
-        ],
-      },
-      "sub-unknown",
-      "task-unknown",
-    );
-    expect(out).toBeUndefined();
-  });
-  it("returns undefined when details is undefined / null / a non-object", () => {
-    expect(subagentActivityFor(undefined, "sub-a", "task-a")).toBeUndefined();
-    expect(subagentActivityFor(null, "sub-a", "task-a")).toBeUndefined();
-    expect(subagentActivityFor("details", "sub-a", "task-a")).toBeUndefined();
-  });
-  it("filters FIRST (a finished subagent keeps its results entry while a sibling runs)", () => {
-    // A's finished entry lives in `results`; B is still running in
-    // `progress`. Prefer-then-filter would pick `progress` (B running) for
-    // A's row — a stale preview. Filter-first picks A's `results` entry.
-    const out = subagentActivityFor(
-      {
-        progress: [
-          { agent: "a", task: "task-a", status: "completed" },
-          {
-            agent: "b",
-            task: "task-b",
-            status: "running",
-            currentTool: "read",
-            currentToolArgs: "docs/b.md",
-          },
-        ],
-        results: [
-          {
-            agent: "a",
-            task: "task-a",
-            childSessionId: "sub-a",
-            exitCode: 0,
-            finalOutput: "done-a",
-          },
-        ],
-      },
-      "sub-a",
-      "task-a",
-    );
-    expect(out).toBe("done-a");
-  });
-});
-
 describe("summarizeToolCall", () => {
   it("shows the bash / sudo command", () => {
     expect(summarizeToolCall("bash", { command: "ls -la" })).toBe("ls -la");
@@ -479,15 +368,21 @@ describe("summarizeToolCall", () => {
   // The compaction card (issue #90): the trigger reason is the only thing the
   // header has to show, and the raw wire value must not reach the user.
   it("shows the compaction trigger as prose, never the raw reason", () => {
-    expect(summarizeToolCall("compaction", { reason: "manual" })).toBe(
-      "requested with /compact",
-    );
-    expect(summarizeToolCall("compaction", { reason: "threshold" })).toBe(
-      "context over threshold",
-    );
-    expect(summarizeToolCall("compaction", { reason: "overflow" })).toBe(
-      "provider context overflow",
-    );
+    for (const reason of ["manual", "threshold", "overflow"] as const) {
+      let label: string;
+      switch (reason) {
+        case "manual":
+          label = "requested with /compact";
+          break;
+        case "threshold":
+          label = "context over threshold";
+          break;
+        case "overflow":
+          label = "provider context overflow";
+          break;
+      }
+      expect(summarizeToolCall("compaction", { reason })).toBe(label);
+    }
     // An unknown/absent reason shows nothing rather than a JSON dump — the
     // default branch would otherwise print `{"reason":"…"}`.
     expect(summarizeToolCall("compaction", {})).toBeUndefined();

@@ -56,7 +56,7 @@ export async function shellSandboxAvailable(): Promise<boolean> {
 }
 
 
-/** Test ONE MCP server entry (the Settings page's Test action, ADR 0019): a one-shot bounded connect + `tools/list`. Resolves the tool count; rejects with the error text (a `needs-auth` / a network failure). */
+/** Test ONE MCP server entry (the Settings page's Test action, ADR 0019): a one-shot bounded connect + `tools/list`. Resolves the tool count; rejects with the `SettingsError` envelope (`{kind, message}` — ADR 0063) whose `message` is the sentence: `MCP server test failed: needs-auth` for a 401-on-OAuth server, or the network failure's sentence. `kind` is `mcp_test_failed` for EVERY test failure — the auth case carries no machine discriminator of its own today (see `McpTestErrorKind` in `@/lib/errors` and the parked red in `McpSection.test.tsx`). */
 export async function testMcpServer(entry: McpServerEntry, name?: string): Promise<number> {
   return invoke("test_mcp_server", { name: name ?? null, entry });
 }

@@ -14,6 +14,7 @@ import {
   startSession as startSessionCommand,
   type AcpSessionUpdate,
   type CloseReasonStr,
+  type CompactionReason,
   type SessionConfigOption,
   type SessionInfo,
   type SessionRecency,
@@ -514,9 +515,9 @@ interface SessionsState {
   contextUsage: Record<string, { used: number; window: number } | undefined>;
   /**
    * The session's in-flight compaction per session id — the value is the
-   * `compaction_update` frame's `reason` (`"manual" | "threshold" |
-   * "overflow"`, ADR 0045's vocabulary) while one runs, `undefined` when
-   * none does (set on `active: true`, cleared on `active: false`, on
+   * `compaction_update` frame's `reason` (`CompactionReason` — ADR 0045's
+   * vocabulary) while one runs, `undefined` when none does (set on
+   * `active: true`, cleared on `active: false`, on
    * `handleSessionClosed` and on `markStalled`). The composer's working
    * indicator reads it (an idle compaction has no turn, so neither
    * `inTurn` nor `agentState` says "working"), and the composer locks on it
@@ -526,7 +527,7 @@ interface SessionsState {
    * `active` frame that was still in the rAF batch when it crashed — see
    * `isStaleCompactionStart`, or the lock would come straight back.
    */
-  compacting: Record<string, string | undefined>;
+  compacting: Record<string, CompactionReason | undefined>;
   /** History pagination window state per session id (ADR 0073). */
   history: Record<
     string,
@@ -553,7 +554,7 @@ interface SessionsState {
    * banner would otherwise linger on the paused transcript).
    */
   stalled: Record<string, { at: number; crashLog: string | null } | undefined>;
-  /** Mark a session stalled (the `session-stalled` event — the `StalledInfo` shape: `at` + `crashLog`). */
+  /** Mark a session stalled (the `session-stalled` event — the `StalledPayload` shape: `sessionId` + `at` + `crashLog`). */
   markStalled: (sessionId: string, at: number, crashLog: string | null) => void;
 
   addSession: (info: SessionInfo) => void;

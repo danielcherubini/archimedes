@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { ComposerPrefix } from "../../lib/skills";
+import { MutedCaption } from "../MutedCaption";
 import { cn } from "../lib/utils";
 import { Button } from "../ui/button";
 
@@ -240,12 +241,9 @@ export default function ComposerMentions({
               )}
             >
               <span className="flex items-baseline gap-1.5">
-                <span
-                  className="shrink-0 text-ui-xs text-foreground-subtlest"
-                  aria-hidden
-                >
+                <MutedCaption className="shrink-0" aria-hidden>
                   {row.prefix}
-                </span>
+                </MutedCaption>
                 {/* THE PRIMARY LINE TRUNCATES, and the two classes are a PAIR,
                     not decoration. A long absolute path is ONE unbreakable token
                     (a 200-char Windows path has no space to wrap at), the badge

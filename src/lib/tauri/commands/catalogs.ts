@@ -1,8 +1,8 @@
 /**
  * The per-Space CATALOG commands: the fetchers that are handed to the ONE shared
  * row-cache machine (`useSkillCatalog`, `useAgentCatalog`,
- * `useMentionCatalogs` — all through `useCatalogRow`), plus the Agent-config
- * listing that shares their Space-scoping contract.
+ * `useMentionCatalogs` — all through `useCatalogRow`), plus the Agent-definition
+ * report that shares their Space-scoping contract.
  *
  * This grouping is Phase C's, measured, not the improvement report's: the report
  * filed all six under `spaces`, but they have nothing in common with Space
@@ -14,16 +14,21 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
-  AgentConfigDto,
   AgentDefinitionDto,
+  AgentDefinitionReportDto,
   CompletionDirDto,
-  FileListDto,
+  ListingDto,
   McpServerInfo,
   SkillInfo,
 } from "../types";
 
 
-/** The skill catalog for a Space (`null` = user-level skills only). */
+/** The skill catalog for a Space (`null` = user-level skills only).
+ *
+ * The command is infallible by construction (discovery is total — a missing
+ * root / unreadable file is skipped); the `Err` arm it still carries in its
+ * Rust signature is the phantom task14c retires, so treat any rejection here
+ * as unreachable and keep the caller's degrade (never render it as prose). */
 export async function listSkills(spacePath: string | null): Promise<SkillInfo[]> {
   return invoke<SkillInfo[]>("list_skills", { spacePath: spacePath ?? null });
 }
@@ -35,11 +40,11 @@ export async function listAgentDefinitionsForSpace(spacePath: string | null): Pr
 }
 
 
-/** The effective Agent config for the Space's definitions — the sidebar Agents modal's data source (ADR 0068). `cwd: null` = app-scope (user-level definitions only; the override map is global and unaffected). */
-export async function listAgentConfig(
+/** The Agent-definition report for the Space's definitions — the sidebar Agents modal's data source (ADR 0068). `cwd: null` = app-scope (user-level definitions only; the override map is global and unaffected). */
+export async function listAgentDefinitionReports(
   cwd: string | null,
-): Promise<AgentConfigDto[]> {
-  return invoke<AgentConfigDto[]>("list_agent_config", {
+): Promise<AgentDefinitionReportDto[]> {
+  return invoke<AgentDefinitionReportDto[]>("list_agent_definition_reports", {
     cwd: cwd ?? null,
   });
 }
@@ -52,12 +57,15 @@ export async function listMcpServersEffective(spacePath: string | null): Promise
 
 
 /**
- * The file listing a Space offers the `?` path completion (ADR 0033 — a
+ * The Listing a Space offers the `?` path completion (ADR 0033 — a
  * PATH is inserted, never the contents). `null` = no Space: the Rust
- * command degrades to the empty listing rather than erroring.
+ * command degrades to the empty Listing rather than erroring. A rejection (the
+ * Rust signature's `Err` arm is a phantom task14c retypes) arrives as the
+ * `FilesError` envelope (`{kind, message}` — ADR 0063; `FilesErrorKind` in
+ * `@/lib/errors` mirrors the frozen kinds).
  */
-export async function listSpaceFiles(spacePath: string | null): Promise<FileListDto> {
-  return invoke<FileListDto>("list_space_files", { spacePath: spacePath ?? null });
+export async function listSpaceListing(spacePath: string | null): Promise<ListingDto> {
+  return invoke<ListingDto>("list_space_listing", { spacePath: spacePath ?? null });
 }
 
 
@@ -65,12 +73,14 @@ export async function listSpaceFiles(spacePath: string | null): Promise<FileList
  * The out-of-Space `?` rows for ONE directory (ADR 0035 — a `~/-`- or
  * drive-rooted token), never a walk. `null` = no out-of-Space token open.
  *
- * `null` is PASSED THROUGH as `{ query: null }`, exactly as `listSpaceFiles`
+ * `null` is PASSED THROUGH as `{ query: null }`, exactly as `listSpaceListing`
  * passes `spacePath: null` (pinned in `src/lib/tauri.test.ts`), and the command
  * never rejects — it degrades to the empty listing. Do NOT add a client-side
  * short-circuit: the Rust `None` arm already touches no filesystem at all, and a
  * short-circuit here would move that guarantee out of the one place a Rust test
- * can see it, for no gain.
+ * can see it, for no gain. (The `Err` arm in the Rust signature is a phantom
+ * task14c retypes; it would arrive as the `FilesError` envelope, like
+ * `listSpaceListing`.)
  */
 export async function listCompletionEntries(
   query: string | null,

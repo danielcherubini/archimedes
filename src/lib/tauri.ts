@@ -56,6 +56,11 @@ export type {
   SpaceRow,
   SpaceCheck,
   CloseReasonStr,
+  // (task07a / finding 4) The compaction trigger vocabulary. TYPE-ONLY — it
+  // vanishes at runtime, so `TAURI_RUNTIME_API` does NOT gain it (the
+  // `AccessRule`/`AccessDirection` precedent). The `compaction_update` frame's
+  // `reason` field and the store's `compacting` value are both this union.
+  CompactionReason,
   StopReason,
   PermissionOutcome,
   PermissionOption,
@@ -66,7 +71,6 @@ export type {
   AcpSessionUpdate,
   SessionUpdatePayload,
   SessionClosedPayload,
-  StalledInfo,
   StalledPayload,
   PermissionRequestPayload,
   AskQuestionDto,
@@ -98,7 +102,7 @@ export type {
   OverrideSource,
   AgentOverrideFields,
   AgentOverrideSources,
-  AgentConfigDto,
+  AgentDefinitionReportDto,
   // (issue #101) The declared-`permission:` wire types. TYPE-ONLY — they vanish
   // at runtime, so `TAURI_RUNTIME_API` does NOT gain them (the
   // `AccessRule`/`AccessDirection` precedent).
@@ -113,7 +117,7 @@ export type {
   ShadowedSkill,
   ShadowedAgent,
   SkillInfo,
-  FileListDto,
+  ListingDto,
   CompletionEntryDto,
   CompletionDirDto,
   HistoryPage,
@@ -167,9 +171,9 @@ export {
 export {
   listSkills,
   listAgentDefinitionsForSpace,
-  listAgentConfig,
+  listAgentDefinitionReports,
   listMcpServersEffective,
-  listSpaceFiles,
+  listSpaceListing,
   listCompletionEntries,
 } from "./tauri/commands/catalogs";
 

@@ -9,6 +9,7 @@ import {
 } from "@testing-library/react";
 import { deleteSession, type SessionInfo } from "@/lib/tauri";
 import { useSessions, type Message } from "@/store/sessions";
+import { resetStores } from "@/test/resetStores";
 import SessionsSection from "./SessionsSection";
 
 /**
@@ -196,8 +197,10 @@ describe("SessionsSection (Settings → Detached sessions)", () => {
     seed({ messages });
     render(<SessionsSection onBack={vi.fn()} />);
     expect(within(rowRootFor("/tmp/beta")).getByText("5m")).toBeTruthy();
-    // No loaded transcript → no time text (the row keeps an empty slot so the
-    // buttons stay aligned — `SessionInfo` carries no `createdAt`).
+    // No loaded transcript AND no `sessionRecency` stamp → no time text (the row
+    // keeps an empty slot so the buttons stay aligned — `SessionInfo` carries no
+    // `createdAt`, so the boot map is the only OTHER thing a row can print from,
+    // and this seed gives it neither).
     expect(
       within(rowRootFor("/tmp/gamma")).queryByText(/^(now|\d+m|\d+h)$/),
     ).toBeNull();
@@ -326,5 +329,28 @@ describe("SessionsSection (Settings → Detached sessions)", () => {
     expect(addSpace).toHaveBeenCalledWith("/tmp/beta");
     expect(openSession).toHaveBeenCalledWith("h-beta");
     expect(onBack).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders the boot recency label for a detached row the map covers and the transcript does not", () => {
+    // THE OTHER SIDE OF FINDING 11: the same no-transcript arm the Archived rows
+    // showed. `recencyOf` answered the boot `sessionRecency` stamp; the row
+    // printed nothing. Now the row prints that stamp, because `relativeTimeFor`
+    // delegates to `recencyOf` instead of keeping its own transcript-only walk.
+    //
+    // `resetStores()` FIRST: this file's `beforeEach` seeds but does NOT reset
+    // (the AGENTS.md rule for a new store-touching test), and this file's `seed`
+    // is a partial `setState` that would otherwise carry a previous test's keys.
+    // It sits at the END of the describe for the mirror reason: the
+    // `sessionRecency` write below must not leak forward into a later test.
+    resetStores();
+    vi.setSystemTime(NOW);
+    seed({
+      sessionRecency: { "a-gamma": NOW - 5 * 60_000 },
+      messages: {},
+    });
+    render(<SessionsSection onBack={vi.fn()} />);
+    // `a-gamma` (/tmp/gamma) has NO loaded transcript — `messages` is empty — so
+    // the map stamp is its only evidence, and it buckets to exactly `5m`.
+    expect(within(rowRootFor("/tmp/gamma")).getByText("5m")).toBeTruthy();
   });
 });

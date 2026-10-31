@@ -37,6 +37,7 @@ use serde::Serialize;
 use tauri::AppHandle;
 use tauri_plugin_updater::Error as UpdaterError;
 
+use crate::agent::errors::UpdateError;
 use crate::agent::hostenv;
 
 // `Manager` is the trait carrying `env()` and `try_state()`, and BOTH are read
@@ -50,10 +51,11 @@ use tauri::Manager;
 /// What `check_update` tells the renderer: current, or here is what is newer.
 ///
 /// `Err` is the third possibility and it is not carried here — "the check could
-/// not complete" is an `Err(String)` from [`map_check_error`], which keeps
-/// `CheckOutcome` free of a `Failed { … }` arm the renderer could mistake for an
-/// answer. Tagged, so the discriminating field is on the wire rather than
-/// inferred from which optional fields happen to be filled.
+/// not complete" is an `Err(UpdateError)` whose `message` is the code from
+/// [`map_check_error`], which keeps `CheckOutcome` free of a `Failed { … }` arm
+/// the renderer could mistake for an answer. Tagged, so the discriminating field
+/// is on the wire rather than inferred from which optional fields happen to be
+/// filled.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", tag = "state")]
 pub enum CheckOutcome {
@@ -321,15 +323,16 @@ fn claim_install_slot() -> Option<InstallClaim> {
 /// Thin by design: the plugin does the request, the version comparison and the
 /// target lookup, and this decides only how each of its three outcomes is spelled
 /// on the wire. `Ok(None)` — the 204, or a manifest with nothing newer — is the
-/// ONLY path to `UpToDate`; everything the plugin could not complete becomes the
-/// typed string from [`map_check_error`], because "couldn't ask" and "was told
-/// no" are different things to show a person.
+/// ONLY path to `UpToDate`; everything the plugin could not complete becomes an
+/// [`UpdateError`] carrying the typed code from [`map_check_error`] as its
+/// `message`, because "couldn't ask" and "was told no" are different things to
+/// show a person.
 ///
 /// The `Err` arm is also where a wrong endpoint announces itself: a repository
 /// with no release yet 404s `latest.json`, and that arrives as
 /// `"release-not-found"` rather than as an empty result.
 #[tauri::command]
-pub async fn check_update(app: AppHandle) -> Result<CheckOutcome, String> {
+pub async fn check_update(app: AppHandle) -> Result<CheckOutcome, UpdateError> {
     use tauri_plugin_updater::UpdaterExt;
 
     // `updater()` is where a MISSING `plugins.updater.endpoints` surfaces — the
@@ -338,7 +341,7 @@ pub async fn check_update(app: AppHandle) -> Result<CheckOutcome, String> {
     // rather than being unwrapped.
     match app
         .updater()
-        .map_err(|e| map_check_error(&e))?
+        .map_err(|e| UpdateError(map_check_error(&e)))?
         .check()
         .await
     {
@@ -350,7 +353,7 @@ pub async fn check_update(app: AppHandle) -> Result<CheckOutcome, String> {
             // otherwise serialize as an object; the renderer has no `time` type.
             date: update.date.map(|d| d.to_string()),
         }),
-        Err(e) => Err(map_check_error(&e)),
+        Err(e) => Err(UpdateError(map_check_error(&e))),
     }
 }
 
@@ -381,7 +384,7 @@ pub async fn check_update(app: AppHandle) -> Result<CheckOutcome, String> {
 /// `FnOnce()` with no arguments, so it cannot reach the accumulator unless the
 /// same `ProgressThrottle` is shared — still ONE total, just reachable twice.
 #[tauri::command]
-pub async fn install_update(app: AppHandle) -> Result<(), String> {
+pub async fn install_update(app: AppHandle) -> Result<(), UpdateError> {
     use std::sync::{Arc, Mutex};
     use tauri::Emitter;
     use tauri_plugin_updater::UpdaterExt;
@@ -389,15 +392,16 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
     // Claimed BEFORE the re-check, so a second click cannot even start a
     // parallel `check()`; the guard releases on drop (see its doc — on Windows
     // the process exits below and the drop is moot).
-    let _install_claim = claim_install_slot().ok_or(INSTALL_IN_PROGRESS.to_string())?;
+    let _install_claim =
+        claim_install_slot().ok_or_else(|| UpdateError(INSTALL_IN_PROGRESS.to_string()))?;
 
     let update = app
         .updater()
-        .map_err(|e| map_check_error(&e))?
+        .map_err(|e| UpdateError(map_check_error(&e)))?
         .check()
         .await
-        .map_err(|e| map_check_error(&e))?
-        .ok_or("no-update-available")?;
+        .map_err(|e| UpdateError(map_check_error(&e)))?
+        .ok_or_else(|| UpdateError("no-update-available".to_string()))?;
 
     let throttle = Arc::new(Mutex::new(ProgressThrottle::new(
         ProgressThrottle::DEFAULT_MIN_INTERVAL,
@@ -441,7 +445,7 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
             },
         )
         .await
-        .map_err(|e| map_check_error(&e))
+        .map_err(|e| UpdateError(map_check_error(&e)))
 }
 
 /// What to exec to restart into the current build, and with which args.

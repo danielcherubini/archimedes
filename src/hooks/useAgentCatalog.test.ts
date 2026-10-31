@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { listAgentConfig, type AgentConfigDto } from "../lib/tauri";
+import { listAgentDefinitionReports, type AgentDefinitionReportDto } from "../lib/tauri";
 import {
   clearAgentCatalogCache,
   useAgentCatalog,
@@ -16,7 +16,7 @@ vi.mock("../lib/tauri", async () => {
     // hoisted above this file's imports and runs while they are being
     // evaluated, so relying on a hoisted function declaration here would be a
     // temporal-dead-zone accident waiting to happen.
-    listAgentConfig: vi.fn().mockResolvedValue([
+    listAgentDefinitionReports: vi.fn().mockResolvedValue([
       {
         name: "alpha",
         description: "Fast recon",
@@ -33,17 +33,17 @@ vi.mock("../lib/tauri", async () => {
         // unreachable from here, so the defaults are repeated rather than shared.
         filePermission: null,
         frontmatterNotes: [],
-      } satisfies AgentConfigDto,
+      } satisfies AgentDefinitionReportDto,
     ]),
   };
 });
 
 /**
- * One `list_agent_config` row fixture (the local-factory pattern
+ * One `list_agent_definition_reports` row fixture (the local-factory pattern
  * `SkillsDialog.test.tsx` uses for `skill()` — expanding literals by hand in
  * nine places would make every test here read as noise).
  */
-function row(overrides: Partial<AgentConfigDto> = {}): AgentConfigDto {
+function row(overrides: Partial<AgentDefinitionReportDto> = {}): AgentDefinitionReportDto {
   return {
     name: "alpha",
     description: "Fast recon",
@@ -63,7 +63,7 @@ function row(overrides: Partial<AgentConfigDto> = {}): AgentConfigDto {
   };
 }
 
-const mockedListAgentConfig = vi.mocked(listAgentConfig);
+const mockedListAgentDefinitionReports = vi.mocked(listAgentDefinitionReports);
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -78,19 +78,19 @@ describe("useAgentCatalog", () => {
     // calls, which is the exact reason this hook copies that rule).
     const a = renderHook(() => useAgentCatalog("/tmp/alpha"));
     const b = renderHook(() => useAgentCatalog("/tmp/alpha"));
-    await waitFor(() => expect(mockedListAgentConfig).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(a.result.current).toHaveLength(1));
     await waitFor(() => expect(b.result.current).toHaveLength(1));
-    expect(mockedListAgentConfig).toHaveBeenCalledTimes(1);
+    expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(1);
   });
 
   it("different_spaces_fetch_separately", async () => {
     const a = renderHook(() => useAgentCatalog("/tmp/alpha"));
     const b = renderHook(() => useAgentCatalog("/tmp/beta"));
-    await waitFor(() => expect(mockedListAgentConfig).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(a.result.current).toHaveLength(1));
     await waitFor(() => expect(b.result.current).toHaveLength(1));
-    expect(mockedListAgentConfig).toHaveBeenCalledTimes(2);
+    expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(2);
   });
 
   it("a_second_consumer_mounted_after_resolve_does_not_refetch", async () => {
@@ -100,7 +100,7 @@ describe("useAgentCatalog", () => {
     // a remount must not re-issue a network-bound discovery).
     const b = renderHook(() => useAgentCatalog("/tmp/alpha"));
     await waitFor(() => expect(b.result.current).toHaveLength(1));
-    expect(mockedListAgentConfig).toHaveBeenCalledTimes(1);
+    expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(1);
   });
 
   it("the_null_key_fetches_app_scope_once", async () => {
@@ -108,14 +108,14 @@ describe("useAgentCatalog", () => {
     // `null` (user-level definitions only — the documented rule).
     const a = renderHook(() => useAgentCatalog(null));
     await waitFor(() => expect(a.result.current).toHaveLength(1));
-    expect(mockedListAgentConfig).toHaveBeenCalledTimes(1);
-    expect(mockedListAgentConfig).toHaveBeenCalledWith(null);
+    expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(1);
+    expect(mockedListAgentDefinitionReports).toHaveBeenCalledWith(null);
     a.unmount();
   });
 
   it("a_key_change_serves_empty_until_the_new_fetch_resolves", async () => {
     // Freshness hole (1). This matters MORE here than in `useSkillCatalog`:
-    // `list_agent_config` runs `effective_catalog`, which does a per-provider
+    // `list_agent_definition_reports` runs `effective_catalog`, which does a per-provider
     // `GET /v1/models`, so the gap after a Space switch is a NETWORK round trip,
     // not a disk walk — the previous Space's rows would sit on screen for
     // seconds if the state did not track its key.
@@ -127,13 +127,13 @@ describe("useAgentCatalog", () => {
       name: "beta",
       path: "/q/.agents/agents/beta.md",
     });
-    let resolveBeta!: (rows: AgentConfigDto[]) => void;
-    const betaPromise = new Promise<AgentConfigDto[]>((resolve) => {
+    let resolveBeta!: (rows: AgentDefinitionReportDto[]) => void;
+    const betaPromise = new Promise<AgentDefinitionReportDto[]>((resolve) => {
       resolveBeta = resolve;
     });
     // A stable `mockImplementation` (NOT a once-queue — `vi.clearAllMocks()`
     // does not clear the once-queue, so leftovers poison the next test).
-    mockedListAgentConfig.mockImplementation((cwd) =>
+    mockedListAgentDefinitionReports.mockImplementation((cwd) =>
       cwd === "/tmp/alpha"
         ? Promise.resolve([alpha])
         : Promise.resolve(betaPromise),
@@ -159,20 +159,20 @@ describe("useAgentCatalog", () => {
     // Freshness hole (2): the LEFT key is evicted on a key change, so an
     // agent file edited on disk (or a model whose catalog entry changed) is
     // picked up when you come back rather than served from a warm cache.
-    mockedListAgentConfig.mockImplementation(() =>
+    mockedListAgentDefinitionReports.mockImplementation(() =>
       Promise.resolve([row({ name: "alpha" })]),
     );
     let spacePath: string | null = "/tmp/alpha";
     const a = renderHook(() => useAgentCatalog(spacePath));
     await waitFor(() => expect(a.result.current).toHaveLength(1));
-    expect(mockedListAgentConfig).toHaveBeenCalledTimes(1);
+    expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(1);
     spacePath = "/tmp/beta";
     a.rerender();
-    await waitFor(() => expect(mockedListAgentConfig).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(2));
     spacePath = "/tmp/alpha";
     a.rerender();
-    await waitFor(() => expect(mockedListAgentConfig).toHaveBeenCalledTimes(3));
-    expect(mockedListAgentConfig).toHaveBeenLastCalledWith("/tmp/alpha");
+    await waitFor(() => expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(3));
+    expect(mockedListAgentDefinitionReports).toHaveBeenLastCalledWith("/tmp/alpha");
     await waitFor(() => expect(a.result.current).toHaveLength(1));
     expect(a.result.current[0].name).toBe("alpha");
     a.unmount();
@@ -185,7 +185,7 @@ describe("useAgentCatalog", () => {
     // modal permanently empty for the rest of the session.
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     let calls = 0;
-    mockedListAgentConfig.mockImplementation(() => {
+    mockedListAgentDefinitionReports.mockImplementation(() => {
       calls += 1;
       return calls === 1
         ? Promise.reject(new Error("boom"))
@@ -195,7 +195,7 @@ describe("useAgentCatalog", () => {
     expect(a.result.current).toEqual([]);
     await waitFor(() => expect(errSpy).toHaveBeenCalledTimes(1));
     const b = renderHook(() => useAgentCatalog("/tmp/alpha"));
-    await waitFor(() => expect(mockedListAgentConfig).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(b.result.current).toHaveLength(1));
     expect(b.result.current[0].name).toBe("alpha");
     a.unmount();
@@ -209,7 +209,7 @@ describe("useAgentCatalog", () => {
     // after the cache clear) must survive the old failure settling.
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     let calls = 0;
-    mockedListAgentConfig.mockImplementation(() => {
+    mockedListAgentDefinitionReports.mockImplementation(() => {
       calls += 1;
       return calls === 1
         ? Promise.reject(new Error("boom"))
@@ -218,12 +218,12 @@ describe("useAgentCatalog", () => {
     const a = renderHook(() => useAgentCatalog("/tmp/alpha")); // call 1 (fails)
     clearAgentCatalogCache(); // wipe the in-flight (failing) entry
     const b = renderHook(() => useAgentCatalog("/tmp/alpha")); // call 2 (succeeds)
-    await waitFor(() => expect(mockedListAgentConfig).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(errSpy).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(b.result.current).toHaveLength(1));
     expect(b.result.current[0].name).toBe("alpha");
     expect(a.result.current).toEqual([]);
-    expect(mockedListAgentConfig).toHaveBeenCalledTimes(2);
+    expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(2);
     a.unmount();
     b.unmount();
     errSpy.mockRestore();

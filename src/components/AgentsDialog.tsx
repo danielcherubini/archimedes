@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { TrashIcon } from "lucide-react";
 import type {
-  AgentConfigDto,
+  AgentDefinitionReportDto,
   AgentFrontmatterNote,
   AgentOverride,
   AgentOverrideFields,
@@ -30,7 +30,7 @@ import {
  * from the Space rail beside **Skills**.
  *
  * One row per **Agent definition** the ACTIVE **Space** can see (project-level
- * rows AND the global ones — `list_agent_config(cwd)` discovers with that `cwd`),
+ * rows AND the global ones — `list_agent_definition_reports(cwd)` discovers with that `cwd`),
  * each carrying the three fields an **Agent override** can set, with the value
  * AND the layer that supplied it (`override` / `file` / `Inherits parent`). The
  * effective values and their layers come from Rust — the same resolver a real
@@ -105,7 +105,7 @@ function toolsInheritLabel(source: OverrideSource): string {
  */
 function shadowHeading(winnerScope: "space" | "user", count: number): string {
   return `${count} ${count === 1 ? "agent is" : "agents are"} hidden by a ${
-    winnerScope === "space" ? "project" : "global"
+    winnerScope === "space" ? "space" : "global"
   } agent with the same name`;
 }
 
@@ -120,7 +120,7 @@ function editedKey(name: string, field: keyof AgentOverride): string {
 const NO_KEYS: ReadonlySet<string> = new Set();
 
 interface AgentsDialogProps {
-  rows: AgentConfigDto[];
+  rows: AgentDefinitionReportDto[];
   /**
    * True while NO **Space** is open. This changes the COPY only — the override
    * map is GLOBAL, so nothing is disabled: with no Space the rows are the
@@ -477,11 +477,7 @@ function storedPinDiff(
  * header can accidentally satisfy a query for one of the three words.
  */
 function LayerTag({ children }: { children: string }) {
-  return (
-    <span className="shrink-0 rounded bg-input px-1 text-ui-xs text-foreground-subtlest">
-      {children}
-    </span>
-  );
+  return <MutedCaption className="shrink-0 rounded bg-input px-1">{children}</MutedCaption>;
 }
 
 /**
@@ -504,7 +500,7 @@ function AgentRow({
   edited,
   onPatch,
 }: {
-  row: AgentConfigDto;
+  row: AgentDefinitionReportDto;
   /** The dialog's search needle — the shadow report is filtered by the SAME
    *  needle the rows use, so it can never contradict the list above it. */
   needle: string;
@@ -767,7 +763,7 @@ function AgentRow({
  *
  *  The empty case returns `null` like `ShadowReport`: a file that says nothing
  *  about permissions has nothing to disclose, and the ordinary row stays lean. */
-function PermissionReport({ row }: { row: AgentConfigDto }) {
+function PermissionReport({ row }: { row: AgentDefinitionReportDto }) {
   // `?? []` is the same IPC tolerance `ShadowReport` keeps for a row that
   // genuinely predates the field — a bare `flatMap` over such a row yields
   // `undefined` entries that throw on the first property access. `filePermission`
@@ -809,16 +805,17 @@ function PermissionReport({ row }: { row: AgentConfigDto }) {
         if (rules.whole_tool) {
           const action = rules.patterns[0]?.action;
           return (
-            <div
+            <MutedCaption
+              as="div"
               key={`${name}#${toolIndex}`}
               data-permission-rule=""
-              className="flex min-w-0 flex-wrap items-center gap-x-2 text-ui-xs text-foreground-subtlest"
+              className="flex min-w-0 flex-wrap items-center gap-x-2"
             >
               <span className="min-w-0 shrink-0">{name}</span>
               <span className="min-w-0 truncate">
                 {action === undefined ? "—" : `→ ${action}`}
               </span>
-            </div>
+            </MutedCaption>
           );
         }
         // One line per pattern row, in the order received. `patterns` can be
@@ -828,31 +825,33 @@ function PermissionReport({ row }: { row: AgentConfigDto }) {
         // case the user needs to see.
         if (rules.patterns.length === 0) {
           return (
-            <div
+            <MutedCaption
+              as="div"
               key={`${name}#${toolIndex}`}
               data-permission-rule=""
-              className="flex min-w-0 flex-wrap items-center gap-x-2 text-ui-xs text-foreground-subtlest"
+              className="flex min-w-0 flex-wrap items-center gap-x-2"
             >
               <span className="min-w-0 shrink-0">{name}</span>
               <span className="min-w-0 truncate">
                 — no rule the reader could use
               </span>
-            </div>
+            </MutedCaption>
           );
         }
         return rules.patterns.map((rule, ruleIndex) => (
-          <div
+          <MutedCaption
+            as="div"
             // The index is part of the key on purpose: a tool's pattern list may
             // legitimately repeat a pattern (`"*"` twice with different
             // verdicts — last one wins), so the pattern alone is not unique.
             key={`${name}#${toolIndex}#${ruleIndex}`}
             data-permission-rule=""
-            className="flex min-w-0 flex-wrap items-center gap-x-2 text-ui-xs text-foreground-subtlest"
+            className="flex min-w-0 flex-wrap items-center gap-x-2"
           >
             <span className="min-w-0 shrink-0">{name}</span>
             <span className="min-w-0 shrink-0">{rule.pattern}</span>
             <span className="min-w-0 truncate">→ {rule.action}</span>
-          </div>
+          </MutedCaption>
         ));
       })}
 
@@ -900,7 +899,7 @@ function ShadowReport({
   row,
   needle,
 }: {
-  row: AgentConfigDto;
+  row: AgentDefinitionReportDto;
   needle: string;
 }) {
   // `?? []` is the same IPC tolerance `SkillsDialog` keeps for a row that
@@ -916,15 +915,16 @@ function ShadowReport({
         {shadowHeading(row.scope, losers.length)}
       </MutedCaption>
       {losers.map((loser) => (
-        <div
+        <MutedCaption
+          as="div"
           key={loser.path}
-          className="flex min-w-0 items-center gap-2 text-ui-xs text-foreground-subtlest"
+          className="flex min-w-0 items-center gap-2"
         >
           <span className="min-w-0 shrink-0">{loser.name}</span>
           <span className="min-w-0 truncate" title={loser.path}>
             {loser.path}
           </span>
-        </div>
+        </MutedCaption>
       ))}
     </div>
   );

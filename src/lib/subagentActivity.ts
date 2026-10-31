@@ -47,13 +47,19 @@ export interface RawResultItem {
   task?: string;
   childSessionId?: string;
   exitCode?: number;
+  // The cost shape the card reads (SubagentDelegatingCard.tsx:285–286,341 —
+  // `input`/`output`/`cost` and nothing else). `cacheRead`, `cacheWrite` and
+  // `turns` used to be declared here too: no reader named them anywhere in
+  // `src/`, no test constructed them, and no Rust producer emits them (the
+  // frozen 34-key `details` vocabulary in `toolDetailsRegistry.test.ts` carries
+  // no such key), so they were deleted rather than kept as a guess at a shape
+  // the wire never sent. The interactive store's `cacheReadTokens` /
+  // `cacheWriteTokens` cost snapshot (`store/interactive.ts`) is a DIFFERENT,
+  // live shape with its own tests — not these three.
   usage?: {
     input?: number;
     output?: number;
-    cacheRead?: number;
-    cacheWrite?: number;
     cost?: number;
-    turns?: number;
   };
   model?: string;
   finalOutput?: string;

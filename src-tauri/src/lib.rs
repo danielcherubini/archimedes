@@ -5,6 +5,7 @@ pub mod commands;
 pub mod config;
 pub mod navigation_guard;
 pub mod open;
+pub(crate) mod roots;
 pub mod skills;
 pub mod storage;
 #[doc(hidden)]
@@ -431,9 +432,8 @@ pub fn run() {
             commands::settings::auth_mcp_server,
             commands::settings::test_search_provider,
             commands::mcp::list_mcp_servers_effective,
-            commands::agents::list_agent_definitions,
             commands::agents::list_agent_definitions_for_space,
-            commands::agents::list_agent_config,
+            commands::agents::list_agent_definition_reports,
             commands::spaces::list_spaces,
             commands::spaces::delete_space,
             commands::spaces::space_for_path,
@@ -442,7 +442,7 @@ pub fn run() {
             commands::skills::list_skills,
             commands::clipboard::read_clipboard_image,
             commands::files::read_file_bytes,
-            commands::files::list_space_files,
+            commands::files::list_space_listing,
             commands::files::list_completion_entries,
             commands::attention::attention_arm,
             commands::attention::attention_disarm,

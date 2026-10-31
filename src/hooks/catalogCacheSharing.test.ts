@@ -1,6 +1,6 @@
 import { renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { listAgentConfig, listSkills } from "../lib/tauri";
+import { listAgentDefinitionReports, listSkills } from "../lib/tauri";
 import { clearAgentCatalogCache, useAgentCatalog } from "./useAgentCatalog";
 import { clearSkillCatalogCache, useSkillCatalog } from "./useSkillCatalog";
 import * as catalogRow from "./useCatalogRow";
@@ -39,7 +39,7 @@ vi.mock("../lib/tauri", async () => {
   return {
     ...actual,
     listSkills: vi.fn().mockResolvedValue([]),
-    listAgentConfig: vi.fn().mockResolvedValue([]),
+    listAgentDefinitionReports: vi.fn().mockResolvedValue([]),
   };
 });
 
@@ -106,7 +106,7 @@ describe("the catalog cache has one owner", () => {
 
   it.each([
     ["useSkillCatalog.ts", "listSkills"],
-    ["useAgentCatalog.ts", "listAgentConfig"],
+    ["useAgentCatalog.ts", "listAgentDefinitionReports"],
   ])("%s holds NO cache logic of its own", (file) => {
     const code = codeOnly(sourceOf(`./${file}`));
     // The React machinery that implements the four cache rules is gone…
@@ -165,25 +165,25 @@ describe("the two catalogs stay independent caches", () => {
     // skill listing that `App` and `ChatStream` share, and the composer's `$`
     // mentions would go blank behind a keystroke.
     const mockedListSkills = vi.mocked(listSkills);
-    const mockedListAgentConfig = vi.mocked(listAgentConfig);
+    const mockedListAgentDefinitionReports = vi.mocked(listAgentDefinitionReports);
     const skills = renderHook(() => useSkillCatalog("/tmp/alpha"));
     const agents = renderHook(() => useAgentCatalog("/tmp/alpha"));
     await waitFor(() => expect(mockedListSkills).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(mockedListAgentConfig).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(1));
 
     clearSkillCatalogCache();
     const skills2 = renderHook(() => useSkillCatalog("/tmp/alpha"));
     await waitFor(() => expect(mockedListSkills).toHaveBeenCalledTimes(2));
-    expect(mockedListAgentConfig).toHaveBeenCalledTimes(1);
+    expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(1);
     // The warm agent entry survived the skill clear — a new consumer is served
     // from the cache, no second fetch.
     const agents2 = renderHook(() => useAgentCatalog("/tmp/alpha"));
     await waitFor(() => expect(agents2.result.current).toEqual([]));
-    expect(mockedListAgentConfig).toHaveBeenCalledTimes(1);
+    expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(1);
 
     clearAgentCatalogCache();
     const agents3 = renderHook(() => useAgentCatalog("/tmp/alpha"));
-    await waitFor(() => expect(mockedListAgentConfig).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockedListAgentDefinitionReports).toHaveBeenCalledTimes(2));
     expect(mockedListSkills).toHaveBeenCalledTimes(2);
 
     expect(skills.result.current).toEqual([]);

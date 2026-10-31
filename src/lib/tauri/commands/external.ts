@@ -30,8 +30,11 @@ export async function externalOpen(
   // arg KEYS are pinned in `src/lib/tauri.test.ts`, and `cwd` is normalised to
   // an explicit `null` (never an absent key) so the Rust `Option<String>` sees
   // one shape. The swallow is deliberate: every caller is a click handler with
-  // no `catch`, and the wire error IS the typed refusal code
-  // (`denied-scheme:…`, `relative-without-cwd`, `os-error:…`).
+  // no `catch`, and the wire error IS the `OpenError` envelope (ADR 0063,
+  // task14) whose `message` is the typed refusal code verbatim
+  // (`denied-scheme:…`, `relative-without-cwd`, `os-error:…`);
+  // `describeIpcError` renders the message, `OpenErrorKind` in `@/lib/errors`
+  // mirrors the frozen kind table.
   try {
     await invoke("external_open", { href, cwd: cwd ?? null });
   } catch (err) {

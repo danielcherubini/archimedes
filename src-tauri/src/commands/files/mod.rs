@@ -7,7 +7,7 @@
 //! an arbitrary local path itself (no `fs` plugin), so the read is a
 //! Tauri command.
 //!
-//! `list_space_files` is the backend half of the `?` file completion (ADR
+//! `list_space_listing` is the backend half of the `?` file completion (ADR
 //! 0033): it lists NAMES in the active **Space** so the picker can offer a
 //! PATH. It reads no file bytes — `?` completes to a path and the agent's
 //! own Boundary/policy-gated `read` stays the enforcement point.
@@ -25,7 +25,7 @@ pub use completion::{
 };
 pub use image::{image_within_cap, is_supported_image_path, read_image_capped, IMAGE_EXTENSIONS};
 pub use space_walk::{
-    collect_files, is_skipped_dir, FileListDto, MAX_PICKER_ENTRIES, PRUNED_VCS_DIRS,
+    collect_files, is_skipped_dir, ListingDto, MAX_PICKER_ENTRIES, PRUNED_VCS_DIRS,
 };
 pub use token::name_is_completable;
 
@@ -56,8 +56,8 @@ pub async fn read_file_bytes(path: String) -> Result<Option<Vec<u8>>, FilesError
 /// walk, never an error: the picker degrades to "no files"). Reads NO file
 /// bytes — names only.
 #[tauri::command]
-pub async fn list_space_files(space_path: Option<String>) -> Result<FileListDto, String> {
-    let empty = || FileListDto {
+pub async fn list_space_listing(space_path: Option<String>) -> Result<ListingDto, FilesError> {
+    let empty = || ListingDto {
         entries: vec![],
         truncated: false,
     };
@@ -82,9 +82,9 @@ pub async fn list_space_files(space_path: Option<String>) -> Result<FileListDto,
         // BOTH arms below degrade to an EMPTY listing (never an `Err`: the
         // picker must not fail an IPC round-trip over a Space it cannot read).
         // The `Ok(Err(_))` arm is pinned by
-        // `list_space_files_degrades_to_empty_for_an_uncanonicalizable_space`;
+        // `list_space_listing_degrades_to_empty_for_an_uncanonicalizable_space`;
         // the shape the same way — `Ok` + empty + not-truncated — is also what
-        // `list_space_files_degrades_to_empty_for_a_space_that_is_a_file` pins
+        // `list_space_listing_degrades_to_empty_for_a_space_that_is_a_file` pins
         // for a walk that succeeds and finds nothing. The `Err(_)` (JoinError)
         // arm has NO test and cannot get one from outside: nothing a caller can
         // pass makes that closure panic, so reaching it would mean inserting a
@@ -101,7 +101,7 @@ pub async fn list_space_files(space_path: Option<String>) -> Result<FileListDto,
         // `commands/sessions.rs` and `commands/spaces.rs`).
         Ok(Err(e)) => {
             eprintln!(
-                "list_space_files: no listing for Space {space_path_for_log} (the path failed to canonicalize: {e}); degrading to an empty listing"
+                "list_space_listing: no listing for Space {space_path_for_log} (the path failed to canonicalize: {e}); degrading to an empty listing"
             );
             return Ok(empty());
         }
@@ -110,12 +110,12 @@ pub async fn list_space_files(space_path: Option<String>) -> Result<FileListDto,
             // panicked, which every "never unwrap in here" comment in
             // `collect_files` exists to prevent. Loud on purpose.
             eprintln!(
-                "list_space_files: the file walk PANICKED for Space {space_path_for_log} ({join}); degrading to an empty listing"
+                "list_space_listing: the file walk PANICKED for Space {space_path_for_log} ({join}); degrading to an empty listing"
             );
             return Ok(empty());
         }
     };
-    Ok(FileListDto {
+    Ok(ListingDto {
         entries: walked.0,
         truncated: walked.1,
     })
@@ -125,22 +125,22 @@ pub async fn list_space_files(space_path: Option<String>) -> Result<FileListDto,
 /// completion (ADR 0035). `None` query = no active token = empty, and NO
 /// filesystem access at all.
 ///
-/// The contract is `list_space_files`'s, deliberately, including the part that
+/// The contract is `list_space_listing`'s, deliberately, including the part that
 /// looks like a bug: **never an `Err`**, always `Ok`, degrading to an EMPTY
 /// listing, because a `?` picker that errors is worse than one that shows
 /// nothing. That is also what makes a failure INDISTINGUISHABLE to the Client
 /// from a directory that legitimately holds no files, so the one arm that CAN
 /// fail logs WHICH arm fired — `eprintln!` being this crate's convention for
-/// command-level diagnostics (compare `list_space_files` above and
+/// command-level diagnostics (compare `list_space_listing` above and
 /// `commands/spaces.rs`).
 ///
-/// ONE failure arm, not `list_space_files`' two. That command has an `Ok(Err(_))`
+/// ONE failure arm, not `list_space_listing`'s two. That command has an `Ok(Err(_))`
 /// arm because `canonicalize` can fail there; `completion_dir` is INFALLIBLE (it
 /// returns a tuple, not a `Result` — an unreadable directory, an unformable query
 /// and a `~` with no home are all `(empty, false)` INSIDE it), so there is no
 /// error to log on the `Ok` side, and an `Ok`-side `eprintln!` would fire on
 /// EVERY directory fetch and bury the one message that matters. Do not "restore
-/// symmetry" with `list_space_files` — the shapes differ because the fallibility
+/// symmetry" with `list_space_listing` — the shapes differ because the fallibility
 /// does.
 ///
 /// The two properties below are stated with what actually guards them, because
@@ -170,7 +170,7 @@ pub async fn list_space_files(space_path: Option<String>) -> Result<FileListDto,
 /// WHY THERE IS NO BOUNDARY GATE ON THIS COMMAND, recorded because it will
 /// otherwise be proposed again: listing ANY path from the webview is NOT a new
 /// class of access in this app, and a gate here would protect nothing while
-/// costing the feature its point. `list_space_files` walks ANY path recursively,
+/// costing the feature its point. `list_space_listing` walks ANY path recursively,
 /// `read_file_bytes` reads any allowlisted-extension file, `set_space_trusted`
 /// flips the Boundary flag from the webview, and `test_mcp_server` spawns an
 /// arbitrary process — all pre-existing, all ungated. A curated root set (`/`,
@@ -181,7 +181,9 @@ pub async fn list_space_files(space_path: Option<String>) -> Result<FileListDto,
 /// adds no reach a user lacks (typing the target works), and dropping it would
 /// break `~/.local/bin` and most of macOS `~/Library`.
 #[tauri::command]
-pub async fn list_completion_entries(query: Option<String>) -> Result<CompletionDirDto, String> {
+pub async fn list_completion_entries(
+    query: Option<String>,
+) -> Result<CompletionDirDto, FilesError> {
     let empty = || CompletionDirDto {
         entries: vec![],
         truncated: false,
@@ -217,7 +219,7 @@ pub async fn list_completion_entries(query: Option<String>) -> Result<Completion
             // `expect` or `debug_assert` a hostile path can trip — that is what
             // every "never unwrap in here" note in `completion_dir` and
             // `collect_files` exists to prevent), so reaching this arm would mean
-            // INSERTING a panic into this file. Same reason `list_space_files`'
+            // INSERTING a panic into this file. Same reason `list_space_listing`'s
             // JoinError arm has no test, and the same reason neither is left
             // silent: a panic here is a BUG in this file, and without this line
             // the only symptom is "the picker quietly went empty". It was

@@ -1,7 +1,7 @@
 //! The Worker event router + the crash / stalled / pending-modal cluster
 //! (ADR 0025) — a CHILD module of `session`, so it sees the parent's private
-//! items (`SessionManager`'s `live` / `stalled` / `config_state` fields, the
-//! private `LiveWorkerSession` / `CloseKind`) with no visibility widening.
+//! items (`SessionManager`'s `sessions` map and the `with_session` accessors,
+//! the private `LiveWorkerSession` / `CloseKind`) with no visibility widening.
 
 use std::path::PathBuf;
 
@@ -215,13 +215,14 @@ impl SessionManager {
     }
 
     /// The `WorkerManager`'s `on_crash` callback (the UNEXPECTED `Exited` — a Worker
-    /// crash): mark the session STALLED (the `stalled` registry + the
-    /// `session-stalled` event + the `stalled_info` query), perform the pending-modal
+    /// crash): mark the session STALLED (the `stalled` slice of the session's
+    /// `SessionState` row + the `session-stalled` event + the `stalled_info`
+    /// query), perform the pending-modal
     /// cleanup (the `interactive-request-close` frames — a crashed session's open
     /// permission / interactive modals are dismissed, no stuck modal alongside the
     /// banner), resolve the in-flight `send_prompt` (the crash outcome — the
     /// composer unlocks; it never stays locked forever), and drop the session's
-    /// NAMING entry (a resumed session re-uses the same id — see the site).
+    /// NAMING slice (a resumed session re-uses the same id — see the site).
     ///
     /// `pid` is the DEAD child's pid (the handle's, captured at spawn); `None`
     /// when the Supervisor never saw one. It selects the crash log — see
@@ -238,18 +239,35 @@ impl SessionManager {
             .crash_log_dir
             .get()
             .and_then(|d| find_crash_log_for_pid(d, pid));
-        // Mark the session STALLED (the `stalled` registry — the frontend reads it via
-        // `stalled_info` + the `session-stalled` event).
-        self.stalled
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(
-                session_id.to_string(),
-                StalledInfo {
-                    at,
-                    crash_log: crash_log.clone(),
-                },
-            );
+        // Mark the session STALLED (the row's `stalled` slice — the frontend
+        // reads it via `stalled_info` + the `session-stalled` event) and drop
+        // the NAMING slice in the same lock acquisition. The other two slices
+        // are LEFT ALONE — that is today's crash-path shape, and it is a
+        // contract, not an oversight:
+        //
+        // - `naming` goes because a crashed-then-resumed session re-uses the
+        //   SAME id, so a stale `in_flight` would block naming for ever and a
+        //   stale `fails == MAX_FAILURES` would silently kill it;
+        // - `live` / `config_state` stay, so a stalled session still passes the
+        //   `close_session` / `cancel_session` `live` guards (the frontend's
+        //   `store/sessions.ts` documents exactly that: a crash "removes no
+        //   `live` entry", so Stop answers `Ok(())` instead of erroring, and the
+        //   row stays resumable). Blanking them here would turn those `Ok`s into
+        //   `UnknownSession` errors — a behaviour change this merge forbids
+        //   ("Repairing that row's liveness bookkeeping is its own decision, not
+        //   a tidy-up to fold in here").
+        //
+        // A crash for an id that was never started CREATES the row holding ONLY
+        // the `stalled` slice (the same thing the standalone `stalled` map did
+        // today) — which is why the write goes through the entry-or-default
+        // helper rather than a `get_mut`.
+        self.with_session_entry(session_id, |row| {
+            row.stalled = Some(StalledInfo {
+                at,
+                crash_log: crash_log.clone(),
+            });
+            row.naming = None;
+        });
         // The pending-modal cleanup (the `interactive-request-close` frames — the
         // unanswered-request-id diff: a crashed session's open permission / interactive
         // modals are dismissed, no stuck modal alongside the banner).
@@ -258,16 +276,6 @@ impl SessionManager {
         // incomplete; `Cancelled` unlocks the composer. The `StopReason` has no error
         // variant — the `session-stalled` event is the frontend's crash signal).
         self.resolve_turn_forced(session_id, StopReason::Cancelled);
-        // Drop the session's naming entry (a crash tears down the modals but
-        // NOT the per-session maps). A crashed-then-resumed session re-uses
-        // the SAME id, so a stale entry survives into the resumed session:
-        // a stale `in_flight` would block naming for ever and a stale
-        // `fails == MAX_FAILURES` would silently kill it. (`config_state`
-        // has the same pre-existing leak — out of scope here.)
-        self.naming
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(session_id);
         // Emit the `session-stalled` event (the frontend's banner — the `StalledInfo`
         // shape: `at` + `crash_log`). The path is the one the registry just froze —
         // NEVER a second glob (that is what let the push and the pull disagree).
@@ -285,13 +293,11 @@ impl SessionManager {
     }
 
     /// The `stalled_info` query (the frontend's banner query — the `SessionManager`
-    /// exposes it; the `get_stalled_info` command wraps it).
+    /// exposes it; the `get_stalled_info` command wraps it). The row's `stalled`
+    /// slice CLONED out under the one lock, released before this returns.
     pub fn stalled_info(&self, session_id: &str) -> Option<StalledInfo> {
-        self.stalled
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(session_id)
-            .cloned()
+        self.with_session(session_id, |s| s.stalled.clone())
+            .flatten()
     }
 
     /// Resolve the session's in-flight turn (the `pending_turn` oneshot) on an
@@ -299,21 +305,29 @@ impl SessionManager {
     /// else `EndTurn` — the existing settle semantics). A no-op when no turn is in
     /// flight (the slot is empty) or the session is gone.
     fn resolve_turn(&self, session_id: &str) {
-        let live = self.live.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(live) = live.get(session_id) else {
+        // Copy out the two SHARED `Arc` slots (the `Arc`s are cloned, not the
+        // slot contents — resolving through the clone resolves the session's
+        // real slot) and act OUTSIDE the `sessions` lock, exactly as the
+        // borrowed `live` reference did under the old map lock.
+        let slots = self
+            .with_session(session_id, |s| {
+                s.live
+                    .as_ref()
+                    .map(|live| (live.cancel_requested.clone(), live.pending_turn.clone()))
+            })
+            .flatten();
+        let Some((cancel_requested, pending_turn)) = slots else {
             return;
         };
-        let cancelled_guard = live
-            .cancel_requested
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let cancelled_guard = cancel_requested.lock().unwrap_or_else(|p| p.into_inner());
         let cancelled = *cancelled_guard;
         let reason = if cancelled {
             StopReason::Cancelled
         } else {
             StopReason::EndTurn
         };
-        let mut pending_guard = live.pending_turn.lock().unwrap_or_else(|p| p.into_inner());
+        drop(cancelled_guard);
+        let mut pending_guard = pending_turn.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(tx) = pending_guard.take() {
             let _ = tx.send(reason);
         }
@@ -323,9 +337,13 @@ impl SessionManager {
     /// / crash path — the turn is over regardless of the `cancel_requested` flag;
     /// a mid-turn death / a close must not tell `send_prompt` "turn ended normally").
     fn resolve_turn_forced(&self, session_id: &str, reason: StopReason) {
-        let live = self.live.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(live) = live.get(session_id) {
-            let mut pending_guard = live.pending_turn.lock().unwrap_or_else(|p| p.into_inner());
+        let pending_turn = self
+            .with_session(session_id, |s| {
+                s.live.as_ref().map(|live| live.pending_turn.clone())
+            })
+            .flatten();
+        if let Some(pending_turn) = pending_turn {
+            let mut pending_guard = pending_turn.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(tx) = pending_guard.take() {
                 let _ = tx.send(reason);
             }
@@ -344,25 +362,26 @@ impl SessionManager {
     /// Worker's EXPECTED `Exited` — so it is also what a test asserts the
     /// per-session cleanup against.
     pub(crate) fn on_session_exited_expected(&self, session_id: &str) {
-        let (reason, exists) = {
-            let live = self.live.lock().unwrap_or_else(|p| p.into_inner());
-            let Some(live) = live.get(session_id) else {
-                return; // the session is already gone (idempotent).
-            };
-            let kind_guard = live.close_kind.lock().unwrap_or_else(|p| p.into_inner());
-            let kind = *kind_guard;
-            // The `ClosedReason` mapping (the current `session.rs:876` shape): a
-            // `close_session` (`CloseKind::User`) → `User`; a clean self-exit (`None`
-            // — the Worker exited on its own) → `AgentExited`.
-            let reason = match kind {
-                Some(CloseKind::User) => ClosedReason::User,
-                None => ClosedReason::AgentExited,
-            };
-            (reason, true)
+        // The `ClosedReason` mapping (the current `session.rs:876` shape): a
+        // `close_session` (`CloseKind::User`) → `User`; a clean self-exit
+        // (`None` — the Worker exited on its own) → `AgentExited`. Read OUTSIDE
+        // the lock below (the `close_kind` `Arc` is copied out under it), so the
+        // idempotent early-return for a session with no `live` slice stays
+        // exactly where the old `live`-map `get` put it.
+        let reason = self
+            .with_session(session_id, |s| {
+                s.live.as_ref().map(|live| {
+                    let kind_guard = live.close_kind.lock().unwrap_or_else(|p| p.into_inner());
+                    match *kind_guard {
+                        Some(CloseKind::User) => ClosedReason::User,
+                        None => ClosedReason::AgentExited,
+                    }
+                })
+            })
+            .flatten();
+        let Some(reason) = reason else {
+            return; // the session is already gone (idempotent).
         };
-        if !exists {
-            return;
-        }
         // Resolve the in-flight `pending_turn` → `Cancelled` (a close / a clean self-
         // exit kills the turn — the composer unlocks; it never stays locked forever).
         self.resolve_turn_forced(session_id, StopReason::Cancelled);
@@ -370,23 +389,47 @@ impl SessionManager {
         // unanswered-request-id diff: a session ending with an open prompt must NOT
         // leave a stuck modal).
         self.cleanup_pending_modals(session_id);
-        // Remove the live-session bookkeeping (the `live` / `config_state` / `stalled`
-        // entries — the session is over).
-        {
-            let mut live = self.live.lock().unwrap_or_else(|p| p.into_inner());
-            live.remove(session_id);
+        // Remove the session's per-session state (`live` / `config_state` /
+        // `naming` — a stalled-less row is removed wholesale; the `stalled` slice
+        // is deliberately NEVER removed: ADR 0025 makes it the crash-attribution
+        // source — the pushed `session-stalled` event and the pulled `stalled_info`
+        // both read it, and the frontend banner may still be reading it).
+        //
+        // This is the ONE place the merge could have erased that attribution, and
+        // the prohibition is pinned: a crash marks the session stalled and the
+        // user then closes it, so the `detach` removes the `workers` entry first
+        // and this teardown runs on a row that HOLDS a `stalled` slice. A
+        // blanket "remove the row" here would delete the crash record mid-read,
+        // so the stalled-bearing case clears the three slices IN PLACE and leaves
+        // the row (grow-only, bounded by DISTINCT crashed sessions); a
+        // stalled-less row goes wholesale — for a plain close the two shapes are
+        // indistinguishable, and dropping the row keeps the map from holding
+        // state for a session that is over.
+        //
+        // The naming semantics the deleted per-field comment used to explain are
+        // preserved by this: an in-flight title request of a closing session
+        // finds NO naming slice afterwards (`InFlightClaim::drop`,
+        // `note_failure` and `note_success` all treat "missing → do not
+        // re-create"), so nothing is resurrected for a session that is over.
+        // The two lock acquisitions below are SEQUENTIAL (no guard is held into
+        // the second call — the merge's lock discipline), and the invariant
+        // survives either interleaving with a concurrent crash: if a crash
+        // writes `stalled` BEFORE the read, this clears in place; if it writes
+        // AFTER the read and this removes the row, the crash's own write goes
+        // through the entry-or-default helper and re-creates the row holding its
+        // `stalled` — so the attribution is never the loser.
+        let stalled_row = self
+            .with_session(session_id, |s| s.stalled.is_some())
+            .unwrap_or(false);
+        if stalled_row {
+            self.with_session_mut(session_id, |row| {
+                row.live = None;
+                row.config_state = None;
+                row.naming = None;
+            });
+        } else {
+            self.remove_session(session_id);
         }
-        self.config_state
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(session_id);
-        // The naming entry goes with it (an in-flight title request of a
-        // closing session must not leave the map holding state for a session
-        // that is over — its `InFlightClaim` then finds no entry to clear).
-        self.naming
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(session_id);
         // Emit the `session-closed` event (the `ClosedReason` payload — the frontend's
         // close handling).
         if let Some(sink) = self.sink.get() {
@@ -409,20 +452,24 @@ impl SessionManager {
     /// prompts (keyed by the unanswered ids; a session ending with an open
     /// permission / interactive prompt must NOT leave a stuck modal).
     fn cleanup_pending_modals(&self, session_id: &str) {
-        let unanswered = {
-            let live = self.live.lock().unwrap_or_else(|p| p.into_inner());
-            let Some(live) = live.get(session_id) else {
-                return;
-            };
-            let ids_guard = live
-                .pending_modal_ids
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            ids_guard.clone()
+        let unanswered = self
+            .with_session(session_id, |s| {
+                s.live.as_ref().map(|live| {
+                    live.pending_modal_ids
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .clone()
+                })
+            })
+            .flatten();
+        let Some(unanswered) = unanswered else {
+            return;
         };
         if unanswered.is_empty() {
             return;
         }
+        // The EMIT runs OUTSIDE the `sessions` lock (the sink is a re-emitting
+        // `TauriSink` — an emit must never re-enter these maps under a guard).
         let Some(sink) = self.sink.get() else {
             return;
         };
@@ -448,14 +495,15 @@ impl SessionManager {
     /// without a `live` entry that a child never has. A torn-down child closes
     /// its OWN cards from `finish_subagent` (`worker/manager.rs`, ADR 0055).
     fn track_modal(&self, session_id: &str, id: &str) {
-        let mut live = self.live.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(live) = live.get_mut(session_id) {
-            let mut ids_guard = live
-                .pending_modal_ids
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            ids_guard.insert(id.to_string());
-        }
+        self.with_session_mut(session_id, |row| {
+            if let Some(live) = row.live.as_mut() {
+                let mut ids_guard = live
+                    .pending_modal_ids
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                ids_guard.insert(id.to_string());
+            }
+        });
     }
 }
 
@@ -591,16 +639,15 @@ mod tests {
         let manager = SessionManager::new(PathBuf::from("/tmp"));
         let (tx, mut rx) = oneshot::channel();
         let sid = "main-session";
-        manager.live.lock().unwrap().insert(
-            sid.to_string(),
-            LiveWorkerSession {
+        manager.with_session_entry(sid, |row| {
+            row.live = Some(LiveWorkerSession {
                 cwd: PathBuf::from("/tmp"),
                 close_kind: Arc::new(StdMutex::new(None)),
                 pending_turn: Arc::new(StdMutex::new(Some(tx))),
                 cancel_requested: Arc::new(StdMutex::new(false)),
                 pending_modal_ids: StdMutex::new(HashSet::new()),
-            },
-        );
+            });
+        });
 
         // A subagent settles under the parent's delivery id (`is_subagent: true`).
         manager.route_event(
@@ -629,22 +676,25 @@ mod tests {
         let manager = SessionManager::new(PathBuf::from("/tmp"));
         let (tx, mut rx) = oneshot::channel();
         let sid = "main-session";
-        manager.live.lock().unwrap().insert(
-            sid.to_string(),
-            LiveWorkerSession {
+        manager.with_session_entry(sid, |row| {
+            row.live = Some(LiveWorkerSession {
                 cwd: PathBuf::from("/tmp"),
                 close_kind: Arc::new(StdMutex::new(None)),
                 pending_turn: Arc::new(StdMutex::new(Some(tx))),
                 cancel_requested: Arc::new(StdMutex::new(false)),
                 pending_modal_ids: StdMutex::new(HashSet::new()),
-            },
-        );
+            });
+        });
 
         // A subagent exits under the parent's delivery id (`is_subagent: true`).
         manager.route_event(sid, true, WorkerInboundEvent::Exited(Some(0)));
 
         // The parent's session must still be live and pending turn untouched!
-        assert!(manager.live.lock().unwrap().contains_key(sid));
+        // (The same `contains_key` predicate the `live` map answered — now the
+        // row's `live` slice, read through the accessor.)
+        assert!(manager
+            .with_session(sid, |s| s.live.is_some())
+            .unwrap_or(false));
         assert!(rx.try_recv().is_err());
     }
 
@@ -652,16 +702,15 @@ mod tests {
     async fn fetch_render_request_does_not_track_modal() {
         let manager = SessionManager::new(PathBuf::from("/tmp"));
         let sid = "main-session";
-        manager.live.lock().unwrap().insert(
-            sid.to_string(),
-            LiveWorkerSession {
+        manager.with_session_entry(sid, |row| {
+            row.live = Some(LiveWorkerSession {
                 cwd: PathBuf::from("/tmp"),
                 close_kind: Arc::new(StdMutex::new(None)),
                 pending_turn: Arc::new(StdMutex::new(None)),
                 cancel_requested: Arc::new(StdMutex::new(false)),
                 pending_modal_ids: StdMutex::new(HashSet::new()),
-            },
-        );
+            });
+        });
 
         manager.route_event(
             sid,
@@ -679,9 +728,14 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let live = manager.live.lock().unwrap();
-        let session = live.get(sid).unwrap();
-        let modals = session.pending_modal_ids.lock().unwrap();
+        let modals = manager
+            .with_session(sid, |s| {
+                s.live
+                    .as_ref()
+                    .map(|session| session.pending_modal_ids.lock().unwrap().clone())
+            })
+            .flatten()
+            .expect("the seeded live session is still there");
         assert!(
             !modals.contains("render-1"),
             "fetch render request must NOT be tracked as a user modal"

@@ -134,6 +134,15 @@ export interface SessionRecency {
 export type CloseReasonStr = "user" | "agent-exited" | "error";
 
 
+/** Why a compaction was triggered (ADR 0045's vocabulary; wire strings
+ * exactly as Rust emits them — `CompactionRan` is the sibling result
+ * type). A fourth reason is a compile error at every frame-construction
+ * site and falls through every exhaustive switch (see
+ * `src/lib/toolOutput.ts` and the `details` registry guard in
+ * `src/lib/toolDetailsRegistry.test.ts`). */
+export type CompactionReason = "manual" | "threshold" | "overflow";
+
+
 /** Why the agent stopped a prompt turn (snake_case strings). */
 export type StopReason =
   | "end_turn"
@@ -251,8 +260,8 @@ export type AcpSessionUpdate =
       sessionUpdate: "compaction_update";
       /** True while a compaction runs; false when it ends (any outcome). */
       active: boolean;
-      /** "manual" | "threshold" | "overflow" (ADR 0045's vocabulary). */
-      reason: string;
+      /** The reason a compaction was triggered — see `CompactionReason`. */
+      reason: CompactionReason;
     }
   | {
       /** (ADR 0048) An Abandoned attempt's reply is RetRACTED: every
@@ -273,20 +282,6 @@ export interface SessionUpdatePayload {
 export interface SessionClosedPayload {
   sessionId: string;
   reason: CloseReasonStr;
-}
-
-
-/**
- * The `session-stalled` event payload (a Worker crash, ADR 0025 Task 4 —
- * the `StalledInfo` shape + the session id, camelCase over the wire). The
- * frontend's banner reads it; the Rust `get_stalled_info` command is the PULL
- * form (the same `StalledInfo`, no `sessionId` — the command's parameter).
- */
-export interface StalledInfo {
-  /** Unix milliseconds (the crash time). */
-  at: number;
-  /** The crashed Worker's own `crash-<ts>-worker-<pid>.log` — selected by the pid of the child the Supervisor reaped, and FROZEN at crash time (the `session-stalled` push and the Rust `get_stalled_info` command name the same path). `null` when the pid matched no log — never another Worker's crash. */
-  crashLog: string | null;
 }
 
 
@@ -812,7 +807,7 @@ export type OverrideSource = "override" | "file" | "parent";
 //   `FrontmatterNote`      `rename_all = "camelCase"`, EXTERNALLY tagged
 //
 // A `rename_all` on a struct does NOT reach a nested type, which is why
-// `whole_tool` stays snake_case inside a camelCase `AgentConfigDto`. Do not
+// `whole_tool` stays snake_case inside a camelCase `AgentDefinitionReportDto`. Do not
 // "fix" it here: the fix, if it ever happens, is a `rename_all` on the Rust
 // `Rules`, landed in the same change that re-pins `a_permission_block_serializes_in_file_order`.
 //
@@ -969,8 +964,8 @@ export interface AgentOverrideSources {
 }
 
 
-/** One row of `list_agent_config` (camelCase over IPC — the Rust `AgentConfigDto`). */
-export interface AgentConfigDto {
+/** One row of `list_agent_definition_reports` (camelCase over IPC — the Rust `AgentDefinitionReportDto`). */
+export interface AgentDefinitionReportDto {
   name: string;
   description: string;
   scope: "space" | "user";
@@ -1072,8 +1067,8 @@ export interface SkillInfo {
 }
 
 
-/** One `?` file-completion listing (camelCase over IPC — the Rust `FileListDto`). */
-export interface FileListDto {
+/** One Listing (the file completion's) — camelCase over IPC, the Rust `ListingDto`. */
+export interface ListingDto {
   /** Paths RELATIVE to the Space root, `/`-separated, sorted. */
   entries: string[];
   /** The walk hit `MAX_PICKER_ENTRIES` — the picker says so instead of lying. */

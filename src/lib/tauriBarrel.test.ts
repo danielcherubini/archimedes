@@ -187,10 +187,10 @@ const TAURI_PUBLIC_API = [
   "AccessRule",
   "AcpSessionUpdate",
   "AcpToolCallStatus",
-  "AgentConfigDto",
   "AgentDefinitionDto",
+  "AgentDefinitionReportDto",
   // (issue #101) The declared-`permission:` wire types, added ON PURPOSE per the
-  // header above. `AgentConfigDto.filePermission` is `AgentPermissionBlock | null`
+  // header above. `AgentDefinitionReportDto.filePermission` is `AgentPermissionBlock | null`
   // and `.frontmatterNotes` is `AgentFrontmatterNote[]`; the block is an ordered
   // array of `[AgentToolKey, AgentPermissionRules]` pairs whose rules are
   // `AgentPermissionRule`s carrying an `AgentPermissionAction`, and a note's
@@ -219,13 +219,19 @@ const TAURI_PUBLIC_API = [
   "CloseReasonStr",
   "closeSession",
   "compactSession",
+  // (task07a / finding 4) The compaction trigger vocabulary, added ON PURPOSE
+  // per the header above: the `compaction_update` frame's `reason` field and
+  // the store's `compacting` value are both this union, so the frame type
+  // forces its return-type presence in the public surface. TYPE-ONLY — it
+  // vanishes at runtime, so `TAURI_RUNTIME_API` does NOT gain it, exactly as
+  // `AccessDirection`/`AccessRule` and the issue #101 seven above.
+  "CompactionReason",
   "CompletionDirDto",
   "CompletionEntryDto",
   "ContentBlock",
   "deleteSession",
   "deleteSpace",
   "externalOpen",
-  "FileListDto",
   "FilePolicy",
   "FontSettings",
   "getSettings",
@@ -236,7 +242,7 @@ const TAURI_PUBLIC_API = [
   "InteractiveRequestPayload",
   "InteractiveResponseDto",
   "KnownProvider",
-  "listAgentConfig",
+  "listAgentDefinitionReports",
   "listAgentDefinitionsForSpace",
   "listCompletionEntries",
   "listenInteractiveEvent",
@@ -250,12 +256,13 @@ const TAURI_PUBLIC_API = [
   "listenSubagentClosed",
   "listenSubagentSessionStarted",
   "listenWindowState",
+  "ListingDto",
   "listKnownProviders",
   "listMcpServersEffective",
   "listModels",
   "listSessions",
   "listSkills",
-  "listSpaceFiles",
+  "listSpaceListing",
   "listSpaces",
   "listTools",
   "loadHistory",
@@ -297,7 +304,6 @@ const TAURI_PUBLIC_API = [
   "SpaceCheck",
   "spaceForPath",
   "SpaceRow",
-  "StalledInfo",
   "StalledPayload",
   "startSession",
   "StopReason",
@@ -326,7 +332,7 @@ const TAURI_RUNTIME_API = [
   "externalOpen",
   "getSettings",
   "getWindowState",
-  "listAgentConfig",
+  "listAgentDefinitionReports",
   "listAgentDefinitionsForSpace",
   "listCompletionEntries",
   "listenInteractiveEvent",
@@ -345,7 +351,7 @@ const TAURI_RUNTIME_API = [
   "listModels",
   "listSessions",
   "listSkills",
-  "listSpaceFiles",
+  "listSpaceListing",
   "listSpaces",
   "listTools",
   "loadHistory",
@@ -402,16 +408,18 @@ describe("the scanner actually reads the tree", () => {
           stripJsComments(readFileSync(f, "utf8")),
         ),
     );
-    // SET SIZE, pinned: 37 files mock the barrel by path. The number may only
+    // SET SIZE, pinned: 38 files mock the barrel by path. The number may only
     // move when a test file is added or removed, in a commit that says so — this
     // one moved 34 -> 35 when D2 wired `useAgentOverridesWrites` into `SpacesList`
     // and landed its test file, which mocks the barrel the documented way, and
     // 35 -> 36 when #85 added `store/modelCatalog.test.ts` (the catalog store the
     // subagent card's context % reads), and 36 -> 37 when the Permissions section
     // landed `components/settings/PermissionsSection.test.tsx`, which mocks the
-    // barrel the documented way.
-    expect(mockers).toHaveLength(37);
-    // 36 of the 37 SPREAD `vi.importActual`, which is the shape that makes the
+    // barrel the documented way, and 37 -> 38 when task14b landed
+    // `components/settings/McpSection.test.tsx` (the MCP badge's contract + the
+    // parked needs-auth red), which mocks the barrel the documented way.
+    expect(mockers).toHaveLength(38);
+    // 37 of the 38 SPREAD `vi.importActual`, which is the shape that makes the
     // seam forgiving: an unlisted export still resolves. The new mocker spreads,
     // so the remaining one is still `hooks/useWindowMaximized.test.ts`, which
     // replaces the module wholesale — so a name it forgets is `undefined`, the
@@ -420,7 +428,7 @@ describe("the scanner actually reads the tree", () => {
       mockers.filter((f) =>
         /vi\.importActual/.test(readFileSync(f, "utf8")),
       ).length,
-    ).toBe(36);
+    ).toBe(37);
   });
 });
 

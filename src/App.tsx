@@ -95,7 +95,7 @@ function App() {
     );
     // A Worker crash (ADR 0025): the `session-stalled` event marks the
     // session STALLED in the store (the `SessionStalledBanner`'s data
-    // source — the `StalledInfo` shape: `at` + `crashLog`).
+    // source — the `StalledPayload` shape: `sessionId` + `at` + `crashLog`).
     unlistenPromises.push(
       listenSessionStalled((payload) =>
         useSessions

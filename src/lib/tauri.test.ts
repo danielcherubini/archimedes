@@ -6,7 +6,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 // does: the hook tests mock this WRAPPER (so they cannot see a renamed command
 // or a re-typed arg key), and no Rust test registers `commands::files`, so a
 // drift here — e.g. `spacePath` vs Rust's `space_path`, or
-// `list_space_files` renamed — would pass every test on BOTH sides and fail
+// `list_space_listing` renamed — would pass every test on BOTH sides and fail
 // only at runtime, in the desktop app.
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -25,40 +25,40 @@ import {
   externalOpen,
   getWindowState,
   listenWindowState,
-  listAgentConfig,
+  listAgentDefinitionReports,
   listCompletionEntries,
-  listSpaceFiles,
+  listSpaceListing,
   loadHistory,
   reorderSessions,
   reorderSpaces,
   sessionRecency,
-  type AgentConfigDto,
+  type AgentDefinitionReportDto,
   type WindowFrameState,
 } from "./tauri";
 
 const mockedInvoke = vi.mocked(invoke);
 const mockedListen = vi.mocked(listen);
 
-describe("listSpaceFiles (the `?` File-completion IPC boundary, ADR 0033)", () => {
+describe("listSpaceListing (the `?` File-completion IPC boundary, ADR 0033)", () => {
   beforeEach(() => {
     mockedInvoke.mockReset();
   });
 
-  it("invokes `list_space_files` with the `spacePath` argument key", async () => {
+  it("invokes `list_space_listing` with the `spacePath` argument key", async () => {
     mockedInvoke.mockResolvedValue({ entries: [], truncated: false });
-    await listSpaceFiles("/x");
+    await listSpaceListing("/x");
     // The command NAME and the arg KEY are both load-bearing: Tauri maps the
     // camelCase `spacePath` here to the snake_case `space_path` Rust
     // parameter, and a typo in either is a runtime-only failure.
-    expect(mockedInvoke).toHaveBeenCalledWith("list_space_files", {
+    expect(mockedInvoke).toHaveBeenCalledWith("list_space_listing", {
       spacePath: "/x",
     });
   });
 
   it("passes null through as `{ spacePath: null }` (no Space: the empty listing, not an error)", async () => {
     mockedInvoke.mockResolvedValue({ entries: [], truncated: false });
-    await listSpaceFiles(null);
-    expect(mockedInvoke).toHaveBeenCalledWith("list_space_files", {
+    await listSpaceListing(null);
+    expect(mockedInvoke).toHaveBeenCalledWith("list_space_listing", {
       spacePath: null,
     });
   });
@@ -71,8 +71,8 @@ describe("listSpaceFiles (the `?` File-completion IPC boundary, ADR 0033)", () =
       truncated: true,
     };
     mockedInvoke.mockResolvedValue(payload);
-    await expect(listSpaceFiles("/x")).resolves.toEqual(payload);
-    await expect(listSpaceFiles("/x")).resolves.toEqual({
+    await expect(listSpaceListing("/x")).resolves.toEqual(payload);
+    await expect(listSpaceListing("/x")).resolves.toEqual({
       entries: ["README.md", "src/main.rs"],
       truncated: true,
     });
@@ -99,7 +99,7 @@ describe("listCompletionEntries (the out-of-Space `?` IPC boundary, ADR 0035)", 
     // PASSED THROUGH, not short-circuited client-side — the Rust `None` arm is
     // the one place that guarantees "no token costs no filesystem access", and a
     // wrapper-level early return would move that guarantee somewhere no Rust
-    // test covers. This is the `listSpaceFiles` shape, kept deliberately.
+    // test covers. This is the `listSpaceListing` shape, kept deliberately.
     mockedInvoke.mockResolvedValue({ entries: [], truncated: false });
     await listCompletionEntries(null);
     expect(mockedInvoke).toHaveBeenCalledWith("list_completion_entries", {
@@ -142,7 +142,7 @@ describe("compactSession (the `/compact` Composer-command IPC boundary, ADR 0044
   it("invokes `compact_session` with the `sessionId`/`instructions` argument keys", async () => {
     mockedInvoke.mockResolvedValue(true);
     await compactSession("s1", "keep the tests");
-    // Same trap as `list_space_files` above: Tauri maps the camelCase arg KEY
+    // Same trap as `list_space_listing` above: Tauri maps the camelCase arg KEY
     // to the snake_case Rust parameter (`sessionId` → `session_id`,
     // `instructions` → `instructions` in `commands::sessions::compact_session`),
     // and a typo in the command NAME or in either KEY is a runtime-only failure
@@ -187,7 +187,7 @@ describe("attention arm/disarm (the ADR 0039 IPC boundary)", () => {
   it("invokes `attention_arm` with the `delaySecs`/`title`/`body` argument keys", async () => {
     mockedInvoke.mockResolvedValue(undefined);
     await attentionArm(15, "Archimedes", "b");
-    // Same trap as `list_space_files` above: Tauri maps the camelCase arg KEY
+    // Same trap as `list_space_listing` above: Tauri maps the camelCase arg KEY
     // to the snake_case Rust parameter (`delaySecs` here → `delay_secs` in
     // `commands::attention::attention_arm`), and a typo in the command NAME or
     // in any KEY is a runtime-only failure the hook tests cannot see.
@@ -240,7 +240,7 @@ describe("externalOpen (the External-open IPC boundary, ADR 0051)", () => {
   it("invokes `external_open` with the `href`/`cwd` argument keys", async () => {
     mockedInvoke.mockResolvedValue(undefined);
     await externalOpen("https://x.test", "/home/u/proj");
-    // Same trap as `list_space_files` above: Tauri maps these arg KEYS to the
+    // Same trap as `list_space_listing` above: Tauri maps these arg KEYS to the
     // `commands::open::external_open` parameters (`href`, `cwd` — both single
     // words, so no casing alias is involved and a typo is pure silence), and a
     // typo in the command NAME or in either KEY is a runtime-only failure no
@@ -387,30 +387,30 @@ describe("loadHistory (the paged history IPC boundary, ADR 0073)", () => {
   });
 });
 
-describe("listAgentConfig (the sidebar Agents modal's IPC boundary, ADR 0068)", () => {
+describe("listAgentDefinitionReports (the sidebar Agents modal's IPC boundary, ADR 0068)", () => {
   beforeEach(() => {
     mockedInvoke.mockReset();
   });
 
-  it("invokes `list_agent_config` with the `cwd` argument key", async () => {
+  it("invokes `list_agent_definition_reports` with the `cwd` argument key", async () => {
     mockedInvoke.mockResolvedValue([]);
-    await listAgentConfig("/p/space");
-    // Same trap as `list_space_files` above: Tauri maps a camelCase arg KEY to
+    await listAgentDefinitionReports("/p/space");
+    // Same trap as `list_space_listing` above: Tauri maps a camelCase arg KEY to
     // the snake_case Rust parameter, and `listSkills` proves the rule costs a
     // rename (its Rust `space_path` is sent as `spacePath`). `cwd` is ONE word,
     // so it must stay `cwd` — `cwdPath`/`spacePath` here is a runtime-only
-    // failure no Rust test can see (the Rust tests call `agent_config`
+    // failure no Rust test can see (the Rust tests call `agent_definition_reports`
     // directly, never over IPC) and no hook test can see (Task 5 mocks THIS
     // wrapper). `listAgentDefinitionsForSpace` is the neighbouring precedent
     // for the exact same key on the same-shaped command.
-    expect(mockedInvoke).toHaveBeenCalledWith("list_agent_config", {
+    expect(mockedInvoke).toHaveBeenCalledWith("list_agent_definition_reports", {
       cwd: "/p/space",
     });
   });
 
   it("sends `cwd: null` for the app-scope call — NEVER an omitted key", async () => {
     mockedInvoke.mockResolvedValue([]);
-    await listAgentConfig(null);
+    await listAgentDefinitionReports(null);
     // `cwd` is `Option<String>` on the Rust side, so an ABSENT key would also
     // deserialize to `None` — which is exactly why the explicit `null` is
     // asserted as a CONTRACT and not as a necessity: it is what the
@@ -419,10 +419,10 @@ describe("listAgentConfig (the sidebar Agents modal's IPC boundary, ADR 0068)", 
     // `toHaveBeenCalledWith` already distinguishes `null` from absent; the `in`
     // check says it out loud, as the `externalOpen` pin above does.
     const args = mockedInvoke.mock.calls[0][1] as Record<string, unknown>;
-    expect(mockedInvoke.mock.calls[0][0]).toBe("list_agent_config");
+    expect(mockedInvoke.mock.calls[0][0]).toBe("list_agent_definition_reports");
     expect("cwd" in args).toBe(true);
     expect(args.cwd).toBeNull();
-    expect(mockedInvoke).toHaveBeenCalledWith("list_agent_config", {
+    expect(mockedInvoke).toHaveBeenCalledWith("list_agent_definition_reports", {
       cwd: null,
     });
   });
@@ -450,7 +450,7 @@ describe("listAgentConfig (the sidebar Agents modal's IPC boundary, ADR 0068)", 
     // `contains`, so a renamed field or a re-tagged enum reddens THIS test —
     // which matters more here than anywhere, because this repo has no Rust↔TS
     // wire-contract test and both suites would otherwise stay green on a drift.
-    const row: AgentConfigDto = {
+    const row: AgentDefinitionReportDto = {
       name: "scout",
       description: "Fast recon.",
       scope: "space",
@@ -484,13 +484,13 @@ describe("listAgentConfig (the sidebar Agents modal's IPC boundary, ADR 0068)", 
       frontmatterNotes: [{ unknownKey: "mode" }, { unrecognizedToolKey: "glob" }],
     };
     mockedInvoke.mockResolvedValue([row]);
-    await expect(listAgentConfig("/p/space")).resolves.toEqual([row]);
+    await expect(listAgentDefinitionReports("/p/space")).resolves.toEqual([row]);
 
     // And the column is read as `override`, never Rust's `override_` (a
     // keyword): this compile-time field access IS the pin — a TS type that
     // declared `override_` would not type-check here, and the modal's editor
     // would read a column that never arrives.
-    const [out] = await listAgentConfig("/p/space");
+    const [out] = await listAgentDefinitionReports("/p/space");
     expect(out.override).toEqual({
       model: null,
       thinking: null,
@@ -543,7 +543,7 @@ describe("listAgentConfig (the sidebar Agents modal's IPC boundary, ADR 0068)", 
     // is `null`, while `frontmatterNotes` is a REQUIRED `Vec` so it is `[]`.
     // A mirror that declared the notes `null`-able, or the block optional,
     // would read fine here and lie about the wire.
-    const row: AgentConfigDto = {
+    const row: AgentDefinitionReportDto = {
       name: "scout",
       description: "Fast recon.",
       scope: "space",
@@ -557,7 +557,7 @@ describe("listAgentConfig (the sidebar Agents modal's IPC boundary, ADR 0068)", 
       frontmatterNotes: [],
     };
     mockedInvoke.mockResolvedValue([row]);
-    const [out] = await listAgentConfig("/p/space");
+    const [out] = await listAgentDefinitionReports("/p/space");
     expect(out.filePermission).toBeNull();
     expect(out.frontmatterNotes).toEqual([]);
     // No block ⇒ no file layer: Rust reports `parent`, never a fourth word.
@@ -572,7 +572,7 @@ describe("sessionRecency (the ADR 0075 recency IPC boundary)", () => {
   });
 
   it("invokes `session_recency` with no payload", async () => {
-    // Same trap as `list_space_files` above: the Rust command is
+    // Same trap as `list_space_listing` above: the Rust command is
     // `commands::history::session_recency` and NOTHING in this repo drives it
     // over IPC in a test (the Rust tests call `Db::session_recency` directly),
     // so a renamed command or a stray argument object is a runtime-only failure

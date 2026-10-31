@@ -13,12 +13,12 @@ use std::path::Path;
 /// The cap is reported UNLESS the too-many-matches arm wins.
 pub const MAX_PICKER_ENTRIES: usize = 5_000;
 
-/// One `?`-picker listing: paths RELATIVE to the Space root, `/`-separated
-/// (normalized so a Windows walk never inserts `\` into the composer's
-/// token), sorted. `truncated` = the cap was hit.
+/// One **Listing** (the file completion's): paths RELATIVE to the Space root,
+/// `/`-separated (normalized so a Windows walk never inserts `\` into the
+/// composer's token), sorted. `truncated` = the cap was hit.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FileListDto {
+pub struct ListingDto {
     pub entries: Vec<String>,
     pub truncated: bool,
 }
@@ -145,7 +145,7 @@ pub fn collect_files(root: &Path, cap: usize) -> (Vec<String>, bool) {
     // `walk.rs`) on any tree holding a subdirectory — but under the
     // all-matchers-off flag set this call used to carry, and re-measured with
     // the flags below it does NOT panic. A configuration-dependent panic inside
-    // `spawn_blocking` (which would trip `list_space_files`' JoinError arm and
+    // `spawn_blocking` (which would trip `list_space_listing`'s JoinError arm and
     // empty the whole picker) is reason enough to avoid it, and skipping depth 0
     // in the loop is equivalent, holds on every 0.4.x whatever the flag set, and
     // keeps the file-root invariant: a Space opened at a FILE yields nothing, so
@@ -218,7 +218,7 @@ pub fn collect_files(root: &Path, cap: usize) -> (Vec<String>, bool) {
         // `Walk::Item` is `Result<DirEntry, ignore::Error>`, NOT a DirEntry.
         // Swallow: a subtree we cannot read is ONE missing subtree. An
         // `unwrap` here panics inside `spawn_blocking`, trips the JoinError arm
-        // of `list_space_files`, and empties the ENTIRE listing.
+        // of `list_space_listing`, and empties the ENTIRE listing.
         .filter_map(|e| e.ok());
     for entry in walker {
         if entry.depth() == 0 {

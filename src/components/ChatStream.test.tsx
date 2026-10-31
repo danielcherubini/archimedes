@@ -11,7 +11,7 @@ import {
   listSkills,
   listMcpServersEffective,
   listAgentDefinitionsForSpace,
-  listSpaceFiles,
+  listSpaceListing,
   listCompletionEntries,
   respondInteractiveRequest,
   respondPermission,
@@ -40,7 +40,7 @@ import type {
   AppSettings,
   CompletionDirDto,
   CompletionEntryDto,
-  FileListDto,
+  ListingDto,
 } from "../lib/tauri";
 import { setSidePaneCollapsed } from "../lib/sidePaneState";
 import * as chatAttachments from "../lib/chatAttachments";
@@ -202,9 +202,9 @@ vi.mock("../lib/tauri", async () => {
     // unconditionally), and the `?` tests need to control the payload per
     // test — including a DEFERRED promise for the in-flight case. Empty by
     // default so the pre-existing `$`/`@`/`#` tests see no file rows.
-    listSpaceFiles: vi.fn().mockResolvedValue({ entries: [], truncated: false }),
+    listSpaceListing: vi.fn().mockResolvedValue({ entries: [], truncated: false }),
     // The out-of-Space Directory completion rows (ADR 0035). Mocked for the
-    // same reason as `listSpaceFiles`, and it is NOT optional: the composer
+    // same reason as `listSpaceListing`, and it is NOT optional: the composer
     // calls `useCompletionDir(null)` on EVERY mount (an empty draft has no
     // token, so `dirPrefix` is `null` and the cache misses), so an un-mocked
     // export — this factory spreads `importActual` — would fire a REAL
@@ -800,7 +800,7 @@ describe("ChatStream", () => {
   });
 
   it("labels every reason 'Compacting' (one label is the product decision)", () => {
-    for (const reason of ["manual", "threshold", "overflow"]) {
+    for (const reason of ["manual", "threshold", "overflow"] as const) {
       seedLiveSession();
       useSessions.setState({ compacting: { s1: reason } });
       const { container, unmount } = render(<ChatStream />);
@@ -3463,7 +3463,7 @@ describe("ChatStream", () => {
 
   it("typing ?RE opens the picker with the file rows and a ? badge", async () => {
     seedLiveSession();
-    vi.mocked(listSpaceFiles).mockResolvedValue({
+    vi.mocked(listSpaceListing).mockResolvedValue({
       entries: ["README.md", "docs/plan.md"],
       truncated: false,
     });
@@ -3480,7 +3480,7 @@ describe("ChatStream", () => {
 
   it("a path-shaped ? query matches by subsequence, not substring", async () => {
     seedLiveSession();
-    vi.mocked(listSpaceFiles).mockResolvedValue({
+    vi.mocked(listSpaceListing).mockResolvedValue({
       entries: ["src/components/Formula.tsx", "README.md"],
       truncated: false,
     });
@@ -3499,7 +3499,7 @@ describe("ChatStream", () => {
   it("enter on a file row inserts the path with the ? CONSUMED and the CASE INTACT",
     async () => {
       seedLiveSession();
-      vi.mocked(listSpaceFiles).mockResolvedValue({
+      vi.mocked(listSpaceListing).mockResolvedValue({
         entries: ["README.md"],
         truncated: false,
       });
@@ -3525,7 +3525,7 @@ describe("ChatStream", () => {
   it("tab on a file row inserts the path (trigger consumed, case intact)",
     async () => {
       seedLiveSession();
-      vi.mocked(listSpaceFiles).mockResolvedValue({
+      vi.mocked(listSpaceListing).mockResolvedValue({
         entries: ["src/README.md"],
         truncated: false,
       });
@@ -3543,7 +3543,7 @@ describe("ChatStream", () => {
   it("a mousedown on a file row inserts the path (trigger consumed, case intact)",
     async () => {
       seedLiveSession();
-      vi.mocked(listSpaceFiles).mockResolvedValue({
+      vi.mocked(listSpaceListing).mockResolvedValue({
         entries: ["README.md"],
         truncated: false,
       });
@@ -3566,7 +3566,7 @@ describe("ChatStream", () => {
   it("a file row is a single line: no basename second line, no tooltip, full path still shown",
     async () => {
       seedLiveSession();
-      vi.mocked(listSpaceFiles).mockResolvedValue({
+      vi.mocked(listSpaceListing).mockResolvedValue({
         entries: ["src/nested/README.md"],
         truncated: false,
       });
@@ -3604,7 +3604,7 @@ describe("ChatStream", () => {
       seedLiveSession();
       // Truncated AND nothing matches: the note is exactly what explains the
       // EMPTY picker (the container gate widened to `open && (rows || note)`).
-      vi.mocked(listSpaceFiles).mockResolvedValue({
+      vi.mocked(listSpaceListing).mockResolvedValue({
         entries: ["README.md"],
         truncated: true,
       });
@@ -3623,7 +3623,7 @@ describe("ChatStream", () => {
       // FIRST 5,000 entries and a truncated-away file is unreachable by
       // narrowing — advising it would be a lie.
       expect(note.textContent).toBe(
-        "File listing capped — some files may be missing",
+        "Listing capped — some files may be missing",
       );
       // The note is NEVER a row: it is not in the button set `activeIndex`,
       // the arrow-wrap and Enter operate over.
@@ -3644,7 +3644,7 @@ describe("ChatStream", () => {
       // so an unbounded picker would re-render thousands of buttons per
       // keystroke — and 10 single-line rows is ≈308px, a normal dropdown.
       const entries = Array.from({ length: 150 }, (_, i) => `file${i}.ts`);
-      vi.mocked(listSpaceFiles).mockResolvedValue({ entries, truncated: false });
+      vi.mocked(listSpaceListing).mockResolvedValue({ entries, truncated: false });
       render(<ChatStream />);
       const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
       fireEvent.change(textarea, { target: { value: "?file" } });
@@ -3675,7 +3675,7 @@ describe("ChatStream", () => {
       // The `undefined` arm: nothing is capped and nothing is truncated, so
       // the picker must stay silent (a note here would be noise on the
       // everyday path).
-      vi.mocked(listSpaceFiles).mockResolvedValue({
+      vi.mocked(listSpaceListing).mockResolvedValue({
         entries: ["README.md", "docs/plan.md"],
         truncated: false,
       });
@@ -3697,7 +3697,7 @@ describe("ChatStream", () => {
       // empty-picker explanation — it rides along whenever the listing is
       // capped, rows or not. Below the render cap (5 matches < 10), so the
       // wording is the walk-cap one.
-      vi.mocked(listSpaceFiles).mockResolvedValue({
+      vi.mocked(listSpaceListing).mockResolvedValue({
         entries: ["a1.ts", "a2.ts", "a3.ts", "a4.ts", "a5.ts"],
         truncated: true,
       });
@@ -3710,7 +3710,7 @@ describe("ChatStream", () => {
       // The walk-cap arm states the LIMITATION — no "keep typing" advice (a
       // truncated-away file cannot be reached by narrowing).
       expect(note.textContent).toBe(
-        "File listing capped — some files may be missing",
+        "Listing capped — some files may be missing",
       );
       expect(note.textContent).not.toContain("keep typing");
       // The rows are all still there (the note never replaces them) …
@@ -3737,7 +3737,7 @@ describe("ChatStream", () => {
       // Precedence pin: both conditions hold, and the actionable one (keep
       // typing) is what renders — the walk-cap note is shadowed.
       const entries = Array.from({ length: 150 }, (_, i) => `file${i}.ts`);
-      vi.mocked(listSpaceFiles).mockResolvedValue({ entries, truncated: true });
+      vi.mocked(listSpaceListing).mockResolvedValue({ entries, truncated: true });
       render(<ChatStream />);
       fireEvent.change(screen.getByRole("textbox"), {
         target: { value: "?file" },
@@ -3840,13 +3840,13 @@ describe("ChatStream", () => {
       // A DEFERRED listing: the in-flight state ADR 0033 calls out (an empty
       // `filtered` means no picker and inert keyboard branches, so Enter sends
       // — the same degradation ADR 0032 relies on).
-      let resolveFiles: (v: FileListDto) => void = () => {};
-      vi.mocked(listSpaceFiles).mockImplementation(
-        () => new Promise<FileListDto>((r) => (resolveFiles = r)),
+      let resolveFiles: (v: ListingDto) => void = () => {};
+      vi.mocked(listSpaceListing).mockImplementation(
+        () => new Promise<ListingDto>((r) => (resolveFiles = r)),
       );
       render(<ChatStream />);
       const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
-      await waitFor(() => expect(vi.mocked(listSpaceFiles)).toHaveBeenCalled());
+      await waitFor(() => expect(vi.mocked(listSpaceListing)).toHaveBeenCalled());
       await waitFor(() => expect(vi.mocked(listSkills)).toHaveBeenCalled());
       fireEvent.change(textarea, { target: { value: "hi ?de" } });
       expect(screen.queryByTestId("mention-picker")).toBeNull();
@@ -3886,11 +3886,11 @@ describe("ChatStream", () => {
         closeReasons: {},
         configOptions: {},
       });
-      let resolveOther: (v: FileListDto) => void = () => {};
-      vi.mocked(listSpaceFiles).mockImplementation((p) =>
+      let resolveOther: (v: ListingDto) => void = () => {};
+      vi.mocked(listSpaceListing).mockImplementation((p) =>
         p === "/home/u/proj"
           ? Promise.resolve({ entries: ["README.md"], truncated: false })
-          : new Promise<FileListDto>((r) => (resolveOther = r)),
+          : new Promise<ListingDto>((r) => (resolveOther = r)),
       );
       render(<ChatStream />);
       const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
@@ -3920,7 +3920,7 @@ describe("ChatStream", () => {
   it("a ? path in the draft is sent BYTE-IDENTICAL (never expanded, never stripped)",
     async () => {
       seedLiveSession();
-      vi.mocked(listSpaceFiles).mockResolvedValue({
+      vi.mocked(listSpaceListing).mockResolvedValue({
         entries: ["README.md"],
         truncated: false,
       });
@@ -3947,7 +3947,7 @@ describe("ChatStream", () => {
   it("??, a?.b and a bare ? open NO picker and all three drafts SEND verbatim",
     async () => {
       seedLiveSession();
-      vi.mocked(listSpaceFiles).mockResolvedValue({
+      vi.mocked(listSpaceListing).mockResolvedValue({
         entries: ["README.md"],
         truncated: false,
       });
@@ -3979,7 +3979,7 @@ describe("ChatStream", () => {
       // The regression pin: `?` SHARES the picker but not the semantics — the
       // Mention prefixes keep the substring filter AND the lowercase insertion.
       seedLiveSession();
-      vi.mocked(listSpaceFiles).mockResolvedValue({
+      vi.mocked(listSpaceListing).mockResolvedValue({
         entries: ["README.md", "debug-notes.md"],
         truncated: false,
       });
@@ -4027,7 +4027,7 @@ describe("ChatStream", () => {
       // Enough rows that the list is taller than the clamp: `?` is capped at
       // 10 rows, and the clamp is sized to ≈10 rows, so 10 rows plus the note
       // line is already more than the box can show.
-      vi.mocked(listSpaceFiles).mockResolvedValue({
+      vi.mocked(listSpaceListing).mockResolvedValue({
         entries: Array.from({ length: 10 }, (_, i) => `file${i}.ts`),
         truncated: true,
       });
@@ -4307,7 +4307,7 @@ describe("ChatStream — out-of-Space Directory completion (ADR 0035)", () => {
       // The Space Listing is seeded with a name the SAME query fuzzy-matches
       // (`ht` is a subsequence of `wait.html`), so this test also proves the
       // outside branch REPLACES the Listing rows rather than mixing with them.
-      vi.mocked(listSpaceFiles).mockResolvedValue({
+      vi.mocked(listSpaceListing).mockResolvedValue({
         entries: ["wait.html"],
         truncated: false,
       });
@@ -4747,7 +4747,7 @@ describe("ChatStream — out-of-Space Directory completion (ADR 0035)", () => {
       // directory being completed is NOT: while the user is completing
       // somewhere else, the Space's cap must stay silent, because it says
       // nothing about the directory on screen.
-      vi.mocked(listSpaceFiles).mockResolvedValue({
+      vi.mocked(listSpaceListing).mockResolvedValue({
         entries: ["README.md"],
         truncated: true,
       });
@@ -4774,7 +4774,7 @@ describe("ChatStream — out-of-Space Directory completion (ADR 0035)", () => {
   it("a truncated DIRECTORY listing shows the cap note while the Space listing is whole",
     async () => {
       seedLiveSession();
-      vi.mocked(listSpaceFiles).mockResolvedValue({
+      vi.mocked(listSpaceListing).mockResolvedValue({
         entries: ["README.md"],
         truncated: false,
       });
@@ -4803,14 +4803,14 @@ describe("ChatStream — out-of-Space Directory completion (ADR 0035)", () => {
       // The SAME string as the Space arm (no new user-facing copy), because the
       // limitation is the same: a truncated-away entry is unreachable.
       expect(note.textContent).toBe(
-        "File listing capped — some files may be missing",
+        "Listing capped — some files may be missing",
       );
     });
 
   it("a relative ?query still offers the Space Listing rows and NEVER reads a directory",
     async () => {
       seedLiveSession();
-      vi.mocked(listSpaceFiles).mockResolvedValue({
+      vi.mocked(listSpaceListing).mockResolvedValue({
         entries: ["README.md", "docs/plan.md"],
         truncated: false,
       });
@@ -5042,7 +5042,7 @@ describe("ChatStream — out-of-Space Directory completion (ADR 0035)", () => {
       seedLiveSession();
       const never = deferred<CompletionDirDto>();
       vi.mocked(listCompletionEntries).mockReturnValue(never.promise);
-      vi.mocked(listSpaceFiles).mockResolvedValue({
+      vi.mocked(listSpaceListing).mockResolvedValue({
         entries: ["README.md"],
         truncated: false,
       });
@@ -5100,7 +5100,7 @@ describe("ChatStream — out-of-Space Directory completion (ADR 0035)", () => {
             })
           : htop.promise,
       );
-      vi.mocked(listSpaceFiles).mockResolvedValue({
+      vi.mocked(listSpaceListing).mockResolvedValue({
         entries: ["README.md"],
         truncated: false,
       });
@@ -5603,7 +5603,7 @@ describe("ChatStream — out-of-Space Directory completion (ADR 0035)", () => {
       // The regression pin on the branch split for the OTHER shape:
       // `?src/comp/Form` is relative, so it stays on the Space Listing.
       seedLiveSession();
-      vi.mocked(listSpaceFiles).mockResolvedValue({
+      vi.mocked(listSpaceListing).mockResolvedValue({
         entries: ["src/components/Formula.tsx", "README.md"],
         truncated: false,
       });
@@ -5712,7 +5712,7 @@ describe("ChatStream — out-of-Space Directory completion (ADR 0035)", () => {
       // The Listing rows are Space-RELATIVE names verbatim, and `deploy` /
       // `Deploy` are BOTH offered by `dep` (it is a substring and a subsequence
       // of each), so the Listing's expected set is the pair.
-      vi.mocked(listSpaceFiles).mockResolvedValue({
+      vi.mocked(listSpaceListing).mockResolvedValue({
         entries: [DISCRIMINATING_NAME, CONTROL_NAME, "Deploy"],
         truncated: false,
       });

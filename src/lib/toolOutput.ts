@@ -1,4 +1,5 @@
 import { basenameOfPath } from "./paths";
+import type { CompactionReason } from "./tauri";
 import type { ToolCallUiStatus } from "./sessionTypes";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -109,17 +110,24 @@ export function summarizeToolCall(title: string, rawInput: unknown): string | un
     case "manage_todo_list":
       return str("operation");
     // The harness's compaction card (issue #90): the trigger is the only thing
-    // worth the header, and the raw reason string is not prose.
+    // worth the header, and the raw reason string is not prose. Exhaustive —
+    // a fourth reason fails `pnpm build` (TS2322 on the never arm), so the
+    // card cannot silently lose its subtitle again.
     case "compaction": {
-      switch (str("reason")) {
+      const reason = str("reason") as CompactionReason | undefined;
+      if (reason === undefined) return undefined;
+      switch (reason) {
         case "manual":
           return "requested with /compact";
         case "threshold":
           return "context over threshold";
         case "overflow":
           return "provider context overflow";
-        default:
-          return undefined;
+        default: {
+          const exhaustive: never = reason; // a 4th member errors HERE (TS2322)
+          void exhaustive;                 // REQUIRED — noUnusedLocals
+          return undefined;                // the "weird"/absent pin — runtime fallback
+        }
       }
     }
     case "subagent": {
@@ -442,61 +450,6 @@ export function summarizeSubagentFor(
   };
   const filtered = { ...d, progress: pick("progress"), results: pick("results") };
   return summarizeSubagentDetails(filtered);
-}
-
-/**
- * The subagent tool's `details` ONE-LINE activity for a SINGLE subagent
- * (the nested `SubagentDelegatingCard`'s live preview — e.g. `read:
- * docs/foo.md · 12s`): filters the `progress` / `results` entries to the
- * one matching `sessionId` / `task` (the `summarizeSubagentFor` match),
- * applies the `summarizeSubagentDetails` preference ON THE FILTERED
- * arrays (prefer the live `progress` while any filtered `progress` entry
- * is still running — the SAME predicate, which checks only the
- * `progress` entries), and returns the `subagentActivityLine` of the
- * FIRST entry of the chosen array (the ONE-LINE activity, not the
- * multi-line `summarizeSubagentFor` block). `undefined` when no entry
- * matches (the caller renders no activity line) or when `details` is
- * not an object. Filtering FIRST matters for the mixed multi-subagent
- * case (one `subagent` tool call's `details` can carry multiple
- * subagents: with sub A finished while sub B runs, prefer-then-filter
- * would pick `progress` (B running) for A's row — a stale preview;
- * filter-first picks A's finished entry from `results`).
- */
-export function subagentActivityFor(
-  details: unknown,
-  sessionId: string,
-  task: string,
-): string | undefined {
-  if (typeof details !== "object" || details === null) return undefined;
-  const d = details as Record<string, unknown>;
-  const pick = (
-    key: "progress" | "results",
-  ): Array<Record<string, unknown>> => {
-    const arr = d[key];
-    if (!Array.isArray(arr)) return [];
-    return (arr as unknown[])
-      .filter((x): x is Record<string, unknown> => typeof x === "object" && x !== null)
-      .filter((x) => {
-        // `results` carry the subagent's pi id; `progress` (live) do not —
-        // match those on the `task` (the dispatch's task, unique per
-        // subagent in practice).
-        const childId = x.childSessionId;
-        if (typeof childId === "string") return childId === sessionId;
-        return typeof x.task === "string" && x.task === task;
-      });
-  };
-  // The `summarizeSubagentDetails` preference, applied to the FILTERED
-  // arrays: prefer the live `progress` while any filtered `progress`
-  // entry is still running (the same predicate — `progress` entries
-  // only), else the final `results` if non-empty, else `progress`.
-  const filteredProgress = pick("progress");
-  const filteredResults = pick("results");
-  const anyRunning = filteredProgress.some((p) => p.status === "running");
-  const entries = anyRunning
-    ? filteredProgress
-    : (filteredResults.length > 0 ? filteredResults : filteredProgress);
-  if (entries.length === 0) return undefined;
-  return subagentActivityLine(entries[0]);
 }
 
 /**

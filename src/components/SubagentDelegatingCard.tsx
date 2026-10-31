@@ -532,14 +532,17 @@ export default function SubagentDelegatingCard({
 
                   {/* Line 2: Model · Thinking · Context/Tokens · Stats */}
                   {metadataParts.length > 0 && (
-                    <div className="flex items-center gap-1.5 min-w-0 text-ui-xs text-foreground-subtlest font-mono truncate">
+                    <MutedCaption
+                      as="div"
+                      className="flex items-center gap-1.5 min-w-0 font-mono truncate"
+                    >
                       {metadataParts.map((part, i) => (
                         <span key={i} className="flex items-center gap-1.5 shrink-0">
                           {i > 0 && <span className="opacity-50">·</span>}
                           <span className={part.className}>{part.text}</span>
                         </span>
                       ))}
-                    </div>
+                    </MutedCaption>
                   )}
 
                   {/* Line 3: Activity / Current Action */}
