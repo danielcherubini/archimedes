@@ -11,7 +11,7 @@ import { IPC_EVENTS } from "../lib/ipc/events";
 import type {
   AgentDefinitionDto,
   CompletionDirDto,
-  FileListDto,
+  ListingDto,
   McpServerInfo,
   SkillInfo,
 } from "../lib/tauri";
@@ -126,7 +126,7 @@ export interface UseMentionPickerArgs {
   agents: AgentDefinitionDto[];
   mcpServers: McpServerInfo[];
   /** The Space's cached `?` Listing (ADR 0033). */
-  files: FileListDto;
+  files: ListingDto;
   /** The ONE directory's rows for an out-of-Space `?` token (ADR 0035). */
   completion: CompletionDirDto;
   /** Whether the `#` trigger names an MCP server (ADR 0031's follow-up). */
@@ -217,7 +217,7 @@ export function useMentionPicker(args: UseMentionPickerArgs): {
     // The case that matters: `send()` clears the draft but NEVER clears
     // `picker`, so on the pre-`?` code the picker VISUALLY RESURRECTED over an
     // emptied composer (and a catalog that landed afterwards — an in-flight
-    // `listSpaceFiles`, ADR 0033's degradation path — re-fed it rows). The
+    // `listSpaceListing`, ADR 0033's degradation path — re-fed it rows). The
     // Send button never passes through the keydown recompute at ALL, so this
     // guard is the only thing standing between a cleared draft and a picker
     // rendered on screen. THE LAYERING: this memo guard owns RENDERING (no
@@ -460,7 +460,7 @@ export function useMentionPicker(args: UseMentionPickerArgs): {
           // MUTATION-CHECKED: that `||` reddens "the cap note for an outside
           // completion reads the DIRECTORY's truncation, not the Space's".
           (outside ? completion.truncated : files.truncated)
-          ? `File listing capped — some files may be missing`
+          ? `Listing capped — some files may be missing`
           : undefined
       : undefined;
   // The highlighted row index, DERIVED (not clamped in place): the raw

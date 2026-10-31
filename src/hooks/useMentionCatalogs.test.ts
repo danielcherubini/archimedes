@@ -3,12 +3,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   listAgentDefinitionsForSpace,
   listMcpServersEffective,
-  listSpaceFiles,
+  listSpaceListing,
   listCompletionEntries,
   type AgentDefinitionDto,
   type CompletionDirDto,
   type CompletionEntryDto,
-  type FileListDto,
+  type ListingDto,
   type McpServerInfo,
 } from "../lib/tauri";
 import {
@@ -51,8 +51,8 @@ vi.mock("../lib/tauri", async () => {
     // Mocked because the files row fetches on EVERY mount: the real
     // wrapper would `invoke` under jsdom, reject, and add a third
     // `console.error` to the failed-fetch test's exact-count assertion.
-    listSpaceFiles: vi.fn().mockResolvedValue({ entries: [], truncated: false }),
-    // Mocked for the same reason as `listSpaceFiles`: the Directory
+    listSpaceListing: vi.fn().mockResolvedValue({ entries: [], truncated: false }),
+    // Mocked for the same reason as `listSpaceListing`: the Directory
     // completion row fetches on EVERY mount, so the real wrapper would
     // `invoke` under jsdom, reject, and add an extra `console.error` to the
     // failed-fetch test's exact-count assertion.
@@ -65,11 +65,11 @@ vi.mock("../lib/tauri", async () => {
 
 const mockListAgentDefinitionsForSpace = vi.mocked(listAgentDefinitionsForSpace);
 const mockListMcpServersEffective = vi.mocked(listMcpServersEffective);
-const mockListSpaceFiles = vi.mocked(listSpaceFiles);
+const mockListSpaceListing = vi.mocked(listSpaceListing);
 const mockListCompletionEntries = vi.mocked(listCompletionEntries);
 
 /** The empty payload the files row degrades to. */
-const EMPTY_FILES: FileListDto = { entries: [], truncated: false };
+const EMPTY_FILES: ListingDto = { entries: [], truncated: false };
 /** The empty payload the Directory completion row degrades to. */
 const EMPTY_DIR: CompletionDirDto = { entries: [], truncated: false };
 
@@ -88,7 +88,7 @@ beforeEach(() => {
   // `clearAllMocks` does NOT drop implementations, so a per-test
   // `mockImplementation` below would leak into later tests. Re-arm the
   // file-listing default every test.
-  mockListSpaceFiles.mockResolvedValue({ entries: [], truncated: false });
+  mockListSpaceListing.mockResolvedValue({ entries: [], truncated: false });
   mockListCompletionEntries.mockResolvedValue({ entries: [], truncated: false });
   clearSkillCatalogCache();
   clearMentionCatalogsCache();
@@ -303,21 +303,21 @@ describe("useMentionCatalogs", () => {
 
   it("the_files_row_shares_one_fetch_between_two_consumers", async () => {
     // The 4th catalog (the `?` file listing) reuses the SAME in-flight
-    // promise cache: two consumers of one key mean ONE `list_space_files`
+    // promise cache: two consumers of one key mean ONE `list_space_listing`
     // IPC call.
-    mockListSpaceFiles.mockResolvedValue({
+    mockListSpaceListing.mockResolvedValue({
       entries: ["README.md"],
       truncated: false,
     });
     const a = renderHook(() => useMentionCatalogs("/tmp/alpha"));
     const b = renderHook(() => useMentionCatalogs("/tmp/alpha"));
-    await waitFor(() => expect(mockListSpaceFiles).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mockListSpaceListing).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(a.result.current.files.entries).toEqual(["README.md"]));
     await waitFor(() => expect(b.result.current.files.entries).toEqual(["README.md"]));
     // Pinned AFTER both resolved: a resolve-only cache would have both
     // effects see a miss → 2 calls.
-    expect(mockListSpaceFiles).toHaveBeenCalledTimes(1);
-    expect(mockListSpaceFiles).toHaveBeenLastCalledWith("/tmp/alpha");
+    expect(mockListSpaceListing).toHaveBeenCalledTimes(1);
+    expect(mockListSpaceListing).toHaveBeenLastCalledWith("/tmp/alpha");
     a.unmount();
     b.unmount();
   });
@@ -326,11 +326,11 @@ describe("useMentionCatalogs", () => {
     // Freshness hole for the files row: a stale Space's paths must never
     // be offered for insertion. The gap serves the EMPTY payload, and the
     // LEFT key is evicted (so coming back re-walks the directory).
-    let resolveBeta!: (payload: FileListDto) => void;
-    const betaPromise = new Promise<FileListDto>((resolve) => {
+    let resolveBeta!: (payload: ListingDto) => void;
+    const betaPromise = new Promise<ListingDto>((resolve) => {
       resolveBeta = resolve;
     });
-    mockListSpaceFiles.mockImplementation((p) =>
+    mockListSpaceListing.mockImplementation((p) =>
       p === "/tmp/alpha"
         ? Promise.resolve({ entries: ["alpha.md"], truncated: false })
         : betaPromise,
@@ -338,7 +338,7 @@ describe("useMentionCatalogs", () => {
     let spacePath = "/tmp/alpha";
     const a = renderHook(() => useMentionCatalogs(spacePath));
     await waitFor(() => expect(a.result.current.files.entries).toEqual(["alpha.md"]));
-    expect(mockListSpaceFiles).toHaveBeenCalledTimes(1);
+    expect(mockListSpaceListing).toHaveBeenCalledTimes(1);
     // Leave A for B: the gap serves the empty payload, NOT A's entries.
     spacePath = "/tmp/beta";
     a.rerender();
@@ -348,13 +348,13 @@ describe("useMentionCatalogs", () => {
       resolveBeta({ entries: ["beta.md"], truncated: true });
     });
     await waitFor(() => expect(a.result.current.files.entries).toEqual(["beta.md"]));
-    expect(mockListSpaceFiles).toHaveBeenCalledTimes(2);
+    expect(mockListSpaceListing).toHaveBeenCalledTimes(2);
     // Come back to A: the LEFT key was evicted, so A is RE-walked (call 3)
     // rather than served from a stale cached promise.
     spacePath = "/tmp/alpha";
     a.rerender();
-    await waitFor(() => expect(mockListSpaceFiles).toHaveBeenCalledTimes(3));
-    expect(mockListSpaceFiles).toHaveBeenLastCalledWith("/tmp/alpha");
+    await waitFor(() => expect(mockListSpaceListing).toHaveBeenCalledTimes(3));
+    expect(mockListSpaceListing).toHaveBeenLastCalledWith("/tmp/alpha");
     a.unmount();
   });
 
@@ -364,7 +364,7 @@ describe("useMentionCatalogs", () => {
     // promise is NOT left cached, so a fresh consumer retries.
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     let fileCalls = 0;
-    mockListSpaceFiles.mockImplementation(() => {
+    mockListSpaceListing.mockImplementation(() => {
       fileCalls += 1;
       return fileCalls === 1
         ? Promise.reject(new Error("boom"))
@@ -373,7 +373,7 @@ describe("useMentionCatalogs", () => {
     const a = renderHook(() => useMentionCatalogs("/tmp/alpha"));
     expect(a.result.current.files).toEqual(EMPTY_FILES);
     await waitFor(() => expect(errSpy).toHaveBeenCalledTimes(1));
-    expect(errSpy.mock.calls[0][0]).toContain("listSpaceFiles");
+    expect(errSpy.mock.calls[0][0]).toContain("listSpaceListing");
     const b = renderHook(() => useMentionCatalogs("/tmp/alpha"));
     await waitFor(() => expect(fileCalls).toBe(2));
     await waitFor(() => expect(b.result.current.files.entries).toEqual(["alpha.md"]));
@@ -386,19 +386,19 @@ describe("useMentionCatalogs", () => {
     async () => {
       // The symmetric pin to `the_null_dir_prefix_serves_the_stable_empty_dir`
       // below, and it exists because of a MEASUREMENT: replacing the module-level
-      // `EMPTY_FILE_LIST` with a fresh object literal at the call site left every
+      // `EMPTY_LISTING` with a fresh object literal at the call site left every
       // test in this file (and then the whole frontend suite) GREEN. Stable
       // identity is therefore a contract of this catalog too, and it is now pinned
       // rather than asserted in a comment: two consumers waiting on DIFFERENT keys
       // must be handed the SAME empty object.
       //
-      // Why anyone should care: `EMPTY_FILE_LIST` is the `empty` argument of
+      // Why anyone should care: `EMPTY_LISTING` is the `empty` argument of
       // `useCatalogPayload`, i.e. the caller-side half of the render-loop hazard
       // that hook's deps comment describes, and a consumer that memoises on
       // `files` would re-run every render on a fresh literal. Both are invisible
       // to deep-equality assertions, which is exactly what a `toBe` is for.
-      const { promise } = deferred<FileListDto>();
-      mockListSpaceFiles.mockReturnValue(promise);
+      const { promise } = deferred<ListingDto>();
+      mockListSpaceListing.mockReturnValue(promise);
       const a = renderHook(() => useMentionCatalogs("/tmp/alpha"));
       const b = renderHook(() => useMentionCatalogs("/tmp/beta"));
       expect(a.result.current.files).toEqual(EMPTY_FILES);
@@ -409,7 +409,7 @@ describe("useMentionCatalogs", () => {
 
   it("the_null_key_calls_the_file_listing_wrapper_with_null", async () => {
     const a = renderHook(() => useMentionCatalogs(null));
-    await waitFor(() => expect(mockListSpaceFiles).toHaveBeenCalledWith(null));
+    await waitFor(() => expect(mockListSpaceListing).toHaveBeenCalledWith(null));
     await waitFor(() => expect(a.result.current.files).toEqual(EMPTY_FILES));
     a.unmount();
   });
@@ -418,7 +418,7 @@ describe("useMentionCatalogs", () => {
     // The cache stores the whole PAYLOAD, not just the row array: a warm
     // read of a capped listing must still say `truncated` (the picker says
     // so instead of lying about completeness).
-    mockListSpaceFiles.mockResolvedValue({
+    mockListSpaceListing.mockResolvedValue({
       entries: ["a.md", "b.md"],
       truncated: true,
     });
@@ -428,7 +428,7 @@ describe("useMentionCatalogs", () => {
     const b = renderHook(() => useMentionCatalogs("/tmp/alpha"));
     await waitFor(() => expect(b.result.current.files.truncated).toBe(true));
     expect(b.result.current.files.entries).toEqual(["a.md", "b.md"]);
-    expect(mockListSpaceFiles).toHaveBeenCalledTimes(1);
+    expect(mockListSpaceListing).toHaveBeenCalledTimes(1);
     a.unmount();
     b.unmount();
   });
@@ -468,7 +468,7 @@ describe("useCompletionDir", () => {
     // hook stays in its empty state and the assertion is about the EMPTY
     // VALUE and its IDENTITY — never "`listCompletionEntries` was not
     // called": the hook calls the wrapper on every cache miss, exactly as
-    // `listSpaceFiles(null)` is called for a Space-less window.
+    // `listSpaceListing(null)` is called for a Space-less window.
     const { promise } = deferred<CompletionDirDto>();
     mockListCompletionEntries.mockReturnValue(promise);
     const a = renderHook(() => useCompletionDir(null));

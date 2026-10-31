@@ -126,7 +126,7 @@ export type SessionErrorKind =
 
 /**
  * `FilesError` — the pre-existing family behind the file listing commands
- * (`list_space_files`, `list_completion_entries`) and `read_file_bytes`.
+ * (`list_space_listing`, `list_completion_entries`) and `read_file_bytes`.
  * Copied from the `FilesError` arm of the hand-built envelope in
  * `src-tauri/src/agent/errors.rs`.
  */

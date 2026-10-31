@@ -442,7 +442,7 @@ pub fn run() {
             commands::skills::list_skills,
             commands::clipboard::read_clipboard_image,
             commands::files::read_file_bytes,
-            commands::files::list_space_files,
+            commands::files::list_space_listing,
             commands::files::list_completion_entries,
             commands::attention::attention_arm,
             commands::attention::attention_disarm,

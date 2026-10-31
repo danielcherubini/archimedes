@@ -2,7 +2,7 @@ use super::support::{
     assert_readdir_disagrees_with_sorted_order, git_repo, tmp_dir, tmpfs_dir, touch,
     ungrammatical_fixture, write,
 };
-use crate::commands::files::{collect_files, list_space_files};
+use crate::commands::files::{collect_files, list_space_listing};
 
 #[test]
 fn collect_files_lists_nothing_when_the_root_is_a_file() {
@@ -482,18 +482,18 @@ fn collect_files_does_not_descend_into_a_directory_whose_name_the_grammar_cannot
 }
 
 #[tokio::test]
-async fn list_space_files_none_is_empty() {
-    let dto = list_space_files(None).await.unwrap();
+async fn list_space_listing_none_is_empty() {
+    let dto = list_space_listing(None).await.unwrap();
     assert!(dto.entries.is_empty());
     assert!(!dto.truncated);
 }
 
 #[tokio::test]
-async fn list_space_files_returns_relative_slash_separated_entries() {
+async fn list_space_listing_returns_relative_slash_separated_entries() {
     let root = tmp_dir("space");
     touch(&root, "README.md");
     touch(&root, "src/main.rs");
-    let dto = list_space_files(Some(root.to_string_lossy().into()))
+    let dto = list_space_listing(Some(root.to_string_lossy().into()))
         .await
         .unwrap();
     assert_eq!(dto.entries, vec!["README.md", "src/main.rs"]);
@@ -508,11 +508,11 @@ async fn list_space_files_returns_relative_slash_separated_entries() {
 }
 
 #[tokio::test]
-async fn list_space_files_degrades_to_empty_for_a_space_that_is_a_file() {
+async fn list_space_listing_degrades_to_empty_for_a_space_that_is_a_file() {
     let dir = tmp_dir("space-is-a-file");
     let file = dir.join("not-a-space.txt");
     std::fs::write(&file, b"x").unwrap();
-    let dto = list_space_files(Some(file.to_string_lossy().into()))
+    let dto = list_space_listing(Some(file.to_string_lossy().into()))
         .await
         .unwrap();
     assert!(dto.entries.is_empty());
@@ -520,8 +520,8 @@ async fn list_space_files_degrades_to_empty_for_a_space_that_is_a_file() {
 }
 
 #[tokio::test]
-async fn list_space_files_degrades_to_empty_for_an_uncanonicalizable_space() {
-    let dto = list_space_files(Some("/no/such/space".to_string()))
+async fn list_space_listing_degrades_to_empty_for_an_uncanonicalizable_space() {
+    let dto = list_space_listing(Some("/no/such/space".to_string()))
         .await
         .unwrap();
     assert!(dto.entries.is_empty());

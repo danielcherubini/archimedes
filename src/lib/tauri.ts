@@ -117,7 +117,7 @@ export type {
   ShadowedSkill,
   ShadowedAgent,
   SkillInfo,
-  FileListDto,
+  ListingDto,
   CompletionEntryDto,
   CompletionDirDto,
   HistoryPage,
@@ -173,7 +173,7 @@ export {
   listAgentDefinitionsForSpace,
   listAgentDefinitionReports,
   listMcpServersEffective,
-  listSpaceFiles,
+  listSpaceListing,
   listCompletionEntries,
 } from "./tauri/commands/catalogs";
 

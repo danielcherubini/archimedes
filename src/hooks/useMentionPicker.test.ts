@@ -5,7 +5,7 @@ import {
   type AgentDefinitionDto,
   type CompletionDirDto,
   type CompletionEntryDto,
-  type FileListDto,
+  type ListingDto,
   type McpServerInfo,
   type SkillInfo,
 } from "../lib/tauri";
@@ -56,7 +56,7 @@ function mcp(name: string): McpServerInfo {
   return { name, kind: "stdio", summary: `npx -y ${name}` };
 }
 
-function listing(entries: string[], truncated = false): FileListDto {
+function listing(entries: string[], truncated = false): ListingDto {
   return { entries, truncated };
 }
 
@@ -90,7 +90,7 @@ interface HarnessProps {
   skills: SkillInfo[];
   agents: AgentDefinitionDto[];
   mcpServers: McpServerInfo[];
-  files: FileListDto;
+  files: ListingDto;
   completion: CompletionDirDto;
   mcpMentionsEnabled: boolean;
 }
@@ -417,7 +417,7 @@ describe("useMentionPicker — the picker's one explanation line", () => {
       files: listing(["README.md"], true),
     });
     expect(h.result.current.note).toBe(
-      "File listing capped — some files may be missing",
+      "Listing capped — some files may be missing",
     );
     h.cleanup();
   });
@@ -457,7 +457,7 @@ describe("useMentionPicker — the picker's one explanation line", () => {
       completion: dir([dirEntry("htop", { isDir: true })], true),
     });
     expect(capped.result.current.note).toBe(
-      "File listing capped — some files may be missing",
+      "Listing capped — some files may be missing",
     );
     capped.cleanup();
   });

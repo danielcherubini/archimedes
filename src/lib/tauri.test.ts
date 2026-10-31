@@ -6,7 +6,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 // does: the hook tests mock this WRAPPER (so they cannot see a renamed command
 // or a re-typed arg key), and no Rust test registers `commands::files`, so a
 // drift here — e.g. `spacePath` vs Rust's `space_path`, or
-// `list_space_files` renamed — would pass every test on BOTH sides and fail
+// `list_space_listing` renamed — would pass every test on BOTH sides and fail
 // only at runtime, in the desktop app.
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -27,7 +27,7 @@ import {
   listenWindowState,
   listAgentDefinitionReports,
   listCompletionEntries,
-  listSpaceFiles,
+  listSpaceListing,
   loadHistory,
   reorderSessions,
   reorderSpaces,
@@ -39,26 +39,26 @@ import {
 const mockedInvoke = vi.mocked(invoke);
 const mockedListen = vi.mocked(listen);
 
-describe("listSpaceFiles (the `?` File-completion IPC boundary, ADR 0033)", () => {
+describe("listSpaceListing (the `?` File-completion IPC boundary, ADR 0033)", () => {
   beforeEach(() => {
     mockedInvoke.mockReset();
   });
 
-  it("invokes `list_space_files` with the `spacePath` argument key", async () => {
+  it("invokes `list_space_listing` with the `spacePath` argument key", async () => {
     mockedInvoke.mockResolvedValue({ entries: [], truncated: false });
-    await listSpaceFiles("/x");
+    await listSpaceListing("/x");
     // The command NAME and the arg KEY are both load-bearing: Tauri maps the
     // camelCase `spacePath` here to the snake_case `space_path` Rust
     // parameter, and a typo in either is a runtime-only failure.
-    expect(mockedInvoke).toHaveBeenCalledWith("list_space_files", {
+    expect(mockedInvoke).toHaveBeenCalledWith("list_space_listing", {
       spacePath: "/x",
     });
   });
 
   it("passes null through as `{ spacePath: null }` (no Space: the empty listing, not an error)", async () => {
     mockedInvoke.mockResolvedValue({ entries: [], truncated: false });
-    await listSpaceFiles(null);
-    expect(mockedInvoke).toHaveBeenCalledWith("list_space_files", {
+    await listSpaceListing(null);
+    expect(mockedInvoke).toHaveBeenCalledWith("list_space_listing", {
       spacePath: null,
     });
   });
@@ -71,8 +71,8 @@ describe("listSpaceFiles (the `?` File-completion IPC boundary, ADR 0033)", () =
       truncated: true,
     };
     mockedInvoke.mockResolvedValue(payload);
-    await expect(listSpaceFiles("/x")).resolves.toEqual(payload);
-    await expect(listSpaceFiles("/x")).resolves.toEqual({
+    await expect(listSpaceListing("/x")).resolves.toEqual(payload);
+    await expect(listSpaceListing("/x")).resolves.toEqual({
       entries: ["README.md", "src/main.rs"],
       truncated: true,
     });
@@ -99,7 +99,7 @@ describe("listCompletionEntries (the out-of-Space `?` IPC boundary, ADR 0035)", 
     // PASSED THROUGH, not short-circuited client-side — the Rust `None` arm is
     // the one place that guarantees "no token costs no filesystem access", and a
     // wrapper-level early return would move that guarantee somewhere no Rust
-    // test covers. This is the `listSpaceFiles` shape, kept deliberately.
+    // test covers. This is the `listSpaceListing` shape, kept deliberately.
     mockedInvoke.mockResolvedValue({ entries: [], truncated: false });
     await listCompletionEntries(null);
     expect(mockedInvoke).toHaveBeenCalledWith("list_completion_entries", {
@@ -142,7 +142,7 @@ describe("compactSession (the `/compact` Composer-command IPC boundary, ADR 0044
   it("invokes `compact_session` with the `sessionId`/`instructions` argument keys", async () => {
     mockedInvoke.mockResolvedValue(true);
     await compactSession("s1", "keep the tests");
-    // Same trap as `list_space_files` above: Tauri maps the camelCase arg KEY
+    // Same trap as `list_space_listing` above: Tauri maps the camelCase arg KEY
     // to the snake_case Rust parameter (`sessionId` → `session_id`,
     // `instructions` → `instructions` in `commands::sessions::compact_session`),
     // and a typo in the command NAME or in either KEY is a runtime-only failure
@@ -187,7 +187,7 @@ describe("attention arm/disarm (the ADR 0039 IPC boundary)", () => {
   it("invokes `attention_arm` with the `delaySecs`/`title`/`body` argument keys", async () => {
     mockedInvoke.mockResolvedValue(undefined);
     await attentionArm(15, "Archimedes", "b");
-    // Same trap as `list_space_files` above: Tauri maps the camelCase arg KEY
+    // Same trap as `list_space_listing` above: Tauri maps the camelCase arg KEY
     // to the snake_case Rust parameter (`delaySecs` here → `delay_secs` in
     // `commands::attention::attention_arm`), and a typo in the command NAME or
     // in any KEY is a runtime-only failure the hook tests cannot see.
@@ -240,7 +240,7 @@ describe("externalOpen (the External-open IPC boundary, ADR 0051)", () => {
   it("invokes `external_open` with the `href`/`cwd` argument keys", async () => {
     mockedInvoke.mockResolvedValue(undefined);
     await externalOpen("https://x.test", "/home/u/proj");
-    // Same trap as `list_space_files` above: Tauri maps these arg KEYS to the
+    // Same trap as `list_space_listing` above: Tauri maps these arg KEYS to the
     // `commands::open::external_open` parameters (`href`, `cwd` — both single
     // words, so no casing alias is involved and a typo is pure silence), and a
     // typo in the command NAME or in either KEY is a runtime-only failure no
@@ -395,7 +395,7 @@ describe("listAgentDefinitionReports (the sidebar Agents modal's IPC boundary, A
   it("invokes `list_agent_definition_reports` with the `cwd` argument key", async () => {
     mockedInvoke.mockResolvedValue([]);
     await listAgentDefinitionReports("/p/space");
-    // Same trap as `list_space_files` above: Tauri maps a camelCase arg KEY to
+    // Same trap as `list_space_listing` above: Tauri maps a camelCase arg KEY to
     // the snake_case Rust parameter, and `listSkills` proves the rule costs a
     // rename (its Rust `space_path` is sent as `spacePath`). `cwd` is ONE word,
     // so it must stay `cwd` — `cwdPath`/`spacePath` here is a runtime-only
@@ -572,7 +572,7 @@ describe("sessionRecency (the ADR 0075 recency IPC boundary)", () => {
   });
 
   it("invokes `session_recency` with no payload", async () => {
-    // Same trap as `list_space_files` above: the Rust command is
+    // Same trap as `list_space_listing` above: the Rust command is
     // `commands::history::session_recency` and NOTHING in this repo drives it
     // over IPC in a test (the Rust tests call `Db::session_recency` directly),
     // so a renamed command or a stray argument object is a runtime-only failure

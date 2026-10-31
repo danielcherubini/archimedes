@@ -17,7 +17,7 @@ import type {
   AgentDefinitionDto,
   AgentDefinitionReportDto,
   CompletionDirDto,
-  FileListDto,
+  ListingDto,
   McpServerInfo,
   SkillInfo,
 } from "../types";
@@ -57,15 +57,15 @@ export async function listMcpServersEffective(spacePath: string | null): Promise
 
 
 /**
- * The file listing a Space offers the `?` path completion (ADR 0033 — a
+ * The Listing a Space offers the `?` path completion (ADR 0033 — a
  * PATH is inserted, never the contents). `null` = no Space: the Rust
- * command degrades to the empty listing rather than erroring. A rejection (the
+ * command degrades to the empty Listing rather than erroring. A rejection (the
  * Rust signature's `Err` arm is a phantom task14c retypes) arrives as the
  * `FilesError` envelope (`{kind, message}` — ADR 0063; `FilesErrorKind` in
  * `@/lib/errors` mirrors the frozen kinds).
  */
-export async function listSpaceFiles(spacePath: string | null): Promise<FileListDto> {
-  return invoke<FileListDto>("list_space_files", { spacePath: spacePath ?? null });
+export async function listSpaceListing(spacePath: string | null): Promise<ListingDto> {
+  return invoke<ListingDto>("list_space_listing", { spacePath: spacePath ?? null });
 }
 
 
@@ -73,14 +73,14 @@ export async function listSpaceFiles(spacePath: string | null): Promise<FileList
  * The out-of-Space `?` rows for ONE directory (ADR 0035 — a `~/-`- or
  * drive-rooted token), never a walk. `null` = no out-of-Space token open.
  *
- * `null` is PASSED THROUGH as `{ query: null }`, exactly as `listSpaceFiles`
+ * `null` is PASSED THROUGH as `{ query: null }`, exactly as `listSpaceListing`
  * passes `spacePath: null` (pinned in `src/lib/tauri.test.ts`), and the command
  * never rejects — it degrades to the empty listing. Do NOT add a client-side
  * short-circuit: the Rust `None` arm already touches no filesystem at all, and a
  * short-circuit here would move that guarantee out of the one place a Rust test
  * can see it, for no gain. (The `Err` arm in the Rust signature is a phantom
  * task14c retypes; it would arrive as the `FilesError` envelope, like
- * `listSpaceFiles`.)
+ * `listSpaceListing`.)
  */
 export async function listCompletionEntries(
   query: string | null,

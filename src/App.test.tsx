@@ -76,7 +76,7 @@ vi.mock("./lib/tauri", async () => {
     // exactly as it did before.
     listAgentDefinitionsForSpace: vi.fn().mockResolvedValue([]),
     listMcpServersEffective: vi.fn().mockResolvedValue([]),
-    listSpaceFiles: vi.fn().mockResolvedValue({
+    listSpaceListing: vi.fn().mockResolvedValue({
       entries: [],
       truncated: false,
     }),

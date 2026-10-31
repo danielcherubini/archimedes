@@ -21,7 +21,7 @@ import { useEffect, useRef, useState } from "react";
  * `useSkillCatalog.ts` import `useMentionCatalogs.ts` while that file already
  * imports `useSkillCatalog` — a module cycle, and Task B3 spent its whole commit
  * removing one. The two empty-value constants that belong to
- * `useMentionCatalogs`' own consumers (`EMPTY_FILE_LIST`, `EMPTY_COMPLETION_DIR`)
+ * `useMentionCatalogs`' own consumers (`EMPTY_LISTING`, `EMPTY_COMPLETION_DIR`)
  * stayed there for the same reason — their IDENTITY is pinned by that file's
  * tests, and a move would relocate a pinned thing for no gain.
  *
@@ -121,7 +121,7 @@ export function useCatalogPayload<P>(
     // The deps below intentionally omit `cache`, `fetch` AND `empty`: all
     // three are stable BY CONSTRUCTION — `cache` is a module-level Map owned by
     // the caller, `fetch` an imported module function, and `empty` a module
-    // constant (`EMPTY_ROWS` here, `EMPTY_FILE_LIST` / `EMPTY_COMPLETION_DIR` in
+    // constant (`EMPTY_ROWS` here, `EMPTY_LISTING` / `EMPTY_COMPLETION_DIR` in
     // `useMentionCatalogs`). None can change between renders, so none may be
     // tracked. `empty` is the one that would actually bite IF it ever were
     // tracked: were `empty` added to these deps AND a caller passing a fresh

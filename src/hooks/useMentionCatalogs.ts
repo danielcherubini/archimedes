@@ -2,10 +2,10 @@ import {
   listAgentDefinitionsForSpace,
   listCompletionEntries,
   listMcpServersEffective,
-  listSpaceFiles,
+  listSpaceListing,
   type AgentDefinitionDto,
   type CompletionDirDto,
-  type FileListDto,
+  type ListingDto,
   type McpServerInfo,
   type SkillInfo,
 } from "../lib/tauri";
@@ -41,11 +41,11 @@ import { useCatalogPayload, useCatalogRow } from "./useCatalogRow";
  * `null` key: `listAgentDefinitionsForSpace(null)` = user-level only
  * (the `cwd: None` command case); `listMcpServersEffective(null)` =
  * the desktop + pi-global layers (the `cwd: None` project-layer skip);
- * `listSpaceFiles(null)` = the empty listing (no Space, nothing to walk).
+ * `listSpaceListing(null)` = the empty Listing (no Space, nothing to walk).
  */
 const agentsCache = new Map<string, Promise<AgentDefinitionDto[]>>();
 const mcpCache = new Map<string, Promise<McpServerInfo[]>>();
-const filesCache = new Map<string, Promise<FileListDto>>();
+const listingCache = new Map<string, Promise<ListingDto>>();
 /**
  * The out-of-Space Directory completion rows (ADR 0035), keyed by the
  * token's DIRECTORY PREFIX rather than by the Space — everything else is
@@ -70,15 +70,15 @@ const completionCache = new Map<string, Promise<CompletionDirDto>>();
  * a literal caller passing every test in the file, so identity is asserted here
  * rather than predicted.
  */
-const EMPTY_FILE_LIST: FileListDto = { entries: [], truncated: false };
+const EMPTY_LISTING: ListingDto = { entries: [], truncated: false };
 
 /**
  * The empty Directory completion payload — a MODULE-LEVEL stable identity
- * for the same reason `EMPTY_FILE_LIST` exists above (it is the `empty`
+ * for the same reason `EMPTY_LISTING` exists above (it is the `empty`
  * argument of `useCatalogPayload`), and pinned the same way: the identity
  * assertion in `the_null_dir_prefix_serves_the_stable_empty_dir` reddens when
  * this constant is replaced by a fresh literal at the call site
- * (mutation-checked). The loop itself is conditional — see `EMPTY_FILE_LIST`.
+ * (mutation-checked). The loop itself is conditional — see `EMPTY_LISTING`.
  */
 const EMPTY_COMPLETION_DIR: CompletionDirDto = { entries: [], truncated: false };
 
@@ -88,7 +88,7 @@ export function useMentionCatalogs(
   skills: SkillInfo[];
   agents: AgentDefinitionDto[];
   mcpServers: McpServerInfo[];
-  files: FileListDto;
+  files: ListingDto;
 } {
   const skills = useSkillCatalog(spacePath);
   const agents = useCatalogRow(
@@ -104,11 +104,11 @@ export function useMentionCatalogs(
     "listMcpServersEffective",
   );
   const files = useCatalogPayload(
-    filesCache,
+    listingCache,
     spacePath,
-    listSpaceFiles,
-    "listSpaceFiles",
-    EMPTY_FILE_LIST,
+    listSpaceListing,
+    "listSpaceListing",
+    EMPTY_LISTING,
   ).payload;
   return { skills, agents, mcpServers, files };
 }
@@ -119,7 +119,7 @@ export function useMentionCatalogs(
  * the command's `None` arm, which touches no filesystem at all.
  *
  * `null` is still a FETCH: the wrapper is called with `null` on that cache miss
- * (exactly as `listSpaceFiles(null)` is), so "no token costs nothing" is a
+ * (exactly as `listSpaceListing(null)` is), so "no token costs nothing" is a
  * RUST-side guarantee, pinned there, and NOT something a hook test can show by
  * absence — an assertion here that the fetcher was not called could never go
  * green, and mutation-checked, a client-side short-circuit for `null` reddens
@@ -193,6 +193,6 @@ export function useCompletionDir(dirPrefix: string | null): {
 export function clearMentionCatalogsCache(): void {
   agentsCache.clear();
   mcpCache.clear();
-  filesCache.clear();
+  listingCache.clear();
   completionCache.clear();
 }

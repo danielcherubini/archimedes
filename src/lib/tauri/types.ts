@@ -1067,8 +1067,8 @@ export interface SkillInfo {
 }
 
 
-/** One `?` file-completion listing (camelCase over IPC — the Rust `FileListDto`). */
-export interface FileListDto {
+/** One Listing (the file completion's) — camelCase over IPC, the Rust `ListingDto`. */
+export interface ListingDto {
   /** Paths RELATIVE to the Space root, `/`-separated, sorted. */
   entries: string[];
   /** The walk hit `MAX_PICKER_ENTRIES` — the picker says so instead of lying. */
