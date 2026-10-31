@@ -13,7 +13,7 @@
 use std::path::Path;
 use std::sync::Mutex as StdMutex;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction};
 use serde::{Deserialize, Serialize};
 
 use crate::types::SessionInfo;
@@ -130,6 +130,50 @@ pub struct SessionRecency {
     pub sort_order: i64,
 }
 
+/// Run `add` inside ONE transaction iff `table.column` is absent (probed via
+/// `pragma_table_info`).
+///
+/// `gate` is a TRANSACTION FACTORY: it opens the `unchecked_transaction`,
+/// passes it to `add`, and commits ONLY after `add` returns Ok — so an ALTER
+/// paired with a data step (backfill/seed) is atomic, and a crash
+/// mid-backfill leaves the ALTER NOT committed, so the next open re-probes
+/// and re-runs the whole gate. It is NOT a wrap-the-call helper: the
+/// transaction is opened HERE (before the closure runs) and committed HERE
+/// (only after it returns Ok), which is what makes the ALTER+backfill pair one
+/// atomic unit. A single-statement gate just does its one ALTER inside the
+/// same tx (a single DDL is atomic in SQLite anyway).
+///
+/// The crash-state this changes: before the factory existed, the gates that
+/// paired an ALTER with a data step committed the ALTER and rolled back only
+/// the data step on a mid-gate crash, so the next open re-ran the seed against
+/// an already-migrated column — which for `sort_order` could DUPLICATE the
+/// ADR 0075 numbers. Under the factory a crash rolls the ALTER back too, the
+/// `pragma_table_info` probe still finds the column missing, and the WHOLE gate
+/// runs cleanly on the next open.
+///
+/// Table and column are compile-time literals at every call site; they are
+/// bound as parameters to the probe (both spellings are safe here).
+fn gate(
+    conn: &mut Connection,
+    table: &str,
+    column: &str,
+    add: impl FnOnce(&mut Transaction<'_>) -> Result<(), DbError>,
+) -> Result<(), DbError> {
+    let has: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+        rusqlite::params![table, column],
+        |row| row.get(0),
+    )?;
+    if has == 0 {
+        let mut tx = conn.unchecked_transaction()?;
+        // Closures that only read/execute may pass `&*tx` onward where a
+        // `&Connection` is wanted (a `Transaction` derefs to one).
+        add(&mut tx)?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
 /// The app's SQLite database.
 ///
 /// The connection is wrapped in a `std::sync::Mutex` (a raw
@@ -146,7 +190,7 @@ impl Db {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         // Enforce the ON DELETE CASCADE on messages.
         conn.pragma_update(None, "foreign_keys", true)?;
         // One-way migration for pre-rip-out databases (the desktop is
@@ -208,32 +252,24 @@ impl Db {
         // pre-check — the ALTER runs only when the column is absent, so a
         // re-open never issues it and no error string is matched (the
         // backfill below, by contrast, is idempotent via DO NOTHING).
-        let has_trusted: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('spaces') WHERE name = 'trusted'",
-            [],
-            |row| row.get(0),
-        )?;
-        if has_trusted == 0 {
-            conn.execute(
+        gate(&mut conn, "spaces", "trusted", |tx| {
+            tx.execute(
                 "ALTER TABLE spaces ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
-        }
+            Ok(())
+        })?;
         // One-time migration for pre-existing databases: add `archived` to
         // `sessions` (fresh databases already have it from SCHEMA). The same
         // pragma-gated pattern as the `trusted` migration above — the ALTER
         // runs only when the column is absent, so a re-open never issues it.
-        let has_archived: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'archived'",
-            [],
-            |row| row.get(0),
-        )?;
-        if has_archived == 0 {
-            conn.execute(
+        gate(&mut conn, "sessions", "archived", |tx| {
+            tx.execute(
                 "ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
-        }
+            Ok(())
+        })?;
         // One-time migration for pre-existing databases: add
         // `context_usage_json` to `sessions` (fresh databases already have
         // it from SCHEMA). The same pragma-gated pattern as the `archived`
@@ -241,49 +277,38 @@ impl Db {
         // so a re-open never issues it. `NULL` (no default): a pre-existing
         // row has NO known usage (the bar shows nothing) — a default value
         // would fabricate one.
-        let has_context_usage: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'context_usage_json'",
-            [],
-            |row| row.get(0),
-        )?;
-        if has_context_usage == 0 {
-            conn.execute(
+        gate(&mut conn, "sessions", "context_usage_json", |tx| {
+            tx.execute(
                 "ALTER TABLE sessions ADD COLUMN context_usage_json TEXT",
                 [],
             )?;
-        }
+            Ok(())
+        })?;
         // One-time migration for pre-existing databases: add `is_subagent`
         // to `sessions` (fresh databases already have it from SCHEMA). The
         // same pragma-gated pattern as the `archived` / `context_usage_json`
         // migrations above. `DEFAULT 0` (existing rows are main sessions —
         // ADR 0025 §6: no data migration).
-        let has_is_subagent: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'is_subagent'",
-            [],
-            |row| row.get(0),
-        )?;
-        if has_is_subagent == 0 {
-            conn.execute(
+        gate(&mut conn, "sessions", "is_subagent", |tx| {
+            tx.execute(
                 "ALTER TABLE sessions ADD COLUMN is_subagent INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
-        }
+            Ok(())
+        })?;
         // One-time migration for pre-existing databases: add `todos_json`
         // to `sessions` (fresh databases already have it from SCHEMA) and
         // backfill each non-subagent session's newest `manage_todo_list` write
         // (ADR 0073). The ALTER and the backfill run in ONE transaction, so a
         // crash rolls both back and retries on next open.
-        let has_todos_json: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'todos_json'",
-            [],
-            |row| row.get(0),
-        )?;
-        if has_todos_json == 0 {
-            let tx = conn.unchecked_transaction()?;
+        gate(&mut conn, "sessions", "todos_json", |tx| {
             tx.execute("ALTER TABLE sessions ADD COLUMN todos_json TEXT", [])?;
-            backfill_session_todos(&tx)?;
-            tx.commit()?;
-        }
+            // The backfill helper takes `&Connection`; deref coercion reaches it
+            // from the `&mut Transaction`, so the data step runs on the SAME
+            // transaction as the ALTER above.
+            backfill_session_todos(tx)?;
+            Ok(())
+        })?;
         // One-time migration for pre-existing databases: add `cost_usd` to
         // `sessions` (fresh databases already have it from SCHEMA). The same
         // pragma-gated pattern as the `todos_json` migration above.
@@ -296,17 +321,19 @@ impl Db {
         // the provider never reported — which is exactly the phantom-`$0.00`
         // defect this column exists to avoid. The `todos_json` precedent has a
         // backfill because todo data existed elsewhere; cost data never existed
-        // anywhere, so `NULL` is the only honest value for an old row.
-        let has_cost_usd: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'cost_usd'",
-            [],
-            |row| row.get(0),
-        )?;
-        if has_cost_usd == 0 {
-            let tx = conn.unchecked_transaction()?;
+        // anywhere, so `NULL` is the only honest value for an old row. That
+        // no-default rule is asserted by the migration test
+        // `cost_usd_column_migration_on_a_preexisting_db`, which reads
+        // `pragma_table_info('sessions').dflt_value` and requires NULL — a
+        // `DEFAULT 0` added here fails that pin.
+        gate(&mut conn, "sessions", "cost_usd", |tx| {
+            // No transaction wrapper is spelled at this call site: the single
+            // ALTER runs inside the factory's tx (atomically, identically — a
+            // lone DDL is atomic in SQLite anyway), so the gate states ONE
+            // statement and ONE transaction policy like every other gate.
             tx.execute("ALTER TABLE sessions ADD COLUMN cost_usd REAL", [])?;
-            tx.commit()?;
-        }
+            Ok(())
+        })?;
         // One-time migration for pre-existing databases: add `sort_order` to
         // `spaces` (fresh databases already have it from SCHEMA) and seed it
         // with the order the user was already looking at. The ALTER and the
@@ -320,39 +347,27 @@ impl Db {
         // and that mixed state is SELF-HEALING — the next open re-probes both
         // tables and runs whichever gate is still missing, independently. It
         // also matches this file's one-column-per-gate style.
-        let has_space_sort_order: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('spaces') WHERE name = 'sort_order'",
-            [],
-            |row| row.get(0),
-        )?;
-        if has_space_sort_order == 0 {
-            let tx = conn.unchecked_transaction()?;
+        gate(&mut conn, "spaces", "sort_order", |tx| {
             tx.execute(
                 "ALTER TABLE spaces ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
-            seed_space_sort_order(&tx)?;
-            tx.commit()?;
-        }
+            seed_space_sort_order(tx)?;
+            Ok(())
+        })?;
         // The matching gate for `sessions` (see the `spaces` gate above for
         // why the two are separate transactions). This gate — like the space
         // one — runs BEFORE the phase-11 space backfill below, so a database
         // that already has `sessions` rows but no `spaces` rows reaches the
         // backfill with the session numbering already settled.
-        let has_session_sort_order: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'sort_order'",
-            [],
-            |row| row.get(0),
-        )?;
-        if has_session_sort_order == 0 {
-            let tx = conn.unchecked_transaction()?;
+        gate(&mut conn, "sessions", "sort_order", |tx| {
             tx.execute(
                 "ALTER TABLE sessions ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
-            seed_session_sort_order(&tx)?;
-            tx.commit()?;
-        }
+            seed_session_sort_order(tx)?;
+            Ok(())
+        })?;
         // One-time migration for pre-existing databases: give
         // `native_messages` its `ON DELETE CASCADE` foreign key (a
         // pre-existing table cannot GAIN an FK in place — recreate it,
