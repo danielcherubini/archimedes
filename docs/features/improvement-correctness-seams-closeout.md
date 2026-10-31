@@ -1,7 +1,7 @@
 ---
 status: live
 last-verified: 2026-10-31
-verified-by: read against this tree at `29d9563` (the post-merge HEAD) — every claim re-confirmed at HEAD; the Gate 1 figures are kept as what was measured at `377ea86`, not silently rewritten (see the two-gate note below and *Corrections on re-derivation* at the end)
+verified-by: read against this tree at `29d9563` (the post-merge gate); the Gate 1 figures are kept as what was measured at `377ea86`, not silently rewritten (see the two-gate note below and *Corrections on re-derivation* at the end). A THIRD pass (2026-10-31, at `057f10f`) re-derived the prose rather than the numbers: the `needs-auth` unblock recipe's acceptance claim was FALSE and has been rewritten from a throwaway-worktree implementation (see *Third pass* and the recipe's measured tables), and the Gate 2 commit counts are pinned to `29d9563` instead of `HEAD`
 ---
 
 # improvement-correctness-seams — close-out record
@@ -11,8 +11,10 @@ family recorded, because that family is deleted on ship and squash-merge orphans
 the roadmap cites. It records: the gates, the false findings that survived an audit, the open
 `needs-auth` work, and the unblock recipe.
 
-> **This doc carries TWO gates.** Gate 1 is the branch's final gate at `377ea86`, the last branch
-> commit before `origin/main` was merged in. Gate 2 is the post-merge gate at `29d9563` — the tree
+> **This doc carries TWO gates.** Gate 1 is the branch's final gate at `377ea86`, the last CODE /
+> gate commit before `origin/main` was merged in — the branch tip at the moment of the merge was
+> `2eeba39`, one docs commit later (this close-out record, the only commit between them). Gate 2 is
+> the post-merge gate at `29d9563` — the tree
 > that will actually be squash-merged. Gate 1's numbers are not stale: they are the record of what was
 > measured at `377ea86`. They are simply no longer HEAD's numbers. The re-derivation that produced
 > Gate 2 also caught figures that were WRONG at every commit — grep artifacts and names that do not
@@ -21,7 +23,7 @@ the roadmap cites. It records: the gates, the false findings that survived an au
 
 ---
 
-## Gate 1 — the final gate at `377ea86` (pre-merge branch tip, `main` untouched at the time)
+## Gate 1 — the final gate at `377ea86` (the last pre-merge code/gate commit, `main` untouched at the time)
 
 | layer | result |
 |---|---|
@@ -64,15 +66,23 @@ shape and carries `title_stage` through it. Main's new migration gate is express
 | versions | `bash scripts/check-versions.sh` — **versions match: 0.9.2** |
 | commands | `bash scripts/check-commands.sh` — 46 registered, 45 consumed names, both directions agree, 1 allowlist exemption cited |
 
-**Branch scale at Gate 2** (vs `origin/main`, i.e. `git rev-list --count HEAD --not origin/main` and
-`git diff --name-only origin/main...HEAD`): **61 commits — 52 non-merge + 9 merges** (the 8 task-branch
-merges plus the `origin/main` merge itself), **116 files — 53 Rust / 51 TS** (the code split is
+**Branch scale at Gate 2**, measured **at `29d9563`, not at `HEAD`** — these figures are pinned to
+that SHA on purpose, because `HEAD` moves and they do not. At `29d9563`:
+`git rev-list --count 29d9563 --not origin/main` → **61 commits — `--no-merges` 52 + `--merges` 9**
+(the 8 task-branch merges plus the `origin/main` merge itself), and
+`git diff --name-only origin/main...29d9563 | wc -l` → **116 files — 53 Rust / 51 TS** (the code split is
 UNCHANGED: main's other changed files — `transport.rs`, `MessageList.tsx`, `AskQuestionCard*`,
 `test/setup.tsx` — are absent from the branch-vs-main three-dot diff because the branch never touched
 them, and the two files both sides changed, `storage/db.rs` and `session/naming.rs`, were already
 counted branch files), plus **7 docs** — Gate 1's 6 plus this close-out record (added at `2eeba39`) — and the same
 `CONTEXT.md`, `scripts/check-commands.sh`, `.github/workflows/ci.yml`, `package.json` +
 `pnpm-lock.yaml`. Gate 1's 59/115 stays true as Gate 1's measurement of the pre-merge branch.
+
+> **Re-derived at the current `HEAD`:** the commit counts are **62 — 53 non-merge + 9 merges**, i.e.
+> Gate 2's figures plus the one docs commit that re-derived them (`057f10f`); the file counts are
+> **unchanged at 116 / 53 Rust / 51 TS / 7 docs**. Anyone re-running these commands at a later `HEAD`
+> should expect the commit total to have grown again while the file split holds — that is why the
+> commands above name `29d9563` rather than `HEAD`.
 
 ---
 
@@ -138,43 +148,176 @@ A **table-row insert ended without a trailing newline**, fusing the task12b inse
 
 ## The open `needs-auth` work (the ONLY unfixed defect from this run)
 
-The `needs-auth` error kind is **absent from the Rust envelope** (0 hits in `src/agent/errors.rs`, `src/commands/settings.rs`, `src/lib/errors.ts`). It is:
+**Which string is which.** Two different markers live in this tree and the earlier drafts of this
+section conflated them:
+
+- `needs-auth` (HYPHEN) — the raw Rust wire marker `http.rs` produces and `McpSection` matches.
+  `grep -c 'needs-auth'` on the three envelope files gives **0 / 1 / 1**: absent from
+  `src-tauri/src/agent/errors.rs`, one doc-comment hit in `src-tauri/src/commands/settings.rs:135`,
+  one doc-comment hit in `src/lib/errors.ts:157`.
+- `needs_auth` (UNDERSCORE) — the *proposed* TS union member that was never landed.
+  `grep -c 'needs_auth'` on the same three files gives **0 / 0 / 1**: absent from BOTH Rust files, one
+  hit in `src/lib/errors.ts:159` (the blocked-candidate comment).
+
+So the accurate headline is: **`needs_auth` (underscore) is absent from the Rust envelope — 0 hits in
+`src-tauri/src/agent/errors.rs` and 0 in `src-tauri/src/commands/settings.rs` — and exists only as the
+1 doc-comment mention at `src/lib/errors.ts:159`.** The `0 / 0 / 1` triple in *Who verified what* is
+that UNDERSCORE grep; the file it counts as `1` is `errors.ts`, which is exactly the file the next
+bullet cites. There is no contradiction, but the earlier wording read like one.
+
+What is open:
 
 - **Blocked candidate**: `src/lib/errors.ts:159` — *"and the blocked candidate (`"needs_auth"`) joins this union ONLY when the Rust envelope grows it"* — the union it names is `McpTestErrorKind` (`:164`)
 - **Parked test**: `src/components/settings/McpSection.test.tsx:153` — `it.skip("a reworded needs-auth sentence still shows the badge (the envelope-contract red-first)")`
 - **Component still text-matches**: `src/components/settings/McpSection.tsx:114` — `result.error.includes("needs-auth")`
 - **SettingsError::McpTestFailed** is the live path: `manager.rs:504` `test_server` returns `"needs-auth"` verbatim, which bubbles through `SettingsError::McpTestFailed` → `mcp_test_failed` → `result.error.includes("needs-auth")` (all re-verified at `29d9563`)
 
-### Unblock recipe (what must change, and ONLY that)
+### Unblock recipe (what must change — measured in a throwaway worktree)
 
-Re-verified against the tree at `29d9563`. The first draft of this recipe named machinery that does
+Re-verified against the tree at `29d9563`, and then re-run end-to-end at this branch's `HEAD`
+(`057f10f`) in the probe worktree. The first draft of this recipe named machinery that does
 not exist: there is **no `AgentError` type and no `ErrorCode` impl** in `agent/errors.rs` (the file is
 one enum per family — `SessionError`, `SettingsError`, … — each with a hand-written `pub fn kind()`),
 and `src/lib/errors.ts` has **no `ErrorCode` union** (it exports per-family `*ErrorKind` unions). It
 also "discovered" a variant that was already there: **`SettingsError::McpAuthFailed` exists**
 (`agent/errors.rs:534`, kind `mcp_auth_failed` at `:558`), is already used by `auth_mcp_server`
 (`commands/settings.rs:157`), and is already mirrored in TS (`SettingsErrorKind`, `errors.ts:144`).
-The tree's own recipe is the comment block at `McpSection.test.tsx:136–152`, and it agrees with this:
 
-1. `src-tauri/src/commands/settings.rs` — in `test_mcp_server`, match `test_server`'s raw `"needs-auth"`
-   marker BEFORE the blanket `.map_err(SettingsError::McpTestFailed)` wrap and map it to the EXISTING
-   `SettingsError::McpAuthFailed`. No new variant; the wire kind `mcp_auth_failed` already exists both sides.
-2. `src/lib/errors.ts` — give `McpTestErrorKind` (`:164`) the machine discriminator the badge switches
-   on and retire the blocked-candidate comment at `:159`.
-3. `src/components/settings/McpSection.tsx` — branch on `kind` (the parked design) instead of the
-   sentence match at `:114`.
-4. Remove the `it.skip` at `McpSection.test.tsx:153` — the test is the acceptance check (its mock and
-   expectation are written for the kind-branching design, so it is the unblock's arbiter as written).
+#### The two false claims, stated plainly
 
-**No new `SettingsError` variant.** The red flow already exists and is pinned by the parked test.
-The old closing claim — "nothing else in the tree references `needs-auth`" — was **false as
-written**: the marker `"needs-auth"` occurs 31 times across 9 files — it is PRODUCED at
-`agent/mcp/http.rs:181` (the 401 arm), CONSUMED at `agent/mcp/manager.rs:187` (the manager's own
-needs-auth state, a different concept with its own tests), and pinned as prose at
-`ipcError.test.ts:65–76` among others. `needs_auth` (underscore) occurs 8 times across 4 files: the
-two blocked-candidate comments above plus five Rust test NAMES about the manager's auth state, none of
-which is the IPC kind. What is true is narrower: nothing OUTSIDE the four files in the recipe changes
-when the kind lands — the manager's auth-state machine and the sentence-pins are unaffected.
+The superseded draft's step 4 said: *"Remove the `it.skip` at `McpSection.test.tsx:153` —
+the test is the acceptance check (its mock and expectation are written for the kind-branching design,
+so it is the unblock's arbiter as written)"*, and its step 3 said to branch on `kind` **instead of** the
+sentence match at `:114`. That combination does not work, and neither does its file list. To find out
+for certain rather than by reading, the whole unblock was **implemented end-to-end in a throwaway
+worktree** (`git worktree add /tmp/needs-auth-probe -b probe/needs-auth HEAD`, torn down afterwards;
+nothing from it is on this branch). Measured outcomes:
+
+| configuration | `vitest run src/components/settings/McpSection.test.tsx` |
+|---|---|
+| baseline (skip in place, nothing changed) | **3 passed / 1 skipped / 0 failed** |
+| recipe AS WRITTEN: Rust kind + branch on `kind` *instead of* the sentence, skip still in place | **2 passed / 1 failed / 1 skipped** — `:118` "the CURRENT needs-auth contract" goes RED |
+| recipe AS WRITTEN + the `it.skip` removed, mock untouched | **2 passed / 2 failed** — `:118` still red AND `:153` still red |
+| corrected: branch on `kind` **keeping** the sentence fallback, skip removed, mock `kind` still `mcp_test_failed` | **3 passed / 1 failed** — `:153` still red |
+| corrected + the parked mock's `kind` edited to `mcp_auth_failed` | **4 passed / 0 failed** ✅ |
+
+The two claims, stated plainly:
+
+1. **The parked test does NOT pass as written.** Its mock rejects with `{kind: "mcp_test_failed", …}`.
+   Once the Rust side emits `mcp_auth_failed` for the auth case, `mcp_test_failed` is the *negative*
+   case — the envelope that must NOT show the badge (that is exactly what `:101` "a generic envelope
+   failure shows the error badge and no Sign-in button" pins). So the parked mock **must be edited** to
+   `kind: "mcp_auth_failed"`. The un-skip is therefore an **un-skip-with-edit**, not an un-skip-as-written,
+   and the test is NOT the unblock's independent arbiter: its mock has to be co-authored with the
+   change it is supposed to adjudicate. That is a real weakening of the red-first framing and this doc
+   should have said so at the time.
+2. **Branching on `kind` INSTEAD of the sentence match reddens a currently-green test.** `:118` pins
+   today's contract — `{kind: "mcp_test_failed", message: "MCP server test failed: needs-auth"}` must
+   show the badge — and it is the test that **forces the sentence fallback to stay**. Measured: drop the
+   fallback and `:118` fails with `Unable to find an element with the text: needs auth` while `:153`
+   passes. **Keep the fallback.** The badge is `kind === "mcp_auth_failed" || error.includes("needs-auth")`:
+   the `kind` carries the new wire, the sentence serves the legacy envelope `:118` pins. Removing the
+   fallback is a *separate*, later change that must delete or re-mock `:118` in the same commit — it is
+   not part of the unblock.
+
+**Also understated by the draft: `McpSection.tsx` never sees `kind` at all.** Both catch blocks store
+`setResult({ error: describeIpcError(e) })` (`:92`, `:107`) and `describeIpcError` flattens the whole
+envelope to its `message` string. A `kind` switch therefore requires a **result-state shape change** —
+`{ count } | { error, errorKind } | null` — plus a way to read `kind` off the rejection. The probe added
+a ~10-line `ipcErrorKind(err): string | null` (total, never throws, mirroring `describeIpcError`'s
+contract) and set `{ error: describeIpcError(e), errorKind: ipcErrorKind(e) }` at both call sites. The
+probe kept that helper local to `McpSection.tsx` rather than putting it in `src/lib/ipcError.ts`, because
+`ipcError.ts` is documented as the ONE renderer with a pinned 5-step resolution order and its own test
+file — a second export there would need its own pins. Putting it in `ipcError.ts` is the better long-term
+home if another component ever needs the `kind`; either way it is a new file-level decision the draft
+never mentioned. Without this step there is nothing to branch on and the rest of the recipe is inert.
+
+#### The real file list (7 files, not 4)
+
+| # | file | change |
+|---|---|---|
+| 1 | `src-tauri/src/commands/settings.rs` | in `test_mcp_server`, match `test_server`'s raw `"needs-auth"` marker BEFORE the blanket `.map_err(SettingsError::McpTestFailed)` wrap and map it to the EXISTING `SettingsError::McpAuthFailed`. No new variant; the wire kind already exists both sides. Add the two command-level pins (below). |
+| 2 | `src-tauri/src/agent/errors.rs` | **the missing drift pin** — `settings_error_kind_spellings_are_frozen` (see below). |
+| 3 | `src/lib/errors.ts` | add `"mcp_auth_failed"` to `McpTestErrorKind` (`:164`) and retire the blocked-candidate comment at `:159`. |
+| 4 | `src/components/settings/McpSection.tsx` | the result-state shape change + `kind` branch **with the sentence fallback kept**. |
+| 5 | `src/components/settings/McpSection.test.tsx` | un-skip `:153` **and edit its mock `kind`** to `mcp_auth_failed`; rewrite the `:136–152` comment block, which currently prescribes the wrong recipe. |
+| 6 | `src/lib/tauri/commands/settings.ts:59` | **not optional** — the wrapper doc states in prose that "`kind` is `mcp_test_failed` for EVERY test failure — the auth case carries no machine discriminator of its own today". The unblock makes that sentence FALSE. |
+| 7 | `docs/decisions/0063-ipc-errors-carry-a-kind-and-a-message.md` | **not optional** — `:163–174` ("One free-text match the envelope does not yet cover") asserts "The `kind` is **always** `mcp_test_failed`, so there is no machine discriminator on the auth case". ADR prose the unblock falsifies; mark it resolved (keep the section as history). |
+
+Plus one **comment-only** edit that the draft's "nothing outside the four files changes" missed:
+`src/lib/ipcError.test.ts:65–77` — the pin's comment reads *"why the sentence, not the kind, is doing
+the discriminating there — the seam `McpSection.test.tsx` parks red"*. The assertion still passes
+untouched (`describeIpcError` is unchanged by this work), but the comment goes stale and should say
+that the sentence is now the *fallback*, not the discriminator.
+
+**No new `SettingsError` variant** — that part of the draft was right. And the marker census still
+holds: `"needs-auth"` (hyphen) occurs 31 times across 9 files — PRODUCED at `agent/mcp/http.rs:181`
+(the 401 arm), CONSUMED at `agent/mcp/manager.rs:187` (the manager's own needs-auth *state*, a
+different concept with its own tests), pinned as prose at `ipcError.test.ts:65–77`. `needs_auth`
+(underscore) occurs 8 times across 4 files: the two blocked-candidate comments plus five Rust test
+NAMES about the manager's auth state, none of which is the IPC kind. What the draft should have
+claimed, instead of "nothing outside the four files changes": **the manager's auth-state machine and
+the sentence-pins are unaffected** — the `ensure_connected` rewrite at `manager.rs:187` never runs on
+the Settings path, so it needs no edit. The command, the envelope, the TS mirror, the component, the
+wrapper doc, and ADR 0063 all do.
+
+#### The missing drift pin (a gap this run shipped, measured)
+
+`kind_spellings_are_frozen` exists for **history** (`errors.rs:965`), **attention** (`:1083`) and
+**clipboard** (`:1161`) — and **not for `SettingsError`**. The only `SettingsError` envelope test is
+`settings_error_serializes_to_adr_0063_envelope` (`:859`), which exercises `SaveFailed` alone. So
+nothing forces the TS mirror to move with the Rust side. Measured: rewriting the Rust arm to
+`SettingsError::McpAuthFailed(_) => "mcp_auth_faild"` — a real typo, silently diverging from the TS
+union the badge branches on — passes the **entire** Rust suite: **1,651 passed / 0 failed / 1 ignored**
+(`--lib`), and `tsc --noEmit` stays clean because `errors.ts` is a type-only module nothing imports the
+spelling from. The badge would break on the user's screen with every gate green.
+
+The fix is the fourth pin, in the same shape as the other three:
+
+```rust
+#[test]
+fn settings_error_kind_spellings_are_frozen() { /* all nine variants → their nine spellings */ }
+```
+
+Verified in the probe: with the pin in place, the same `mcp_auth_faild` typo fails
+`settings_error_kind_spellings_are_frozen` (`left: [… "mcp_auth_faild" …]` vs
+`right: [… "mcp_auth_failed" …]`). Note the pin freezes spellings, not the TS union — a Rust-side
+*added* variant still needs the `errors.ts` edit caught by review; the pin's doc comment must name both
+TS mirrors (`SettingsErrorKind` and `McpTestErrorKind`) so the reader knows which two files to check.
+
+#### The two Rust pins the command needs (the recipe previously had none)
+
+The TS test is a mock — it proves the component honours a `kind` someone asserts, not that the command
+emits it. The probe added, in `commands/settings.rs`'s `mod tests`, a one-shot local listener that
+answers every request with a fixed status:
+
+- `test_mcp_server_a_401_on_an_oauth_server_is_the_auth_kind` — an `{url, auth:"oauth"}` entry against a
+  401 listener asserts `err.kind() == "mcp_auth_failed"`. **Genuinely red-first**: with the `settings.rs`
+  wrap reverted to `.map_err(SettingsError::McpTestFailed)` and the test kept, it fails
+  `left: "mcp_test_failed" / right: "mcp_auth_failed"`. This is the real acceptance check for step 1 —
+  the parked TS test is not.
+- `test_mcp_server_a_non_auth_failure_keeps_the_test_failed_kind` — a 500 on a non-OAuth entry asserts
+  `mcp_test_failed`, so the `kind` switch cannot read a network error as an auth wall.
+
+#### Full gate at the end of the probe (all measured, all green)
+
+| layer | result |
+|---|---|
+| `vitest run src/components/settings/McpSection.test.tsx` | **4 passed / 0 failed** (the skip is gone) |
+| `vitest run` (full frontend) | **157 files / 3,319 passed / 0 failed / 0 skipped** — Gate 2's 3,318 + 1, exactly the un-parked test, so the skip count goes to zero |
+| `tsc --noEmit` | clean |
+| `cargo test` (full, all targets) | **1,786 passed / 0 failed / 4 ignored** — Gate 2's 1,783 + 3 (the two command pins + the drift pin) |
+| `cargo test --lib commands::settings` | **11 passed / 0 failed** (was 9) |
+| `cargo clippy --all-targets` | **0 warnings** |
+| `cargo fmt --all -- --check` | clean |
+| `scripts/check-versions.sh` / `check-commands.sh` | `versions match: 0.9.2` / 46 registered, 45 consumed, both directions agree |
+
+**Corrected order of work** (each step lands green): (1) the two command pins, RED against the
+unwrapped command; (2) the `settings.rs` marker match → GREEN; (3) the `SettingsError` drift pin;
+(4) `errors.ts` union + comment; (5) `McpSection.tsx` result shape + `kind` branch **keeping** the
+fallback; (6) un-skip `:153` **and edit its mock `kind`**; (7) the `settings.ts:59` doc, the ADR 0063
+resolution note, and the `ipcError.test.ts` comment.
+
 
 ---
 
@@ -205,7 +348,7 @@ when the kind lands — the manager's auth-state machine and the sentence-pins a
 
 | claim | verified by | how |
 |---|---|---|
-| `needs-auth` absent in Rust | orchestrator | `grep -rc 'needs_auth' src-tauri/src/agent/errors.rs src-tauri/src/commands/settings.rs src/lib/errors.ts` → 0, 0, 1 (TS doc) — re-run at `29d9563`, same |
+| `needs_auth` (underscore) absent from Rust, present only as a TS comment | orchestrator | `grep -rc 'needs_auth' src-tauri/src/agent/errors.rs src-tauri/src/commands/settings.rs src/lib/errors.ts` → **0, 0, 1** — the `1` is the blocked-candidate comment at `errors.ts:159`; re-run at `29d9563`, same. Do NOT read this as "`needs-auth` is absent": the hyphen marker greps **0, 1, 1** on the same three files (see the "Which string is which" note) |
 | parked skip intact | orchestrator | `grep -n 'it.skip.*needs-auth' src/components/settings/McpSection.test.tsx` → line 153 — re-run at `29d9563`, same |
 | component text-match | orchestrator | `grep -n 'needs-auth' src/components/settings/McpSection.tsx` → line 114 — re-run at `29d9563`, same |
 | envelope `code: "needs_auth"` comment | orchestrator | `grep -n 'blocked candidate.*needs_auth' src/lib/errors.ts` → line 159 — re-run at `29d9563`, same |
@@ -254,8 +397,8 @@ superseded):**
    commits merged at `93b6901`, now named in the row.
 6. **The `c6e2ecc` row was labelled "F6 (task08b)"** — `c6e2ecc` is task08 (F4-rust/F5-rust);
    task08b/F6 is `03fdca8`. The row is split in two.
-7. **"nothing else in the tree references `needs-auth`"** — false: 31 hits across 9 files (see the
-   needs-auth section).
+7. **"nothing else in the tree references `needs-auth`"** — false: the hyphen marker is 31 hits across
+   9 files, and the recipe's own file list is 7 files, not 4 (see the needs-auth section).
 8. **The unblock recipe's `AgentError` + `ErrorCode` impl + TS `ErrorCode` union** — none of those
    exist; and "no new `SettingsError` variant" was right for the wrong reason: `McpAuthFailed` already
    exists and is already wired.
@@ -265,21 +408,59 @@ superseded):**
    that contains it is dated 2026-10-30.
 10. **The F7b map row's "`db/tests` shape"** — task11 owns `mcp/http.rs` only; the `db/tests` shape is
     task12's.
+11. **"the last branch commit before `origin/main` was merged in" was `377ea86`** — the branch tip at
+    the merge was **`2eeba39`** (this close-out record); `29d9563`'s first parent is `2eeba39`, and
+    `377ea86..2eeba39` is exactly one commit. `377ea86` is the last CODE / gate commit before the merge,
+    which is why Gate 1 belongs to it — but it was not the tip.
+12. **The Gate 2 branch-scale figures were quoted from `git rev-list --count HEAD --not origin/main`**
+    — a command whose answer moves with `HEAD`. At `29d9563` it yields 61 / 52 / 9, which is what the
+    table printed; at `057f10f` it yields **62 / 53 / 9**. The figures are now pinned to `29d9563` in the
+    command itself, with the current-`HEAD` re-derivation stated beside them.
+13. **The `needs-auth` headline said "0 hits in … `src/lib/errors.ts`"** while the very next bullet cited
+    `errors.ts:159` as containing `"needs_auth"` — a self-contradiction on one line. It was a
+    hyphen-vs-underscore grep artifact: `needs-auth` is 0/1/1 on the three files and `needs_auth` is
+    0/0/1. Both greps are now named with their string.
 
 **UNCHANGED AND STILL TRUE (re-measured, not copied):** clippy 0 warnings, fmt clean, mingw check
 clean, `check-commands.sh` 46/45 both directions agree; 56 roadmap files (16+17+22+1); all 22 status
 rows 7 cells; `discover_in_roots` = 2 verbatim; `roots.rs` 4 / `prompt.rs` 3 `join(".git")`; the allow
-counts 1 (`loop.rs`) + 2 (`loop/tests/support.rs`); the `needs_auth` greps 0/0/1; the skip at `:153`;
+counts 1 (`loop.rs`) + 2 (`loop/tests/support.rs`); the `needs_auth` (underscore) greps 0/0/1 — and the
+`needs-auth` (hyphen) greps 0/1/1, which is NOT the same claim; the skip at `:153`;
 the text-match at `:114`; the blocked-candidate comment at `:159`; `manager.rs:504` `test_server`;
 `grep -c 'test]'` = 0 on `http.rs`; every SHA cited in this doc resolves and is an ancestor of
 `29d9563`.
 
 ---
 
+## Third pass: the `needs-auth` recipe was FALSE, plus three residual defects (2026-10-31)
+
+Gate 2 re-derived the NUMBERS. A later pass re-derived the PROSE and the recipe, and found the doc's
+one forward-looking claim — the unblock recipe's "acceptance test passes as written" — did not survive
+being run. Items 11–13 above are the wording defects; the recipe's own section carries the measured
+probe table (5 configurations, every number from a real run) and the corrected 7-file list. Summary of
+what changed here:
+
+| claim | was | is |
+|---|---|---|
+| recipe file list | "4 files, and ONLY that" | **7 files** + 1 comment-only edit (`ipcError.test.ts`) — `settings.ts:59`, ADR 0063 `:163–174`, and the `McpSection.tsx` result-state shape were all load-bearing |
+| parked test `:153` | "un-skips green **as written**, the unblock's arbiter" | **un-skip-with-edit**: its mock `kind` must change `mcp_test_failed` → `mcp_auth_failed`, so it is NOT an independent arbiter |
+| the sentence match at `:114` | branch on `kind` **instead of** it | branch on `kind` **and keep** it — `:118` pins the legacy envelope and reddens otherwise |
+| acceptance check | the parked TS test | **two new Rust command pins** (a 401 listener asserting `mcp_auth_failed`, a 500 listener asserting `mcp_test_failed`); the first is genuinely red-first |
+| drift coverage | assumed adequate | **no `SettingsError` kind pin existed** — a misspelled `mcp_auth_failed` passes 1,651 Rust tests + `tsc`; `settings_error_kind_spellings_are_frozen` is now named as a required step |
+| Gate 2 commit counts | quoted from `HEAD` | pinned to `29d9563` (61/52/9), with the `HEAD` re-derivation (62/53/9) stated |
+| Gate 1's place in history | "`377ea86`, the last branch commit before the merge" | `2eeba39` was the tip; `377ea86` is the last code/gate commit |
+| the `needs-auth` headline | "0 hits in … `src/lib/errors.ts`" next to a bullet citing `errors.ts:159` | hyphen 0/1/1, underscore 0/0/1 — the strings are named |
+
+---
+
 ## Next reader: what to do before concluding something is "done"
 
 1. **Read this doc** — the roadmap family is deleted and its hashes are orphans.
-2. **Check the three `needs-auth` conditions** above — if all three flip, the block is lifted.
+2. **Read the `needs-auth` recipe before implementing it** — its first version was false in three ways
+   (file list, "un-skip as written", "branch on `kind` instead of the sentence"), and the three
+   conditions it used to hinge on (`:153` skipped, `:114` text-matching, `errors.ts:159` blocked) are
+   symptoms, not the gate. The gate is the corrected 7-file list + the two Rust command pins + the
+   `SettingsError` drift pin, all measured in the recipe's tables.
 3. **Don't trust a grep of `test]`** — count `tokio::test` for this module.
 4. **Don't trust `grep -c SKIP-SANDBOX` on captured output** — it's vacuous.
 5. **Cite squash SHAs, not per-issue hashes** — the merge commits are the implementable boundary
