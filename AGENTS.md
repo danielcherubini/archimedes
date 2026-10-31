@@ -455,6 +455,32 @@ These are properties of the repo, not of any branch:
   skill's cleanup loop already does this right — it names
   `${FEATURE_NAME}`-prefixed files only — so the failure mode is deviating from
   it, not the skill.
+- **`git check-ignore <path>` exits 1 for a path that is already TRACKED, and that
+  reads exactly like "the ignore rule is gone".** Measured live: an agent verifying
+  `docs/roadmap/` ran it, got exit 1, and reported "docs/roadmap/ is NOT gitignored" —
+  while `git check-ignore --no-index -v` prints `.gitignore:31:docs/roadmap/` and exits
+  0. Roadmap plan families enter git via `git add -f`, so every one of them is in the
+  index, so the naive form reports nothing for all of them. The wrong conclusion is
+  expensive here specifically: it makes the bullet above sound stale and the unrecoverable
+  files look recoverable. Trust the `--no-index` form.
+- **`docs/roadmap/`'s ignored files do not appear in
+  `git ls-files --others --exclude-standard` — use `--others --ignored --exclude-standard`
+  to see them.** A count built with `--exclude-standard` reports 0 untracked in a directory
+  whose every untracked file is ignored by construction, which is the same false "nothing
+  to lose" reading as the bullet above, reached from the other direction. Measured at the
+  #139/#138 ship: `--exclude-standard` said 0, `--ignored` named
+  `issue-91-fetch-hidden-window-follow-ups.md`, and `git log --all` on that path is empty —
+  git has never held it.
+- **The `docs/features/` front-matter does not parse as strict YAML** — the multi-line
+  `verified-by:` value is missing its `|`/`>` block-scalar indicator, so PyYAML raises a
+  `ParserError`. Two agents on unrelated files hit it independently and both confirmed it
+  fails identically *before* their edit: it is pre-existing across these docs, not
+  something a branch introduced. Harmless today because nothing parses those fields
+  programmatically — the one test that reads `docs/features/` is
+  `src/lib/subagentSheetLayout.test.ts`, and it reads the body, not the front-matter. It
+  becomes real work the moment a docs linter, staleness bot, or generated index reads
+  `status:` / `last-verified:` / `verified-by:` with a parser, and then it should be one
+  sweep across `docs/features/`, not a per-visit fix.
 - **Two files in `docs/roadmap/` have no durable copy in git** (measured, not
   assumed): `permissions-section.md` is issue #112's approved spec and its only
   in-repo copy — recover it from #112's issue comments, which mirror it — and

@@ -302,6 +302,11 @@ async fn wait_for_rows(db: &Db, session_id: &str, want: usize) -> Vec<String> {
 ///      is dead, so no in-flight write can land behind it) and it
 ///      asserts presence/role, never a count.
 ///
+/// File-local (`wait_for_rows` is private here). The same-shaped un-polled reads
+/// in `tests/ipc.rs` / `tests/session_native.rs` are LEGAL: IN-PROCESS writer (no
+/// second OS process writing one SQLite file) + PRESENCE, not a COUNT. A future
+/// row-count read there is unguarded: on a flake, share the helper + guard.
+///
 /// The needle below is SPLIT on purpose so this guard's own source
 /// cannot match the contiguous token it counts: keep the
 /// `concat!("load_native_", "messages")` form intact, and never write
