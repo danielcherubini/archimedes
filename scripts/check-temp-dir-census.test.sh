@@ -430,6 +430,32 @@ assert_eq "on LINUX a dotted directory is still a leak (the exclusion is Darwin-
 assert_contains "and it is named" "com.apple.Maps.mapssyncd" "$output"
 assert_not_contains "and nothing is reported as excluded on Linux" "excluded:" "$output"
 
+# 17b. THE SAME SCOPING PROOF FOR THE SECOND SHAPE. Case 17 pins that the DOTTED
+#      exclusion is Darwin-only; nothing pinned the DASH-FREE exclusion the same
+#      way — every Linux-injected plant in both harnesses was dotted
+#      (`com.apple.Maps.mapssyncd` here and in `--self-test` Case 13), so a
+#      refactor that moved `dash_free_name` outside the Darwin gate
+#      (`exclusion_applies_here`) would have gone unnoticed on the Linux leg,
+#      which is the leg that carries the real coverage. That is precisely the
+#      regression this branch's own fix is vulnerable to: the shape that saves
+#      `macos-latest` must not leak onto Linux, where a dash-free directory IS a
+#      leak (a real Archimedes name always carries a dash, so nothing of ours is
+#      sacrificed by keeping it strict there).
+#
+#      The plant is deliberately dash-free AND dot-free — `planteddashfreeleak`
+#      — so the SECOND shape is the only thing that could exclude it. A dotted
+#      plant here would pass under a `dotted_name`-only Linux regression and the
+#      case would test the wrong shape. This is case 18d's plant, run on Linux:
+#      18d proves Darwin excludes it, 17b proves Linux must not.
+fixture linux_dashfree
+run_check_env "ARCHIMEDES_CENSUS_UNAME_S=Linux" snapshot --state "$state" --base "$base"
+assert_eq "Linux snapshot exits 0" "0" "$status"
+mkdir -p "$base/planteddashfreeleak"
+run_check_env "ARCHIMEDES_CENSUS_UNAME_S=Linux" verify --state "$state" --base "$base"
+assert_eq "on LINUX a dash-free directory is still a leak (the second shape is Darwin-only too) (case 17b)" "1" "$status"
+assert_contains "and it is named" "planteddashfreeleak" "$output"
+assert_not_contains "and nothing is reported as excluded on Linux" "excluded:" "$output"
+
 # 18. THE DARWIN HALF, BOTH DIRECTIONS. A bug that excludes EVERYTHING must fail
 #     here, which is why the dot-free half shares a fixture with the dotted half:
 #     a dotted-only fixture stays green under a `*` rule instead of `*.*`.

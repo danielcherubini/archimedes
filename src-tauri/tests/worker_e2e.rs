@@ -323,8 +323,8 @@ fn direct_native_transcript_reads_are_capped_at_three_sites() {
         hits.len(),
         3,
         "a direct {needle} read escaped the three legal sites above — every other \
-         read must go through `wait_for_rows` (row counts must fail on the helper's \
-         deadline, not on a race). Hits at file lines: {hits:?}"
+         row-count read in this file must go through `wait_for_rows` (row counts must \
+         fail on the helper's deadline, not on a race). Hits at file lines: {hits:?}"
     );
 }
 
