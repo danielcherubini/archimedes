@@ -1,14 +1,22 @@
 ---
 status: live
-last-verified: 2026-10-29
+last-verified: 2026-10-31
 verified-by: sections 1–10 re-read against this tree at `00676d5` plus **the first CI run of PR #99**
   (real ubuntu/macOS/windows legs, logs read in full), plus measurements on this box (temp-dir counts,
   `--self-test`, five sabotages of the census script, drop-order probes, `wine --version`). Gaps 9
   and 10 are what that CI run *found*; the rest were re-confirmed still open rather than copied.
   **Section 9a added 2026-10-29** from `main`'s CI run `40875258489` (job `123452317398`, log read)
   plus four measurements on this tree at `6f501ab`, all four re-run at `02a6de9` and unchanged (grep for the minter, the tolerance table's single
-  row, the dot-free name against the Darwin shape rule, the unattributed-vs-tolerated code path) and
-  the `.test.sh` case-18c citation. **Not verified:** what actually mints `betaenrollmentagent` — no
+  row, the dot-free name against the Darwin shape rule, the unattributed-vs-tolerated code path).
+  **Re-verified 2026-10-31 on the tree staged at `5c90fdf`, with 17b added in `30c581c`, for the TWO-shape analysis** — section 9's dotted shape
+  (`dotted_name`) plus the second, dash-free shape (`dash_free_name`) that section 9a's measurement
+  motivated. The citations those sections lean on were re-run on those two trees, not copied: `.test.sh`
+  cases 17, **17b**, 18c, 18c(2), 18d and 19, plus the script's own `--self-test`. **How it was
+  verified:** by `ARCHIMEDES_CENSUS_UNAME_S`-injected runs on a Linux box — Darwin-*targeted*,
+  **not** verified on real Darwin, because this box is not one. The macOS legs therefore stay
+  **open on CI**: no real `uname -s` of `Darwin` has ever executed the exclusion here. Case **17b**
+  is new in this pass and is the Linux-side pin that the second shape is Darwin-only too.
+  **Not verified:** what actually mints `betaenrollmentagent` — no
   source for it was found, and the section says so rather than guessing.
 ---
 
@@ -190,24 +198,28 @@ it is rewritten rather than left as a prediction:
   `mapssyncd`, `privatecloudcomputed`, the `remotemanagement` subscribers and so on,
   written by the OS during a ~90s suite. Linux does not have this problem: Ubuntu's
   fresh-runner `/tmp` snapshotted 13 directories and verified clean.
-- The fix is a **Darwin-only shape rule**: a candidate whose name contains a dot is
-  not counted, and the count is always announced (`excluded: N dotted-name dir(s)
-  …`) so the exclusion is never silent. It is a shape, not a name list — deliberately
-  **not** `com.apple.*`, which would need widening every time a daemon appears. It
-  rests on an invariant that is now **pinned by a test** (`.test.sh` case 18c): no
-  Archimedes minter prefix contains a dot. If someone mints a dotted prefix, a test
-  reddens instead of the leak becoming invisible.
+- The fix is a **Darwin-only shape rule**: a candidate whose name contains a dot,
+  or contains no dash, is not counted, and the count is always announced
+  (`excluded: N shape-mismatched dir(s) …`) so the exclusion is never silent. It is
+  a shape, not a name list — deliberately **not** `com.apple.*`, which would need
+  widening every time a daemon appears. It rests on an invariant that is now
+  **pinned by a test** (`.test.sh` cases 18c and 18c(2)): no Archimedes minter
+  prefix contains a dot, and none is dash-free. If someone mints a dotted or
+  dash-free prefix, a test reddens instead of the leak becoming invisible.
 - **The remaining macOS unknown**: the exclusion is exercised in CI only by
   injected-platform cases (`ARCHIMEDES_CENSUS_UNAME_S`), never by a real Darwin
   `uname -s` on this box, because no macOS is available locally. The `getconf
   DARWIN_USER_TEMP_DIR` spelling in `resolve_base` is now corroborated by the
   snapshot's own output, but the `TMPDIR`-unset path that reaches it has not run.
 
-### 9a. A dot-free macOS name defeats the shape rule — `betaenrollmentagent`
+### 9a. A dot-free macOS name defeated the single-shape rule — `betaenrollmentagent`
 
-**Live on `main`, unfixed, and it will red a macOS job again.** Observed on
-`main`'s own history at `2f5f896` (PR #121): CI run `40875258489`, job
-`123452317398`, `macos-latest` failed the census step with
+**This was the live state on `main`; the fix has since landed on this branch.** What
+follows is the HISTORICAL measurement, observed at `2f5f896`, that motivated
+[#139](https://github.com/danielcherubini/archimedes/issues/139) — it is kept because
+it is the evidence the second shape was added for, not because it describes this
+tree. It was observed on `main`'s own history at `2f5f896` (PR #121): CI run
+`40875258489`, job `123452317398`, `macos-latest` failed the census step with
 
 > `error: the Rust test suite left 1 new directories …` / `betaenrollmentagent ← <UNATTRIBUTED: no known minter matches this prefix …>`
 
@@ -222,12 +234,13 @@ Measured on this tree, all four claims checked rather than inferred:
   doing its job by refusing to guess a minter.
 - It is **not** in the tolerance table, which holds exactly one row
   (`harness-subagent-	1`).
-- **It contains no dot**, so section 9's Darwin shape rule **cannot exclude it**.
-  That rule's safety rests on "no Archimedes minter prefix contains a dot" — an
-  invariant that keeps the exclusion from hiding our own leaks. It says nothing
-  about a *system* name that happens to be dot-free, and this is one. The shape
-  rule is therefore narrower than "excludes macOS noise": it excludes reverse-DNS
-  shaped noise.
+- **It contains no dot**, so section 9's ORIGINAL Darwin shape rule — the single
+  `*.*` shape that stood at `2f5f896` — **could not exclude it**. That rule's safety
+  rested on "no Archimedes minter prefix contains a dot" — an invariant that keeps
+  the exclusion from hiding our own leaks. It said nothing about a *system* name
+  that happens to be dot-free, and this is one. The single-shape rule was therefore
+  narrower than "excludes macOS noise": it excluded reverse-DNS shaped noise. The
+  second shape (`dash_free_name`) is what closes that gap on this branch.
 - An unattributed name **hard-fails regardless of budget** — tolerance is looked up
   by prefix row, and a name with no row never reaches the tolerated path.
 
@@ -239,13 +252,35 @@ did not find a source for it — do not record a minter you have not read.
 **Do not fix this by widening the tolerance table.** Section 3's rule is that
 tolerances are earned by measurement of *our* leak, and a row here would let a real
 `betaenrollmentagent*` leak hide behind a system daemon forever — the exact failure
-the allow-list argument in the script's header refuses. The two honest options, if
-it starts costing rounds: (a) extend the Darwin exclusion to a second *shape* that
+the allow-list argument in the script's header refuses. The two honest options on
+the table were: (a) extend the Darwin exclusion to a second *shape* that
 still cannot match an Archimedes prefix, and re-pin the no-dot invariant test
 (`.test.sh` case 18c) to cover the new shape too; or (b) snapshot the base
 immediately before `cargo test` rather than at job start, shrinking the window a
-daemon can write into. (a) trades guard precision for green CI and needs a reviewer;
-(b) costs nothing in precision. **Needs an owner, not a drive-by entry.**
+daemon can write into. **(b) is already implemented** — the ci.yml step is literally
+`Snapshot the temp dir before cargo test` and sits directly above the `cargo test`
+steps — so there is no window left to shrink: ~100% of the exposure is the suite's
+own runtime, which the delta must straddle by design, and **(a) is the option that
+was taken**. (a) trades guard precision for green CI and needs a reviewer; (b) costs
+nothing in precision because it is already in place. The exclusion is Darwin-only: a
+dotted or dash-free dir on Linux is STILL a leak (`.test.sh` cases 17 and 17b — one
+planted dotted dir under injected Linux, one planted dash-free and dot-free dir, each
+asserting exit 1 and that the name is reported). Do not weaken that.
+**Owner: roadmap task A1 — the shape change is the fix, not a future option.**
+The shape and the re-pinned invariant live in `scripts/check-temp-dir-census.sh` /
+`.test.sh` (case 18c plus the no-dash twin 18c(2), the positive case 18d, and the
+teeth case 19).
+
+The second recorded occurrence is the PR #140 writeup
+(`docs/research/windows-child-console-window.md`): the macOS job failed at step 17,
+the temp-dir census, on an unattributed `betaenrollmentagent` directory, while
+`cargo test` passed on that same run (1602 passed), and the sibling macOS run of the
+identical SHA passed the same step. The exclusion count moved between the first
+(§9a above) and this occurrence — 3 dotted-name dirs on the first run, 5 on this one
+— **as reported by issue #139; the 3→5 figures are issue-provided and have not been
+re-measured in this repo** (the run ids are not present in the tree, no macOS and no
+run logs exist here, and `excluded: 5` appears in no artifact this doc can cite). A
+doc correction must not launder an issue's numbers into a measured record.
 
 ## 10. `ScratchDir::drop` cannot tell you it failed — and on Windows nothing else can either
 

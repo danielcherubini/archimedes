@@ -39,10 +39,10 @@
 # Prefixes therefore survive ONLY as the ATTRIBUTION table below (so a red sends
 # you to the right file), never as the filter.
 #
-# One filter DOES exist — the Darwin-only dotted-name exclusion further down — and
-# it is NOT the shape this section rejects. Read `exclusion_applies_here` for why a
-# SHAPE (contains a dot) has none of the allow-list's blindness and needs no
-# widening as daemons come and go.
+# Two filters DO exist — the Darwin-only shape exclusion further down — and
+# they are NOT the shape this section rejects. Read `exclusion_applies_here` for
+# why a SHAPE (the name contains a dot, OR the name contains no dash) has none of
+# the allow-list's blindness and needs no widening as daemons come and go.
 #
 # USAGE
 #   check-temp-dir-census.sh snapshot --state FILE [--base DIR]
@@ -234,7 +234,7 @@ unattributed_note() {
 }
 
 # ---------------------------------------------------------------------------
-# THE DOTTED-NAME EXCLUSION — DARWIN ONLY, A SHAPE, AND NEVER SILENT.
+# THE SHAPE EXCLUSION — DARWIN ONLY, TWO SHAPES, AND NEVER SILENT.
 #
 # WHY IT EXISTS. macOS gives every user a private temp dir
 # (`confstr(_CS_DARWIN_USER_TEMP_DIR)` → `/var/folders/nn/…/T`) that is NOT
@@ -261,6 +261,18 @@ unattributed_note() {
 # be one of ours, and the guard stays blind to nothing it could ever own. `check-temp-dir-census.test.sh`
 # case 18c asserts that invariant in the tree, so a minter that broke it reddens a
 # test rather than quietly becoming invisible.
+#
+# THE SECOND SHAPE, ADDED FOR ISSUE #139. The dotted shape is narrower than
+# "excludes macOS noise": a system daemon that happens to be DOT-FREE
+# (`betaenrollmentagent`) slips through it and hard-fails the macOS leg. The
+# second shape is its mirror — *do not count a candidate whose name contains no
+# dash* — and the same argument covers it: it needs no name list, and it cannot
+# hide one of ours, because every real `ScratchDir` name is `{prefix}{tag}-{uuid}`
+# with a non-empty uuid, so a dash terminates every name we can ever mint BY
+# CONSTRUCTION, and every minter prefix in this tree ends in a dash. Case 18c(2)
+# pins that corpus invariant, case 19 proves the pin has teeth, and case 18d
+# proves the shape fires. The two shapes are OR'd and each rests on its own
+# pinned invariant — neither is a wildcard, and neither is the rejected `*`.
 #
 # DO NOT MATCH `com.apple.*`. That is a NAME LIST — the exact rejected shape,
 # needing a diff every time Apple ships a new daemon, and silently blind to any
@@ -294,6 +306,29 @@ dotted_name() {
     *.*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# The SECOND shape: a name that contains NO dash anywhere. Why a shape and
+# not a name list is the header's argument — this needs no widening as daemons
+# arrive and go because it cannot match an Archimedes minter: every real
+# ScratchDir name is `{prefix}{tag}-{uuid}` (the naming contract on
+# `ScratchDir::in_dir`, re-pinned by the test
+# `the_guard_names_the_dir_after_the_prefix_and_tag_it_is_given`) with a
+# NON-EMPTY uuid, so a dash terminates every real name BY CONSTRUCTION — a
+# dash-free name is structurally impossible for us to own. The corpus pin
+# (`.test.sh` 18c(2)) asserts the same in the tree, so a minter that broke it
+# reddens a test instead of quietly becoming invisible. (This shape is
+# Darwin-only, exactly like the dotted shape: see `exclusion_applies_here`.)
+dash_free_name() {
+  # The negated-glob test, NOT a character class. `*[!-]*` matches any name
+  # with at least one non-dash character (i.e. everything — a tautology), and
+  # `*[!-]` still matches any name ENDING in a non-dash, which would swallow
+  # the planted `planted-darwin-leak-1a2b3c4d` (it ends in `d`) and break
+  # `.test.sh` case 18b. The property we need is "the name contains NO dash
+  # anywhere", which is exactly `[[ "$1" != *-* ]]`. Every Archimedes minter
+  # prefix ends in a dash, so a dash-free name cannot be one of ours (case
+  # 18c(2) pins that in the tree).
+  [[ "$1" != *-* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -669,17 +704,21 @@ run_verify() {
   local new
   new="$(new_names "$before" "$after")"
 
-  # THE DOTTED-NAME EXCLUSION (Darwin only — see the block above `exclusion_applies_here`
+  # THE SHAPE EXCLUSION (Darwin only — see the block above `exclusion_applies_here`
   # for why this is a SHAPE and not the rejected allow-list, and why Linux stays
-  # strict). Applied to the DELTA, BEFORE classification, so an excluded name can
-  # reach neither the strict list nor a tolerance count, and can never mask a
-  # dot-free leak.
+  # strict). TWO shapes, OR'd: a name that contains a dot (`dotted_name`, the
+  # reverse-DNS daemons), or a name that contains NO dash (`dash_free_name`, the
+  # dot-free daemon of issue #139 — `betaenrollmentagent`). Applied to the DELTA,
+  # BEFORE classification, so an excluded name can reach neither the strict list
+  # nor a tolerance count, and can never mask a name shaped like ours — every
+  # Archimedes name carries a dash (`{prefix}{tag}-{uuid}`), so neither shape can
+  # swallow one.
   local -a excluded=()
   if exclusion_applies_here && [[ -n "$new" ]]; then
     local counted="" cand
     while IFS= read -r cand; do
       [[ -z "$cand" ]] && continue
-      if dotted_name "$cand"; then
+      if dotted_name "$cand" || dash_free_name "$cand"; then
         excluded+=("$cand")
       else
         counted+="$cand"$'\n'
@@ -694,7 +733,7 @@ run_verify() {
   # and the count is what tells them the guard looked and set something aside.
   local excluded_note=""
   if (( ${#excluded[@]} > 0 )); then
-    excluded_note="$(printf 'excluded: %s dotted-name dir(s) in %s — macOS system daemons share the per-user TMPDIR; no Archimedes minter name contains a dot (#96)\n' "${#excluded[@]}" "$base")"
+    excluded_note="$(printf 'excluded: %s shape-mismatched dir(s) in %s — macOS system daemons share the per-user TMPDIR; no Archimedes minter name contains a dot or a dash (#96)\n' "${#excluded[@]}" "$base")"
   fi
 
   # Classify: the STRICT count comes from names matching NO tolerance row,
@@ -1180,7 +1219,7 @@ run_self_test() {
     self_mk -p "$root_canonical/darwin-base/com.apple.Maps.mapssyncd"
     self_status=0
     self_output="$(env TMPDIR= ARCHIMEDES_CENSUS_UNAME_S=Darwin "$script" verify --state "$root_canonical/darwin-state.txt" --base "$root_canonical/darwin-base" 2>&1)" || self_status=$?
-    if [[ "$self_status" == "0" && "$self_output" == *"census clean"* && "$self_output" == *"excluded: 1 dotted-name dir(s)"* ]]; then
+    if [[ "$self_status" == "0" && "$self_output" == *"census clean"* && "$self_output" == *"excluded: 1 shape-mismatched dir(s)"* ]]; then
       self_ok "on DARWIN a dotted daemon dir is excluded, and the exclusion is PRINTED"
     else
       self_fail "on DARWIN a dotted daemon dir is excluded and the exclusion is printed" "exit $self_status: $self_output"
@@ -1190,7 +1229,7 @@ run_self_test() {
     self_mk -p "$root_canonical/darwin-base/planted-darwin-leak-1"
     self_status=0
     self_output="$(env TMPDIR= ARCHIMEDES_CENSUS_UNAME_S=Darwin "$script" verify --state "$root_canonical/darwin-state.txt" --base "$root_canonical/darwin-base" 2>&1)" || self_status=$?
-    if [[ "$self_status" == "1" && "$self_output" == *"planted-darwin-leak-1"* && "$self_output" == *"excluded: 1 dotted-name dir(s)"* ]]; then
+    if [[ "$self_status" == "1" && "$self_output" == *"planted-darwin-leak-1"* && "$self_output" == *"excluded: 1 shape-mismatched dir(s)"* ]]; then
       self_ok "on DARWIN a dot-free directory is still reported (the exclusion is a shape, not a wildcard)"
     else
       self_fail "on DARWIN a dot-free directory is still reported" "exit $self_status: $self_output"

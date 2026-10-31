@@ -441,17 +441,61 @@ These are properties of the repo, not of any branch:
   and failed once on `main` right after an unrelated merge. Same advice: re-run
   before investigating, and do not "fix" it by tightening or loosening the
   threshold, which only moves the flake.
+- **`scripts/check-temp-dir-census.test.sh` case 13 (`--self-test leaves the real
+  census base unchanged`) reddens on a loaded Linux box, and the assertion is
+  correct.** Its metric is `count_entries` — `find /tmp -mindepth 1 -maxdepth 1`,
+  **every** depth-1 entry, not just directories, so on a dev box it is in the
+  hundreds (~729 measured here) rather than the ~130 a directory-only count gives.
+  `/tmp` here is a **tmpfs** shared with everything else on the machine, so anything
+  else creating a temp dir mid-run legitimately violates the assertion. It moved
+  twice (686→683, 697→694) during a wave that ran three agents in one tree with two
+  cold `cargo build --all-targets` in flight — those two figures come from the agent
+  that hit them, not from a re-measurement, but their magnitude agrees with the ~729
+  above, so they are the same metric. On a quiet box the count was stable at 729
+  across six samples. So re-run before investigating, and do not "fix" it by
+  loosening the assertion — the churn is a real violation, and CI's `/tmp` does not
+  churn. If it ever bites CI, the honest fix is a dedicated temp root for the census,
+  not a wider tolerance.
 - **Plans carry stale baselines within hours** on a busy branch: re-measure test
   counts at your own HEAD rather than trusting the plan's.
 - **Never `rm -rf docs/roadmap/`.** The directory is gitignored (`.gitignore:31`)
-  but it is not uniformly disposable: two files in it ARE tracked
-  (`git ls-files docs/roadmap/` returns exactly the two `*-follow-ups.md` docs
-  today), and the untracked ones are unrecoverable — no `git checkout`, no
-  stash, no dangling blob, because git never held them. Delete a shipped plan
-  family by explicit pathspec and print the match list before the `rm`, with the
-  count reconciled. The `finish` skill's cleanup loop already does this right —
-  it names `${FEATURE_NAME}`-prefixed files only — so the failure mode is
-  deviating from it, not the skill.
+  but it is not uniformly disposable: some files in it ARE tracked — run
+  `git ls-files docs/roadmap/` and expect a MOVING number, not a fixed one,
+  because a roadmap run force-adds its plan family (`-status`, `-taskNN`,
+  `-ground-*`) through that ignore rule, so the tracked set grows during a run
+  and shrinks again when `finish` deletes it — and the untracked ones are
+  unrecoverable — no `git checkout`, no stash, no dangling blob, because git
+  never held them. Delete a shipped plan family by explicit pathspec and print
+  the match list before the `rm`, with the count reconciled. The `finish`
+  skill's cleanup loop already does this right — it names
+  `${FEATURE_NAME}`-prefixed files only — so the failure mode is deviating from
+  it, not the skill.
+- **`git check-ignore <path>` exits 1 for a path that is already TRACKED, and that
+  reads exactly like "the ignore rule is gone".** Measured live: an agent verifying
+  `docs/roadmap/` ran it, got exit 1, and reported "docs/roadmap/ is NOT gitignored" —
+  while `git check-ignore --no-index -v` prints `.gitignore:31:docs/roadmap/` and exits
+  0. Roadmap plan families enter git via `git add -f`, so every one of them is in the
+  index, so the naive form reports nothing for all of them. The wrong conclusion is
+  expensive here specifically: it makes the bullet above sound stale and the unrecoverable
+  files look recoverable. Trust the `--no-index` form.
+- **`docs/roadmap/`'s ignored files do not appear in
+  `git ls-files --others --exclude-standard` — use `--others --ignored --exclude-standard`
+  to see them.** A count built with `--exclude-standard` reports 0 untracked in a directory
+  whose every untracked file is ignored by construction, which is the same false "nothing
+  to lose" reading as the bullet above, reached from the other direction. Measured at the
+  #139/#138 ship: `--exclude-standard` said 0, `--ignored` named
+  `issue-91-fetch-hidden-window-follow-ups.md`, and `git log --all` on that path is empty —
+  git has never held it.
+- **The `docs/features/` front-matter does not parse as strict YAML** — the multi-line
+  `verified-by:` value is missing its `|`/`>` block-scalar indicator, so PyYAML raises a
+  `ParserError`. Two agents on unrelated files hit it independently and both confirmed it
+  fails identically *before* their edit: it is pre-existing across these docs, not
+  something a branch introduced. Harmless today because nothing parses those fields
+  programmatically — the one test that reads `docs/features/` is
+  `src/lib/subagentSheetLayout.test.ts`, and it reads the body, not the front-matter. It
+  becomes real work the moment a docs linter, staleness bot, or generated index reads
+  `status:` / `last-verified:` / `verified-by:` with a parser, and then it should be one
+  sweep across `docs/features/`, not a per-visit fix.
 - **Two files in `docs/roadmap/` have no durable copy in git** (measured, not
   assumed): `permissions-section.md` is issue #112's approved spec and its only
   in-repo copy — recover it from #112's issue comments, which mirror it — and
