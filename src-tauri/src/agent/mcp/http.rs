@@ -1173,4 +1173,111 @@ mod tests {
             );
         }
     }
+
+    /// The `Bearer` prefix ON THE WIRE for a static-header auth spec. Every
+    /// other test here runs `AuthSpec::None` or `AuthSpec::OAuth`, so nothing
+    /// pinned that the `format!("Bearer {t}")` built at connect time (`:86`)
+    /// actually lands as an `Authorization` request header (`:157` in
+    /// `send_request`, `:281` in `send_notification`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn http_bearer_prefix_on_the_wire_for_a_static_header_spec() {
+        // A literal token (NOT the `env_var` branch — that is a connect-time
+        // resolution decision, not a wire byte, and is out of scope here; and
+        // NOT the OAuth path, which is `http_401_on_an_oauth_server_is_needs_auth`'s
+        // territory).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the listener binds");
+        let addr = listener.local_addr().expect("the listener has an address");
+        let handler: Arc<Mutex<TestHandler>> = Arc::new(Mutex::new(json_handler("")));
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let server = http_server(listener, handler, recorded.clone());
+        let mut client = HttpClient::connect(
+            &http_def(
+                &format!("http://{addr}/mcp"),
+                AuthSpec::Bearer {
+                    token: Some("s3cr3t-token".to_string()),
+                    env_var: None,
+                },
+            ),
+            Duration::from_secs(5),
+            &cancel(),
+            None,
+        )
+        .await
+        .expect("the handshake completes");
+        let _ = client
+            .list_tools(&cancel())
+            .await
+            .expect("tools/list answers");
+        let _ = client
+            .call_tool("echo", &json!({ "text": "auth" }), &cancel())
+            .await
+            .expect("tools/call answers");
+        let headers = recorded.lock().unwrap().clone();
+        server.abort();
+        // 3 id-bearing requests + the `notifications/initialized` notification
+        // — the pin below covers ALL of them, so a leak on ANY request fails.
+        assert!(
+            headers.len() >= 3,
+            "the handshake + the notification + tools/list + tools/call were recorded, got {}",
+            headers.len()
+        );
+        // The `initialize` request (index 0) carries the prefix. Compared on the
+        // LOWERCASED header line (the session-id test's pattern at :605-610):
+        // the header NAME's casing on the wire is reqwest's, and the compare
+        // pins the `bearer ` PREFIX + the token, not reqwest's spelling.
+        let initialize = headers[0].to_lowercase();
+        assert!(
+            initialize.contains("authorization: bearer s3cr3t-token"),
+            "the initialize request carries `Authorization: Bearer <token>` on the wire, got:\n{}",
+            headers[0]
+        );
+        // EVERY request of the connection carries it (the header is fixed at
+        // connect time and re-attached per request — `:152-157` and the
+        // notification's identical path at `:276-282`).
+        for (i, h) in headers.iter().enumerate() {
+            assert!(
+                h.to_lowercase()
+                    .contains("authorization: bearer s3cr3t-token"),
+                "request {i} also carries the `Bearer` prefix, got:\n{h}"
+            );
+        }
+
+        // ── the negative control: `AuthSpec::None` sends NO `Authorization` ──
+        // Its OWN server + client (a fresh connection, so the recorder can only
+        // hold this client's bytes).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the listener binds");
+        let addr = listener.local_addr().expect("the listener has an address");
+        let handler: Arc<Mutex<TestHandler>> = Arc::new(Mutex::new(json_handler("")));
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let server = http_server(listener, handler, recorded.clone());
+        let mut client = HttpClient::connect(
+            &http_def(&format!("http://{addr}/mcp"), AuthSpec::None),
+            Duration::from_secs(5),
+            &cancel(),
+            None,
+        )
+        .await
+        .expect("the handshake completes");
+        let _ = client
+            .list_tools(&cancel())
+            .await
+            .expect("tools/list answers");
+        let headers = recorded.lock().unwrap().clone();
+        server.abort();
+        assert!(
+            headers.len() >= 2,
+            "the unauthenticated connection recorded its requests, got {}",
+            headers.len()
+        );
+        for (i, h) in headers.iter().enumerate() {
+            assert!(
+                !h.to_lowercase().contains("authorization:"),
+                "an `AuthSpec::None` connection sends NO `Authorization` header at all, but request {i} carries one:\n{h}"
+            );
+        }
+    }
 }
