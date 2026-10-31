@@ -107,8 +107,8 @@ planners could overlap the implementers.
 
 | # | Task | Area | Plan file | Wave | Owns (file set — disjointness evidence) | Status |
 |---|------|------|-----------|------|------------------------------------------|--------|
-| A1 | Extend the Darwin temp-dir exclusion to a second shape that cannot match an Archimedes minter prefix, re-pin the self-test's no-dot invariant case (18c) to cover it, and correct §9a (option (b) is already implemented; add the second `betaenrollmentagent` occurrence) — #139 | temp-dir-census | `docs/roadmap/macos-ci-flakes-task01-census-darwin-shape.md` | 1 | `scripts/check-temp-dir-census.sh`, `scripts/check-temp-dir-census.test.sh`, `docs/features/issue-96-temp-dir-known-gaps.md` | `todo` |
-| A2 | Route the un-pollled child-transcript row-count read in `subagent_dispatch_end_to_end_real_workers` through the file's existing `wait_for_rows` helper, keeping the exact-count assert so a genuinely missing row still fails on timeout — #138 | worker-e2e | `docs/roadmap/macos-ci-flakes-task02-poll-child-transcript-read.md` | 1 | `src-tauri/tests/worker_e2e.rs` | `todo` |
+| A1 | Extend the Darwin temp-dir exclusion to a second shape that cannot match an Archimedes minter prefix, re-pin the self-test's no-dot invariant case (18c) to cover it, and correct §9a (option (b) is already implemented; add the second `betaenrollmentagent` occurrence) — #139 | temp-dir-census | `docs/roadmap/macos-ci-flakes-task01-census-darwin-shape.md` | 1 | `scripts/check-temp-dir-census.sh`, `scripts/check-temp-dir-census.test.sh`, `docs/features/issue-96-temp-dir-known-gaps.md` | `done` `c419e1f` |
+| A2 | Route the un-pollled child-transcript row-count read in `subagent_dispatch_end_to_end_real_workers` through the file's existing `wait_for_rows` helper, keeping the exact-count assert so a genuinely missing row still fails on timeout — #138 | worker-e2e | `docs/roadmap/macos-ci-flakes-task02-poll-child-transcript-read.md` | 1 | `src-tauri/tests/worker_e2e.rs` | `done` `570b465` |
 
 **Constraint on A1 that outranks any plan's preference:** do **not** widen the tolerance table. §9a states the
 rule verbatim — tolerances are earned by measurement of *our* leak, and a `betaenrollmentagent*` row would let a
@@ -132,4 +132,64 @@ Empty.
 
 ## Changelog
 
-(empty — no task has shipped)
+### Wave 1 gate and task rows
+
+**Wave 1 gate, integrated tree at `90cce0d`** (fan-in of `c419e1f` + `570b465`; disjoint ownership confirmed by
+`comm -12` on the two `git diff --name-only` lists → zero overlap, `merge-tree --write-tree` exit 0):
+census self-test `all checks passed` · script `--self-test` `all cases behaved (the guard has teeth)` ·
+`bash -n` both scripts clean · `ci.yml` byte-identical to `60470d2` · `cargo build --all-targets` ok ·
+`cargo test` **1652 passed / 0 failed / 1 ignored** (lib) and **`worker_e2e` 7 passed / 0 failed** (was 6 —
+the guard is a new test, named in output) · `cargo clippy --all-targets` 0 warnings **and** the CI form
+`-- -D warnings` exit 0 · `cargo fmt --check` and `--all` clean · `pnpm test` **157 files / 3318 passed /
+1 skipped** (identical to baseline) · `pnpm build` ok.
+
+- **A1 `done` `c419e1f`** — `dash_free_name()` (`[[ "$1" != *-* ]]`) added beside `dotted_name()`, Darwin-only,
+  message token `dotted-name` → `shape-mismatched` across all five pins, new cases **18d** (plants
+  `betaenrollmentagent` on injected Darwin → exit 0 + `excluded: 1 shape-mismatched dir(s)`) and **19**
+  (the guard's teeth: an injected dash-free literal in a synthetic corpus must trip FAIL), **18c** re-expressed
+  pipe-safe and **18c(2)** added as the no-dash twin. Tolerance table untouched (still the one
+  `harness-subagent-<TAB>1` row). Gate at that moment: `all checks passed` / `all cases behaved`.
+- **A2 `done` `570b465`** — the child read is now `wait_for_rows(&h.db, &child_id, 3).await` with the exact-count
+  assert kept verbatim, plus guard `direct_native_transcript_reads_are_capped_at_three_sites`. Child measured the
+  guard RED at 4 hits before the conversion and GREEN at 3 after, and proved the count is measured not assumed by
+  temporarily expecting 99 and reading back `left: 3`. Gate at that moment: 7 passed in the target, 0 clippy
+  warnings, fmt clean.
+
+### Vet rounds (a `vetted` row requires its line)
+
+- **A1 vet round 1 → FINDINGS (3 blockers, 3 majors, 3 minors).** Blockers: the invariant pipelines could not go red (pipe-tail `grep -q .` under the harness's own `set -o pipefail` — `grep -q` exits 0 on the first match, SIGPIPEs `sort -u`, and pipefail folds the 141 into the `if` condition, so an injected dash-free prefix silently GREENED the guard); Step 3's token rename reded five fixture pins that no step edited; C1 claimed a dot-free+dash-free Darwin exclusion that no case planted. Planner refined the same file.
+- **A1 vet round 2 → APPROVE.** The reviewer measured the closure rather than reading it: broken idiom FALSE GREEN 5/5 vs fixed idiom RED 5/5 on a 620 KB corpus; `grep -rn 'dotted-name dir(s)'` returns exactly five pins (`.test.sh:446`, `.test.sh:462`, `.sh:1183`, `.sh:1193`, doc `:194`) — no sixth; and the planned 18d fixture run against the UNMODIFIED script exits 1 naming `betaenrollmentagent` UNATTRIBUTED, exactly the red Step 1 predicts.
+- **A2 vet round 1 → APPROVE.** The proposed call is not novel — `let child_rows = wait_for_rows(&h.db, &child_id, 2).await;` already exists in the converted sibling test, so `&h.db` → `&Db` and `&child_id` → `&str` are proven coercions. Guard occurrence count grep-verified 4 → 3; the split needle defeats self-matching; `env!("CARGO_MANIFEST_DIR")` is compile-time, so the path is CWD-independent. Two nits: `use …Db` is at line 32 not 27, and the hand-copied `1652` baseline is not in the grounding — re-derive at run time, do not treat it as a contract. (A third nit raised there — "helper closes at 290 not 292" — was itself WRONG: the implementer checked, 292 is correct and 290 is the `sleep` line. Do not repeat it.)
+
+### Findings the children raised, and how the orchestrator adjudicated them
+
+- **A1 child reported "`docs/roadmap/` is NOT gitignored" — WRONG, and the reason is worth keeping.** It ran
+  `git check-ignore` and got exit 1. Plain `git check-ignore` reports *nothing* for a path already in the index,
+  which reads as "not ignored"; `git check-ignore --no-index -v` prints `.gitignore:31:docs/roadmap/` correctly.
+  The directory is ignored, and files enter it only via `git add -f` — which is what this run did, matching every
+  prior roadmap run in `git log`. **`AGENTS.md`'s "never `rm -rf docs/roadmap/`" bullet stays true.**
+- **Its companion finding is true and accepted:** force-adding the plan means the issue's run ids
+  (`41188776833`, `124501049035`) and `excluded: 5` ARE grep-able in the repo — inside the plan file only. Outside
+  `docs/roadmap/` the vet's "zero hits" holds, and the durable §9a text attributes them to #139 as unmeasured.
+  The plan is deleted on ship, so the residue is not permanent.
+- **A2 child corrected the vet's nit — the vet was wrong.** `wait_for_rows`'s closing brace is at **292**, not 290
+  (290 is the `sleep` line); the plan's own "281–292" was right. Cosmetic; the implementer had already anchored on
+  landmark text.
+- **A2 child found two real plan defects, both gate-breaking:** the plan's "insert verbatim" guard snippet produced
+  **6 × `clippy::doc_lazy_continuation`** warnings (a prose paragraph after a `/// 1./2./3.` doc list) — and CI runs
+  `-D warnings`, so the plan as literally specified would have reddened CI — and was not rustfmt-clean
+  (`cargo fmt --check` failed on the `concat!(env!(…), …)` block). Fixed with tool-suggested formatting only: a
+  blank `///` line, and rustfmt's own collapse. No change to semantics, needle, or counted occurrences.
+  **Lesson for the next wave: a plan that quotes insertable Rust has to be clippy-and-fmt clean itself; a vet that
+  reads the snippet rather than compiling it cannot catch this.**
+- **A1 child flagged an environmental flake, not a regression:** `.test.sh` case 13 (`--self-test leaves the real
+  census base unchanged`) intermittently reddens here because this box's `/tmp` churns (686→683, 697→694) while
+  nothing runs. Present at baseline too; it passed 3/3 and on the wave gate. CI's `/tmp` should not churn. Recorded
+  so a future reader does not blame `c419e1f`.
+- **A1 child found Step 2's red list under-stated:** the token rename also reds case 13's `--self-test exits 0`,
+  because case 13 runs the script's own self-test and Case 14's red propagates. Deterministic, closed at Step 3.
+
+### Nits handed to the implementers (from the vets, non-blocking)
+
+- **A1**: the plan cites `test_support.rs:211` / `:533` for the `{prefix}{tag}-{uuid}` contract and its re-pinning test — the real lines are **212** and **537** (`:207` doc comment is correct). Landmark names in the plan are greppable, so cite the fn name `the_guard_names_the_dir_after_the_prefix_and_tag_it_is_given` rather than the digits. Also: `grep -rn 'dotted-name'` hits the printf producer at `.sh:697` and the 18c message lines at `.test.sh:472/476` in addition to the five pins — Step 6's final-grep expectation already accounts for those, do not treat them as missed pins.
+- **A2**: keep the assert message verbatim; anchor on landmark text, not the plan's line numbers.
