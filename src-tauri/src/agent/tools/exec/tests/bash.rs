@@ -907,11 +907,21 @@ async fn bash_an_inline_quoted_path_still_takes_the_branch() {
 /// showed up OUTSIDE it, that listing is what tells us `start` changed the working directory — a
 /// different finding, but an equally useful one.
 ///
-/// THE THIRD ASSERTION NEVER ASSERTS `is_error`. If the captured text carries one of the issue's two
-/// sentences, the result must not present as a clean success with an EMPTY body. Turning an
-/// exit-0-with-error-text run into `is_error` would be a `bash_exit_report` change (its
-/// `(Some(n), None)` arm — "a normal non-zero exit needs no note — the code IS the report") and is
-/// explicitly OUT OF SCOPE here.
+/// THIS TEST MAKES TWO ASSERTIONS, NOT THREE — the third one that used to sit here is DELETED, and
+/// the reason is worth keeping so nobody re-adds it. It read
+/// `if text.contains(X) { assert!(!text.trim().is_empty() && text.contains(X)) }`, and a guard of
+/// that shape CANNOT FAIL: `text.contains(X)` is the condition that PRODUCED `X`, and a text holding
+/// a non-empty sentence is non-empty, so both halves of the body were true by construction on every
+/// path — including the `None` path, which skipped the body outright. It looked like coverage and
+/// asserted nothing. The claim it gestured at — that our layer does not swallow one of the issue's
+/// error sentences — is real and worth pinning, but the only honest way to pin it is to construct a
+/// run whose text is KNOWN to carry the sentence, so the assertion is checked against something the
+/// output scan did not supply. That needs no Windows at all, so the claim now lives in the
+/// cross-platform [`the_bash_tool_passes_issue_79_error_sentences_through_verbatim`], which runs on
+/// Linux and macOS as well as on CI's Windows leg. Like this test, that one deliberately does NOT
+/// assert `is_error`: turning an exit-0-with-error-text run into an error would be a
+/// `bash_exit_report` change (its `(Some(n), None)` arm — "a normal non-zero exit needs no note — the
+/// code IS the report") and is explicitly OUT OF SCOPE on both sides of the move.
 ///
 /// ⚠ `#[cfg(windows)]`, and BOTH OUTCOMES ON CI ARE FINDINGS — a later reader must not "fix" a red
 /// run of this test. Locally the ceiling is `cargo check --target x86_64-pc-windows-gnu
@@ -982,21 +992,6 @@ async fn bash_start_b_does_not_report_success_without_starting_something() {
              nothing: CONTENTS={contents:?}"
         );
     }
-
-    // 3. The error text is never swallowed. NOT an `is_error` assertion: promoting an
-    //    exit-0-with-error-text run to an error is a `bash_exit_report` change, out of scope.
-    let reported = ["being used by another process", "Access is denied"]
-        .into_iter()
-        .find(|sentence| text.contains(sentence));
-    if let Some(sentence) = reported {
-        assert!(
-            !text.trim().is_empty() && text.contains(sentence),
-            "issue #79's own sentence appeared in this run, so the result must not present as a \
-             clean success with an empty body — the sentence has to survive to the model: \
-             LOOKING_FOR={sentence:?} TEXT={text:?} DETAILS={:?}",
-            r.details,
-        );
-    }
 }
 
 /// (issue #79 residual (a), the WIRING) The pure translator is pinned by
@@ -1038,6 +1033,126 @@ async fn a_run_whose_text_carries_the_cmd_redirect_error_gets_the_diagnostic_as_
         text.contains("\nERROR: Input redirection is not supported"),
         "the captured text is kept (never replaced) and still starts its own line after the \
          diagnostic: {text:?}"
+    );
+}
+
+/// (issue #79 residual R1, the claim the false success actually violates) When a command's output
+/// CARRIES one of #79's error sentences, `exec_bash` must pass it through to the model INTACT. The
+/// false success was never only a wrong number: `exitCode: 0` told the agent the build had started,
+/// and `Access is denied.` was the only thing in the result that said otherwise — so if our layer
+/// swallowed that sentence, the model would have NOTHING to disbelieve the code with. The model must
+/// be able to SEE the error. THIS is the pin for that.
+///
+/// IT REPLACED A VACUOUS BLOCK. The `#[cfg(windows)]`
+/// [`bash_start_b_does_not_report_success_without_starting_something`] used to carry a third
+/// assertion shaped `if text.contains(X) { assert!(!text.trim().is_empty() && text.contains(X)) }`.
+/// A guard of that form CANNOT FAIL: `text.contains(X)` is the condition that PRODUCED `X`, and a
+/// text containing a non-empty sentence is non-empty — so the body was true by construction on every
+/// path, including the `None` path that skips it entirely. It read like coverage and asserted
+/// nothing. The only honest way to pin "our layer does not swallow the error sentence" is to
+/// construct a run whose text is KNOWN to carry it, which needs no Windows at all — so the claim
+/// moved HERE, where the input is built independently of the output scan and the assertion can
+/// therefore be false.
+///
+/// UNLIKE THE `start /B` TEST, THIS RUNS ON EVERY PLATFORM — Linux and macOS included, not only on
+/// CI's `windows-latest` leg. It is UNGATED, mirroring its precedent
+/// [`a_run_whose_text_carries_the_cmd_redirect_error_gets_the_diagnostic_as_its_first_line`], which
+/// is ALSO ungated (its doc says so on purpose: the wiring in `exec_bash` it pins is not `cfg`-gated,
+/// so it must not rest on a CI-only test). That precedent's technique is what this copies: have the
+/// CHILD EMIT the exact sentence from a plain print command, so the test runs on a host that has no
+/// `cmd.exe` and needs no `cmd` behaviour beyond "a shell prints what it is told to print".
+///
+/// ONE DELIBERATE DIFFERENCE FROM THE PRECEDENT, AND IT IS THE PORTABILITY HALF: the precedent
+/// emits with `printf`, which is a `sh` builtin and NOT a `cmd` builtin, so its Windows leg rides on
+/// whatever `printf.exe` happens to be on that runner's PATH. This test emits with `echo`, which is a
+/// builtin on BOTH shells (`sh -c` on Unix, `cmd /d /s /c` on Windows), and both sentences are
+/// metacharacter-free on both — no `&`, `|`, `<`, `>`, `(`, `)`, `^`, `%`, `$` or backtick — and
+/// carry NO QUOTES AT ALL, so nothing here depends on how `childproc::append_cmd_c` treats an
+/// embedded `"`. Two `echo`s joined by `&&` therefore print the same two bytes on both platforms, and
+/// the test needs no gate. (The precedent stays as it is; fixing its emission is not this claim.)
+///
+/// WHY EVERY ASSERTION BELOW IS NECESSARY, and what each one rules out:
+/// - exit 0 + `!is_error` reproduces #79's EXACT shape — an error sentence riding on a clean
+///   success. Without this pairing the text pin would be testing the wrong run: a NON-zero run's text
+///   arriving intact says nothing about the case where the code is the only thing that lied.
+/// - the two sentences arrive as the WHOLE body, in order: line 1 is the first sentence and there
+///   are exactly two lines. Line 1 is what rules out the one thing that inserts in front of captured
+///   text — `cmd_input_redirection_diagnostic`'s prepend, which keys on `ERROR: Input redirection is
+///   not supported`, a sentence this run does not carry, and which would have displaced line 1 while
+///   leaving both `contains` checks green. "Exactly two lines" is what rules out anything APPENDED —
+///   an exit-report note in particular — and together the two pins say the captured bytes survived the
+///   100 KB cap and the lossy UTF-8 conversion as the exact body, not merely present somewhere in it.
+///
+/// NOT AN `is_error` ASSERTION, and deliberately so: promoting an exit-0-with-error-text run to an
+/// error is a `bash_exit_report` change (its `(Some(n), None)` arm — "a normal non-zero exit needs no
+/// note — the code IS the report") and is out of scope. This test makes NO claim about what the tool
+/// should CONCLUDE from the sentence, only that the sentence ARRIVES.
+#[tokio::test]
+async fn the_bash_tool_passes_issue_79_error_sentences_through_verbatim() {
+    let cwd = temp_cwd("bash-issue-79-verbatim");
+    // Both sentences #79 quotes, verbatim, from the shell's own `echo` — a builtin on `sh` AND on
+    // `cmd`, so this needs no `cmd.exe`, no `printf.exe`, no third-party tool and no `cfg` gate. No
+    // quotes anywhere in the command: the sentences carry none, and an embedded `"` would move the
+    // claim from "does our layer swallow the text" to "how does `append_cmd_c` escape a quote",
+    // which [`bash_passes_inline_double_quotes_through_to_cmd_verbatim`] already owns.
+    const LOCKED: &str =
+        "The process cannot access the file because it is being used by another process";
+    const DENIED: &str = "Access is denied";
+    let r = execute_tool(
+        &ctx(&cwd),
+        "bash",
+        &json!({ "command": format!("echo {LOCKED} && echo {DENIED}") }),
+    )
+    .await;
+    let text = text_of(&r);
+
+    // 1. THE #79 SHAPE: an error sentence riding on a CLEAN success. This is the half that makes the
+    //    text pin test the RIGHT run — on a non-zero run, "the text survived" would say nothing about
+    //    the case where the code was the only thing that lied.
+    assert!(
+        !r.is_error,
+        "the run must be a clean success for this to be #79's shape — the whole point is that the \
+         TEXT is the only evidence of a problem: TEXT={text:?} DETAILS={:?}",
+        r.details
+    );
+    assert_eq!(
+        r.details.as_ref().unwrap()["exitCode"], 0,
+        "`echo` exits 0 on both shells, so the exit code is the lying half of the pair: DETAILS={:?}",
+        r.details
+    );
+
+    // 2. THE CLAIM ITSELF, once per sentence, asserted against constants written here and NOT read
+    //    out of the output (that independence is what makes this falsifiable, and what the deleted
+    //    block could not have).
+    assert!(
+        text.contains(LOCKED),
+        "issue #79's file-lock sentence must reach the model VERBATIM — swallowed by truncation, by \
+         a replacement, or by any rewrite of the captured text, it is the one thing that contradicts \
+         the exit 0 above: LOOKING_FOR={LOCKED:?} TEXT={text:?} DETAILS={:?}",
+        r.details
+    );
+    assert!(
+        text.contains(DENIED),
+        "issue #79's `Access is denied.` sentence must reach the model VERBATIM for the same reason: \
+         LOOKING_FOR={DENIED:?} TEXT={text:?} DETAILS={:?}",
+        r.details
+    );
+
+    // 3. THE BODY IS EXACTLY THOSE TWO SENTENCES, IN THAT ORDER, AND NOTHING ELSE. Line 1 rules out
+    //    the one thing in `exec_bash` that inserts BEFORE captured text (the diagnostic prepend, which
+    //    keys on a sentence this run does not carry — and which would have displaced line 1 while
+    //    leaving both `contains` checks above green); the line COUNT rules out anything APPENDED, an
+    //    exit-report note included, so assertion 1's "clean success" claim is checked on the text axis
+    //    too and not only on `is_error`.
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines,
+        vec![LOCKED, DENIED],
+        "the two sentences ARE the model-facing body, in order: nothing prepended, nothing appended, \
+         nothing blanked or truncated (this is the assertion the deleted vacuous block could not be, \
+         because the expected value here was written before the run and not read out of it): \
+         TEXT={text:?} DETAILS={:?}",
+        r.details
     );
 }
 
