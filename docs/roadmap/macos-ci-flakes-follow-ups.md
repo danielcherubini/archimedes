@@ -113,6 +113,51 @@ attributes the 3→5 movement to the issue explicitly as *not measured here*.
 **Why accepted.** A plan is a working document; the vet's requirement was that the **doc** not launder issue
 numbers into measured facts, and it does not. The plan is deleted on ship, so the residue is temporary by design.
 
+## 8. The `docs/features/` front-matter does not parse as YAML — `recorded, not open work`
+
+**What.** Two independent agents, working on two different files in the review round, both reported that this doc's
+front-matter fails a strict YAML parse: the `verified-by:` value is a multi-line block that is missing its `|` or `>`
+block-scalar indicator, so PyYAML raises a `ParserError`. Both confirmed it fails **identically before their edit** —
+it is pre-existing, not introduced by this branch, and this branch left it as it found it.
+
+**Why it is not open work here.** Nothing in the repo parses these fields programmatically today: the fields are read
+by humans and by agents, and the one test that reads `docs/features/`
+(`src/lib/subagentSheetLayout.test.ts`) does not parse front-matter. Fixing it is a one-character change that would
+touch the front-matter of an unknown number of sibling docs, which is a different slice from two macOS flakes.
+
+**When it becomes real work:** the moment anything starts reading `status:` / `last-verified:` / `verified-by:` with a
+YAML parser — a docs linter, a staleness bot, a generated index. At that point every doc with a multi-line
+`verified-by` needs the block indicator, and it should be done as one sweep across `docs/features/`, not per-visit.
+
+## 9. The read-discipline guard covers one file — `recorded, not open work`
+
+**What.** `direct_native_transcript_reads_are_capped_at_three_sites` enforces "row-count reads must poll" inside
+`src-tauri/tests/worker_e2e.rs` only. It reads that one path, and `wait_for_rows` is a private helper of it.
+
+**What the review settled, so nobody re-opens it.** The reviewer read the three same-class reads elsewhere —
+`src-tauri/tests/ipc.rs` (two sites) and `src-tauri/tests/session_native.rs` (one) — and found each one synchronises
+on an **in-process** writer and asserts **presence, not a count**. None can flake by #138's mechanism (cross-process
+writer + exact-count assert). **They are legal and are not latent #138s — do not open an issue to "fix the remaining
+sites".** The orchestrator raised that exact framing in the review brief and the reviewer killed it with the code.
+
+**The residual, and why it is not worth doing now.** A future *row-count* read added to `ipc.rs` or
+`session_native.rs` would be unguarded. Sharing the helper and its guard across those files means promoting a private
+test helper to a shared module for a failure mode that does not currently exist in those files. The honest trade is to
+leave it: if a count-read flake ever appears in one of them, that is the moment to share the helper, and the guard
+comes with it.
+
+## 10. `--self-test` Case 13 has no dash-free Linux arm — `accepted`
+
+**What.** Case 17b (`.test.sh`) pins that the dash-free shape is Darwin-only, and it runs in the `scripts` job. The
+script's own `--self-test` Case 13 — which CI invokes on the macOS runner too — plants only a **dotted** dir, so the
+Darwin leg's own self-test pins the Darwin-scoping of the dotted shape only.
+
+**Why accepted.** Case 17b covers it on the Linux harness, so this is belt-and-braces, not a hole; and Case 14's
+dashed negative arm already pins "the exclusion is a shape, not a wildcard" for the OR'd pair. The A1 implementer
+recommended the extra arm (~6 lines, Case 13 already has the Linux scaffold) and correctly did not do it, because
+`scripts/check-temp-dir-census.sh` was outside its owned file set. Do it next time Case 13 is touched, not as a
+standalone change.
+
 ## Fold list — what must survive the deletion of this directory
 
 | Item | Durable home | State |
@@ -121,3 +166,5 @@ numbers into measured facts, and it does not. The plan is deleted on ship, so th
 | Cross-process transcript-read mechanism, and the rule that row-count reads poll | already in `src-tauri/tests/worker_e2e.rs` comments (both the converted sibling's and A2's) | **folded by A2** |
 | Items 1, 4, 6, 7 above | reasoning already in code comments / `AGENTS.md` | no fold needed |
 | Items 2, 3, 5 | verification task (§3), and a skills-level lesson (§5) | §3 is open work on CI; §5 belongs to the skills |
+| Item 4 (ADR 0078 still said one shape) | `docs/decisions/0078-…md`, amended in place per ADR 0023's nested-note convention | **folded by the review loop** |
+| Items 8, 9, 10 | pre-existing quirk / settled non-issue / deferred belt-and-braces | no fold needed — recorded here and re-derivable |
