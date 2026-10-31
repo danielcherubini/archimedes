@@ -847,6 +847,158 @@ async fn bash_an_inline_quoted_path_still_takes_the_branch() {
     );
 }
 
+/// (issue #79 residual R1, the contract the false success VIOLATED) A backgrounded launch that
+/// reports a clean success must have ACTUALLY STARTED something. Mechanism-free on purpose: it
+/// claims nothing about who holds a file lock, only about the observable pairing of a reported
+/// success with evidence of a start.
+///
+/// WHY THIS EXISTS AND THE TEST ABOVE DOES NOT COVER IT: [`bash_an_inline_quoted_path_still_takes_the_branch`]
+/// pins the same "the exit code is the thing that lies" shape on the QUOTING path. Nothing pinned
+/// the BACKGROUNDED LAUNCH itself — `start /B prog.bat`, the command the issue names verbatim and
+/// the symptom the issue says must NOT be closed by the quoting fix. This test is also the repro
+/// harness §Gaps records as not existing ("whoever reproduces it on a real Windows box owns the
+/// question"): it is the first thing in this repo that drives `start /B` at all.
+///
+/// THE FIXTURE IS THE REPORTED COMMAND, NOT AN INVENTED ONE. `std::fs::write` drops a
+/// `marker.bat` that appends `RAN` to `marker.txt`, and the tool runs `start /B marker.bat` — the
+/// issue's `start /B prog.bat` shape with a name local to the scratch dir. `@echo off` keeps the
+/// echo of each command line out of the captured text. The line endings are EXPLICIT `\r\n`: a
+/// batch file with bare `\n` is not reliably parsed by `cmd`, so a LF-only fixture would be testing
+/// the parser instead of the launcher.
+///
+/// DO NOT ADD A `""` TITLE SLOT. The fixture is verbatim `start /B marker.bat` with NO quotes, so
+/// `start`'s "first quoted token is the window title" rule is not in play here at all. That trap is
+/// real — it is why the Windows `BASH_DESCRIPTION` (`agent/harness/tool_specs.rs`) tells the model
+/// never to pass `""` there — but prepending `""` "helpfully" would change WHAT THIS TEST MEASURES
+/// (it would exercise the title-slot path instead of the reported one). Keep the command byte-exact.
+///
+/// `/B` STAYS. `cmd /c start` with NO `/B` allocates its own console regardless of `CREATE_NO_WINDOW`
+/// (§6's standing caveat: a handle-ownership question, not another face of the window bug this doc
+/// is about), so dropping `/B` would both change what is measured and pop a window on the runner.
+///
+/// THE ASSERTION IS A MATERIAL IMPLICATION, AND THAT IS THE WHOLE POINT: `code != Some(0) ||
+/// marker_exists` fails on exactly ONE state — **exit 0 with nothing started** — which is precisely
+/// what the issue reported (`Access is denied.` printed after the agent's echo marker, `exitCode: 0`
+/// reported, no log file, no process, the agent telling the user a build was "running in the
+/// background"). Every other cell of the truth table passes: a non-zero code, or a start with no
+/// reported status, are both honest outcomes.
+///
+/// `code == None` ALSO SATISFIES THE LEFT SIDE, AND THAT IS INTENTIONAL. `as_i64()` yields `None`
+/// for a `Value::Null` `exitCode` — an UNOBSERVED status, e.g. a run killed at its deadline — and
+/// `None != Some(0)` is true, so the implication passes without consulting the marker. An unobserved
+/// status is not a *clean success*, so the contract simply does not apply to it. This is exactly why
+/// the sibling [`bash_timeout_t_reports_a_no_console_input_diagnostic`] uses the stricter
+/// `code.is_i64() && code.as_i64().unwrap() != 0` form: a later author who STRENGTHENS this to a
+/// pinned exit code must keep that `is_i64()` guard, so "real non-zero" stays distinguishable from
+/// "null".
+///
+/// DO NOT OVER-CLAIM WHAT THIS DETECTS. The implication's job is narrow — the R1 contract, exit 0 ⇒
+/// something started. It is NOT the detector for a hypothetical "`exec_bash` always reports 0" bug;
+/// that is pinned by the many existing asserts in this file that require a SPECIFIC code (e.g.
+/// [`bash_passes_inline_double_quotes_through_to_cmd_verbatim`] asserts `exitCode == 0`,
+/// [`bash_timeout_t_reports_a_no_console_input_diagnostic`] asserts a non-zero one). What makes THIS
+/// test non-vacuous is only that the hard case — exit 0 with no marker — is the reported symptom,
+/// and the implication fails on it. Say the narrow thing.
+///
+/// THE MARKER'S CONTENTS ARE ASSERTED WHEN IT EXISTS, so a phantom zero-byte `marker.txt` created by
+/// anything at all cannot satisfy the implication in the batch's place.
+///
+/// THE FAILURE MESSAGE CARRIES A `read_dir` LISTING OF THE SCRATCH DIR on purpose: if `marker.txt`
+/// showed up OUTSIDE it, that listing is what tells us `start` changed the working directory — a
+/// different finding, but an equally useful one.
+///
+/// THE THIRD ASSERTION NEVER ASSERTS `is_error`. If the captured text carries one of the issue's two
+/// sentences, the result must not present as a clean success with an EMPTY body. Turning an
+/// exit-0-with-error-text run into `is_error` would be a `bash_exit_report` change (its
+/// `(Some(n), None)` arm — "a normal non-zero exit needs no note — the code IS the report") and is
+/// explicitly OUT OF SCOPE here.
+///
+/// ⚠ `#[cfg(windows)]`, and BOTH OUTCOMES ON CI ARE FINDINGS — a later reader must not "fix" a red
+/// run of this test. Locally the ceiling is `cargo check --target x86_64-pc-windows-gnu
+/// --all-targets`, a compile gate and NOT a run: there is no host for it, not Linux and not wine.
+/// The proof leg is CI's `windows-latest` run, and §Gaps records which of these it gave:
+/// - **RED** → the lock REPRODUCED. Record the verbatim output and the exit code in §Gaps. Do NOT
+///   weaken the assertion, do NOT add a retry, do NOT invent a mechanism. The issue then has, for
+///   the first time, an observed repro with real text — the artefact a fix needs.
+/// - **GREEN** → the lock does NOT reproduce in CI's DEBUG build. That narrows R1 to the packaged
+///   RELEASE bundle — the GUI-subsystem binary (`main.rs:2`,
+///   `cfg_attr(not(debug_assertions), windows_subsystem = "windows")`) that CI never builds — the
+///   same debug-vs-release blind spot §Gaps already records for the window bug.
+#[cfg(windows)]
+#[tokio::test]
+async fn bash_start_b_does_not_report_success_without_starting_something() {
+    let cwd = temp_cwd("bash-start-b");
+    // EXPLICIT \r\n — `cmd` does not reliably parse a batch file with bare \n.
+    std::fs::write(
+        cwd.join("marker.bat"),
+        "@echo off\r\necho RAN >> marker.txt\r\n",
+    )
+    .unwrap();
+    // Verbatim `start /B marker.bat` — NO `""` title slot, `/B` kept. See the doc comment.
+    let r = execute_tool(
+        &ctx(&cwd),
+        "bash",
+        &json!({ "command": "start /B marker.bat" }),
+    )
+    .await;
+    let text = text_of(&r);
+
+    // `start /B` is ASYNCHRONOUS: it hands off and returns. A single immediate `exists()` would be
+    // a race, not a test, so poll the scratch dir for up to ~5 s.
+    let marker = cwd.join("marker.txt");
+    let mut marker_exists = marker.exists();
+    for _ in 0..50 {
+        if marker_exists {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        marker_exists = marker.exists();
+    }
+
+    // 1. THE CONTRACT, as a material implication: a reported exit 0 ⇒ something started.
+    let code = r.details.as_ref().unwrap()["exitCode"].as_i64();
+    assert!(
+        code != Some(0) || marker_exists,
+        "a backgrounded launch that reports exit code 0 must have started something (issue #79's \
+         false success: exitCode 0 with no process and no log file). The dir listing below is how \
+         we tell \"nothing started\" from \"it started somewhere else\": TEXT={text:?} \
+         DETAILS={:?} CWD={:?}",
+        r.details,
+        std::fs::read_dir(&cwd)
+            .map(|rd| rd
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
+
+    // 2. If it started, the BATCH ran — not merely "a file appeared".
+    if marker_exists {
+        let contents = std::fs::read_to_string(&marker).unwrap_or_default();
+        assert!(
+            contents.contains("RAN"),
+            "the marker's CONTENTS are the proof `marker.bat` actually ran — a zero-byte \
+             `marker.txt` from any other source would satisfy the implication above while proving \
+             nothing: CONTENTS={contents:?}"
+        );
+    }
+
+    // 3. The error text is never swallowed. NOT an `is_error` assertion: promoting an
+    //    exit-0-with-error-text run to an error is a `bash_exit_report` change, out of scope.
+    let reported = ["being used by another process", "Access is denied"]
+        .into_iter()
+        .find(|sentence| text.contains(sentence));
+    if let Some(sentence) = reported {
+        assert!(
+            !text.trim().is_empty() && text.contains(sentence),
+            "issue #79's own sentence appeared in this run, so the result must not present as a \
+             clean success with an empty body — the sentence has to survive to the model: \
+             LOOKING_FOR={sentence:?} TEXT={text:?} DETAILS={:?}",
+            r.details,
+        );
+    }
+}
+
 /// (issue #79 residual (a), the WIRING) The pure translator is pinned by
 /// [`cmd_input_redirection_is_diagnosed_as_the_no_console_input_tool_policy`] and the presence of
 /// cmd's sentence in a REAL run is pinned on the Windows CI leg by
