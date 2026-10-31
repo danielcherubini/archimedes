@@ -666,6 +666,100 @@ async fn bash_timeout_t_reports_a_no_console_input_diagnostic() {
     );
 }
 
+/// (issue #79 residual (a), the OTHER half of the pair) The sibling above pins that the failure
+/// recommends a replacement, and three tests pin that the replacement STRING is present —
+/// [`cmd_input_redirection_is_diagnosed_as_the_no_console_input_tool_policy`], the same assertion
+/// inside [`bash_timeout_t_reports_a_no_console_input_diagnostic`], and the first-line pin inside
+/// [`a_run_whose_text_carries_the_cmd_redirect_error_gets_the_diagnostic_as_its_first_line`]. None
+/// of them ever showed the replacement WORKS. THIS is the behaviour leg: on the SAME child that
+/// cannot run `timeout`, `ping -n 3 127.0.0.1 > NUL` must WAIT, EXIT 0, and need NO console input.
+/// Without it the tool would be pointing the model at a second dead end on the one platform it
+/// advises it for.
+///
+/// WHY THE LOWER BOUND IS THE LOAD-BEARING ASSERTION: `timeout`'s documented failure mode on this
+/// child is to exit AT ONCE — the sibling test's own doc records it, and `cmd` says so in its own
+/// sentence ("…exiting the process immediately"). A test that only asserted the command RAN, or
+/// only bounded the run from ABOVE, would pass on that broken behaviour and prove nothing. Only a
+/// FLOOR distinguishes a real wait from an instant exit, so 1200 ms is what this test is actually
+/// about; the other three assertions characterise the wait, they do not establish it.
+///
+/// FLOOR MARGIN, deliberately loose: `-n 3` sleeps ~2 s (one interval between each reply) and the
+/// floor sits at 1200 ms. Ping's delay is a TIMER, not CPU work, so a loaded runner can overshoot
+/// but cannot undershoot — there is no contention mechanism that makes a timer fire early. There
+/// is therefore NO upper bound here, and one must never be added: an upper bound is how a
+/// wall-clock test becomes a flake (the shape this repo already suffers in
+/// `src/**/Reasoning.test.tsx`'s ratio assertion — not imported into Rust).
+///
+/// `-n 3`, NOT the recommended `-n 20`: three pings prove the mechanism in ~2 s; twenty would cost
+/// ~19 s of CI time to prove the SAME thing. This test therefore proves the SHAPE — `ping` needs
+/// no console input, `> NUL` is honoured by `cmd`, exit code 0 — and NOT the literal count in the
+/// recommended string. It deliberately makes NO assertion on that string: presence is already
+/// owned by the three tests named above, and repeating it here would be a vacuous second pin.
+///
+/// ASSERTION 3 IS NOT THE SUCCESS PROOF. Empty text is evidence that the `> NUL` redirection was
+/// HONOURED (the reply lines never reached the pipe, so output stays small); it is NOT evidence
+/// that the run succeeded, because a mis-reported FAILING run's text would be empty too. Success
+/// rests on assertions 1, 2 and 4 between them: exit 0 and `!is_error` (it worked), ≥1200 ms (it
+/// waited), `cancelled: false` (the wait ended by itself, the deadline never fired).
+///
+/// ⚠ `#[cfg(windows)]` — `ping`'s `-n` flag and `> NUL` are `cmd`/Windows shapes, so this test can
+/// exist on no other platform. It RUNS only on CI's `windows-latest` leg; locally the ceiling is
+/// `cargo check --target x86_64-pc-windows-gnu --all-targets`, a compile gate and not a run. Do NOT
+/// relax the gate to make it execute here: a test that silently does not run on the platform it
+/// guards is the blind spot issue #79 was filed about (see the warning block below).
+#[cfg(windows)]
+#[tokio::test]
+async fn bash_ping_workaround_actually_waits_without_console_input() {
+    let cwd = temp_cwd("bash-ping-waits");
+    let start = std::time::Instant::now();
+    let r = execute_tool(
+        &ctx(&cwd),
+        "bash",
+        &json!({ "command": "ping -n 3 127.0.0.1 > NUL" }),
+    )
+    .await;
+    // 1. It SUCCEEDS, where `timeout` cannot.
+    assert!(
+        !r.is_error,
+        "`ping` is the workaround this tool RECOMMENDS, so it must succeed where `timeout /t` \
+         fails: TEXT={:?} DETAILS={:?}",
+        text_of(&r),
+        r.details
+    );
+    assert_eq!(
+        r.details.as_ref().unwrap()["exitCode"],
+        0,
+        "`ping` exits 0 on this console-less child (the recommendation would be a second dead \
+         end if it did not): DETAILS={:?}",
+        r.details
+    );
+    // 2. THE LOAD-BEARING ASSERTION: it WAITED. `timeout`'s failure is to exit at once, so only a
+    //    floor separates the workaround that sleeps from the one that fails instantly.
+    assert!(
+        start.elapsed() >= Duration::from_millis(1200),
+        "`ping` must actually SLEEP (three replies ~2 s apart) — an ELAPSED FLOOR is the only \
+         thing that distinguishes a real wait from `timeout`'s exit-immediately failure mode: \
+         ELAPSED={:?} TEXT={:?}",
+        start.elapsed(),
+        text_of(&r)
+    );
+    // 3. Evidence that `> NUL` was HONOURED (output stays small) — NOT evidence of success.
+    assert!(
+        text_of(&r).trim().is_empty(),
+        "`> NUL` is honoured by `cmd` (our `/d /s /c` raw tail passes the redirection through \
+         untouched), so the reply lines never reach the pipe and the model-facing text is empty: \
+         TEXT={:?}",
+        text_of(&r)
+    );
+    // 4. It finished on its own — the deadline never fired.
+    assert_eq!(
+        r.details.as_ref().unwrap()["cancelled"],
+        false,
+        "the wait ended by itself; the bash deadline never fired: DETAILS={:?}",
+        r.details
+    );
+}
+
 // ── the quoting contract, on the shell that actually re-parses it ─────
 //
 // `#[cfg(windows)]` rather than `#[cfg(not(unix))]`: these spawn `cmd.exe`,
