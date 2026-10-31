@@ -96,6 +96,23 @@ a way the guard could have been silently always-green:
 - macOS's census is **noisy rather than wrong**: its per-user `TMPDIR` is shared with
   system daemons, which write into it during a suite run, so the delta there sees
   directories nothing in this repo created. Linux's `/tmp` on a fresh runner is
-  quiescent and stays fully strict. macOS therefore excludes dotted names — a shape,
-  not a name list, and always announced — resting on the fact that no minter prefix
-  here contains a dot, which a test now pins. See the gap doc.
+  quiescent and stays fully strict. macOS therefore excludes names that contain a
+  dot **or contain no dash** — shapes, not a name list, and always announced —
+  resting on the fact that no minter prefix here contains a dot **or a dash**,
+  which tests now pin (`.test.sh` cases 18c and 18c(2), one per invariant, with
+  the positive case 18d and the teeth case 19). See the gap doc.
+
+  - **Amended 2026-10-31 (the second shape, not the decision).** This bullet
+    originally named one exclusion — dotted names — and rested on the no-dot
+    invariant alone. Issue #139's macOS runner produced a directory
+    (`betaenrollmentagent`) that nothing in this repo mints and that has neither
+    a dot nor a dash, so it wore no excluded shape and the census was red on a
+    directory this suite did not create. The exclusion gained `dash_free_name()`
+    OR'd with `dotted_name()`, and the invariant it rests on widened to match:
+    every one of the 91 distinct minter prefixes in this tree contains a dash and
+    none contains a dot — both re-measured at amendment time and both pinned, so
+    a future minter that breaks either half reddens the check instead of hiding
+    behind a shape. Nothing here is superseded and this ADR's `status` stays
+    `accepted`: the same justification — a shape, never a name list, always
+    announced — now covers a second shape because the daemon population turned
+    out to be wider than the reverse-DNS one.

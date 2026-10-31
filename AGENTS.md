@@ -444,14 +444,17 @@ These are properties of the repo, not of any branch:
 - **Plans carry stale baselines within hours** on a busy branch: re-measure test
   counts at your own HEAD rather than trusting the plan's.
 - **Never `rm -rf docs/roadmap/`.** The directory is gitignored (`.gitignore:31`)
-  but it is not uniformly disposable: two files in it ARE tracked
-  (`git ls-files docs/roadmap/` returns exactly the two `*-follow-ups.md` docs
-  today), and the untracked ones are unrecoverable — no `git checkout`, no
-  stash, no dangling blob, because git never held them. Delete a shipped plan
-  family by explicit pathspec and print the match list before the `rm`, with the
-  count reconciled. The `finish` skill's cleanup loop already does this right —
-  it names `${FEATURE_NAME}`-prefixed files only — so the failure mode is
-  deviating from it, not the skill.
+  but it is not uniformly disposable: some files in it ARE tracked — run
+  `git ls-files docs/roadmap/` and expect a MOVING number, not a fixed one,
+  because a roadmap run force-adds its plan family (`-status`, `-taskNN`,
+  `-ground-*`) through that ignore rule, so the tracked set grows during a run
+  and shrinks again when `finish` deletes it — and the untracked ones are
+  unrecoverable — no `git checkout`, no stash, no dangling blob, because git
+  never held them. Delete a shipped plan family by explicit pathspec and print
+  the match list before the `rm`, with the count reconciled. The `finish`
+  skill's cleanup loop already does this right — it names
+  `${FEATURE_NAME}`-prefixed files only — so the failure mode is deviating from
+  it, not the skill.
 - **Two files in `docs/roadmap/` have no durable copy in git** (measured, not
   assumed): `permissions-section.md` is issue #112's approved spec and its only
   in-repo copy — recover it from #112's issue comments, which mirror it — and
