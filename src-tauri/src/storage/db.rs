@@ -13,7 +13,7 @@
 use std::path::Path;
 use std::sync::Mutex as StdMutex;
 
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{params, Connection, Row, Transaction};
 use serde::{Deserialize, Serialize};
 
 use crate::types::SessionInfo;
@@ -70,6 +70,55 @@ pub struct SessionRow {
     pub cost_usd: Option<f64>,
 }
 
+/// The ONE `sessions` SELECT list every `SessionRow` read uses, as a const
+/// array of column names.
+///
+/// It exists so the list and the mapper cannot be edited apart: the three
+/// reads (`session`, both `list_sessions` arms) interpolate THIS list, and the
+/// one mapper below reads it position-for-position. Before this const, each
+/// read spelled its own copy of the 9 names and each built its own positional
+/// `get` ladder — the F12 hazard: a list edited without its ladder compiles and
+/// mis-maps at runtime.
+///
+/// The honest scope of what keeps them in sync: the per-row-type drift-guard
+/// TEST (`session_row_from_maps_the_select_const_columns_in_order`, which
+/// asserts `column_count() == SESSION_ROW_FIELDS` before any value) is the
+/// guard. The const is what makes that test able to speak about the SELECT at
+/// all; it is not itself a compile-time check of the SELECT text.
+const SESSION_COLUMNS: [&str; 9] = [
+    "id",
+    "cwd",
+    "created_at",
+    "title",
+    "capabilities_json",
+    "archived",
+    "context_usage_json",
+    "is_subagent",
+    "cost_usd",
+];
+
+/// Map one row of [`SESSION_COLUMNS`] onto a [`SessionRow`], index for index.
+///
+/// The ONE place a `SessionRow` is constructed (3 call sites: `session`, both
+/// `list_sessions` arms). The `get::<_, i64>` calls on the two INTEGER-as-bool
+/// columns are a RUNTIME conversion, not a compile-time check: a DDL type change
+/// makes them fail loudly with `InvalidColumnType` instead of silently
+/// mis-mapping, but they do not catch a column appended to the const (see the
+/// drift-proof in the plan — the drift-guard TEST owns that class).
+fn session_row_from(row: &Row<'_>) -> rusqlite::Result<SessionRow> {
+    Ok(SessionRow {
+        id: row.get(0)?,
+        cwd: row.get(1)?,
+        created_at: row.get(2)?,
+        title: row.get(3)?,
+        capabilities_json: row.get(4)?,
+        archived: row.get::<_, i64>(5)? != 0,
+        context_usage_json: row.get(6)?,
+        is_subagent: row.get::<_, i64>(7)? != 0,
+        cost_usd: row.get(8)?,
+    })
+}
+
 /// A row from the `messages` table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,6 +136,34 @@ pub struct MessageRow {
     pub created_at: i64,
 }
 
+/// The ONE `messages` SELECT list every `MessageRow` read uses, as a const
+/// array of column names — same reason and same honest scope as
+/// [`SESSION_COLUMNS`] (the drift-guard TEST is the guard).
+const MESSAGE_COLUMNS: [&str; 6] = [
+    "id",
+    "session_id",
+    "kind",
+    "message_key",
+    "payload_json",
+    "created_at",
+];
+
+/// Map one row of [`MESSAGE_COLUMNS`] onto a [`MessageRow`], index for index.
+///
+/// The ONE place a `MessageRow` is constructed (3 call sites: `messages_for`,
+/// both `messages_page` arms). Every column here is a plain `row.get` — the
+/// table holds no INTEGER-as-bool column, so there is nothing to type-annotate.
+fn message_row_from(row: &Row<'_>) -> rusqlite::Result<MessageRow> {
+    Ok(MessageRow {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        kind: row.get(2)?,
+        message_key: row.get(3)?,
+        payload_json: row.get(4)?,
+        created_at: row.get(5)?,
+    })
+}
+
 /// A row from the `spaces` table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -98,6 +175,30 @@ pub struct SpaceRow {
     pub last_opened_at: i64,
     /// Trusted Space flag (untrusted by default; fail-closed reads).
     pub trusted: bool,
+}
+
+/// The ONE `spaces` SELECT list `list_spaces` uses, as a const array of column
+/// names — same reason and same honest scope as [`SESSION_COLUMNS`].
+///
+/// `sort_order` is deliberately ABSENT: `SpaceRow` predates manual ordering and
+/// `list_spaces` consumes that column only in its `ORDER BY`, never as a field.
+/// Adding it here would change the wire type `Vec<SpaceRow>` that
+/// `commands/spaces.rs` returns, so its absence is a decision, not an omission.
+const SPACE_COLUMNS: [&str; 4] = ["path", "created_at", "last_opened_at", "trusted"];
+
+/// Map one row of [`SPACE_COLUMNS`] onto a [`SpaceRow`], index for index.
+///
+/// The ONE place a `SpaceRow` is constructed (1 call site: `list_spaces`).
+/// `trusted` is the INTEGER-as-bool column, so its `get::<_, i64>` is a runtime
+/// conversion (a loud `InvalidColumnType` on a DDL type change), not a
+/// compile-time check — see the drift-proof in the plan.
+fn space_row_from(row: &Row<'_>) -> rusqlite::Result<SpaceRow> {
+    Ok(SpaceRow {
+        path: row.get(0)?,
+        created_at: row.get(1)?,
+        last_opened_at: row.get(2)?,
+        trusted: row.get::<_, i64>(3)? != 0,
+    })
 }
 
 /// One session's recency, as a FIELD rather than a position (ADR 0075).
@@ -656,27 +757,20 @@ impl Db {
     /// pre-check for a native resume).
     pub fn session(&self, id: &str) -> Result<Option<SessionRow>, DbError> {
         let guard = self.conn.lock().expect("db mutex poisoned");
-        let mut stmt = guard.prepare(
-            "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent, cost_usd \
-             FROM sessions WHERE id = ?1",
-        )?;
-        let row = stmt
-            .query_map(params![id], |row| {
-                Ok(SessionRow {
-                    id: row.get(0)?,
-                    cwd: row.get(1)?,
-                    created_at: row.get(2)?,
-                    title: row.get(3)?,
-                    capabilities_json: row.get(4)?,
-                    archived: row.get::<_, i64>(5)? != 0,
-                    context_usage_json: row.get(6)?,
-                    is_subagent: row.get::<_, i64>(7)? != 0,
-                    cost_usd: row.get(8)?,
-                })
-            })?
-            .next()
-            .transpose()?;
-        Ok(row)
+        let mut stmt = guard.prepare(&format!(
+            "SELECT {} FROM sessions WHERE id = ?1",
+            SESSION_COLUMNS.join(", ")
+        ))?;
+        // The no-row case is matched EXPLICITLY (like `session_todos`) rather
+        // than via `query_map(..).next().transpose()`: once the mapper can
+        // error, a `query_map` chain makes "row present but failed to map"
+        // INDISTINGUISHABLE from "no such row". `QueryReturnedNoRows` is the
+        // only spelling of absence; any other error propagates.
+        match stmt.query_row(params![id], session_row_from) {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// All stored sessions, in the user's manual order (`sort_order`), `id`
@@ -703,32 +797,28 @@ impl Db {
     /// shared `ORDER BY`, so the Archived section cannot drift.
     pub fn list_sessions(&self, include_archived: bool) -> Result<Vec<SessionRow>, DbError> {
         let guard = self.conn.lock().expect("db mutex poisoned");
+        // BOTH arms interpolate the SAME const list (they used to spell it
+        // twice) and share ONE mapper, so the projected columns cannot differ
+        // between the archived and un-archived read. The WHERE/ORDER arms stay
+        // exactly as spelled today.
         let sql = if include_archived {
-            "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent, cost_usd
-             FROM sessions
-             WHERE is_subagent = 0
-             ORDER BY sort_order ASC, id DESC"
+            format!(
+                "SELECT {} FROM sessions
+                 WHERE is_subagent = 0
+                 ORDER BY sort_order ASC, id DESC",
+                SESSION_COLUMNS.join(", ")
+            )
         } else {
-            "SELECT id, cwd, created_at, title, capabilities_json, archived, context_usage_json, is_subagent, cost_usd
-             FROM sessions
-             WHERE archived = 0 AND is_subagent = 0
-             ORDER BY sort_order ASC, id DESC"
+            format!(
+                "SELECT {} FROM sessions
+                 WHERE archived = 0 AND is_subagent = 0
+                 ORDER BY sort_order ASC, id DESC",
+                SESSION_COLUMNS.join(", ")
+            )
         };
-        let mut stmt = guard.prepare(sql)?;
+        let mut stmt = guard.prepare(&sql)?;
         let rows = stmt
-            .query_map([], |row| {
-                Ok(SessionRow {
-                    id: row.get(0)?,
-                    cwd: row.get(1)?,
-                    created_at: row.get(2)?,
-                    title: row.get(3)?,
-                    capabilities_json: row.get(4)?,
-                    archived: row.get::<_, i64>(5)? != 0,
-                    context_usage_json: row.get(6)?,
-                    is_subagent: row.get::<_, i64>(7)? != 0,
-                    cost_usd: row.get(8)?,
-                })
-            })?
+            .query_map([], session_row_from)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -837,23 +927,14 @@ impl Db {
     /// A session's messages in insertion order (the transcript order).
     pub fn messages_for(&self, session_id: &str) -> Result<Vec<MessageRow>, DbError> {
         let guard = self.conn.lock().expect("db mutex poisoned");
-        let mut stmt = guard.prepare(
-            "SELECT id, session_id, kind, message_key, payload_json, created_at
-             FROM messages
+        let mut stmt = guard.prepare(&format!(
+            "SELECT {} FROM messages
              WHERE session_id = ?1
              ORDER BY id",
-        )?;
+            MESSAGE_COLUMNS.join(", ")
+        ))?;
         let rows = stmt
-            .query_map(params![session_id], |row| {
-                Ok(MessageRow {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    kind: row.get(2)?,
-                    message_key: row.get(3)?,
-                    payload_json: row.get(4)?,
-                    created_at: row.get(5)?,
-                })
-            })?
+            .query_map(params![session_id], message_row_from)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -873,24 +954,18 @@ impl Db {
         let guard = self.conn.lock().expect("db mutex poisoned");
         if let Some(n) = limit {
             let limit_probe = (n as i64) + 1;
-            let mut stmt = guard.prepare(
-                "SELECT id, session_id, kind, message_key, payload_json, created_at
-                 FROM messages
+            let mut stmt = guard.prepare(&format!(
+                "SELECT {} FROM messages
                  WHERE session_id = ?1 AND id < COALESCE(?2, 9223372036854775807)
                  ORDER BY id DESC
                  LIMIT ?3",
-            )?;
+                MESSAGE_COLUMNS.join(", ")
+            ))?;
             let mut rows = stmt
-                .query_map(params![session_id, before_id, limit_probe], |row| {
-                    Ok(MessageRow {
-                        id: row.get(0)?,
-                        session_id: row.get(1)?,
-                        kind: row.get(2)?,
-                        message_key: row.get(3)?,
-                        payload_json: row.get(4)?,
-                        created_at: row.get(5)?,
-                    })
-                })?
+                .query_map(
+                    params![session_id, before_id, limit_probe],
+                    message_row_from,
+                )?
                 .collect::<Result<Vec<_>, _>>()?;
             let has_more = rows.len() > n as usize;
             if has_more {
@@ -899,23 +974,14 @@ impl Db {
             rows.reverse();
             Ok((rows, has_more))
         } else {
-            let mut stmt = guard.prepare(
-                "SELECT id, session_id, kind, message_key, payload_json, created_at
-                 FROM messages
+            let mut stmt = guard.prepare(&format!(
+                "SELECT {} FROM messages
                  WHERE session_id = ?1 AND id < COALESCE(?2, 9223372036854775807)
                  ORDER BY id",
-            )?;
+                MESSAGE_COLUMNS.join(", ")
+            ))?;
             let rows = stmt
-                .query_map(params![session_id, before_id], |row| {
-                    Ok(MessageRow {
-                        id: row.get(0)?,
-                        session_id: row.get(1)?,
-                        kind: row.get(2)?,
-                        message_key: row.get(3)?,
-                        payload_json: row.get(4)?,
-                        created_at: row.get(5)?,
-                    })
-                })?
+                .query_map(params![session_id, before_id], message_row_from)?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok((rows, false))
         }
@@ -1068,20 +1134,13 @@ impl Db {
     /// ties. Nothing else moves a row.
     pub fn list_spaces(&self) -> Result<Vec<SpaceRow>, DbError> {
         let guard = self.conn.lock().expect("db mutex poisoned");
-        let mut stmt = guard.prepare(
-            "SELECT path, created_at, last_opened_at, trusted
-             FROM spaces
+        let mut stmt = guard.prepare(&format!(
+            "SELECT {} FROM spaces
              ORDER BY sort_order ASC, path ASC",
-        )?;
+            SPACE_COLUMNS.join(", ")
+        ))?;
         let rows = stmt
-            .query_map([], |row| {
-                Ok(SpaceRow {
-                    path: row.get(0)?,
-                    created_at: row.get(1)?,
-                    last_opened_at: row.get(2)?,
-                    trusted: row.get::<_, i64>(3)? != 0,
-                })
-            })?
+            .query_map([], space_row_from)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
