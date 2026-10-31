@@ -205,48 +205,25 @@ fn a_crashed_fk_migration_with_native_messages_gone_recovers_on_the_next_open() 
 /// the `archived` column must open CLEANLY (the one-time migration adds
 /// the column with a `DEFAULT 0` backfill) and the pre-existing rows
 /// must read `archived == false` (the default).
+///
+/// The fixture is `SCHEMA_WITHOUT_ARCHIVED`: every OTHER gated column is
+/// present, so the `trusted` / `context_usage_json` / `is_subagent` /
+/// `todos_json` / `cost_usd` / two `sort_order` gates and the pre-rip-out
+/// `agent_id` purge all stay silent and this test observes its own gate.
 #[test]
 fn archived_column_migration_on_a_preexisting_db() {
     let dir = crate::test_support::ScratchDir::in_env_temp("db-archived-test-", "scratch");
-    let path = dir.join("t.db");
-    // A pre-existing database: the LEGACY `sessions` table (WITHOUT
-    // `archived`) + the rest of the schema.
-    let conn = Connection::open(&path).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE sessions (
-            id TEXT PRIMARY KEY,
-            agent_id TEXT NOT NULL,
-            cwd TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            title TEXT,
-            capabilities_json TEXT NOT NULL
-        );
-        CREATE TABLE messages (
-            id INTEGER PRIMARY KEY,
-            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-            kind TEXT NOT NULL,
-            message_key TEXT,
-            payload_json TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            UNIQUE(session_id, kind, message_key)
-        );
-        CREATE TABLE native_messages (
-            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-            seq INTEGER NOT NULL,
-            role TEXT NOT NULL,
-            content_json TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            UNIQUE(session_id, seq)
-        );
-        CREATE TABLE spaces (
-            path TEXT PRIMARY KEY,
-            created_at INTEGER NOT NULL,
-            last_opened_at INTEGER NOT NULL
-        );
-        INSERT INTO sessions VALUES ('s1', 'archimedes', '/tmp', 1, NULL, '{}');",
-    )
-    .unwrap();
-    drop(conn);
+    let path = preexisting_db(
+        &dir,
+        SCHEMA_WITHOUT_ARCHIVED,
+        // A cwd that does not exist on disk (the idiom the sort-order fixtures
+        // use): the phase-11 space backfill skips it, so the fixture stays about
+        // the ONE session row and the silence below is provable. The original
+        // fixture's `/tmp` was never asserted — the row's `id` and `archived`
+        // are what this test reads.
+        "INSERT INTO sessions (id, cwd, created_at, capabilities_json) \
+         VALUES ('s1', '/x/nope-not-a-folder', 1, '{}');",
+    );
     // The next `Db::open` must SUCCEED (the migration adds the column).
     let db = Db::open(&path).expect("the archived migration is one-time and idempotent");
     // ...and the column is in place now.
@@ -263,6 +240,16 @@ fn archived_column_migration_on_a_preexisting_db() {
     assert_eq!(
         has, 1,
         "the archived column is in place after the migration"
+    );
+    // Isolation, asserted rather than assumed: the sibling gates were silent,
+    // so the ONE row this fixture seeded is the only row `Db::open` saw — no
+    // space row was backfilled from a `sessions` cwd, no seed renumbered it.
+    assert_eq!(
+        raw_scalar(&db, "SELECT COUNT(*) FROM spaces"),
+        0,
+        "the phase-11 space backfill stayed silent (the `/tmp` cwd of the fixture \
+         row is not canonicalizable to a fresh space row here, so a space row \
+         would mean a sibling gate ran inside this test)"
     );
     // ...and the pre-existing row reads `archived == false` (the default).
     let rows = db
@@ -1420,27 +1407,18 @@ fn list_sessions_hides_subagent_rows_but_their_transcripts_load() {
 /// `context_usage_json` column must open CLEANLY (the one-time
 /// migration adds the column) and the pre-existing rows must read
 /// `context_usage == None` (the default).
+///
+/// The fixture is `SCHEMA_WITHOUT_CONTEXT_USAGE`: every OTHER gated column is
+/// present, so the sibling gates stay silent and this test observes its own.
 #[test]
 fn context_usage_column_migration_on_a_preexisting_db() {
     let dir = crate::test_support::ScratchDir::in_env_temp("db-context-test-", "scratch");
-    let path = dir.join("t.db");
-    // A pre-existing database: the `sessions` table WITHOUT
-    // `context_usage_json` (the `archived` column IS present — this
-    // test isolates the context migration).
-    let conn = Connection::open(&path).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE sessions (
-            id TEXT PRIMARY KEY,
-            cwd TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            title TEXT,
-            capabilities_json TEXT NOT NULL,
-            archived INTEGER NOT NULL DEFAULT 0
-        );
-        INSERT INTO sessions VALUES ('s1', '/tmp', 1, NULL, '{}', 0);",
-    )
-    .unwrap();
-    drop(conn);
+    let path = preexisting_db(
+        &dir,
+        SCHEMA_WITHOUT_CONTEXT_USAGE,
+        "INSERT INTO sessions (id, cwd, created_at, capabilities_json, archived) \
+         VALUES ('s1', '/tmp', 1, '{}', 0);",
+    );
     // The next `Db::open` must SUCCEED (the migration adds the column).
     let db = Db::open(&path).expect("the context_usage migration is one-time and idempotent");
     // ...and the column is in place now.
@@ -1496,30 +1474,17 @@ fn context_usage_column_migration_on_a_preexisting_db() {
 #[test]
 fn cost_usd_column_migration_on_a_preexisting_db() {
     let dir = crate::test_support::ScratchDir::in_env_temp("db-cost-test-", "scratch");
-    let path = dir.join("t.db");
     // A pre-existing database: the `sessions` table WITHOUT `cost_usd`.
-    // Every OTHER current column IS present, so this test isolates the
+    // Every OTHER gated column IS present, so this test isolates the
     // `cost_usd` gate (the sibling migrations are no-ops here) — the same
-    // isolation the `context_usage_json` migration test above practices.
-    let conn = Connection::open(&path).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE sessions (
-            id TEXT PRIMARY KEY,
-            cwd TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            title TEXT,
-            capabilities_json TEXT NOT NULL,
-            archived INTEGER NOT NULL DEFAULT 0,
-            context_usage_json TEXT,
-            is_subagent INTEGER NOT NULL DEFAULT 0,
-            todos_json TEXT,
-            sort_order INTEGER NOT NULL DEFAULT 0
-        );
-        INSERT INTO sessions (id, cwd, created_at, capabilities_json)
-        VALUES ('s1', '/tmp', 1, '{}');",
-    )
-    .unwrap();
-    drop(conn);
+    // isolation the `context_usage_json` migration test above practices, now
+    // spelled as the shared `SCHEMA_WITHOUT_COST_USD` constant.
+    let path = preexisting_db(
+        &dir,
+        SCHEMA_WITHOUT_COST_USD,
+        "INSERT INTO sessions (id, cwd, created_at, capabilities_json) \
+         VALUES ('s1', '/tmp', 1, '{}');",
+    );
     // The next `Db::open` must SUCCEED (the migration adds the column).
     let db = Db::open(&path).expect("the cost_usd migration is one-time and idempotent");
     // ...and the column is in place now.
@@ -2149,6 +2114,303 @@ fn create_pre_sort_order_db(path: &Path) {
     drop(conn);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// The pre-existing-database fixture for the migration-gate cluster.
+//
+// The five pre-existing-database gate tests each used to open a raw
+// `Connection`, hand-write a schema with ONE column missing, seed rows and drop
+// the conn —
+// five copies of the same skeleton. `preexisting_db` owns that skeleton; the
+// `SCHEMA_WITHOUT_*` constants below are its only schema argument.
+//
+// ISOLATION IS THE LOAD-BEARING PROPERTY OF THESE STRINGS. Each is the full
+// 4-table `CREATE` batch with EXACTLY ONE gate's column absent and every OTHER
+// gated column present, so `Db::open`'s other gates find their column and stay
+// SILENT: the test observes its own gate, not nine gates at once. Two of the
+// five fixtures were NOT isolated before this consolidation (the `archived` one
+// also omitted `trusted`, both `sort_order`s, `context_usage_json`,
+// `is_subagent`, `todos_json` and `cost_usd`, and carried `agent_id` — so it
+// also ran the pre-rip-out purge and both seeds; the `context_usage` one was
+// similar). Making them isolated is the point of the change; the gate under
+// test is unchanged in every case, and each gate keeps its own dedicated test.
+//
+// That is also why `create_pre_sort_order_db` must NEVER serve these five: its
+// schema omits BOTH `sort_order` columns at once, so handing it to (say) the
+// `archived` test would run the two sort-order SEEDS inside a test that is about
+// `archived` — the isolation collapse the plan forbids. It stays in use for the
+// five pre-0075 fixtures that genuinely want both columns absent.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The `spaces` table as a post-trust, post-sort_order database has it — the
+/// half every cluster fixture uses EXCEPT the one whose gate owns this table.
+/// (A macro rather than a `const`, because [`legacy_batch!`] concatenates
+/// literals.)
+macro_rules! legacy_spaces_with_sort_order {
+    () => {
+        "
+CREATE TABLE spaces (
+    path TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL,
+    last_opened_at INTEGER NOT NULL,
+    trusted INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+"
+    };
+}
+
+/// The `spaces` table WITHOUT `sort_order` (`trusted` present, so the trust gate
+/// stays quiet) — only the space sort-order gate can fire on it.
+macro_rules! legacy_spaces_without_sort_order {
+    () => {
+        "
+CREATE TABLE spaces (
+    path TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL,
+    last_opened_at INTEGER NOT NULL,
+    trusted INTEGER NOT NULL DEFAULT 0
+);
+"
+    };
+}
+
+/// The `messages` + `native_messages` half of every fixture here — no gate in
+/// this cluster touches either table. `native_messages` carries its
+/// `ON DELETE CASCADE` FK, so `Db::open`'s FK-rewrite batch stays quiet on every
+/// fixture below; a fixture that omitted the FK would be testing that rewrite,
+/// not its own gate.
+macro_rules! legacy_tail {
+    () => {
+        "
+CREATE TABLE messages (
+    id INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    message_key TEXT,
+    payload_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(session_id, kind, message_key)
+);
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
+CREATE TABLE native_messages (
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    content_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(session_id, seq)
+);
+"
+    };
+}
+
+/// Assemble one legacy fixture batch: the `sessions` DDL the caller spells as a
+/// literal, the `spaces` spelling the caller picks, and the two tables NO gate in
+/// this cluster touches.
+///
+/// A macro rather than a function or `const` concatenation because `&str`
+/// concatenation is not a const operation and `concat!` needs LITERALS — hence
+/// the `sessions` DDL arriving as a literal argument, and the two `spaces`
+/// spellings plus the tail living here once each so no fixture can invent its own.
+macro_rules! legacy_batch {
+    ($sessions:expr, spaces_with_sort_order) => {
+        concat!($sessions, legacy_spaces_with_sort_order!(), legacy_tail!())
+    };
+    ($sessions:expr, spaces_without_sort_order) => {
+        concat!(
+            $sessions,
+            legacy_spaces_without_sort_order!(),
+            legacy_tail!()
+        )
+    };
+}
+
+/// The full 4-table batch with ONLY `sessions.archived` missing. Every other
+/// gated column is present, so the sibling gates are no-ops on this fixture.
+/// `agent_id` is absent too: the pre-rip-out purge is a DIFFERENT gate with its
+/// own test (`opening_a_pre_rip_out_database_migrates_it`), and a fixture that
+/// carried the column would run that purge as a side effect.
+const SCHEMA_WITHOUT_ARCHIVED: &str = legacy_batch!(
+    "
+CREATE TABLE sessions (
+    id TEXT PRIMARY KEY,
+    cwd TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    title TEXT,
+    capabilities_json TEXT NOT NULL,
+    context_usage_json TEXT,
+    is_subagent INTEGER NOT NULL DEFAULT 0,
+    todos_json TEXT,
+    cost_usd REAL,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+",
+    spaces_with_sort_order
+);
+
+/// The full 4-table batch with ONLY `sessions.context_usage_json` missing.
+const SCHEMA_WITHOUT_CONTEXT_USAGE: &str = legacy_batch!(
+    "
+CREATE TABLE sessions (
+    id TEXT PRIMARY KEY,
+    cwd TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    title TEXT,
+    capabilities_json TEXT NOT NULL,
+    archived INTEGER NOT NULL DEFAULT 0,
+    is_subagent INTEGER NOT NULL DEFAULT 0,
+    todos_json TEXT,
+    cost_usd REAL,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+",
+    spaces_with_sort_order
+);
+
+/// The full 4-table batch with ONLY `sessions.cost_usd` missing — the isolation
+/// the `dflt_value` pin depends on.
+const SCHEMA_WITHOUT_COST_USD: &str = legacy_batch!(
+    "
+CREATE TABLE sessions (
+    id TEXT PRIMARY KEY,
+    cwd TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    title TEXT,
+    capabilities_json TEXT NOT NULL,
+    archived INTEGER NOT NULL DEFAULT 0,
+    context_usage_json TEXT,
+    is_subagent INTEGER NOT NULL DEFAULT 0,
+    todos_json TEXT,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+",
+    spaces_with_sort_order
+);
+
+/// The full 4-table batch with ONLY `spaces.sort_order` missing (`sessions` is
+/// complete, so the SESSION seed cannot fire — that is the isolation this
+/// constant exists to provide).
+const SCHEMA_WITHOUT_SPACE_SORT_ORDER: &str = legacy_batch!(
+    "
+CREATE TABLE sessions (
+    id TEXT PRIMARY KEY,
+    cwd TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    title TEXT,
+    capabilities_json TEXT NOT NULL,
+    archived INTEGER NOT NULL DEFAULT 0,
+    context_usage_json TEXT,
+    is_subagent INTEGER NOT NULL DEFAULT 0,
+    todos_json TEXT,
+    cost_usd REAL,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+",
+    spaces_without_sort_order
+);
+
+/// The full 4-table batch with ONLY `sessions.sort_order` missing (`spaces` is
+/// complete, so the SPACE seed cannot fire).
+const SCHEMA_WITHOUT_SESSION_SORT_ORDER: &str = legacy_batch!(
+    "
+CREATE TABLE sessions (
+    id TEXT PRIMARY KEY,
+    cwd TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    title TEXT,
+    capabilities_json TEXT NOT NULL,
+    archived INTEGER NOT NULL DEFAULT 0,
+    context_usage_json TEXT,
+    is_subagent INTEGER NOT NULL DEFAULT 0,
+    todos_json TEXT,
+    cost_usd REAL
+);
+",
+    spaces_with_sort_order
+);
+
+/// Isolation is these fixtures' load-bearing property, so it is ASSERTED rather
+/// than commented: each `SCHEMA_WITHOUT_*` must omit EXACTLY ONE gated column
+/// across both tables, and must carry the other eight. If a fixture silently
+/// loses a second column, the sibling gate fires inside that test and the test
+/// stops being about its own gate — this fails first, with the fixture named.
+#[test]
+fn each_cluster_schema_omits_exactly_one_gated_column() {
+    // (table, column) for every gate `Db::open` probes, in probe order.
+    const GATED: [(&str, &str); 8] = [
+        ("spaces", "trusted"),
+        ("sessions", "archived"),
+        ("sessions", "context_usage_json"),
+        ("sessions", "is_subagent"),
+        ("sessions", "todos_json"),
+        ("sessions", "cost_usd"),
+        ("spaces", "sort_order"),
+        ("sessions", "sort_order"),
+    ];
+    let fixtures: [(&str, &str); 5] = [
+        ("SCHEMA_WITHOUT_ARCHIVED", SCHEMA_WITHOUT_ARCHIVED),
+        ("SCHEMA_WITHOUT_CONTEXT_USAGE", SCHEMA_WITHOUT_CONTEXT_USAGE),
+        ("SCHEMA_WITHOUT_COST_USD", SCHEMA_WITHOUT_COST_USD),
+        (
+            "SCHEMA_WITHOUT_SPACE_SORT_ORDER",
+            SCHEMA_WITHOUT_SPACE_SORT_ORDER,
+        ),
+        (
+            "SCHEMA_WITHOUT_SESSION_SORT_ORDER",
+            SCHEMA_WITHOUT_SESSION_SORT_ORDER,
+        ),
+    ];
+    for (name, schema) in fixtures {
+        let dir = crate::test_support::ScratchDir::in_env_temp("db-cluster-fixture-", "scratch");
+        let path = preexisting_db(&dir, schema, "");
+        let conn = Connection::open(&path).unwrap();
+        let missing: Vec<(&str, &str)> = GATED
+            .iter()
+            .filter(|(table, column)| {
+                let has: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                        rusqlite::params![*table, *column],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                has == 0
+            })
+            .copied()
+            .collect();
+        assert_eq!(
+            missing.len(),
+            1,
+            "`{name}` must omit EXACTLY ONE gated column so its sibling gates \
+             stay silent; it omits {missing:?}"
+        );
+    }
+}
+
+/// Create a legacy database file WITHOUT opening `Db` — raw SQLite only.
+///
+/// `Db::open` is the code under test here (its gates are what these tests
+/// observe), so the fixture must be the raw file: this factory never opens a
+/// `Db`, and the conn is dropped before returning so `Db::open` gets the file
+/// to itself.
+///
+/// `legacy_schema` is the full 4-table `CREATE` batch with the ONE gated column
+/// under test missing and every OTHER gated column present (see the
+/// `SCHEMA_WITHOUT_*` constants — get this wrong and a sibling gate runs inside
+/// the test); `rows` seeds the pre-existing data.
+fn preexisting_db(dir: &Path, legacy_schema: &str, rows: &str) -> std::path::PathBuf {
+    let path = dir.join("t.db");
+    let conn = Connection::open(&path).expect("raw open of the fixture db");
+    conn.execute_batch(&format!(
+        "{legacy_schema}{rows}",
+        legacy_schema = legacy_schema,
+        rows = rows
+    ))
+    .expect("fixture schema");
+    drop(conn);
+    path
+}
+
 /// Reads a single TEXT column through the raw connection (the row structs
 /// never select `sort_order`, so the seed assertions go straight to SQL).
 fn raw_column(db: &Db, sql: &str) -> Vec<String> {
@@ -2250,26 +2512,41 @@ fn sort_order_columns_exist_on_a_fresh_database() {
 /// recency, and `/x/a` beats `/x/c` on the `path ASC` tie-break at a tied
 /// timestamp. No `sessions` rows are inserted, so the phase-11 space
 /// backfill cannot add rows and pollute the assertion.
+///
+/// The fixture is `SCHEMA_WITHOUT_SPACE_SORT_ORDER`: `spaces` lacks
+/// `sort_order` (the gate under test) while `sessions` — empty here —
+/// already CARRIES its own `sort_order`, so the SESSION seed stays silent and
+/// this test observes the space seed alone. (The shared
+/// `create_pre_sort_order_db` omits BOTH columns, which would run both seeds
+/// here — that is exactly why it does not serve this test.)
 #[test]
 fn sort_order_seeded_in_the_old_space_order_on_a_preexisting_db() {
     let dir = crate::test_support::ScratchDir::in_env_temp("db-sortspace-test-", "scratch");
-    let path = dir.join("t.db");
-    create_pre_sort_order_db(&path);
-    let conn = Connection::open(&path).expect("raw open of the fixture db");
-    for (path_value, created, opened) in [
-        ("/x/b", 1_i64, 3_000_i64),
-        ("/x/a", 1, 2_000),
-        ("/x/c", 1, 2_000),
-    ] {
-        conn.execute(
-            "INSERT INTO spaces (path, created_at, last_opened_at) VALUES (?1, ?2, ?3)",
-            params![path_value, created, opened],
-        )
-        .expect("fixture space row");
-    }
-    drop(conn);
+    let path = preexisting_db(
+        &dir,
+        SCHEMA_WITHOUT_SPACE_SORT_ORDER,
+        "INSERT INTO spaces (path, created_at, last_opened_at) VALUES ('/x/b', 1, 3000);
+         INSERT INTO spaces (path, created_at, last_opened_at) VALUES ('/x/a', 1, 2000);
+         INSERT INTO spaces (path, created_at, last_opened_at) VALUES ('/x/c', 1, 2000);",
+    );
 
     let db = Db::open(&path).expect("the sort_order seed must not brick startup");
+    // The column is in place (the gate's own ALTER), like every other gate test
+    // in this cluster asserts.
+    let has: i64 = db
+        .conn
+        .lock()
+        .expect("db mutex poisoned")
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('spaces') WHERE name = 'sort_order'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        has, 1,
+        "the spaces.sort_order column is in place after the migration"
+    );
     let paths: Vec<String> = raw_column(
         &db,
         "SELECT path FROM spaces ORDER BY sort_order ASC, path ASC",
@@ -2280,42 +2557,87 @@ fn sort_order_seeded_in_the_old_space_order_on_a_preexisting_db() {
         "the seed numbers the spaces in the OLD display order \
          (last_opened_at DESC, then path ASC on a tied timestamp)"
     );
+    // The ADR 0075 NUMBERS themselves, not just their order: the seed writes
+    // 0-based positions in that read order, so a seed that numbered correctly
+    // but started at 1 (or counted in the wrong direction) fails HERE even if a
+    // future ORDER BY happened to forgive it.
+    assert_eq!(
+        (
+            sort_order_of(&db, "spaces", "path", "/x/b"),
+            sort_order_of(&db, "spaces", "path", "/x/a"),
+            sort_order_of(&db, "spaces", "path", "/x/c"),
+        ),
+        (0, 1, 2),
+        "the space seed numbers the rows 0, 1, 2 in the old display order"
+    );
+    // ...and a SECOND open is a clean no-op: the pragma gate is closed, so the
+    // seed does not re-run and cannot renumber the rows.
+    drop(db);
+    let db = Db::open(&path).expect("a re-open of the seeded db must succeed");
+    assert_eq!(
+        (
+            sort_order_of(&db, "spaces", "path", "/x/b"),
+            sort_order_of(&db, "spaces", "path", "/x/a"),
+            sort_order_of(&db, "spaces", "path", "/x/c"),
+        ),
+        (0, 1, 2),
+        "the re-open does not re-run the space seed — the numbers are untouched"
+    );
+    // Isolation, asserted rather than assumed: the numbers came from the SPACE
+    // seed alone (the session gate never ran — its column was already there).
+    assert_eq!(
+        raw_scalar(&db, "SELECT COUNT(*) FROM sessions"),
+        0,
+        "the fixture stayed spaces-only, so no session seed could have moved \
+         anything this test reads"
+    );
 }
 
 /// (sort_order) A pre-existing database is seeded in the order the user
 /// was ALREADY looking at for sessions: last activity (the `COALESCE`
 /// expression) then `id DESC`. That order is neither `id DESC` alone nor
 /// `created_at DESC` alone, so the assertion pins the whole expression.
+///
+/// The fixture is `SCHEMA_WITHOUT_SESSION_SORT_ORDER`: `sessions` lacks
+/// `sort_order` (the gate under test) while `spaces` — empty here — already
+/// CARRIES its own, so the SPACE seed stays silent and this test observes the
+/// session seed alone.
 #[test]
 fn sort_order_seeded_in_the_old_session_order_on_a_preexisting_db() {
     let dir = crate::test_support::ScratchDir::in_env_temp("db-sortsess-test-", "scratch");
-    let path = dir.join("t.db");
-    create_pre_sort_order_db(&path);
-    let conn = Connection::open(&path).expect("raw open of the fixture db");
     // A cwd that does not exist on disk: the phase-11 space backfill skips
     // it, so the fixture stays about sessions only.
-    for (id, created) in [
-        ("s_old_used", 1_000_i64),
-        ("s_stale", 2_000),
-        ("s_fresh", 3_000),
-    ] {
-        conn.execute(
-            "INSERT INTO sessions (id, cwd, created_at, capabilities_json, is_subagent) \
-             VALUES (?1, '/x/nope-not-a-folder', ?2, '{}', 0)",
-            params![id, created],
-        )
-        .expect("fixture session row");
-    }
-    // The OLDEST-created session is the most recently USED one.
-    conn.execute(
-        "INSERT INTO messages (session_id, kind, message_key, payload_json, created_at) \
-         VALUES ('s_old_used','user',NULL,'{}',9999)",
-        [],
-    )
-    .expect("fixture message row");
-    drop(conn);
+    // The OLDEST-created session (`s_old_used`) is the most recently USED one.
+    let path = preexisting_db(
+        &dir,
+        SCHEMA_WITHOUT_SESSION_SORT_ORDER,
+        "INSERT INTO sessions (id, cwd, created_at, capabilities_json, is_subagent) \
+         VALUES ('s_old_used', '/x/nope-not-a-folder', 1000, '{}', 0);
+         INSERT INTO sessions (id, cwd, created_at, capabilities_json, is_subagent) \
+         VALUES ('s_stale', '/x/nope-not-a-folder', 2000, '{}', 0);
+         INSERT INTO sessions (id, cwd, created_at, capabilities_json, is_subagent) \
+         VALUES ('s_fresh', '/x/nope-not-a-folder', 3000, '{}', 0);
+         INSERT INTO messages (session_id, kind, message_key, payload_json, created_at) \
+         VALUES ('s_old_used','user',NULL,'{}',9999);",
+    );
 
     let db = Db::open(&path).expect("the sort_order seed must not brick startup");
+    // The column is in place (the gate's own ALTER), like every other gate test
+    // in this cluster asserts.
+    let has: i64 = db
+        .conn
+        .lock()
+        .expect("db mutex poisoned")
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'sort_order'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        has, 1,
+        "the sessions.sort_order column is in place after the migration"
+    );
     let ids: Vec<String> = raw_column(
         &db,
         "SELECT id FROM sessions ORDER BY sort_order ASC, id DESC",
@@ -2325,6 +2647,39 @@ fn sort_order_seeded_in_the_old_session_order_on_a_preexisting_db() {
         vec!["s_old_used", "s_fresh", "s_stale"],
         "the seed numbers the sessions in the OLD display order \
          (last activity DESC, then id DESC)"
+    );
+    // The ADR 0075 NUMBERS themselves, not just their order (the space twin
+    // above pins the same shape): the seed writes 0-based positions.
+    assert_eq!(
+        (
+            sort_order_of(&db, "sessions", "id", "s_old_used"),
+            sort_order_of(&db, "sessions", "id", "s_fresh"),
+            sort_order_of(&db, "sessions", "id", "s_stale"),
+        ),
+        (0, 1, 2),
+        "the session seed numbers the rows 0, 1, 2 in the old display order"
+    );
+    // ...and a SECOND open is a clean no-op: the pragma gate is closed, so the
+    // seed does not re-run and cannot renumber the rows.
+    drop(db);
+    let db = Db::open(&path).expect("a re-open of the seeded db must succeed");
+    assert_eq!(
+        (
+            sort_order_of(&db, "sessions", "id", "s_old_used"),
+            sort_order_of(&db, "sessions", "id", "s_fresh"),
+            sort_order_of(&db, "sessions", "id", "s_stale"),
+        ),
+        (0, 1, 2),
+        "the re-open does not re-run the session seed — the numbers are untouched"
+    );
+    // Isolation, asserted rather than assumed: the fixture seeded no space
+    // rows and every cwd is uncanonicalizable, so the space seed had nothing to
+    // number and the backfill had nothing to insert.
+    assert_eq!(
+        raw_scalar(&db, "SELECT COUNT(*) FROM spaces"),
+        0,
+        "no space row exists, so the space seed could not have influenced \
+         anything this test reads"
     );
 }
 
