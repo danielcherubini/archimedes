@@ -291,6 +291,43 @@ async fn wait_for_rows(db: &Db, session_id: &str, want: usize) -> Vec<String> {
     }
 }
 
+/// Regression guard for this file's read discipline: a `native_messages`
+/// row-COUNT read must go through `wait_for_rows`; a DIRECT call to the
+/// native-messages loader is allowed at exactly three sites:
+///   1. inside `wait_for_rows` itself (it IS the poll),
+///   2. `crash_path_on_crash_fires_and_rows_stay_intact`'s pre-crash
+///      inline poller (bounded by its own `for _ in 0..100` loop), and
+///   3. the same test's POST-crash read — deliberately un-polled, but
+///      safe: it runs after the child is SIGKILLed (the writer process
+///      is dead, so no in-flight write can land behind it) and it
+///      asserts presence/role, never a count.
+///
+/// The needle below is SPLIT on purpose so this guard's own source
+/// cannot match the contiguous token it counts: keep the
+/// `concat!("load_native_", "messages")` form intact, and never write
+/// the contiguous token in this guard's comments or assert message —
+/// an un-split spelling inflates the count by 1 and reds the guard
+/// on itself.
+#[test]
+fn direct_native_transcript_reads_are_capped_at_three_sites() {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/worker_e2e.rs"))
+        .expect("worker_e2e.rs reads — CARGO_MANIFEST_DIR anchors the path, CWD-independent");
+    let needle = concat!("load_native_", "messages");
+    let hits: Vec<usize> = src
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains(needle))
+        .map(|(i, _)| i + 1)
+        .collect();
+    assert_eq!(
+        hits.len(),
+        3,
+        "a direct {needle} read escaped the three legal sites above — every other \
+         read must go through `wait_for_rows` (row counts must fail on the helper's \
+         deadline, not on a race). Hits at file lines: {hits:?}"
+    );
+}
+
 /// The `RpcEvent` kinds among the collected frames (in order).
 fn event_kinds(evs: &[(String, bool, WorkerInboundEvent)]) -> Vec<Cow<'static, str>> {
     evs.iter()
@@ -1308,9 +1345,13 @@ async fn subagent_dispatch_end_to_end_real_workers() {
     // envelope field (the `build_child_system_message` output — the
     // frontmatter body, `has_todo_tool` = `false`), then the user task
     // + the child's final text.
-    let child_rows =
-        h.db.load_native_messages(&child_id)
-            .expect("the child transcript loads");
+    // The read is POLLED: `subagent-closed` is the PARENT's sink event and
+    // the child is a SEPARATE PROCESS writing the same SQLite file, so the
+    // parent's connection is not guaranteed to observe the child's answer
+    // row at the instant the close arrives (see the mechanism note at the
+    // `a_child_with_a_tools_list_and_an_empty_body_gets_no_main_prompt`
+    // sibling) — a no-op when the ordering holds.
+    let child_rows = wait_for_rows(&h.db, &child_id, 3).await;
     assert_eq!(
         child_rows.len(),
         3,
