@@ -441,6 +441,21 @@ These are properties of the repo, not of any branch:
   and failed once on `main` right after an unrelated merge. Same advice: re-run
   before investigating, and do not "fix" it by tightening or loosening the
   threshold, which only moves the flake.
+- **`scripts/check-temp-dir-census.test.sh` case 13 (`--self-test leaves the real
+  census base unchanged`) reddens on a loaded Linux box, and the assertion is
+  correct.** Its metric is `count_entries` — `find /tmp -mindepth 1 -maxdepth 1`,
+  **every** depth-1 entry, not just directories, so on a dev box it is in the
+  hundreds (~729 measured here) rather than the ~130 a directory-only count gives.
+  `/tmp` here is a **tmpfs** shared with everything else on the machine, so anything
+  else creating a temp dir mid-run legitimately violates the assertion. It moved
+  twice (686→683, 697→694) during a wave that ran three agents in one tree with two
+  cold `cargo build --all-targets` in flight — those two figures come from the agent
+  that hit them, not from a re-measurement, but their magnitude agrees with the ~729
+  above, so they are the same metric. On a quiet box the count was stable at 729
+  across six samples. So re-run before investigating, and do not "fix" it by
+  loosening the assertion — the churn is a real violation, and CI's `/tmp` does not
+  churn. If it ever bites CI, the honest fix is a dedicated temp root for the census,
+  not a wider tolerance.
 - **Plans carry stale baselines within hours** on a busy branch: re-measure test
   counts at your own HEAD rather than trusting the plan's.
 - **Never `rm -rf docs/roadmap/`.** The directory is gitignored (`.gitignore:31`)
