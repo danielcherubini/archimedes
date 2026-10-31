@@ -8,9 +8,9 @@ verified-by: sections 1–10 re-read against this tree at `00676d5` plus **the f
   **Section 9a added 2026-10-29** from `main`'s CI run `40875258489` (job `123452317398`, log read)
   plus four measurements on this tree at `6f501ab`, all four re-run at `02a6de9` and unchanged (grep for the minter, the tolerance table's single
   row, the dot-free name against the Darwin shape rule, the unattributed-vs-tolerated code path).
-  **Re-verified 2026-10-31 at `5c90fdf` for the TWO-shape analysis** — section 9's dotted shape
+  **Re-verified 2026-10-31 on the tree staged at `5c90fdf`, with 17b added in `30c581c`, for the TWO-shape analysis** — section 9's dotted shape
   (`dotted_name`) plus the second, dash-free shape (`dash_free_name`) that section 9a's measurement
-  motivated. The citations those sections lean on were re-run on this tree, not copied: `.test.sh`
+  motivated. The citations those sections lean on were re-run on those two trees, not copied: `.test.sh`
   cases 17, **17b**, 18c, 18c(2), 18d and 19, plus the script's own `--self-test`. **How it was
   verified:** by `ARCHIMEDES_CENSUS_UNAME_S`-injected runs on a Linux box — Darwin-*targeted*,
   **not** verified on real Darwin, because this box is not one. The macOS legs therefore stay
