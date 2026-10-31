@@ -1015,4 +1015,162 @@ mod tests {
             }
         }
     }
+
+    /// Every decision `response_to_result` (`:207`) can make, pinned at the
+    /// unit level (an in-module test calls the private fn directly — no
+    /// listener), then the two server-facing variants pinned THROUGH THE WIRE
+    /// (the JSON transport and the SSE transport), so the shape logic is
+    /// pinned at both levels without duplicating the round-trip tests.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn http_response_to_result_shape_branches() {
+        // ── the unit-level branches (the function at :207-220) ──
+        // A top-level NON-object (`as_object` fails) — the `else` at :208-210.
+        for not_object in [
+            json!([1, 2]),
+            json!("a string"),
+            json!(7),
+            json!(null),
+            json!(true),
+        ] {
+            assert_eq!(
+                HttpClient::response_to_result(&not_object),
+                Err("the response is not a JSON object".to_string()),
+                "a top-level non-object is the `the response is not a JSON object` error"
+            );
+        }
+        // An `error` object with code + message — the exact `format!` shape at
+        // :215 (`"{message} (code {code})"`), byte-exact including the space.
+        assert_eq!(
+            HttpClient::response_to_result(&json!({
+                "jsonrpc": "2.0", "id": 1,
+                "error": { "code": -32601, "message": "no such tool" }
+            })),
+            Err("no such tool (code -32601)".to_string()),
+            "an error object formats as `<message> (code <n>)`"
+        );
+        // An `error` object MISSING `message` — the `unwrap_or_default()`
+        // branch at :214: the message is `""`, so the string LEADS with the
+        // space the `format!` puts between them.
+        assert_eq!(
+            HttpClient::response_to_result(&json!({
+                "jsonrpc": "2.0", "id": 1, "error": { "code": 1 }
+            })),
+            Err(" (code 1)".to_string()),
+            "an error without a message is the empty-message shape ` (code <n>)`"
+        );
+        // An `error` object MISSING `code` — the `unwrap_or(-1)` branch at :213.
+        assert_eq!(
+            HttpClient::response_to_result(&json!({
+                "jsonrpc": "2.0", "id": 1, "error": { "message": "b" }
+            })),
+            Err("b (code -1)".to_string()),
+            "an error without a code reports `code -1`"
+        );
+        // THE FLOAT-`code` QUIRK — PINNED BY DECISION (§1.2 of the plan: the
+        // vet record forbids leaving this corner undecided, so it is PINNED,
+        // not excluded). A server sending a NON-INTEGER code: `Value::as_i64`
+        // FAILS on a JSON float (`serde_json`'s documented semantics), so
+        // `unwrap_or(-1)` at :213 kicks in and the code reports `-1` — EXACTLY
+        // as if `code` were absent. This tree's decision; if the shape logic is
+        // ever reworked to preserve a float code, THIS PIN BREAKS LOUDLY, which
+        // is the point of pinning it.
+        assert_eq!(
+            HttpClient::response_to_result(&json!({
+                "jsonrpc": "2.0", "id": 1,
+                "error": { "code": 1.5, "message": "b" }
+            })),
+            Err("b (code -1)".to_string()),
+            "a float `code` is not an i64, so it collapses to `code -1` (the pinned quirk)"
+        );
+        // A `result` present → `Ok(cloned result)` (the `.cloned()` at :217).
+        let result = json!({ "tools": [{ "name": "echo" }] });
+        assert_eq!(
+            HttpClient::response_to_result(&json!({
+                "jsonrpc": "2.0", "id": 2, "result": result
+            })),
+            Ok(result.clone()),
+            "a `result` is returned cloned"
+        );
+        // A `result` ABSENT (and no `error`) → the `unwrap_or(Value::Null)`
+        // branch at :217. NOTE: an `error` that is NOT an object (a string)
+        // falls through the `.and_then(Value::as_object)` at :212 to here — so
+        // it is `Ok(Null)`, NOT an error; pinned as part of the same branch.
+        assert_eq!(
+            HttpClient::response_to_result(&json!({ "jsonrpc": "2.0", "id": 3 })),
+            Ok(Value::Null),
+            "a response with no `result` is `Ok(Value::Null)`"
+        );
+        assert_eq!(
+            HttpClient::response_to_result(&json!({
+                "jsonrpc": "2.0", "id": 3, "error": "a malformed string error"
+            })),
+            Ok(Value::Null),
+            "a NON-object `error` is not an error at all — it falls through to `Ok(Null)`"
+        );
+
+        // ── the two server-facing variants, THROUGH THE WIRE ──
+        // A server that answers the `initialize` handshake normally (so the
+        // transport itself is proven good) and then answers `tools/list` with a
+        // JSON-RPC `error` — the error must surface from `list_tools` in the
+        // SAME shape the unit calls pinned. `sse` picks the transport.
+        let error_handler = |sse: bool| -> TestHandler {
+            Box::new(move |_h: &str, body: &str| {
+                let v: Value = serde_json::from_str(body).expect("a JSON body");
+                let method = v["method"].as_str().unwrap_or_default();
+                let id = v["id"].clone();
+                let payload = if method == "initialize" {
+                    json!({ "jsonrpc": "2.0", "id": id, "result": canned_result(method, &v) })
+                } else {
+                    json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "error": { "code": -32601, "message": "no such tool" }
+                    })
+                }
+                .to_string();
+                if sse {
+                    (
+                        http_response(
+                            "HTTP/1.1 200 OK",
+                            "Content-Type: text/event-stream",
+                            &format!("event: message\r\ndata: {payload}\r\n\r\n"),
+                        ),
+                        false,
+                    )
+                } else {
+                    (
+                        http_response(
+                            "HTTP/1.1 200 OK",
+                            "Content-Type: application/json",
+                            &payload,
+                        ),
+                        false,
+                    )
+                }
+            })
+        };
+        for (transport, sse) in [("JSON", false), ("SSE", true)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("the listener binds");
+            let addr = listener.local_addr().expect("the listener has an address");
+            let handler: Arc<Mutex<TestHandler>> = Arc::new(Mutex::new(error_handler(sse)));
+            let recorded = Arc::new(Mutex::new(Vec::new()));
+            let server = http_server(listener, handler, recorded);
+            let mut client = HttpClient::connect(
+                &http_def(&format!("http://{addr}/mcp"), AuthSpec::None),
+                Duration::from_secs(5),
+                &cancel(),
+                None,
+            )
+            .await
+            .expect("the handshake completes (the server answers `initialize` fine)");
+            let r = client.list_tools(&cancel()).await;
+            server.abort();
+            assert_eq!(
+                r,
+                Err("no such tool (code -32601)".to_string()),
+                "a JSON-RPC `error` arriving over the {transport} transport surfaces in the pinned shape"
+            );
+        }
+    }
 }
