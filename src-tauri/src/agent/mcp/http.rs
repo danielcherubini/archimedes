@@ -1002,8 +1002,21 @@ mod tests {
                 elapsed >= Duration::from_millis(900),
                 "the cancel fired only after its 1 s post-arrival gate, got {elapsed:?}"
             );
+            // The UPPER bound is deliberately generous, and its number is
+            // DERIVED, not guessed: the arrival gate above is itself bounded at
+            // 10 s, and the cancel fires 1 s after arrival, so the observable
+            // cannot legitimately arrive later than ~11 s. 12 s is that bound
+            // plus slack. A TIGHT ceiling (the 5 s this shipped as during
+            // development) adds nothing the `match` below does not already
+            // prove — a completed read returns `Ok`, which the `match` rejects —
+            // and it would flake on a loaded machine, because `arrival` waits
+            // for THREE recorded requests (handshake + notification + call) and
+            // under full-suite load the arrival alone can exceed a tight
+            // ceiling and redden a correct test. That is the wall-clock-flake
+            // class AGENTS.md records for `Reasoning.test.tsx` and for this
+            // module's own `http_a_slow_sse_stream_completes`.
             assert!(
-                elapsed < Duration::from_secs(5),
+                elapsed < Duration::from_secs(12),
                 "the cancel won a ~15 s dribble (a completed read would be Ok), got {elapsed:?}"
             );
             match r {
@@ -1279,5 +1292,180 @@ mod tests {
                 "an `AuthSpec::None` connection sends NO `Authorization` header at all, but request {i} carries one:\n{h}"
             );
         }
+    }
+
+    /// The exact BYTES of the requests this client puts on the wire — the
+    /// request line, the headers this crate sets, the JSON-RPC body, and the
+    /// id sequence. The other tests assert on BEHAVIOUR (a round-trip, a
+    /// resend, a 401); nothing pinned the bytes themselves, so a change to the
+    /// construction at `:141-160` that kept behaviour intact would have been
+    /// invisible.
+    ///
+    /// **What "byte-exact" claims, and what it does NOT** (the honest scope):
+    /// - **Claimed:** the compact JSON body, byte for byte; and NAMED header
+    ///   substrings (`POST /mcp HTTP/1.1`, `content-type:`, `accept:`,
+    ///   `x-custom:`) matched as substrings of the recorded request.
+    /// - **NOT claimed:** the `Host:` header, reqwest's `Content-Length:`, and
+    ///   the ORDER of headers on the wire — those are reqwest/hyper's output,
+    ///   not this crate's, and may move with a reqwest bump. Nothing here pins
+    ///   them.
+    /// - **The body IS deterministic in this tree,** because `serde_json`
+    ///   1.0.151 (locked) has `preserve_order` OFF, so `Map` is a `BTreeMap`
+    ///   and a given `Value` serializes in SORTED key order — byte-identical
+    ///   run to run. (Note: that means the bytes follow the MAP's sorted order,
+    ///   NOT the `json!` literal order — the keys of the body are written in
+    ///   `jsonrpc,id,method,params` order in the source and arrive as
+    ///   `id,jsonrpc,method,params`.)
+    /// - **The pin is version-coupled:** the first body embeds
+    ///   `env!("CARGO_PKG_VERSION")` (the `initialize` `clientInfo.version`),
+    ///   so a version bump breaks this test LOUDLY and on purpose — a bump
+    ///   forces the re-pin to happen with eyes open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn http_exact_request_bytes_on_the_wire() {
+        // Bodies are NOT what `recorded` holds (it stores the request line +
+        // headers — `handle_connection` pushes `headers.clone()`), so the
+        // bodies ride out through the handler closure on their own recorder.
+        // Still the existing harness — no second server abstraction.
+        let bodies: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let bodies_in = bodies.clone();
+        let handler: TestHandler = Box::new(move |_headers, body| {
+            bodies_in.lock().unwrap().push(body.to_string());
+            let v: Value = serde_json::from_str(body).expect("a JSON body");
+            let method = v["method"].as_str().unwrap_or_default();
+            let id = v["id"].clone();
+            let resp = json!({ "jsonrpc": "2.0", "id": id, "result": canned_result(method, &v) })
+                .to_string();
+            (
+                http_response("HTTP/1.1 200 OK", "Content-Type: application/json", &resp),
+                false,
+            )
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the listener binds");
+        let addr = listener.local_addr().expect("the listener has an address");
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let server = http_server(listener, Arc::new(Mutex::new(handler)), recorded.clone());
+        // A DIRECT `HttpDef` literal: `http_def` hardcodes EMPTY headers, and
+        // this test's whole point includes the static-header loop at `:160`.
+        let mut def = http_def(&format!("http://{addr}/mcp"), AuthSpec::None);
+        def.headers = BTreeMap::from([("X-Custom".to_string(), "v1".to_string())]);
+        let mut client = HttpClient::connect(&def, Duration::from_secs(5), &cancel(), None)
+            .await
+            .expect("the handshake completes");
+        let _ = client
+            .list_tools(&cancel())
+            .await
+            .expect("tools/list answers");
+        let _ = client
+            .call_tool("echo", &json!({ "text": "bytes" }), &cancel())
+            .await
+            .expect("tools/call answers");
+        let headers = recorded.lock().unwrap().clone();
+        let bodies = bodies.lock().unwrap().clone();
+        server.abort();
+
+        // initialize, notifications/initialized, tools/list, tools/call.
+        assert_eq!(
+            headers.len(),
+            4,
+            "four requests on one connection, got {}:\n{}",
+            headers.len(),
+            headers.join("\n---\n")
+        );
+        assert_eq!(bodies.len(), 4, "four bodies captured");
+
+        // ── the request line (the URL path is test-controlled) ──
+        for (i, h) in headers.iter().enumerate() {
+            assert!(
+                h.starts_with("POST /mcp HTTP/1.1\r\n"),
+                "request {i} is a `POST` to the def's path, got: {h}"
+            );
+        }
+        // ── the headers THIS crate sets (named substrings, lowercased: the
+        // wire casing is reqwest's; the compare pins the value, not the case) ──
+        for (i, h) in headers.iter().enumerate() {
+            let low = h.to_lowercase();
+            assert!(
+                low.contains("content-type: application/json"),
+                "request {i} declares the JSON content type (:144), got: {h}"
+            );
+            assert!(
+                low.contains("accept: application/json, text/event-stream"),
+                "request {i} advertises both response shapes (:145), got: {h}"
+            );
+            assert!(
+                low.contains("x-custom: v1"),
+                "request {i} carries the def's static header — the `static_headers` \
+                 loop at :160 runs on EVERY request, got: {h}"
+            );
+        }
+        // ── the session id is LEARNED, so the first request cannot carry it ──
+        assert!(
+            !headers[0].to_lowercase().contains("mcp-session-id:"),
+            "the first request cannot resend a session id it has not learned yet, got: {}",
+            headers[0]
+        );
+        // (the resend itself is `http_session_id_is_resent`'s — not duplicated here)
+
+        // ── the id sequence: 1 (initialize), NONE (the notification), 2, 3 ──
+        let parsed: Vec<Value> = bodies
+            .iter()
+            .map(|b| serde_json::from_str(b).expect("a JSON-RPC body"))
+            .collect();
+        assert_eq!(parsed[0]["method"], "initialize");
+        assert_eq!(parsed[0]["id"], json!(1));
+        assert_eq!(parsed[1]["method"], "notifications/initialized");
+        assert!(
+            parsed[1].get("id").is_none(),
+            "a notification carries NO id (:269 builds `{{jsonrpc, method}}` only), got: {}",
+            bodies[1]
+        );
+        assert_eq!(
+            parsed[1].get("params"),
+            None,
+            "a notification carries no params"
+        );
+        assert_eq!(parsed[2]["method"], "tools/list");
+        assert_eq!(parsed[2]["id"], json!(2));
+        assert_eq!(parsed[3]["method"], "tools/call");
+        assert_eq!(parsed[3]["id"], json!(3));
+
+        // ── the body SHAPES (the contract, not just the bytes) ──
+        assert_eq!(parsed[0]["jsonrpc"], "2.0");
+        assert_eq!(parsed[0]["params"]["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(parsed[0]["params"]["clientInfo"]["name"], "archimedes");
+        assert_eq!(
+            parsed[0]["params"]["clientInfo"]["version"],
+            env!("CARGO_PKG_VERSION"),
+            "the version on the wire is the CRATE's version, read the way production \
+             reads it — never a hardcoded literal"
+        );
+        assert_eq!(
+            parsed[2]["params"],
+            json!({}),
+            "tools/list sends EMPTY params"
+        );
+        assert_eq!(
+            parsed[3]["params"],
+            json!({ "name": "echo", "arguments": { "text": "bytes" } }),
+            "tools/call params are `{{name, arguments}}` — the arguments are NOT \
+             flattened into params (that shape is the contract)"
+        );
+
+        // ── the BYTES of the first body, pinned ──
+        // Sorted-key order (the `BTreeMap` `Map` — `preserve_order` off), which
+        // is why `id` leads. If this breaks, diff the two strings: a version
+        // bump changes `clientInfo.version` and is the EXPECTED reason.
+        let expected_first = format!(
+            "{{\"id\":1,\"jsonrpc\":\"2.0\",\"method\":\"initialize\",\"params\":{{\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"archimedes\",\"version\":\"{}\"}},\"protocolVersion\":\"{}\"}}}}",
+            env!("CARGO_PKG_VERSION"),
+            PROTOCOL_VERSION
+        );
+        assert_eq!(
+            bodies[0], expected_first,
+            "the initialize body is pinned byte-for-byte (version-coupled — see the \
+             test's doc comment)"
+        );
     }
 }
