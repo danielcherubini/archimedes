@@ -1222,9 +1222,20 @@ async fn pasted_token_and_cli_sso_refresh_are_noops() {
 
 /// Read a source file relative to the crate root (the census-lint precedent:
 /// vacuity-guarded — an unreadable file PANICS rather than passing silently).
+///
+/// Line endings are NORMALISED to LF first, for the reason
+/// `definition_permission::…::parse_value_copy` documents: a Windows runner's
+/// git defaults to `core.autocrlf=true`, so the working tree carries CRLF while
+/// the object store keeps LF. A needle carrying a bare `\n` (below, the `"\n}\n"`
+/// that closes the wait handler) matches on Linux/macOS and matches NOTHING on
+/// Windows — which is how these structural pins go red on `windows-latest` while
+/// green everywhere else. Normalising makes the lint measure the CONTENT it
+/// means to measure, never the platform's checkout convention.
 fn crate_source(relative: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {relative:?}: {e}"))
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("reading {relative:?}: {e}"))
+        .replace("\r\n", "\n")
 }
 
 #[test]
