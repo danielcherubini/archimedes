@@ -23,6 +23,7 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::litellm_oauth;
 use super::store::{self, ProviderAuthStore, ProviderCredential};
 use crate::agent::debuglog;
 use crate::agent::session::SessionManager;
@@ -69,6 +70,68 @@ pub async fn refresh(
                 "provider-refresh: a `gcloud_adc` credential needs no store refresh (the ADC \
                  token is minted per resolve into the in-memory cache) — serving the stored \
                  entry unchanged",
+            );
+            Ok(cred.clone())
+        }
+        // The `litellm_cli_pkce` flow (T5, issue #126) is the ONE T5 flow with a
+        // real rotation: the PKCE client is PUBLIC (no secret) and LiteLLM
+        // rotates the refresh token on every exchange, so this arm exchanges the
+        // stored refresh token at the stored `token_endpoint` and persists the
+        // NEW pair (a used refresh token is refused with `400 invalid_grant`).
+        //
+        // ADR 0015's MCP guard (a public client never auto-refreshes) is
+        // deliberately NOT applied here — its OPPOSITE is correct for this
+        // credential, and that is the decision record the plan §4e names: the
+        // acceptance criterion "token refresh automatically executed in
+        // background before expiry" is met by refreshing a secret-less client in
+        // provider_auth's own code, with `mcp::oauth::refresh` untouched.
+        //
+        // A missing piece (no refresh token / endpoint / client id) FALLS
+        // THROUGH to the generic `oauth` arm below rather than short-circuiting
+        // here, and that is deliberate: T1's arm already owns the documented
+        // degradation for exactly that shape (`Ok(cred.clone())` when the
+        // endpoint or the refresh token is absent, an `Err` when the endpoint
+        // answers badly — the loop's backoff policy), and its tests pin it. A
+        // `litellm_cli_pkce` row that carries the full triple takes THIS arm.
+        // Deviation recorded in the commit message (the plan asked for an
+        // in-arm `Ok(clone)` guard; the fall-through yields the same observable
+        // outcomes without regressing T1's pins).
+        ProviderCredential::OAuth(oauth)
+            if oauth.flow == "litellm_cli_pkce"
+                && oauth.refresh_token.is_some()
+                && oauth.token_endpoint.is_some()
+                && oauth.client_id.is_some() =>
+        {
+            let refreshed = litellm_oauth::refresh_pkce(oauth, client).await?;
+            Ok(ProviderCredential::OAuth(refreshed))
+        }
+        // The `litellm_cli_sso` flow (the LEGACY device flow) is a DELIBERATE
+        // NO-OP, and that is a decision, not an omission: the device-flow JWT
+        // carries NO refresh token (verified §11b — the ready poll body returns
+        // only `key`/`user_id`/`team_id`). Pi re-logins when it expires; here the
+        // store holds the JWT's `exp`-derived `expires_at`, the Supervisor lets it
+        // expire, and the expiry IS the user-facing re-login (T8 shows the
+        // provider as needing sign-in). Pinned by
+        // `pasted_token_and_cli_sso_refresh_are_noops` — if the device flow ever
+        // DOES advertise a refresh mechanism, that pin fails loudly at the store
+        // level instead of this arm quietly becoming wrong.
+        ProviderCredential::OAuth(oauth) if oauth.flow == "litellm_cli_sso" => {
+            debuglog::log(
+                "provider-refresh: a `litellm_cli_sso` credential has no refresh token (the \
+                 device-flow JWT is static) — serving the stored entry unchanged; when it \
+                 expires the user re-logs in",
+            );
+            Ok(cred.clone())
+        }
+        // The `pasted_token` flow is the OTHER deliberate no-op: a pasted SSO
+        // token — or the virtual key minted from one — is a static bearer with no
+        // refresh token (`GenerateKeyResponse` carries none, §11d). Whether the
+        // mint advertised an `expires` or not, there is nothing to rotate, and pi
+        // behaves identically (no silent renewal). Same pin as above.
+        ProviderCredential::OAuth(oauth) if oauth.flow == "pasted_token" => {
+            debuglog::log(
+                "provider-refresh: a `pasted_token` credential is a static bearer with no \
+                 refresh token — serving the stored entry unchanged",
             );
             Ok(cred.clone())
         }

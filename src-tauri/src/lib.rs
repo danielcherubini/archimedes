@@ -526,6 +526,13 @@ pub fn run() {
             commands::settings::test_mcp_server,
             commands::settings::auth_mcp_server,
             commands::settings::test_search_provider,
+            // The interactive provider login (issue #126). The `generate_handler!`
+            // list is `cfg`-blind (the updater comment above says so verbatim) and
+            // all four are platform-neutral Rust, so no second list is needed.
+            commands::settings::provider_login_oauth,
+            commands::settings::provider_login_sso_poll,
+            commands::settings::provider_login_sso_choose_team,
+            commands::settings::provider_login_paste_token,
             commands::mcp::list_mcp_servers_effective,
             commands::agents::list_agent_definitions_for_space,
             commands::agents::list_agent_definition_reports,

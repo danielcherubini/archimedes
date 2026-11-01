@@ -233,11 +233,274 @@ pub async fn shell_sandbox_available() -> Result<bool, SettingsError> {
     Ok(crate::agent::tools::shell_sandbox_available())
 }
 
+// ── the interactive provider login (issue #126, T5) ───────────────────────
+//
+// The Rust command surface for LiteLLM's three-tier interactive login. The flow
+// LOGIC lives in `agent/provider_auth::{litellm_oauth, cli_sso}` (these commands
+// are thin wrappers — the `auth_mcp_server` pattern: call the flow, map `Err` →
+// `SettingsError::Other`, return the DTO), and the wire DTOs are declared THERE
+// and re-exported HERE, so the type the flow produces and the type T8 renders are
+// ONE type (the deviation from the plan's "declare the DTO in this module" is
+// recorded in the commit message — a DTO declared in the IPC layer would force
+// the flow module to depend on the IPC layer).
+//
+// STATELESS (no `tauri::State` — the `list_tools` pattern): the provider row's
+// `baseUrl` comes from the renderer and the store path resolves inside via
+// `provider_auth::store::auth_file_path()` (ruling R3: the platform DATA dir,
+// beside `mcp-auth.json`). The flow functions take the path as a parameter, so
+// the tests drive them against a scratch dir and nothing here can reach the real
+// store from a test.
+
+/// The login's wire steps, re-exported as this module's wire surface (the
+/// `ModelDto` pattern: camelCase, Serialize-only). T8's TypeScript mirrors THIS.
+pub use crate::agent::provider_auth::{ProviderLoginStep, TeamDto};
+
+/// Run LiteLLM's PKCE DCR login (falling back to the CLI SSO device flow when
+/// discovery or dynamic client registration is unavailable).
+///
+/// BLOCKS until the browser callback completes (up to 10 minutes) — the
+/// `auth_mcp_server` shape, which T8's "signing in…" badge pattern already
+/// assumes. Returns `Authenticated`, or the `DevicePending` step whose code the
+/// UI shows while it polls [`provider_login_sso_poll`].
+#[tauri::command]
+pub async fn provider_login_oauth(
+    provider_id: String,
+    base_url: String,
+) -> Result<ProviderLoginStep, SettingsError> {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    // The ADR 0051 opener seam — `crate::open` is the ONE opener policy and it is
+    // callable from Rust (the MCP OAuth flow's `production_open_browser`
+    // precedent). NO opener plugin is added to Rust for this.
+    let open_browser: Box<dyn Fn(&str) + Send + Sync> = Box::new(|url| {
+        let _ = crate::open::open(url, None);
+    });
+    crate::agent::provider_auth::litellm_oauth::login(
+        &provider_id,
+        &base_url,
+        &crate::agent::provider_auth::store::auth_file_path(),
+        &open_browser,
+        &cancel,
+    )
+    .await
+    .map_err(SettingsError::Other)
+}
+
+/// One device-flow poll TICK (the legacy CLI SSO tier): `GET
+/// {base}/sso/cli/poll/{login_id}` with the `x-litellm-cli-poll-secret` header.
+///
+/// ONE tick, deliberately — the 2 s cadence (`cli_sso::SSO_POLL_INTERVAL`) is
+/// driven by T8's timer so the user code stays on screen and the invoke never
+/// blocks (plan §4f). `team_id` is the SECOND poll that IS the team-selection
+/// round-trip (the proxy reads the choice as a `?team_id=` query param on this
+/// SAME endpoint — verified against LiteLLM's source; there is no team-choice
+/// POST for a desktop client): pass `None` for a plain tick, or the chosen id
+/// after a `ChooseTeam` step (or use [`provider_login_sso_choose_team`], which is
+/// the same request with the id required).
+///
+/// An expired/unknown session (`400`) or a rejected secret (`403`) is TERMINAL:
+/// the error text says to restart the login, and the UI must stop polling.
+///
+/// `provider_id` is required (DEVIATION from the plan's §4f signature, which
+/// omitted it): the store is keyed by PROVIDER id (`resolve_bearer` looks the row
+/// up by `provider.id`), so a credential stored under the device `login_id` could
+/// never be served. The UI has the id in hand — it started the login for a row.
+#[tauri::command]
+pub async fn provider_login_sso_poll(
+    provider_id: String,
+    login_id: String,
+    poll_secret: String,
+    base_url: String,
+    team_id: Option<String>,
+) -> Result<ProviderLoginStep, SettingsError> {
+    let client = crate::agent::provider_auth::cli_sso::poll_client();
+    let session = crate::agent::provider_auth::cli_sso::DeviceSession {
+        login_id: login_id.clone(),
+        poll_secret: poll_secret.clone(),
+        user_code: String::new(),
+        expires_in: None,
+        verification_uri_complete: None,
+    };
+    let outcome = crate::agent::provider_auth::cli_sso::poll_once(
+        &base_url,
+        &session,
+        team_id.as_deref(),
+        &client,
+    )
+    .await
+    .map_err(SettingsError::Other)?;
+    device_step_from_outcome(&base_url, &provider_id, &login_id, &poll_secret, outcome)
+}
+
+/// The interactive team choice (a `TeamDto` from the last `ChooseTeam` step):
+/// ONE re-poll with `?team_id=<id>` — the verified wire.
+#[tauri::command]
+pub async fn provider_login_sso_choose_team(
+    provider_id: String,
+    login_id: String,
+    poll_secret: String,
+    base_url: String,
+    team_id: String,
+) -> Result<ProviderLoginStep, SettingsError> {
+    let client = crate::agent::provider_auth::cli_sso::poll_client();
+    let session = crate::agent::provider_auth::cli_sso::DeviceSession {
+        login_id: login_id.clone(),
+        poll_secret: poll_secret.clone(),
+        user_code: String::new(),
+        expires_in: None,
+        verification_uri_complete: None,
+    };
+    let outcome =
+        crate::agent::provider_auth::cli_sso::choose_team(&base_url, &session, &team_id, &client)
+            .await
+            .map_err(SettingsError::Other)?;
+    device_step_from_outcome(&base_url, &provider_id, &login_id, &poll_secret, outcome)
+}
+
+/// Paste a token from `{base}/sso/key/generate`. With `mint_virtual_key`, FIRST
+/// `POST {base}/key/generate` with `Authorization: Bearer <token>` and an EMPTY
+/// `{}` body (the verified mint wire) and store the minted key; ANY mint failure
+/// degrades to storing the pasted token (a virtual-key generation failure must
+/// never fail the paste).
+#[tauri::command]
+pub async fn provider_login_paste_token(
+    provider_id: String,
+    base_url: String,
+    token: String,
+    mint_virtual_key: bool,
+) -> Result<ProviderLoginStep, SettingsError> {
+    let client = crate::agent::provider_auth::cli_sso::poll_client();
+    crate::agent::provider_auth::cli_sso::store_pasted(
+        &base_url,
+        &provider_id,
+        &token,
+        mint_virtual_key,
+        &crate::agent::provider_auth::store::auth_file_path(),
+        &client,
+    )
+    .await
+    .map(|_| ProviderLoginStep::Authenticated)
+    .map_err(SettingsError::Other)
+}
+
+/// Turn one device-flow poll outcome into the step T8 renders, storing the
+/// credential when the flow is ready. The `poll_secret` is re-carried on the
+/// interactive steps so the UI can round-trip it (it is a bearer for the poll
+/// endpoint and it dies with the session — the same trust level as an MCP server
+/// entry holding its headers).
+fn device_step_from_outcome(
+    base_url: &str,
+    provider_id: &str,
+    login_id: &str,
+    poll_secret: &str,
+    outcome: crate::agent::provider_auth::cli_sso::PollOutcome,
+) -> Result<ProviderLoginStep, SettingsError> {
+    use crate::agent::provider_auth::cli_sso::PollOutcome;
+    match outcome {
+        PollOutcome::Ready { .. } => {
+            crate::agent::provider_auth::cli_sso::store_device_token(
+                &crate::agent::provider_auth::store::auth_file_path(),
+                provider_id,
+                base_url,
+                &outcome,
+            )
+            .map_err(SettingsError::Other)?;
+            Ok(ProviderLoginStep::Authenticated)
+        }
+        PollOutcome::NeedsTeam(teams) => Ok(ProviderLoginStep::ChooseTeam {
+            login_id: login_id.to_string(),
+            poll_secret: poll_secret.to_string(),
+            teams: teams
+                .into_iter()
+                .map(|t| TeamDto {
+                    team_id: t.team_id,
+                    team_alias: t.team_alias,
+                })
+                .collect(),
+        }),
+        // Still waiting on the browser leg: the step re-carries the code + link
+        // so a renderer can keep them on screen (the UI holds the state; the
+        // command stays stateless). `userCode` is EMPTY here on purpose — the
+        // proxy never echoes the code back on a poll (it is issued by `start`
+        // only, §11a), so the renderer keeps the one it was given rather than
+        // blanking it with a fabricated value.
+        PollOutcome::Pending => Ok(ProviderLoginStep::DevicePending {
+            login_id: login_id.to_string(),
+            poll_secret: poll_secret.to_string(),
+            user_code: String::new(),
+            verification_url: crate::agent::provider_auth::cli_sso::verification_url(
+                base_url, login_id,
+            ),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    // ── the interactive-login wire DTOs (issue #126) ───────────────────────
+
+    #[test]
+    fn provider_login_step_serializes_camelcase_with_a_status_tag() {
+        // T8 renders each variant off the `status` tag, so the tag name and the
+        // camelCase field names ARE the contract. Serialize-only (the command
+        // never receives this).
+        let json = |step: &ProviderLoginStep| serde_json::to_value(step).expect("serializes");
+
+        let auth = json(&ProviderLoginStep::Authenticated);
+        assert_eq!(
+            auth["status"], "authenticated",
+            "the unit tag is camelCased"
+        );
+        assert_eq!(
+            auth.as_object().expect("an object").len(),
+            1,
+            "a unit variant carries only its tag: {auth}"
+        );
+
+        let pending = json(&ProviderLoginStep::DevicePending {
+            login_id: "cli-abc".into(),
+            poll_secret: "secret".into(),
+            user_code: "ABCD-EFGH".into(),
+            verification_url: "https://gw/sso/key/generate?source=litellm-cli&key=cli-abc".into(),
+        });
+        assert_eq!(pending["status"], "devicePending", "the tag is camelCase");
+        assert_eq!(pending["loginId"], "cli-abc");
+        assert_eq!(pending["pollSecret"], "secret");
+        assert_eq!(pending["userCode"], "ABCD-EFGH", "the code the user reads");
+        assert_eq!(
+            pending["verificationUrl"],
+            "https://gw/sso/key/generate?source=litellm-cli&key=cli-abc"
+        );
+
+        let choose = json(&ProviderLoginStep::ChooseTeam {
+            login_id: "cli-abc".into(),
+            poll_secret: "secret".into(),
+            teams: vec![TeamDto {
+                team_id: "team-a".into(),
+                team_alias: "Alpha".into(),
+            }],
+        });
+        assert_eq!(choose["status"], "chooseTeam");
+        assert_eq!(choose["loginId"], "cli-abc");
+        assert_eq!(choose["teams"][0]["teamId"], "team-a");
+        assert_eq!(choose["teams"][0]["teamAlias"], "Alpha");
+    }
+
+    #[test]
+    fn team_dto_serializes_camelcase() {
+        let json = serde_json::to_value(TeamDto {
+            team_id: "t".into(),
+            team_alias: "Alias".into(),
+        })
+        .expect("serializes");
+        assert_eq!(json["teamId"], "t");
+        assert_eq!(json["teamAlias"], "Alias");
+        // Exactly two keys — a stray field would be a wire change T8 must opt into.
+        assert_eq!(json.as_object().expect("an object").len(), 2);
+    }
 
     #[tokio::test]
     async fn list_tools_returns_a_sorted_list_of_the_native_harness_tools() {

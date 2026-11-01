@@ -8,15 +8,22 @@
 //! Wiring `resolve_bearer` into `resolve` is T2/T4's seam; this module owns
 //! the resolution, the store and the refresh lifecycle.
 
+pub mod cli_sso;
 pub mod gcloud;
 pub mod headers;
 pub mod key_helper;
+pub mod litellm_oauth;
 pub mod refresh;
 pub mod store;
 
 pub use gcloud::{adc_file_path, describe_error, parse_adc, token as gcloud_token, AdcCredential};
 pub use headers::{expand_map, validate_base_url};
 pub use key_helper::run as run_key_helper;
+// T5's login surface (issue #126): the PKCE DCR orchestrator + the legacy CLI
+// SSO device flow. `ProviderLoginStep`/`TeamDto` are declared in
+// `litellm_oauth` (the flow that PRODUCES them) and re-exported by
+// `commands::settings` as its wire surface — ONE type, never a mirror struct.
+pub use litellm_oauth::{login as litellm_oauth_login, ProviderLoginStep, TeamDto};
 pub use refresh::{
     noop_refresher_factory, production_refresher_factory, refresh, SupervisorRefresher,
     SupervisorRefresherDeps,
@@ -138,21 +145,31 @@ pub async fn resolve_bearer_at(
         ));
     }
     match provider.auth_mode.as_str() {
-        // Arm 3 (T2a, issue #129): an `api_key` starting with `!` is a KEY
-        // HELPER — executed when `execute_helpers` is true. A helper FAILURE
-        // degrades to `None` (the static key as-is) per the interface's rule —
-        // never an `Err`, never a blank — with a debuglog line. With
-        // `execute_helpers == false` (the seeding path) the helper is NEVER
-        // spawned and `None` is returned (the command string stays the static
-        // key; the "no subprocess at startup" invariant, pinned by test).
+        // Arm 3 (T2a, issue #129; guard narrowed by T5 per ruling R8, issue #126):
+        // an `api_key` starting with `!` is a KEY HELPER — executed when
+        // `execute_helpers` is true. A helper FAILURE degrades to `None` (the
+        // static key as-is) per the interface's rule — never an `Err`, never a
+        // blank — with a debuglog line. With `execute_helpers == false` (the
+        // seeding path) the helper is NEVER spawned and `None` is returned (the
+        // command string stays the static key; the "no subprocess at startup"
+        // invariant, pinned by test).
         //
-        // The slot is T1's landed placeholder position (between the `gcloud_adc`
-        // and the `oauth`/`oidc` arms) and is NOT reordered (interface §4 fixes
-        // the dispatch order). Because a `_`-guard matches any `auth_mode`, a row
-        // that carries BOTH a `!`-key and `authMode: "oauth"` takes this arm
-        // first — the recorded behaviour of the landed order (the plan's §2h
-        // note describes the reverse; see the implementation report).
-        _ if provider.api_key.starts_with('!') => {
+        // RULING R8 (interface §10): the guard used to be `_`, which matches ANY
+        // `auth_mode`, so a row carrying BOTH a `!`-prefixed `api_key` AND
+        // `authMode: "oauth"` took this arm and silently ignored its stored
+        // OAuth token. The guard is now narrowed to the `api_key` auth mode —
+        // the fix R8 prefers, because it keeps interface §4's documented
+        // precedence (an EXPLICIT auth mode beats an inferred `!` prefix)
+        // WITHOUT reordering the match (this stays in T1's landed slot). Pinned
+        // by `a_row_with_a_bang_key_and_oauth_mode_serves_the_stored_token` and
+        // its helper-side twin in `tests/provider_oauth_flow.rs`.
+        //
+        // Consequence owned: a row with an UNRECOGNISED auth mode and a `!`-key
+        // now falls to the default arm (the static key as-is) instead of running
+        // the helper — the permissive boundary's own rule (validate at use). A
+        // row with `authMode` absent is unaffected: serde defaults it to
+        // `"api_key"`, so every existing helper keeps working.
+        _ if provider.auth_mode == "api_key" && provider.api_key.starts_with('!') => {
             if !execute_helpers {
                 None
             } else {
