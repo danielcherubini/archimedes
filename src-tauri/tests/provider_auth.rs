@@ -41,6 +41,8 @@ fn provider(id: &str, auth_mode: &str) -> ProviderConfig {
         // gained `use_gcloud_token_auth`; this fixture's providers never use
         // the ADC flow.
         use_gcloud_token_auth: false,
+        // (issue #127) The mechanical additive grow: no OIDC login on this fixture.
+        oidc: None,
     }
 }
 

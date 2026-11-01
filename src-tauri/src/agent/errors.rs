@@ -545,6 +545,30 @@ pub enum SettingsError {
     #[error("search provider failed: {0}")]
     SearchFailed(String),
 
+    // ── the direct OIDC login (issue #127) — THREE ADDITIVE variants ─────────
+    //
+    // Purely additive (the ADR 0063 envelope's own rule): no existing variant's
+    // text or behaviour changed, and the two exhaustive places over this enum
+    // (`kind()` below and the `From<SettingsError> for InvokeError` conversion)
+    // gained new arms only — the compiler is the checklist.
+    /// The `oidc` block the renderer sent is not a valid `OidcConfig` (a missing
+    /// `issuer`/`clientId`, a wrong type).
+    #[error("invalid OIDC provider configuration: {0}")]
+    InvalidOidcConfig(String),
+
+    /// The OIDC login itself failed (discovery unreachable, the callback failed
+    /// or timed out, the claims failed validation, no port bound). The message
+    /// carries the authorize URL when the login could not be completed
+    /// automatically, so the UI can offer the manual path (ADR 0018).
+    #[error("OIDC login failed: {0}")]
+    OidcAuthFailed(String),
+
+    /// The login succeeded but the credential could not be persisted (the atomic
+    /// 0600 store write failed). Distinct from `OidcAuthFailed` so the UI can say
+    /// "you are logged in but I could not save it" rather than "login failed".
+    #[error("could not store the OIDC credential: {0}")]
+    OidcStoreFailed(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -560,6 +584,9 @@ impl SettingsError {
             SettingsError::SearchNotConfigured(_) => "search_not_configured",
             SettingsError::SearchTimeout(_) => "search_timeout",
             SettingsError::SearchFailed(_) => "search_failed",
+            SettingsError::InvalidOidcConfig(_) => "invalid_oidc_config",
+            SettingsError::OidcAuthFailed(_) => "oidc_auth_failed",
+            SettingsError::OidcStoreFailed(_) => "oidc_store_failed",
             SettingsError::Other(_) => "other",
         }
     }
@@ -862,6 +889,32 @@ mod tests {
         assert!(wire.is_object());
         assert_eq!(wire["kind"].as_str(), Some("save_failed"));
         assert_eq!(wire["message"].as_str(), Some(err.to_string().as_str()));
+    }
+
+    #[test]
+    fn the_three_oidc_settings_error_kinds_are_on_the_wire() {
+        // (issue #127) The three ADDITIVE variants' discriminators are the contract
+        // T8's `describeIpcError` switches on — pinned so a rename reddens here
+        // rather than silently breaking the UI's error branch.
+        for (err, kind) in [
+            (
+                super::SettingsError::InvalidOidcConfig("no issuer".into()),
+                "invalid_oidc_config",
+            ),
+            (
+                super::SettingsError::OidcAuthFailed("authorize manually at: https://x".into()),
+                "oidc_auth_failed",
+            ),
+            (
+                super::SettingsError::OidcStoreFailed("read-only disk".into()),
+                "oidc_store_failed",
+            ),
+        ] {
+            let wire = tauri::ipc::InvokeError::from(err.clone()).0;
+            assert_eq!(wire["kind"].as_str(), Some(kind), "{err}");
+            assert_eq!(wire["message"].as_str(), Some(err.to_string().as_str()));
+            assert_eq!(wire.as_object().map(|m| m.len()), Some(2));
+        }
     }
 
     #[test]

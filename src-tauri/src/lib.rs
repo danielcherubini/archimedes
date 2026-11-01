@@ -533,6 +533,9 @@ pub fn run() {
             commands::settings::provider_login_sso_poll,
             commands::settings::provider_login_sso_choose_team,
             commands::settings::provider_login_paste_token,
+            // The direct OIDC PKCE login (issue #127) — the command T8's "log in
+            // with OIDC" button calls. Platform-neutral Rust, one entry.
+            commands::settings::provider_login_oidc,
             commands::mcp::list_mcp_servers_effective,
             commands::agents::list_agent_definitions_for_space,
             commands::agents::list_agent_definition_reports,

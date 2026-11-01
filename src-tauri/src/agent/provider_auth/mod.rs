@@ -13,12 +13,14 @@ pub mod gcloud;
 pub mod headers;
 pub mod key_helper;
 pub mod litellm_oauth;
+pub mod oidc;
 pub mod refresh;
 pub mod store;
 
 pub use gcloud::{adc_file_path, describe_error, parse_adc, token as gcloud_token, AdcCredential};
 pub use headers::{expand_map, validate_base_url};
 pub use key_helper::run as run_key_helper;
+pub use oidc::{authenticate_oidc, credential_from_session, OidcSession};
 // T5's login surface (issue #126): the PKCE DCR orchestrator + the legacy CLI
 // SSO device flow. `ProviderLoginStep`/`TeamDto` are declared in
 // `litellm_oauth` (the flow that PRODUCES them) and re-exported by
@@ -30,7 +32,8 @@ pub use refresh::{
 };
 pub use store::{
     auth_file_path, is_expiring_soon, load, now_epoch_millis, remove_credential, save,
-    store_credential, OAuthCredential, ProviderAuthStore, ProviderCredential, REFRESH_LEAD_MILLIS,
+    store_credential, OAuthCredential, OidcCredential, ProviderAuthStore, ProviderCredential,
+    REFRESH_LEAD_MILLIS,
 };
 
 use std::path::Path;
@@ -186,9 +189,9 @@ pub async fn resolve_bearer_at(
             }
         }
         "oauth" | "oidc" => {
-            // T1 implements the `oauth` arm; `oidc` shares the entry point and
-            // has no stored credential type yet (T6 adds it), so it degrades to
-            // the static key exactly as an absent entry does.
+            // T1 implements the `oauth` arm; T6 fills the `oidc` half of this
+            // shared entry point (interface §4's arm 2 — `"oauth" | "oidc"` → the
+            // stored credential).
             //
             // The stored token is SERVED as-is: the background loop
             // (`refresh::SupervisorRefresher`) refreshes ahead of expiry with the
@@ -203,6 +206,58 @@ pub async fn resolve_bearer_at(
                     // stored token either way.
                     let _ = store::is_expiring_soon(cred.expires_at, store::now_epoch_millis());
                     Some(cred.access_token.clone())
+                }
+                // The `oidc` arm (issue #127). THE BEARER IS THE VALIDATED
+                // `id_token` — never the access token (the proxy accepts the
+                // identity token). The resolve spine substitutes it into
+                // `Model.api_key` (interface §1: NO new `Model` field).
+                //
+                // Refresh-before-serve: an `id_token` inside the 5-minute lead is
+                // refreshed SYNCHRONOUSLY here, because unlike an OAuth access
+                // token an `id_token` is short-lived and the Supervisor loop's
+                // next pass may not arrive before it dies. A SUCCESS is persisted
+                // through the existing atomic 0600 path and served; a FAILURE —
+                // including the `sub`-mismatch account-swap rejection — serves the
+                // STORED token unchanged (interface §1: degrade, never blank; and
+                // in the mismatch case the stored token is exactly the honest one,
+                // since the candidate was refused).
+                Some(ProviderCredential::Oidc(cred)) => {
+                    if store::is_expiring_soon(cred.expires_at, store::now_epoch_millis()) {
+                        match oidc::refresh(cred, client).await {
+                            Ok(refreshed) => {
+                                // Persist best-effort: a write failure must not
+                                // cost us the fresh token we just earned (the
+                                // store loop retries the write on its next pass).
+                                if let Err(e) = store::store_credential(
+                                    auth_file,
+                                    &provider.id,
+                                    ProviderCredential::Oidc(refreshed.clone()),
+                                ) {
+                                    crate::agent::debuglog::log(&format!(
+                                        "provider-auth: could not persist the refreshed oidc \
+                                         credential for `{}`: {e}",
+                                        provider.id
+                                    ));
+                                }
+                                Some(refreshed.id_token)
+                            }
+                            Err(e) => {
+                                // Includes the account-swap rejection: the stored
+                                // token keeps serving and the operator sees the
+                                // reason in the debuglog — a user is never silently
+                                // logged in as somebody else, and never blanked.
+                                crate::agent::debuglog::log(&format!(
+                                    "provider-auth: the oidc refresh for `{}` failed ({e}) — \
+                                     serving the stored id_token (never blanking a working \
+                                     bearer)",
+                                    provider.id
+                                ));
+                                Some(cred.id_token.clone())
+                            }
+                        }
+                    } else {
+                        Some(cred.id_token.clone())
+                    }
                 }
                 // No stored credential (or one this build cannot serve) → the
                 // static key as-is. Degrade, never blank.

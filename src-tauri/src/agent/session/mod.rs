@@ -4555,6 +4555,8 @@ mod session_tests {
             headers: None,
             allow_insecure_http: false,
             use_gcloud_token_auth: flag,
+            // (issue #127) The mechanical additive grow: no OIDC login on this fixture.
+            oidc: None,
         };
 
         // Unset → the row decides.

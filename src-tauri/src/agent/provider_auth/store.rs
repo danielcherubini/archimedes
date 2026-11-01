@@ -30,7 +30,15 @@ use serde::{Deserialize, Serialize};
 pub enum ProviderCredential {
     #[serde(rename = "oauth")]
     OAuth(OAuthCredential),
-    // T6 adds `#[serde(rename = "oidc")] Oidc(OidcCredential)`.
+    /// The `oidc` slot T1's plan reserves verbatim
+    /// (`// T6 adds #[serde(rename = "oidc")] Oidc(OidcCredential).`) — the
+    /// direct OIDC PKCE login's record (issue #127). ADDITIVE: nothing about the
+    /// `OAuth` variant, the envelope or the load/save machinery changes, and the
+    /// two exhaustive `match`es over this enum (`refresh::refresh` and
+    /// `resolve_bearer_at`'s arm 2) gained their `Oidc` arms as the compile-driven
+    /// checklist T1's plan describes.
+    #[serde(rename = "oidc")]
+    Oidc(OidcCredential),
     // An unknown `type` in a hand-edited file must not poison the whole
     // store — see `load`'s per-entry tolerance below.
 }
@@ -61,6 +69,50 @@ pub struct OAuthCredential {
     pub token_endpoint: Option<String>,
     #[serde(default)]
     pub resource: Option<String>,
+}
+
+/// The `oidc` credential record (interface §3's T6 slot; issue #127) — the same
+/// camelCase + millis-expiry discipline as [`OAuthCredential`].
+///
+/// The bearer this row exists for is `id_token` (the VALIDATED identity token the
+/// proxy accepts), NOT an access token — `access_token` is carried for
+/// diagnostics only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OidcCredential {
+    /// `flow == "oidc"` — the refresh dispatcher's arm key (stored WITH the
+    /// credential, exactly as `OAuthCredential.flow` is: interface §3).
+    pub flow: String,
+    /// The VALIDATED `id_token` — what `resolve_bearer`'s arm 2 hands the proxy.
+    pub id_token: String,
+    /// The access token (diagnostics only; never the proxy bearer).
+    #[serde(default)]
+    pub access_token: Option<String>,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    /// Epoch MILLISECONDS (the store's unit — identical to
+    /// [`OAuthCredential::expires_at`]; never seconds).
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+    /// The account subject — THE refresh-consistency key. A refresh whose new
+    /// `sub` differs is REJECTED (`oidc::refresh`), so a stored credential can
+    /// never silently become a different account.
+    pub sub: String,
+    /// The configured issuer (so a refresh re-validates `iss` without re-reading
+    /// the settings document).
+    pub issuer: String,
+    /// The pre-registered client id, so a refresh can re-run the `aud`/`azp`
+    /// checks. (A recorded deviation from the plan's field list, which omitted
+    /// it: validating the audience of a refreshed token against an `aud` read
+    /// OUT OF THAT TOKEN would prove nothing, so the known value has to be
+    /// stored beside it.)
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// The IdP token endpoint (re-discovery is not needed at refresh time).
+    #[serde(default)]
+    pub token_endpoint: Option<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 /// The whole `provider-auth.json` document — `version` + the per-provider map.

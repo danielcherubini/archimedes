@@ -24,6 +24,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::litellm_oauth;
+use super::oidc;
 use super::store::{self, ProviderAuthStore, ProviderCredential};
 use crate::agent::debuglog;
 use crate::agent::session::SessionManager;
@@ -135,6 +136,23 @@ pub async fn refresh(
             );
             Ok(cred.clone())
         }
+        // The `oidc` flow (T6, issue #127) is a REAL rotation with the sharpest
+        // guard in the suite: `oidc::refresh` re-validates the refreshed
+        // `id_token`'s claims and REFUSES the whole refresh when its `sub` names a
+        // DIFFERENT account than the stored one (an account swap through a
+        // long-lived refresh token must never reach the proxy). On an `Err` —
+        // mismatch, a rejected grant, a transient 5xx — this dispatcher returns the
+        // error and writes NOTHING: the loop keeps serving the stored, unexpired
+        // `id_token` (T1's never-discard-on-refresh-failure discipline) and the user
+        // re-logs in when it finally expires.
+        ProviderCredential::Oidc(cred) if cred.flow == "oidc" => {
+            let refreshed = oidc::refresh(cred, client).await?;
+            Ok(ProviderCredential::Oidc(refreshed))
+        }
+        ProviderCredential::Oidc(cred) => Err(format!(
+            "an oidc credential on the unknown flow `{}` cannot be refreshed (re-log in)",
+            cred.flow
+        )),
         ProviderCredential::OAuth(oauth) => refresh_oauth(oauth, client).await,
     }
 }
@@ -239,6 +257,10 @@ fn earliest_expiry_within_lead(store: &ProviderAuthStore, horizon: i64) -> Optio
         .values()
         .filter_map(|cred| match cred {
             ProviderCredential::OAuth(oauth) => oauth.expires_at,
+            // An `oidc` credential's `expires_at` is the SAME unit (millis) and
+            // means the same thing (when the stored `id_token` dies), so the loop
+            // targets it exactly like an OAuth entry (issue #127).
+            ProviderCredential::Oidc(oidc) => oidc.expires_at,
         })
         // The LEAD-aware horizon: an entry is targeted when the moment it
         // ENTERES the lead (`expires_at - REFRESH_LEAD_MILLIS`) is at or before
@@ -486,6 +508,12 @@ async fn run_loop(
                 ProviderCredential::OAuth(oauth) => {
                     oauth.expires_at.is_some_and(|at| at <= due_horizon)
                 }
+                // An `oidc` entry is due on the same rule (issue #127): the loop
+                // rotates the `id_token` before it dies so the resolve arm rarely
+                // has to refresh synchronously.
+                ProviderCredential::Oidc(oidc) => {
+                    oidc.expires_at.is_some_and(|at| at <= due_horizon)
+                }
             };
             if !due {
                 continue;
@@ -530,10 +558,15 @@ async fn run_loop(
             // Push the new bearer to the live sessions on that provider — ONLY
             // after a successful refresh AND a successful persist, so a session
             // is never handed a token the store does not hold.
-            // Irrefutable for the same reason as `refresh`'s match: a new
-            // variant must be a compile error here, not a silently-wrong push.
-            let ProviderCredential::OAuth(oauth) = &refreshed;
-            let api_key = oauth.access_token.clone();
+            // EXHAUSTIVE for the same reason as `refresh`'s match: a new variant
+            // must be a compile error here, not a silently-wrong push. T6's
+            // `Oidc` variant pushes its VALIDATED `id_token` — the same string
+            // `resolve_bearer`'s arm 2 serves (interface §1: both land in
+            // `Model.api_key`).
+            let api_key = match &refreshed {
+                ProviderCredential::OAuth(oauth) => oauth.access_token.clone(),
+                ProviderCredential::Oidc(oidc) => oidc.id_token.clone(),
+            };
             let pushed = session_manager
                 .refresh_live_credentials(&provider_id, &api_key)
                 .await;
@@ -874,11 +907,15 @@ mod tests {
             .expect("the exchange succeeds");
         let after = store::now_epoch_millis();
 
-        // An IRREFUTABLE `let` (the enum has one variant today): adding T6's
-        // `Oidc` turns this line into a compile error, which is the extension
-        // point behaving — a refutable `let … else` would instead be an
-        // unreachable-else warning, and a `match` a clippy single-pattern lint.
-        let ProviderCredential::OAuth(next) = &refreshed;
+        // This was an IRREFUTABLE `let` while the enum had one variant; T6's
+        // `Oidc` variant turned it into a compile error (the extension point
+        // behaving exactly as T1's plan describes) and this `let … else` is the
+        // checklist item that error demanded: the arm is a PANIC, so a future
+        // dispatcher that routed this `oauth` credential into an `Oidc` output
+        // reddens here instead of quietly asserting against the wrong variant.
+        let ProviderCredential::OAuth(next) = &refreshed else {
+            panic!("an oauth credential refreshed into a non-oauth variant: {refreshed:?}");
+        };
         assert_eq!(
             next.access_token, "fresh-bearer",
             "the new token is the whole point"

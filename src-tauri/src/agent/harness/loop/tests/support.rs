@@ -426,6 +426,8 @@ pub(super) fn build_loop_with_headers_and_db(
             // gained T4's `use_gcloud_token_auth`; this fixture does not use
             // the ADC flow.
             use_gcloud_token_auth: false,
+            // (issue #127) The mechanical additive grow: no OIDC login on this fixture.
+            oidc: None,
         }],
         ..crate::config::Settings::default()
     };

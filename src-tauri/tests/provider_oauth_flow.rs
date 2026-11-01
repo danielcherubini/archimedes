@@ -45,6 +45,8 @@ fn provider(id: &str, auth_mode: &str, api_key: &str) -> ProviderConfig {
         // (issue #128) The mechanical additive grow: T4's `ProviderConfig`
         // gained `use_gcloud_token_auth`; these fixtures never use the ADC flow.
         use_gcloud_token_auth: false,
+        // (issue #127) The mechanical additive grow: no OIDC login on this fixture.
+        oidc: None,
     }
 }
 
@@ -320,7 +322,16 @@ async fn pkce_flow_completes_end_to_end_against_a_mock_proxy() {
     // An IRREFUTABLE `let` (the enum has one variant today — T1's precedent):
     // adding T6's `Oidc` turns this into a compile error, which is the extension
     // point behaving rather than a warning.
-    let ProviderCredential::OAuth(cred) = &loaded.providers["gw"];
+    // (issue #127) This was an irrefutable `let` while the enum had one variant;
+    // T6's additive `Oidc` variant made it refutable, and the panic arm is the
+    // checklist item that error demanded — an `oauth` credential resolving into
+    // another variant is a bug, not a path.
+    let ProviderCredential::OAuth(cred) = &loaded.providers["gw"] else {
+        panic!(
+            "an oauth row resolved to a non-oauth credential: {:?}",
+            loaded.providers["gw"]
+        );
+    };
     assert_eq!(cred.flow, "litellm_cli_pkce");
     assert_eq!(cred.access_token, "pkce-access-token");
     assert_eq!(cred.refresh_token.as_deref(), Some("pkce-refresh-token"));
@@ -1135,7 +1146,13 @@ async fn refresh_pkce_exchanges_the_refresh_token_and_rotates_it() {
         .expect("the arm performs the rotation");
     let after = store::now_epoch_millis();
 
-    let ProviderCredential::OAuth(next) = &refreshed;
+    // (issue #127) An irrefutable `let` until T6's additive `Oidc` variant made it
+    // refutable — the compile error IS the extension point, and this panic arm is
+    // the fix it asked for (a `litellm_cli_pkce` credential rotating into another
+    // variant is a bug, never a branch to serve).
+    let ProviderCredential::OAuth(next) = &refreshed else {
+        panic!("an oauth credential refreshed into a non-oauth variant: {refreshed:?}");
+    };
     assert_eq!(next.access_token, "rotated-access");
     assert_eq!(
         next.refresh_token.as_deref(),

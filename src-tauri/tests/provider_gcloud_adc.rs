@@ -128,6 +128,8 @@ fn provider(id: &str, auth_mode: &str, api_key: &str, gcloud_flag: bool) -> Prov
         headers: None,
         allow_insecure_http: false,
         use_gcloud_token_auth: gcloud_flag,
+        // (issue #127) The mechanical additive grow: no OIDC login on this fixture.
+        oidc: None,
     }
 }
 

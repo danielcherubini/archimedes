@@ -285,6 +285,68 @@ pub async fn provider_login_oauth(
     .map_err(SettingsError::Other)
 }
 
+/// Run the direct OIDC PKCE login for a provider row (Settings UI; the button
+/// itself is T8's — this is the command it calls, issue #127).
+///
+/// `config` is the row's `oidc` object VERBATIM (`{ issuer, clientId, scope?,
+/// redirectPorts? }`) rather than a re-read of the saved settings: the flow must
+/// run against the exact values the user is looking at, and load-patch-save would
+/// round-trip a stale copy.
+///
+/// BLOCKS until the browser callback completes (up to 10 minutes) — the
+/// `auth_mcp_server` shape. `Ok` is the `"{providerId}: authenticated"` string;
+/// `Err` is one of the three OIDC `SettingsError` kinds, and an
+/// `oidc_auth_failed` message carries the authorize URL when no callback port
+/// could bind (ADR 0018's manual-completion path).
+#[tauri::command]
+pub async fn provider_login_oidc(
+    provider_id: String,
+    config: Value,
+) -> Result<String, SettingsError> {
+    // The ADR 0051 opener seam — `crate::open` is the ONE opener policy, and the
+    // second argument is `cwd`, so `None` means URL pass-through (a path-join can
+    // never mangle an authorize URL).
+    let open_browser: Box<dyn Fn(&str) + Send + Sync> = Box::new(|url| {
+        let _ = crate::open::open(url, None);
+    });
+    provider_login_oidc_with(
+        &provider_id,
+        config,
+        &crate::agent::provider_auth::store::auth_file_path(),
+        &open_browser,
+    )
+    .await
+}
+
+/// The command's tested CORE (all four artifacts injected: the id, the config,
+/// the STORE PATH, the opener). The `#[tauri::command]` wrapper above is the thin
+/// shell that supplies the production store path and the real opener — the
+/// `auth_mcp_server` / `authenticate_server` split, so NO test path can reach
+/// `crate::open::open` or the real data-dir store (ruling R3: the real store is
+/// `dirs::data_dir()/archimedes/provider-auth.json`; a test passes a scratch path).
+pub(crate) async fn provider_login_oidc_with(
+    provider_id: &str,
+    config: Value,
+    store_path: &Path,
+    open_browser: &(dyn Fn(&str) + Send + Sync),
+) -> Result<String, SettingsError> {
+    use crate::agent::provider_auth::{oidc, store};
+    let oidc_config: crate::config::OidcConfig = serde_json::from_value(config)
+        .map_err(|e| SettingsError::InvalidOidcConfig(e.to_string()))?;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let session = oidc::authenticate_oidc(&oidc_config, &cancel, open_browser)
+        .await
+        .map_err(SettingsError::OidcAuthFailed)?;
+    let credential = oidc::credential_from_session(&session, &oidc_config);
+    store::store_credential(
+        store_path,
+        provider_id,
+        store::ProviderCredential::Oidc(credential),
+    )
+    .map_err(SettingsError::OidcStoreFailed)?;
+    Ok(format!("{provider_id}: authenticated"))
+}
+
 /// One device-flow poll TICK (the legacy CLI SSO tier): `GET
 /// {base}/sso/cli/poll/{login_id}` with the `x-litellm-cli-poll-secret` header.
 ///
@@ -739,5 +801,364 @@ mod tests {
             err.to_string(),
             "Search provider 'perplexity' is not configured with an API key or URL"
         );
+    }
+
+    // ── the direct OIDC login command (issue #127) ──────────────────────────
+    //
+    // Driven through `provider_login_oidc_with` — the four-artifact core (id,
+    // config, STORE PATH, opener) — against a wiremock IdP, so NOTHING on this
+    // path can reach `crate::open::open` or the real data-dir store (ruling R3).
+
+    use crate::agent::provider_auth::{oidc, store, ProviderCredential};
+    use crate::config::OidcConfig;
+
+    /// What an injected opener was handed (so a test can assert what a real
+    /// browser WOULD have opened).
+    #[derive(Default)]
+    struct Opener {
+        urls: std::sync::Mutex<Vec<String>>,
+    }
+
+    /// Percent-encode a callback URL value (a tiny local copy — a test must not
+    /// reach into a private helper of the flow module).
+    fn url_encode(s: &str) -> String {
+        let mut out = String::new();
+        for b in s.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    out.push(b as char)
+                }
+                _ => out.push_str(&format!("%{b:02X}")),
+            }
+        }
+        out
+    }
+
+    /// The opener seam that SIMULATES the browser (no real browser is ever
+    /// launched): parse `redirect_uri` + `state` out of the authorize URL and GET
+    /// the loopback callback with a `code`.
+    ///
+    /// SPAWN-DON'T-FOLLOW, the rule `mcp::oauth` / `litellm_oauth` state verbatim:
+    /// this closure is called from INSIDE the flow, whose task then waits for the
+    /// very callback this leg triggers — joining here would deadlock the login
+    /// against its own browser. The handle is stashed so the test can await it
+    /// before it ends (ADR 0078's census).
+    #[derive(Default)]
+    struct SimulatedBrowser {
+        opener: Opener,
+        tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    }
+
+    impl SimulatedBrowser {
+        /// The `open_browser` closure to inject.
+        fn seam(self: &std::sync::Arc<Self>) -> impl Fn(&str) + Send + Sync {
+            let this = self.clone();
+            move |url: &str| {
+                this.opener.urls.lock().unwrap().push(url.to_string());
+                let url = url.to_string();
+                let handle = tokio::spawn(async move {
+                    let Ok(parsed) = url::Url::parse(&url) else {
+                        return;
+                    };
+                    let get = |name: &str| {
+                        parsed
+                            .query_pairs()
+                            .find(|(k, _)| k == name)
+                            .map(|(_, v)| v.to_string())
+                    };
+                    let (Some(redirect_uri), Some(state)) = (get("redirect_uri"), get("state"))
+                    else {
+                        return;
+                    };
+                    let callback = format!(
+                        "{redirect_uri}?code={}&state={}",
+                        url_encode("mock-code"),
+                        url_encode(&state)
+                    );
+                    let Ok(client) = reqwest::Client::builder()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .build()
+                    else {
+                        return;
+                    };
+                    // The GET that a browser's redirect would be; the flow's
+                    // callback server is its listener.
+                    let _ = client.get(callback).send().await;
+                });
+                this.tasks.lock().unwrap().push(handle);
+            }
+        }
+
+        /// Await every leg the simulated browser started (the census tail).
+        async fn settle(&self) {
+            let tasks: Vec<_> = self.tasks.lock().unwrap().drain(..).collect();
+            for task in tasks {
+                let _ = task.await;
+            }
+        }
+    }
+
+    /// A fake IdP: discovery + a `/token` endpoint answering an `id_token` whose
+    /// `iss` is the mock's own URI (so the claims validate) and whose `nonce` is
+    /// the value the login sent (echoed from the token form — the flow re-sends it
+    /// for exactly this reason, see `exchange_code`'s form comment).
+    async fn fake_idp(sub: &str) -> (wiremock::MockServer, OidcConfig) {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::path(
+            "/.well-known/openid-configuration",
+        ))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "issuer": server.uri(),
+                "authorization_endpoint": format!("{}/authorize", server.uri()),
+                "token_endpoint": format!("{}/token", server.uri()),
+            })),
+        )
+        .mount(&server)
+        .await;
+        let issuer = server.uri();
+        let sub = sub.to_string();
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/token"))
+            .respond_with(move |req: &wiremock::Request| {
+                let form = String::from_utf8_lossy(&req.body).to_string();
+                let nonce = form
+                    .split("nonce=")
+                    .nth(1)
+                    .and_then(|rest| rest.split('&').next())
+                    .unwrap_or_default()
+                    .to_string();
+                let now = crate::agent::mcp::oauth::now_epoch_secs();
+                let token = oidc::build_test_id_token(&serde_json::json!({
+                    "iss": issuer,
+                    "aud": ["archimedes"],
+                    "sub": sub,
+                    "exp": now + 3600,
+                    "nonce": nonce,
+                }));
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "access-1",
+                    "id_token": token,
+                    "refresh_token": "refresh-1",
+                    "expires_in": 3600,
+                }))
+            })
+            .mount(&server)
+            .await;
+        let config = OidcConfig {
+            issuer: server.uri(),
+            client_id: "archimedes".to_string(),
+            scope: None,
+            redirect_ports: vec![],
+        };
+        (server, config)
+    }
+
+    #[tokio::test]
+    async fn provider_login_oidc_rejects_a_bad_config() {
+        // The `invalid_oidc_config` kind is the wire contract T8 renders, and a
+        // rejected payload runs NOTHING: no browser, no store write.
+        let scratch = crate::test_support::ScratchDir::in_env_temp("provider-oidc-", "bad-cfg");
+        let browser = std::sync::Arc::<SimulatedBrowser>::default();
+        let err = provider_login_oidc_with(
+            "gw",
+            serde_json::json!({ "clientId": "c" }),
+            &scratch.path().join("provider-auth.json"),
+            &browser.seam(),
+        )
+        .await
+        .expect_err("an oidc block with no issuer is invalid");
+        assert_eq!(err.kind(), "invalid_oidc_config", "{err}");
+        assert!(
+            browser.opener.urls.lock().unwrap().is_empty(),
+            "a rejected config never opens a browser"
+        );
+        assert!(
+            !scratch.path().join("provider-auth.json").exists(),
+            "a rejected config never writes the store"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_login_oidc_completes_and_persists() {
+        // The command's E2E against a fake IdP: the VALIDATED `id_token` lands in
+        // the store as `{"type":"oidc","flow":"oidc",…}` with the validated `sub`,
+        // and the Ok payload is the `"{providerId}: authenticated"` string.
+        let scratch = crate::test_support::ScratchDir::in_env_temp("provider-oidc-", "complete");
+        let store_path = scratch.path().join("provider-auth.json");
+        let (_server, config) = fake_idp("alice").await;
+        let browser = std::sync::Arc::<SimulatedBrowser>::default();
+        let seam = browser.seam();
+        let ok = provider_login_oidc_with(
+            "gw",
+            serde_json::to_value(&config).expect("a config serializes"),
+            &store_path,
+            &seam,
+        )
+        .await
+        .expect("the login completes");
+        browser.settle().await;
+        assert_eq!(ok, "gw: authenticated", "the auth_mcp_server Ok shape");
+        let urls = browser.opener.urls.lock().unwrap().clone();
+        assert_eq!(urls.len(), 1, "the browser was handed ONE url: {urls:?}");
+        let url = &urls[0];
+        for want in [
+            "response_type=code",
+            "code_challenge_method=S256",
+            "client_id=archimedes",
+            "nonce=",
+            "state=",
+            "scope=openid",
+            "redirect_uri=http%3A%2F%2F127.0.0.1",
+        ] {
+            assert!(
+                url.contains(want),
+                "the authorize URL carries `{want}`: {url}"
+            );
+        }
+        let loaded = store::load(&store_path);
+        let stored = loaded
+            .providers
+            .get("gw")
+            .expect("the credential is stored under the PROVIDER id");
+        let ProviderCredential::Oidc(cred) = stored else {
+            panic!("the stored credential is not an oidc one: {stored:?}");
+        };
+        assert_eq!(cred.flow, "oidc", "the refresh dispatcher's arm key");
+        assert_eq!(cred.sub, "alice", "the VALIDATED sub anchors the row");
+        assert_eq!(cred.client_id.as_deref(), Some("archimedes"));
+        assert_eq!(cred.refresh_token.as_deref(), Some("refresh-1"));
+        assert!(
+            cred.token_endpoint.is_some(),
+            "a refresh needs no re-discovery"
+        );
+        let expires_at = cred.expires_at.expect("expires_in became millis");
+        assert!(
+            expires_at > store::now_epoch_millis() + 3_500_000,
+            "{expires_at}"
+        );
+        assert_eq!(cred.scope.as_deref(), Some("openid"), "the effective scope");
+        // The wire shape T8 + the store's per-entry tolerance depend on.
+        let on_disk = std::fs::read_to_string(&store_path).expect("the store is readable");
+        assert!(
+            on_disk.contains("\"type\":\"oidc\"") || on_disk.contains("\"type\": \"oidc\""),
+            "{on_disk}"
+        );
+        assert!(
+            on_disk.contains("\"flow\":\"oidc\"") || on_disk.contains("\"flow\": \"oidc\""),
+            "{on_disk}"
+        );
+        // `code_verifier` NEVER reaches the store (the invariant the plan pins):
+        // the file holds tokens, never the PKCE secret.
+        assert!(
+            !on_disk.contains("code_verifier"),
+            "the store leaks a verifier"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_login_oidc_surfaces_the_manual_url_when_the_callback_fails() {
+        // ADR 0018's constraint: a login that cannot complete AUTOMATICALLY tells
+        // the user WHERE to authorize manually instead of hanging or dead-ending.
+        // The fast, deterministic way to make the callback leg fail (no 10-minute
+        // wait, no root, no portability assumption) is a browser leg that answers
+        // the callback with a MISMATCHED `state` — the CSRF guard rejects it
+        // immediately, and the flow's error text must carry the authorize URL.
+        let scratch = crate::test_support::ScratchDir::in_env_temp("provider-oidc-", "manual");
+        let (_server, config) = fake_idp("alice").await;
+        let urls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let legs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // An opener that completes the callback with the WRONG state: the callback
+        // server refuses it (constant time) and the flow fails NOW rather than in
+        // ten minutes.
+        let broken = {
+            let urls = urls.clone();
+            let legs = legs.clone();
+            move |url: &str| {
+                urls.lock().unwrap().push(url.to_string());
+                let url = url.to_string();
+                let handle = tokio::spawn(async move {
+                    let Ok(parsed) = url::Url::parse(&url) else {
+                        return;
+                    };
+                    let get = |name: &str| {
+                        parsed
+                            .query_pairs()
+                            .find(|(k, _)| k == name)
+                            .map(|(_, v)| v.to_string())
+                    };
+                    let (Some(redirect_uri), Some(state)) = (get("redirect_uri"), get("state"))
+                    else {
+                        return;
+                    };
+                    let _ = state; // deliberately NOT echoed — the guard must fire
+                    let callback = format!(
+                        "{redirect_uri}?code={}&state={}",
+                        url_encode("c"),
+                        url_encode("not-the-state")
+                    );
+                    let Ok(client) = reqwest::Client::builder()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .build()
+                    else {
+                        return;
+                    };
+                    let _ = client.get(callback).send().await;
+                });
+                legs.lock().unwrap().push(handle);
+            }
+        };
+        let err = provider_login_oidc_with(
+            "gw",
+            serde_json::to_value(&config).expect("a config serializes"),
+            &scratch.path().join("provider-auth.json"),
+            &broken,
+        )
+        .await
+        .expect_err("a callback with a mismatched state fails the login");
+        assert_eq!(err.kind(), "oidc_auth_failed", "{err}");
+        let message = err.to_string();
+        assert!(
+            message.contains("authorize manually at:"),
+            "the failure carries the manual-completion path (ADR 0018): {message}"
+        );
+        assert!(
+            message.contains("code_challenge_method=S256"),
+            "the URL handed to the user is the REAL authorize URL: {message}"
+        );
+        assert_eq!(urls.lock().unwrap().len(), 1, "one browser hand-off");
+        // Drain the handles FIRST so no `MutexGuard` is held across an `await`
+        // (clippy's `await_holding_lock` — the guard would otherwise live for the
+        // whole loop body).
+        let legs: Vec<_> = legs.lock().unwrap().drain(..).collect();
+        for leg in legs {
+            let _ = leg.await;
+        }
+        assert!(
+            !scratch.path().join("provider-auth.json").exists(),
+            "a failed login stores nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_login_oidc_reports_a_store_write_failure_separately() {
+        // `oidc_store_failed` exists so the UI can say "you ARE logged in, I could
+        // not save it" instead of "login failed". Force it by naming a store path
+        // that cannot be written: the scratch dir itself.
+        let scratch = crate::test_support::ScratchDir::in_env_temp("provider-oidc-", "store");
+        let (_server, config) = fake_idp("alice").await;
+        let browser = std::sync::Arc::<SimulatedBrowser>::default();
+        let err = provider_login_oidc_with(
+            "gw",
+            serde_json::to_value(&config).expect("a config serializes"),
+            // A DIRECTORY as the store path: the atomic stage/rename cannot publish
+            // over it, so the write fails while the login itself succeeded.
+            scratch.path(),
+            &browser.seam(),
+        )
+        .await
+        .expect_err("a store that cannot be written is an error");
+        browser.settle().await;
+        assert_eq!(err.kind(), "oidc_store_failed", "{err}");
     }
 }

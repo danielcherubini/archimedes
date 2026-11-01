@@ -71,6 +71,8 @@ fn provider(id: &str, api_key: &str) -> ProviderConfig {
         // (issue #128) The mechanical additive grow: T4's `ProviderConfig`
         // gained `use_gcloud_token_auth`; this fixture never uses the ADC flow.
         use_gcloud_token_auth: false,
+        // (issue #127) The mechanical additive grow: no OIDC login on this fixture.
+        oidc: None,
     }
 }
 
@@ -269,6 +271,8 @@ fn provider_headers_and_the_insecure_flag_round_trip_through_the_settings_file()
             headers: Some(headers),
             allow_insecure_http: true,
             // (issue #128) The mechanical additive grow (this fixture opts
+            // (issue #127) The mechanical additive grow: no OIDC login on this fixture.
+            oidc: None,
             // into plain HTTP, not into the ADC flow).
             use_gcloud_token_auth: false,
         }],
