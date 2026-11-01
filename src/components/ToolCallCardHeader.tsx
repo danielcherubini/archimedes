@@ -64,7 +64,7 @@ import {
  *                   `TooltipContent` around it. The glyph is sized by its own
  *                   `size-3` CLASS so the box is provably unaffected, but the
  *                   button would otherwise GAIN a font-size utility it never had
- *                   — the hazard C7 group 4 hit, where `ChatStream.test.tsx`'s
+ *                   — the hazard C7 group 4 hit, where `ChatStreamDirectoryCompletion.test.tsx`'s
  *                   `primaryLines()` finds rows by `querySelectorAll
  *                   (".text-ui-base")` and a gained token is selectable code.
  *                   Restoring `inherit` collapses the whole font-size group, so

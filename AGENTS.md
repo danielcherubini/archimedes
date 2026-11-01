@@ -458,24 +458,35 @@ These are properties of the repo, not of any branch:
   not a wider tolerance.
 - **Plans carry stale baselines within hours** on a busy branch: re-measure test
   counts at your own HEAD rather than trusting the plan's.
-- **Never `rm -rf docs/roadmap/`.** The directory is gitignored (`.gitignore:31`)
-  but it is not uniformly disposable: some files in it ARE tracked — run
-  `git ls-files docs/roadmap/` and expect a MOVING number, not a fixed one,
-  because a roadmap run force-adds its plan family (`-status`, `-taskNN`,
-  `-ground-*`) through that ignore rule, so the tracked set grows during a run
-  and shrinks again when `finish` deletes it — and the untracked ones are
-  unrecoverable — no `git checkout`, no stash, no dangling blob, because git
-  never held them. Delete a shipped plan family by explicit pathspec and print
-  the match list before the `rm`, with the count reconciled. The `finish`
-  skill's cleanup loop already does this right — it names
-  `${FEATURE_NAME}`-prefixed files only — so the failure mode is deviating from
-  it, not the skill.
+- **Do not `git add -f` a file under `docs/roadmap/` to get it into a sibling worktree — `cp` it there.**
+  The directory is gitignored (`.gitignore:31`) and plan families are working memory: they belong
+  on disk, not in a PR. But **an ignored, untracked file does not exist in another worktree** —
+  measured: a fresh untracked `docs/roadmap/ZZ-probe-untracked.md` in the primary tree read
+  ABSENT from both sibling worktrees, while a committed one read PRESENT in both. That is the
+  whole reason the force-add keeps happening: `roadmap` Step 4 says "Commit the plan docs", and at
+  wave width ≥2 a child dispatched into its own worktree cannot read its own plan unless the plan
+  is tracked. So the instruction and the ignore rule are in genuine conflict, and the run resolves
+  it by force-adding — hit live twice: a 6-wave run force-added 14 files across 6 commits and the
+  PR carried 14 files of grounding reports beside a 4,500-line refactor, every one committed with
+  a message that read like a deliverable ("docs: plan … wave 4"), which is what hid it.
+  **The fix is `cp docs/roadmap/<feature>-taskNN-*.md <worktree>/docs/roadmap/` immediately after
+  `git worktree add`** — measured: the copy reads PRESENT to the child, does not appear in
+  `git status` there, and does not propagate back to the primary tree. Serial (width-1) waves need
+  nothing, because the planner and the implementer already share one tree.
+  Some files in the directory ARE tracked — `git ls-files docs/roadmap/` returns a small legacy
+  residue from runs that force-added them — so the directory is not uniformly disposable and the
+  count is a moving number. That residue is what to clean up, never the pattern to copy. Untracked
+  files here are unrecoverable — no `git checkout`, no stash, no dangling blob, because git never
+  held them — so delete a shipped plan family by explicit pathspec, print the match list before the
+  `rm`, reconcile the count, and **fold anything durable into `docs/features/` or an ADR FIRST**.
+  The `finish` skill's cleanup loop names `${FEATURE_NAME}`-prefixed files only, which is the right
+  shape — the failure mode is deviating from it, or force-adding so there is more to lose.
 - **`git check-ignore <path>` exits 1 for a path that is already TRACKED, and that
   reads exactly like "the ignore rule is gone".** Measured live: an agent verifying
   `docs/roadmap/` ran it, got exit 1, and reported "docs/roadmap/ is NOT gitignored" —
   while `git check-ignore --no-index -v` prints `.gitignore:31:docs/roadmap/` and exits
-  0. Roadmap plan families enter git via `git add -f`, so every one of them is in the
-  index, so the naive form reports nothing for all of them. The wrong conclusion is
+  0. The legacy tracked leftovers in that directory are in the index, so the naive form
+  reports nothing for exactly those paths. The wrong conclusion is
   expensive here specifically: it makes the bullet above sound stale and the unrecoverable
   files look recoverable. Trust the `--no-index` form.
 - **`docs/roadmap/`'s ignored files do not appear in

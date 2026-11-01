@@ -408,7 +408,7 @@ describe("the scanner actually reads the tree", () => {
           stripJsComments(readFileSync(f, "utf8")),
         ),
     );
-    // SET SIZE, pinned: 38 files mock the barrel by path. The number may only
+    // SET SIZE, pinned: 43 files mock the barrel by path. The number may only
     // move when a test file is added or removed, in a commit that says so — this
     // one moved 34 -> 35 when D2 wired `useAgentOverridesWrites` into `SpacesList`
     // and landed its test file, which mocks the barrel the documented way, and
@@ -417,10 +417,19 @@ describe("the scanner actually reads the tree", () => {
     // landed `components/settings/PermissionsSection.test.tsx`, which mocks the
     // barrel the documented way, and 37 -> 38 when task14b landed
     // `components/settings/McpSection.test.tsx` (the MCP badge's contract + the
-    // parked needs-auth red), which mocks the barrel the documented way.
-    expect(mockers).toHaveLength(38);
-    // 37 of the 38 SPREAD `vi.importActual`, which is the shape that makes the
-    // seam forgiving: an unlisted export still resolves. The new mocker spreads,
+    // parked needs-auth red), which mocks the barrel the documented way, and
+    // 38 -> 39 when the chatstream decomposition moved `ChatStream`'s attachment
+    // tests into `src/hooks/useChatAttachments.test.tsx`, which mocks the barrel
+    // the documented way, and 39 -> 41 when the chatstream decomposition moved
+    // the dispatch/queue/flush tests into `src/hooks/useChatPromptDispatch.test.tsx`
+    // and `src/hooks/usePromptQueueFlusher.test.tsx`, which mock the barrel the
+    // documented way, and 41 -> 43 when task06 (issue #135 §5) split the residual
+    // `ChatStream.test.tsx` into `src/components/ChatStreamDirectoryCompletion.test.tsx`
+    // and `src/components/ChatStreamChildGates.test.tsx`, which mock the barrel
+    // the documented way.
+    expect(mockers).toHaveLength(43);
+    // 42 of the 43 SPREAD `vi.importActual`, which is the shape that makes the
+    // seam forgiving: an unlisted export still resolves. Both new mockers spread,
     // so the remaining one is still `hooks/useWindowMaximized.test.ts`, which
     // replaces the module wholesale — so a name it forgets is `undefined`, the
     // case the pinned-surface assertion below covers.
@@ -428,7 +437,7 @@ describe("the scanner actually reads the tree", () => {
       mockers.filter((f) =>
         /vi\.importActual/.test(readFileSync(f, "utf8")),
       ).length,
-    ).toBe(37);
+    ).toBe(42);
   });
 });
 

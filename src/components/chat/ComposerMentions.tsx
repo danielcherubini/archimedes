@@ -36,7 +36,7 @@ import { Button } from "../ui/button";
  *    row INHERITED and, by collapsing both, declares no line-height either. Two
  *    reasons, and the second is the one that bites: the row's own font-size is
  *    invisible (every line is a span that spells its own size), BUT
- *    `ChatStream.test.tsx` locates the picker's primary lines with
+ *    `ChatStreamDirectoryCompletion.test.tsx` locates the picker's primary lines with
  *    `picker.querySelectorAll(".text-ui-base")` — so a row that GAINS
  *    `text-ui-base` adds itself to that list and every filter/sort assertion
  *    doubles. That is not a brittle test, it is the class-set collision telling
@@ -122,7 +122,7 @@ function primaryLabel(row: MentionRow): string {
  * abbreviated `~/…` while `name` carries the absolute path it will INSERT, and
  * the `/` is the visual half of "selecting this descends" (ADR 0035). That
  * `label ??` is load-bearing, not cosmetic — MUTATION-CHECKED: rendering
- * `row.name` here reddens SEVEN of `ChatStream.test.tsx`'s ADR 0035 tests, which
+ * `row.name` here reddens SEVEN of `ChatStreamDirectoryCompletion.test.tsx`'s ADR 0035 tests, which
  * is the other half of why the row carries BOTH halves. The second line is
  * conditional on a NON-EMPTY description, so a `$`/`@`/`#` row has two
  * lines whenever its catalog entry
@@ -263,7 +263,7 @@ export default function ComposerMentions({
                     part of any of this a test can assert — jsdom has NO layout
                     engine, so no test here measures a clip, an ellipsis or a
                     width; the elision itself is CSS-reasoned, and what
-                    `ChatStream.test.tsx` pins is these two class names plus the
+                    `ChatStreamDirectoryCompletion.test.tsx` pins is these two class names plus the
                     `title`. A row that wraps would ALSO break the container's
                     `max-h-[calc(var(--ui-font-size)*22)]` clamp ("~10 single-line
                     rows"), which is the other reason the label must not wrap.

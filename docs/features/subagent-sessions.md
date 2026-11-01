@@ -462,7 +462,7 @@ non-dismissibly, because `ChatStream`'s listener would otherwise kill the
 parent's turn. What used to be pinned in the sheet — an Esc consumed by a
 nested `AskQuestionCard` staying with that card — cannot happen there any
 more, since the sheet renders no cards; that guarantee now lives in
-`src/components/ChatStream.test.tsx` (`an Escape INSIDE the inline child card
+`src/components/ChatStreamChildGates.test.tsx` (`an Escape INSIDE the inline child card
 answers the CHILD and does NOT cancel the parent`), with the overlay's half
 pinned in `src/components/SubagentModals.test.tsx`.
 

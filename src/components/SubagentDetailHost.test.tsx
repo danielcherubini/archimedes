@@ -238,7 +238,7 @@ describe("SubagentDetailHost (the subagent transcript sheet)", () => {
   // untouched and still pin the sheet's own behaviour.
   //
   // The guarantee that test pinned — an Esc consumed by a child's card stays
-  // with the card and reaches nothing else — now lives in `ChatStream.test.tsx`
+  // with the card and reaches nothing else — now lives in `ChatStreamChildGates.test.tsx`
   // (`an Escape INSIDE the inline child card answers the CHILD and does NOT
   // cancel the parent`), which is where a child's `ask` card renders today: the
   // parent's transcript when the parent is active, the `SubagentModals` panel

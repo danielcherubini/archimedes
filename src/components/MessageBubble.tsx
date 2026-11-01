@@ -49,7 +49,7 @@ import { Button } from "./ui/button";
  *                 declares `text-ui-base/relaxed`; `cn` keeps the LAST of the
  *                 font-size group, so this arbitrary-value utility wins BOTH and
  *                 the site keeps the font-size AND the line-height it inherits
- *                 (this is the hazard C7 records: `ChatStream.test.tsx`'s
+ *                 (this is the hazard C7 records: `ChatStreamDirectoryCompletion.test.tsx`'s
  *                 `primaryLines()` finds picker rows with
  *                 `querySelectorAll(".text-ui-base")`, so a site that GAINS the
  *                 token is selected by a test that never saw it).

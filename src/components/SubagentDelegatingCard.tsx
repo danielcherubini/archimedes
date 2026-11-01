@@ -54,7 +54,7 @@ import { ToolCallCardHeader } from "./ToolCallCardHeader";
  *    none) and, by collapsing both, declares no line-height either. Every text
  *    child spells `text-ui-base` or `text-ui-xs` itself, so the row's own size is
  *    invisible — but a `text-ui-base` the row GAINS is a class another selector
- *    can read, and `ChatStream.test.tsx`'s `primaryLines()` helper (which finds
+ *    can read, and `ChatStreamDirectoryCompletion.test.tsx`'s `primaryLines()` helper (which finds
  *    picker rows by `querySelectorAll(".text-ui-base")`) proves that is not
  *    hypothetical: at this program's other picker it doubled a label list and
  *    reddened six assertions. Restoring beats arguing away.
