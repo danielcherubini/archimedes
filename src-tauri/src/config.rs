@@ -69,6 +69,16 @@ pub struct ProviderConfig {
     /// local dev servers are essential).
     #[serde(default)]
     pub allow_insecure_http: bool,
+    /// ADC: read the Google Application Default Credentials file and exchange
+    /// the refresh token natively (the `gcloud_adc` flow, issue #128). Also
+    /// enabled by `auth_mode: "gcloud_adc"`, and overridable by the
+    /// `LITELLM_GCLOUD_TOKEN_AUTH` env var — which the RESOLVE arm reads, never
+    /// this module (an env read here would cache at parse time and make the
+    /// toggle untestable; see `provider_auth::gcloud_token_auth_enabled`).
+    /// Additive: a pre-feature file parses to `false`, so no existing row
+    /// starts reading the user's ADC file on upgrade.
+    #[serde(default)]
+    pub use_gcloud_token_auth: bool,
 }
 
 fn default_provider_api() -> String {
@@ -1488,6 +1498,38 @@ mod tests {
     }
 
     #[test]
+    fn provider_config_use_gcloud_token_auth_defaults_false() {
+        // (issue #128) A pre-ADC `settings.json` carries no
+        // `useGcloudTokenAuth`: it serde-defaults to `false`, so no existing
+        // provider row starts reading the user's Google ADC file on upgrade.
+        let config: ProviderConfig =
+            serde_json::from_str(r#"{"id":"p","name":"P","baseUrl":"https://x/v1","apiKey":"k"}"#)
+                .unwrap();
+        assert!(
+            !config.use_gcloud_token_auth,
+            "a pre-feature file must NOT enable the ADC flow"
+        );
+    }
+
+    #[test]
+    fn provider_config_use_gcloud_token_auth_round_trips() {
+        // (issue #128) The field round-trips camelCase (`useGcloudTokenAuth`)
+        // and `true` survives the document.
+        let config: ProviderConfig = serde_json::from_str(
+            r#"{"id":"p","name":"P","baseUrl":"https://x/v1","apiKey":"k","useGcloudTokenAuth":true}"#,
+        )
+        .unwrap();
+        assert!(config.use_gcloud_token_auth);
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            json.contains("\"useGcloudTokenAuth\":true"),
+            "camelCase on the wire: {json}"
+        );
+        let back: ProviderConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, config);
+    }
+
+    #[test]
     fn provider_config_headers_and_allow_insecure_http_round_trip() {
         // (issue #129) Both fields round-trip, camelCase on the wire
         // (`allowInsecureHttp`), and the header VALUES stay the unexpanded
@@ -1531,6 +1573,9 @@ mod tests {
             auth_mode: "oauth".to_string(),
             headers: None,
             allow_insecure_http: false,
+            // (issue #128) The mechanical additive grow: the ADC flag is
+            // OFF in every pre-existing fixture (the serde default).
+            use_gcloud_token_auth: false,
         };
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("\"authMode\":\"oauth\""), "got {json}");
@@ -1551,6 +1596,9 @@ mod tests {
             auth_mode: "api_key".to_string(),
             headers: None,
             allow_insecure_http: false,
+            // (issue #128) The mechanical additive grow: the ADC flag is
+            // OFF in every pre-existing fixture (the serde default).
+            use_gcloud_token_auth: false,
         };
         let json = serde_json::to_string(&config).unwrap();
         assert!(
@@ -1585,6 +1633,8 @@ mod tests {
                 auth_mode: "api_key".into(),
                 headers: None,
                 allow_insecure_http: false,
+                // (issue #128) The additive ADC flag, OFF here (the default).
+                use_gcloud_token_auth: false,
             }],
             font: FontSettings {
                 size_px: 18,

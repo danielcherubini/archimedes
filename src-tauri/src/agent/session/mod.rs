@@ -4316,6 +4316,15 @@ mod session_tests {
         }
     }
 
+    /// Unset `key` for the rest of the test. Caller must hold `env_lock()` (the
+    /// `commands/settings.rs` helper of the same name).
+    fn remove_env(key: &'static str) -> RestoreEnv {
+        let prev = std::env::var_os(key);
+        // SAFETY: `ENV_LOCK` is held by the caller.
+        unsafe { std::env::remove_var(key) };
+        RestoreEnv(key, prev)
+    }
+
     /// Set `key` for the rest of the test. Caller must hold `env_lock()`.
     fn set_env(key: &'static str, value: &str) -> RestoreEnv {
         let prev = std::env::var_os(key);
@@ -4431,8 +4440,157 @@ mod session_tests {
         server.abort();
     }
 
+    /// (issue #128) The ADC bearer reaches BOTH the discovery request and every
+    /// `Model` row: `resolve` resolves the bearer BEFORE `discover_models`, so a
+    /// gateway whose `/model/info` needs the Google token is discovered with it
+    /// (grounding §2 — the substitution is not row-only).
+    ///
+    /// Hermeticity: the ADC file is a scratch fixture and the token endpoint a
+    /// `wiremock` URL, installed through `gcloud`'s test-override seam — which
+    /// REPLACES discovery, so the developer's real `~/.config/gcloud` file is
+    /// unreachable from here and no request can reach real Google. The override
+    /// and the token cache are process-global, so `ENV_LOCK` is held for the whole
+    /// span (the `set_env` tests' precedent).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn resolve_substitutes_the_gcloud_adc_bearer_into_models_and_discovery() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _lock = crate::test_support::env_lock();
+        crate::agent::provider_auth::gcloud::cache_clear();
+        let adc = ScratchDir::in_env_temp("-t4-adc", "fixture");
+        let adc_file = adc.join("application_default_credentials.json");
+        std::fs::write(
+            &adc_file,
+            json!({
+                "type": "authorized_user",
+                "client_id": "session-test-client",
+                "client_secret": "session-test-secret",
+                "refresh_token": format!("session-test-refresh-{}", uuid::Uuid::new_v4())
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let token_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"access_token": "ya29.minted"})),
+            )
+            .mount(&token_server)
+            .await;
+        let _override = crate::agent::provider_auth::gcloud::set_test_adc_override(
+            crate::agent::provider_auth::gcloud::TestAdcOverride {
+                adc_file: crate::agent::provider_auth::gcloud::AdcFileSource::Explicit(Some(
+                    adc_file.clone(),
+                )),
+                token_endpoint: Some(token_server.uri()),
+            },
+        );
+
+        let dir = temp_config_dir();
+        let (addr, server, mut rx) = capturing_models_server(r#"{"data":[{"id":"m/1"}]}"#).await;
+        write_settings_provider_row(
+            &dir,
+            json!({
+                "id": "tama", "name": "tama",
+                "baseUrl": format!("http://{addr}/v1"),
+                "apiKey": "static-key",
+                "useGcloudTokenAuth": true
+            }),
+        );
+        let mut manager = SessionManager::new(dir.to_path_buf());
+        manager.set_catalog(ModelCatalog::default());
+        let effective = manager.effective_catalog(None, true).await;
+        let row = effective
+            .models
+            .iter()
+            .find(|m| m.id == "m/1")
+            .expect("the discovered model is in the effective catalog");
+        assert_eq!(
+            row.api_key, "ya29.minted",
+            "the minted ADC token REPLACES the row's static key"
+        );
+        let head = rx.recv().await.expect("the server saw the request");
+        assert!(
+            head.to_lowercase()
+                .contains("authorization: bearer ya29.minted"),
+            "discovery must carry the SUBSTITUTED ADC bearer:\n{head}"
+        );
+        server.abort();
+        // The mint went to the in-memory cache and nowhere else — the on-disk
+        // store's untouched-ness is pinned from the outside by
+        // `minting_a_token_never_writes_the_provider_auth_store`.
+        assert!(
+            !dir.join("provider-auth.json").exists(),
+            "the ADC path writes nothing into the config dir"
+        );
+    }
+
+    /// (issue #128) The env precedence TABLE, at the function that computes it
+    /// (`provider_auth::gcloud_token_auth_enabled`, called by the `gcloud_adc`
+    /// arm): `=1` forces the flow on for a row that did not ask, `=0`/`=false`
+    /// refuses it for a row that did, unset or an unrecognised value defers to the
+    /// row.
+    ///
+    /// Deliberately asserted HERE rather than through four more resolves: the
+    /// resolve spine substitutes whatever the arm returns (pinned by
+    /// `resolve_substitutes_the_gcloud_adc_bearer_into_models_and_discovery`), the
+    /// env is read at the arm and nowhere else, and driving four extra raw
+    /// discovery servers in the parallel suite buys no new claim.
+    #[allow(clippy::await_holding_lock)] // the env is process-global
+    #[test]
+    fn the_gcloud_env_override_beats_the_provider_flag() {
+        use crate::agent::provider_auth::gcloud_token_auth_enabled;
+
+        let _lock = crate::test_support::env_lock();
+        let row = |mode: &str, flag: bool| crate::config::ProviderConfig {
+            id: "gw".to_string(),
+            name: "Gateway".to_string(),
+            base_url: "https://gw.example/v1".to_string(),
+            api_key: "k".to_string(),
+            api: "litellm".to_string(),
+            key_url: None,
+            auth_mode: mode.to_string(),
+            headers: None,
+            allow_insecure_http: false,
+            use_gcloud_token_auth: flag,
+        };
+
+        // Unset → the row decides.
+        let _unset = remove_env("LITELLM_GCLOUD_TOKEN_AUTH");
+        assert!(gcloud_token_auth_enabled(&row("gcloud_adc", false)));
+        assert!(gcloud_token_auth_enabled(&row("api_key", true)));
+        assert!(!gcloud_token_auth_enabled(&row("api_key", false)));
+
+        // `=1` / `=true` → on for EVERY row (an env force beats a config that did
+        // not opt in — the container shape, where the ADC file is the only key).
+        for value in ["1", "true", "TRUE"] {
+            let _on = set_env("LITELLM_GCLOUD_TOKEN_AUTH", value);
+            assert!(
+                gcloud_token_auth_enabled(&row("api_key", false)),
+                "`{value}` must enable the flow for a row that did not ask"
+            );
+        }
+
+        // `=0` / `=false` → off even for a row that opted in (the "never read my
+        // ADC file" escape hatch).
+        for value in ["0", "false", "FALSE"] {
+            let _off = set_env("LITELLM_GCLOUD_TOKEN_AUTH", value);
+            assert!(
+                !gcloud_token_auth_enabled(&row("gcloud_adc", true)),
+                "`{value}` must refuse the flow even for an opted-in row"
+            );
+        }
+
+        // An unrecognised value → the row decides (a typo in the env must not
+        // silently disable a flow the user configured).
+        let _typo = set_env("LITELLM_GCLOUD_TOKEN_AUTH", "yes-please");
+        assert!(gcloud_token_auth_enabled(&row("api_key", true)));
+        assert!(!gcloud_token_auth_enabled(&row("api_key", false)));
+    }
+
     /// (issue #129) The seeding gate: with `execute_helpers == false` the
-    /// helper is NEVER spawned (the "app startup launches no subprocess"
     /// invariant). The probe is a real side effect — a bare `touch <marker>` is
     /// legal argv (`touch` is the program, the marker path an ordinary
     /// argument), so the marker's ABSENCE proves no child ran, and the row keeps

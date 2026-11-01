@@ -422,6 +422,10 @@ pub(super) fn build_loop_with_headers_and_db(
             // production).
             headers: Some(headers),
             allow_insecure_http: false,
+            // (issue #128) The mechanical additive grow: `ProviderConfig`
+            // gained T4's `use_gcloud_token_auth`; this fixture does not use
+            // the ADC flow.
+            use_gcloud_token_auth: false,
         }],
         ..crate::config::Settings::default()
     };

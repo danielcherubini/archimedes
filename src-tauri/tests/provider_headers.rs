@@ -68,6 +68,9 @@ fn provider(id: &str, api_key: &str) -> ProviderConfig {
         auth_mode: "api_key".to_string(),
         headers: None,
         allow_insecure_http: false,
+        // (issue #128) The mechanical additive grow: T4's `ProviderConfig`
+        // gained `use_gcloud_token_auth`; this fixture never uses the ADC flow.
+        use_gcloud_token_auth: false,
     }
 }
 
@@ -265,6 +268,9 @@ fn provider_headers_and_the_insecure_flag_round_trip_through_the_settings_file()
             auth_mode: "api_key".to_string(),
             headers: Some(headers),
             allow_insecure_http: true,
+            // (issue #128) The mechanical additive grow (this fixture opts
+            // into plain HTTP, not into the ADC flow).
+            use_gcloud_token_auth: false,
         }],
         ..Settings::default()
     };

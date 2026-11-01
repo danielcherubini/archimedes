@@ -37,6 +37,10 @@ fn provider(id: &str, auth_mode: &str) -> ProviderConfig {
         // use neither (no custom headers, no plain-HTTP opt-in).
         headers: None,
         allow_insecure_http: false,
+        // (issue #128) The mechanical additive grow: T4's `ProviderConfig`
+        // gained `use_gcloud_token_auth`; this fixture's providers never use
+        // the ADC flow.
+        use_gcloud_token_auth: false,
     }
 }
 

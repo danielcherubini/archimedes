@@ -8,11 +8,13 @@
 //! Wiring `resolve_bearer` into `resolve` is T2/T4's seam; this module owns
 //! the resolution, the store and the refresh lifecycle.
 
+pub mod gcloud;
 pub mod headers;
 pub mod key_helper;
 pub mod refresh;
 pub mod store;
 
+pub use gcloud::{adc_file_path, describe_error, parse_adc, token as gcloud_token, AdcCredential};
 pub use headers::{expand_map, validate_base_url};
 pub use key_helper::run as run_key_helper;
 pub use refresh::{
@@ -25,6 +27,31 @@ pub use store::{
 };
 
 use std::path::Path;
+
+/// Is the `gcloud_adc` flow enabled for one provider row? (issue #128.)
+///
+/// Precedence, in the ONE place it is computed:
+/// - `LITELLM_GCLOUD_TOKEN_AUTH` unset (or an unrecognised value) → the row
+///   decides (`use_gcloud_token_auth` OR `authMode: "gcloud_adc"`);
+/// - `=0` / `=false` → OFF even for a row that enabled it (an explicit env
+///   disable beats the config — the escape hatch for "never touch my ADC file");
+/// - `=1` / `=true` → ON for EVERY row (an env force beats a config that did not
+///   opt in — the container/CI shape, where the ADC file is the only credential).
+///
+/// The env is read PER CALL, deliberately: this runs on a Supervisor resolve
+/// (not a per-turn Worker path), it keeps the toggle injectable from a test
+/// without touching `settings.json`, and it means the flag cannot be cached at
+/// startup behind a settings load.
+pub fn gcloud_token_auth_enabled(provider: &crate::config::ProviderConfig) -> bool {
+    let enabled_by_row = provider.use_gcloud_token_auth || provider.auth_mode == "gcloud_adc";
+    match std::env::var_os("LITELLM_GCLOUD_TOKEN_AUTH").as_deref() {
+        Some(v) if v == "0" || v.eq_ignore_ascii_case("false") => false,
+        Some(v) if v == "1" || v.eq_ignore_ascii_case("true") => true,
+        // Unset, or any other spelling: the row decides (a typo in the env must
+        // not silently disable a flow the user configured).
+        _ => enabled_by_row,
+    }
+}
 
 /// The effective bearer for one provider row, or `None` to mean "use the row's
 /// static `api_key` as-is". Never `Err` at this boundary — a failure resolves
@@ -73,21 +100,44 @@ pub async fn resolve_bearer_at(
     client: &reqwest::Client,
     execute_helpers: bool,
 ) -> Option<String> {
-    // Keep the interface's parameters named for the arms that do not use them
-    // yet (the dispatcher is async and takes the shared client; T5/T6 will use
-    // it for a synchronous refresh before serving an expiring token).
-    let _ = client;
+    // `client` and `config_dir` are both live now (the `gcloud_adc` flow uses
+    // them; T5/T6 will use `client` for a synchronous refresh before serving an
+    // expiring token). No parameter is left unnamed.
     // The dispatch ORDER is FIXED by interface §4 — earlier arms must not be
-    // reordered, so a placeholder occupies its exact position.
-    match provider.auth_mode.as_str() {
-        // EXTENSION POINT — T4: `"gcloud_adc"` → `gcloud::token(config_dir, …)`.
-        // Reaching `None` here means "serve the row's static key", which is the
-        // documented degradation until that arm exists (interface §1: a failure
-        // degrades, it never blanks).
-        "gcloud_adc" => {
-            let _ = (config_dir, execute_helpers);
-            None
+    // reordered. Slot 1 (the ADC flow) sits above the landed match, which keeps
+    // T1's/T2a's arm order exactly as it landed.
+    // Dispatch slot 1 (interface §4, T4 / issue #128): the Google ADC flow.
+    // `gcloud::token` mints (or reuses a cached) access token from the user's ADC
+    // file; ANY failure inside it — no ADC file, a `service_account`, a
+    // malformed file, a failed exchange — resolves to `None`, which means
+    // "serve the row's static key" (interface §1: a failed credential resolution
+    // degrades, it never blanks), and `gcloud` logs the specific diagnostic
+    // through `debuglog`.
+    //
+    // A MISS FALLS THROUGH to the rest of the ladder (interface §4's slot order
+    // says ADC is asked FIRST, not that it is the only thing asked: a row with
+    // both `useGcloudTokenAuth` and a `!command` key helper keeps its helper when
+    // the ADC file is absent). It is written as an early-return rather than a
+    // `match` arm so that fall-through is the plain control flow, and the
+    // match below keeps T1's/T2a's landed arm order untouched (ruling R8's
+    // arm-3-vs-oauth ordering is T5's to change, not this task's).
+    //
+    // This flow is NOT a subprocess and takes no `execute_helpers` gate: the
+    // exchange is one `reqwest` POST, so the "no child process at seeding"
+    // invariant is untouched (pinned by the zero-subprocess census). The minted
+    // token is NEVER persisted — `gcloud` holds it in a 50-minute in-memory cache
+    // and nothing writes it to the provider-auth store.
+    if gcloud_token_auth_enabled(provider) {
+        if let Some(token) = gcloud::token(config_dir, client).await {
+            return Some(token);
         }
+        crate::agent::debuglog::log(&format!(
+            "provider-auth: gcloud_adc produced no token for provider `{}` — falling back to \
+             the row's other credential sources (the static key if there are no others)",
+            provider.id
+        ));
+    }
+    match provider.auth_mode.as_str() {
         // Arm 3 (T2a, issue #129): an `api_key` starting with `!` is a KEY
         // HELPER — executed when `execute_helpers` is true. A helper FAILURE
         // degrades to `None` (the static key as-is) per the interface's rule —

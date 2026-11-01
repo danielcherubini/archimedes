@@ -57,6 +57,21 @@ pub async fn refresh(
     // `ProviderCredential` has one variant today, so a catch-all is an
     // unreachable-pattern warning and, later, a hole.)
     match cred {
+        // The `gcloud_adc` flow (T4, issue #128) is a LABEL route, not a
+        // rotation: an ADC credential carries the user's ADC FILE, not a minted
+        // token, and the exchange happens in `resolve_bearer`
+        // (`gcloud::token`) against a 50-minute IN-MEMORY cache. There is
+        // therefore nothing for the store loop to rotate — and persisting an ADC
+        // access token would break T4's central rule (the mint never touches
+        // disk), so this arm returns the credential UNCHANGED and never writes.
+        ProviderCredential::OAuth(oauth) if oauth.flow == "gcloud_adc" => {
+            debuglog::log(
+                "provider-refresh: a `gcloud_adc` credential needs no store refresh (the ADC \
+                 token is minted per resolve into the in-memory cache) — serving the stored \
+                 entry unchanged",
+            );
+            Ok(cred.clone())
+        }
         ProviderCredential::OAuth(oauth) => refresh_oauth(oauth, client).await,
     }
 }
