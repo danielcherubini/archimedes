@@ -8,9 +8,13 @@
 //! Wiring `resolve_bearer` into `resolve` is T2/T4's seam; this module owns
 //! the resolution, the store and the refresh lifecycle.
 
+pub mod headers;
+pub mod key_helper;
 pub mod refresh;
 pub mod store;
 
+pub use headers::{expand_map, validate_base_url};
+pub use key_helper::run as run_key_helper;
 pub use refresh::{
     noop_refresher_factory, production_refresher_factory, refresh, SupervisorRefresher,
     SupervisorRefresherDeps,
@@ -84,10 +88,36 @@ pub async fn resolve_bearer_at(
             let _ = (config_dir, execute_helpers);
             None
         }
-        // EXTENSION POINT — T2: an `api_key` starting with `!` runs
-        // `key_helper::run(...)` when `execute_helpers` (the seeding gate:
-        // background seeding must not spawn subprocesses).
-        _ if execute_helpers && provider.api_key.starts_with('!') => None,
+        // Arm 3 (T2a, issue #129): an `api_key` starting with `!` is a KEY
+        // HELPER — executed when `execute_helpers` is true. A helper FAILURE
+        // degrades to `None` (the static key as-is) per the interface's rule —
+        // never an `Err`, never a blank — with a debuglog line. With
+        // `execute_helpers == false` (the seeding path) the helper is NEVER
+        // spawned and `None` is returned (the command string stays the static
+        // key; the "no subprocess at startup" invariant, pinned by test).
+        //
+        // The slot is T1's landed placeholder position (between the `gcloud_adc`
+        // and the `oauth`/`oidc` arms) and is NOT reordered (interface §4 fixes
+        // the dispatch order). Because a `_`-guard matches any `auth_mode`, a row
+        // that carries BOTH a `!`-key and `authMode: "oauth"` takes this arm
+        // first — the recorded behaviour of the landed order (the plan's §2h
+        // note describes the reverse; see the implementation report).
+        _ if provider.api_key.starts_with('!') => {
+            if !execute_helpers {
+                None
+            } else {
+                match key_helper::run(&provider.api_key).await {
+                    Ok(token) => Some(token),
+                    Err(e) => {
+                        crate::agent::debuglog::log(&format!(
+                            "provider-auth: key helper failed for {}: {e}",
+                            provider.id
+                        ));
+                        None
+                    }
+                }
+            }
+        }
         "oauth" | "oidc" => {
             // T1 implements the `oauth` arm; `oidc` shares the entry point and
             // has no stored credential type yet (T6 adds it), so it degrades to

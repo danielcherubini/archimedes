@@ -32,6 +32,11 @@ fn provider(id: &str, auth_mode: &str) -> ProviderConfig {
         api: "litellm".to_string(),
         key_url: None,
         auth_mode: auth_mode.to_string(),
+        // (issue #129) The mechanical additive grow: T2a's `ProviderConfig`
+        // gained `headers` + `allow_insecure_http`; this fixture's providers
+        // use neither (no custom headers, no plain-HTTP opt-in).
+        headers: None,
+        allow_insecure_http: false,
     }
 }
 

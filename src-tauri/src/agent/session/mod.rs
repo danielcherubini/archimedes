@@ -363,14 +363,84 @@ impl EffectiveCatalog {
     /// discovery fails contributes 0 models but still shadows the base
     /// models for its id (ADR 0014 — via `merge_catalog`'s
     /// `shadowed_provider_ids`).
+    ///
+    /// The interactive default: helper-executing. Equivalent to
+    /// [`Self::resolve_with`] with `execute_helpers = true` — the value every
+    /// interactive caller wants (a session start MUST be able to run a
+    /// `!command` key helper). A caller that must NOT spawn a subprocess (the
+    /// boot seeding path) goes through [`Self::resolve_with`] with `false`, or
+    /// [`SessionManager::effective_catalog`] with the flag.
     pub async fn resolve(&self, force_refresh: Option<&str>) -> ModelCatalog {
+        self.resolve_with(force_refresh, true).await
+    }
+
+    /// The flag-taking core (issue #129): `execute_helpers` threads the spec's
+    /// seeding gate down to [`crate::agent::provider_auth::resolve_bearer`] —
+    /// `false` means a `!command` `api_key` is NEVER spawned and serves its
+    /// literal text as the static key (app startup must not launch a
+    /// subprocess).
+    ///
+    /// The per-provider sequence is: expand the custom headers → the
+    /// insecure-HTTP gate → resolve the bearer → discover. A gate refusal
+    /// degrades the provider exactly like a failed discovery (0 models,
+    /// `succeeded = false`, one debuglog line) and it still SHADOWS (ADR 0014),
+    /// so the picker shows `unreachable` + settings rather than a stale row.
+    pub async fn resolve_with(
+        &self,
+        force_refresh: Option<&str>,
+        execute_helpers: bool,
+    ) -> ModelCatalog {
         let settings = load_settings(&self.config_dir);
         let mut user_models: Vec<Model> = Vec::new();
         let mut cache = self.cache.lock().await;
+        // ONE client per resolve, handed to `resolve_bearer` (the `!command`
+        // arm ignores it; the oauth/ADC arms use it — interface §4).
+        let client = reqwest::Client::new();
         for provider in &settings.providers {
             let entry = cache
                 .entry(provider.id.clone())
                 .or_insert_with(ProviderDiscovery::default);
+            // The provider's custom headers (issue #129), EXPANDED + validated
+            // here (the single expansion site for the discovery path — the
+            // transport only attaches them). `None` in → `None` out: no
+            // sentinel map for a provider that configured none.
+            let custom_headers = provider
+                .headers
+                .as_ref()
+                .map(crate::agent::provider_auth::headers::expand_map);
+            // The insecure-HTTP gate (issue #129): a plain-`http://` base to a
+            // non-loopback host is refused unless the row opted in. A refusal
+            // degrades like a failed discovery — 0 models, `succeeded = false`
+            // (it SHADOWS anyway, ADR 0014, so the picker shows `unreachable` +
+            // settings) — with ONE descriptive debuglog line.
+            if let Err(e) = crate::agent::provider_auth::headers::validate_base_url(
+                &provider.base_url,
+                provider.allow_insecure_http,
+            )
+            .await
+            {
+                crate::agent::debuglog::log(&format!("provider-auth: {e}"));
+                entry.models.clear();
+                entry.succeeded = false;
+                continue; // no discovery, no models — never a panic, never a blank key
+            }
+            // The EFFECTIVE bearer (issue #129): a dynamic token (key helper /
+            // oauth / ADC) REPLACES the row's static key for BOTH the discovery
+            // call and every `Model` row this provider contributes (grounding:
+            // the substitution happens BEFORE discovery, not only in the row).
+            // `None` means "serve the static key as-is" — the contract's
+            // degrade rule (resolution never errors at the boundary).
+            let effective_key = match crate::agent::provider_auth::resolve_bearer(
+                provider,
+                &self.config_dir,
+                &client,
+                execute_helpers,
+            )
+            .await
+            {
+                Some(bearer) => bearer,
+                None => provider.api_key.clone(),
+            };
             // `force_refresh` (a provider id) bypasses the cache for that
             // provider (the settings page's refresh affordance); a failed
             // re-fetch clears the stale entry (0 models — the provider row
@@ -383,7 +453,14 @@ impl EffectiveCatalog {
             // before the network is up) shows `unreachable` + 0 models until a
             // restart. A success — including a legitimately EMPTY one — caches.
             if !entry.succeeded || bypass {
-                match discover_models(&provider.base_url, &provider.api_key, &provider.api).await {
+                match discover_models(
+                    &provider.base_url,
+                    &effective_key,
+                    &provider.api,
+                    custom_headers.as_ref(),
+                )
+                .await
+                {
                     Ok(models) => {
                         entry.models = models;
                         entry.succeeded = true;
@@ -405,7 +482,11 @@ impl EffectiveCatalog {
                     id: id.clone(),
                     provider: provider.id.clone(),
                     base_url: provider.base_url.clone(),
-                    api_key: provider.api_key.clone(),
+                    // The EFFECTIVE key (issue #129) — a dynamic bearer reaches
+                    // the Worker through this row (the token's destination is
+                    // `Model.api_key`; the Worker holds a pushed snapshot string
+                    // and never learns about helpers/OAuth).
+                    api_key: effective_key.clone(),
                     context_window: meta.context_window.unwrap_or(DEFAULT_CONTEXT_WINDOW),
                     cost_per_mtok_in: 0.0,
                     cost_per_mtok_out: 0.0,
@@ -778,10 +859,45 @@ impl SessionManager {
     /// unreachable endpoint is NOT retried every session). A failure, or a
     /// model absent from the response, degrades to the static
     /// (`models-store.json`) metadata (the `Model` is returned unchanged).
+    ///
+    /// (issue #129) The same HEADER parity as the resolve spine: this fetch is a
+    /// request to the user's provider too, so the row's custom headers are
+    /// expanded and attached, and its base URL passes the insecure-HTTP gate (a
+    /// refusal degrades to "the `Model` is returned unchanged" — no fetch). The
+    /// row is looked up by `model.provider` from a fresh `load_settings` read
+    /// (the header map and the flag live on the ROW, not on the `Model` — no new
+    /// `Model` field this wave).
+    ///
+    /// The BEARER needs NO re-resolution here: the `Model` handed to this
+    /// function always comes from the RESOLVED effective catalog (session start
+    /// resolves, picks the model from that catalog, and only then refreshes
+    /// metadata), so `model.api_key` already IS the spine-substituted effective
+    /// key and any `!`-prefix is long gone — re-running `resolve_bearer` here
+    /// would be dead work.
     async fn refresh_model_metadata(&self, model: &Model) -> Model {
         if model.base_url.is_empty() {
             return model.clone();
         }
+        // The provider row behind this model (the header source of truth).
+        let settings = load_settings(&self.config_dir);
+        let row = settings.providers.iter().find(|p| p.id == model.provider);
+        if let Some(row) = row {
+            if let Err(e) = crate::agent::provider_auth::headers::validate_base_url(
+                &row.base_url,
+                row.allow_insecure_http,
+            )
+            .await
+            {
+                // The same gate as the resolve spine: a refused base means no
+                // plaintext request (best-effort degrade — the static metadata
+                // is kept, exactly like an unreachable endpoint).
+                crate::agent::debuglog::log(&format!("provider-auth: {e}"));
+                return model.clone();
+            }
+        }
+        let provider_headers = row
+            .and_then(|p| p.headers.as_ref())
+            .map(crate::agent::provider_auth::headers::expand_map);
         let mut cache = self.discovery_cache.lock().await;
         let entry = cache
             .entry(model.provider.clone())
@@ -800,6 +916,7 @@ impl SessionManager {
                     .and_then(WireApi::parse)
                     .unwrap_or(WireApi::OpenAiCompletions)
                     .as_str(),
+                provider_headers.as_ref(),
             )
             .await
             {
@@ -834,15 +951,25 @@ impl SessionManager {
     /// discovery fails contributes 0 models but still shadows the base
     /// models for its id (ADR 0014 — via `merge_catalog`'s
     /// `shadowed_provider_ids`). Thin wrapper over
-    /// [`EffectiveCatalog::resolve`] (the subagent's resolution uses the
+    /// [`EffectiveCatalog::resolve_with`] (the subagent's resolution uses the
     /// parent's `StartEnv` catalog, built from the same core).
-    pub async fn effective_catalog(&self, force_refresh: Option<&str>) -> ModelCatalog {
+    ///
+    /// `execute_helpers` (issue #129) is the spec's seeding gate, supplied by
+    /// the CALLER (this is the single entry — no second seeding entry exists):
+    /// `true` for every interactive path (a session start, a model switch, the
+    /// agents listing — a helper MAY be spawned), `false` for the boot
+    /// `list_models` seed (app startup never spawns a subprocess).
+    pub async fn effective_catalog(
+        &self,
+        force_refresh: Option<&str>,
+        execute_helpers: bool,
+    ) -> ModelCatalog {
         EffectiveCatalog {
             config_dir: self.config_dir.clone(),
             cache: self.discovery_cache.clone(),
             base: self.catalog.clone(),
         }
-        .resolve(force_refresh)
+        .resolve_with(force_refresh, execute_helpers)
         .await
     }
 
@@ -1180,7 +1307,7 @@ impl SessionManager {
                     id: session_id.to_string(),
                 })?;
         let caps: Value = serde_json::from_str(&row.capabilities_json).unwrap_or(Value::Null);
-        let catalog = self.effective_catalog(None).await;
+        let catalog = self.effective_catalog(None, true).await;
         let settings = load_settings(&self.config_dir);
         let model = caps
             .get("model")
@@ -1243,7 +1370,7 @@ impl SessionManager {
         // The EFFECTIVE catalog (the base catalog + the user's providers, a fresh
         // `load_settings` read; the per-provider `discovery_cache` makes the fetch
         // cheap): the model resolution + the `StartEnv`'s `catalog`.
-        let catalog = self.effective_catalog(None).await;
+        let catalog = self.effective_catalog(None, true).await;
         let settings = load_settings(&self.config_dir);
         let is_resume = resume.is_some();
         let (session_id, model, stored_level, archived, title, context_usage, cost_usd) =
@@ -1432,7 +1559,7 @@ impl SessionManager {
         let rows = db
             .list_sessions(include_archived)
             .map_err(|e| SessionError::Io(e.to_string()))?;
-        let catalog = self.effective_catalog(None).await;
+        let catalog = self.effective_catalog(None, true).await;
         let settings = load_settings(&self.config_dir);
         Ok(rows
             .into_iter()
@@ -1803,7 +1930,7 @@ impl SessionManager {
         // The `Model` lookup + the re-synthesizer run against the EFFECTIVE
         // catalog (the base catalog + the user's providers — a user-provider
         // model can be switched TO mid-session, not just the base ones).
-        let catalog = self.effective_catalog(None).await;
+        let catalog = self.effective_catalog(None, true).await;
         // Apply (the `WorkerManager`'s `send_config` — the `Config` frame → the
         // Worker's `AgentLoop` `set_model` / `set_thinking_level`, applied when
         // the loop is idle) + mirror the change on the config state (the
@@ -4127,6 +4254,383 @@ mod session_tests {
         server.abort();
     }
 
+    // ── issue #129: the resolve spine (bearer, headers, the HTTP gate) ──────
+
+    /// `PERPLEXITY_API_KEY`-style restore guard (the `commands/settings.rs` /
+    /// `agent/web/config.rs` pattern — the restore happens even when an
+    /// assertion panics). Caller must hold `env_lock()`.
+    struct RestoreEnv(&'static str, Option<std::ffi::OsString>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            match self.1.take() {
+                // SAFETY: the `ENV_LOCK` is still held at drop time (this guard
+                // is declared after the `_lock` guard and outlives it in
+                // reverse); no other thread mutates the env concurrently.
+                Some(v) => unsafe { std::env::set_var(self.0, v) },
+                None => unsafe { std::env::remove_var(self.0) },
+            }
+        }
+    }
+
+    /// Set `key` for the rest of the test. Caller must hold `env_lock()`.
+    fn set_env(key: &'static str, value: &str) -> RestoreEnv {
+        let prev = std::env::var_os(key);
+        // SAFETY: `ENV_LOCK` is held by caller.
+        unsafe { std::env::set_var(key, value) };
+        RestoreEnv(key, prev)
+    }
+
+    /// Restores the global debug log to DISABLED on scope exit (the
+    /// `commands/sessions.rs` guard — a panic must not hand a sibling test a
+    /// global pointing at this test's deleted scratch dir).
+    struct DisableDebuglogOnExit;
+    impl Drop for DisableDebuglogOnExit {
+        fn drop(&mut self) {
+            crate::agent::debuglog::init(false, None);
+        }
+    }
+
+    /// A `settings.json` with ONE provider written from a JSON value (the
+    /// issue-#129 fixtures need per-row `headers` / `allowInsecureHttp` /
+    /// `apiKey`, which the two fixed-shape helpers above cannot express).
+    fn write_settings_provider_row(dir: &Path, row: Value) {
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_string_pretty(&json!({ "providers": [row] })).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A raw `GET /v1/models` server that CAPTURES each request's header block
+    /// and serves one model list. The capture is what lets a test assert what
+    /// actually went on the WIRE (the shared `test_support::raw_json_server`
+    /// ignores request headers — documented there).
+    async fn capturing_models_server(
+        body: &'static str,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<()>,
+        tokio::sync::mpsc::Receiver<String>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(16);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the listener binds");
+        let addr = listener.local_addr().expect("an address");
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let mut data = Vec::new();
+                    while !data.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let Ok(n) = stream.read(&mut buf).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        data.extend_from_slice(&buf[..n]);
+                    }
+                    let head = String::from_utf8_lossy(&data).to_string();
+                    let _ = tx.send(head).await;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        (addr, server, rx)
+    }
+
+    /// (issue #129) A `!command` `api_key` is EXECUTED at resolve time and the
+    /// resulting bearer reaches BOTH the discovery request (`Authorization:
+    /// Bearer tok`) and every `Model` row — the substitution happens BEFORE
+    /// discovery, not only in the row (grounding §2).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_substitutes_a_key_helper_bearer_into_models_and_discovery() {
+        let dir = temp_config_dir();
+        let (addr, server, mut rx) = capturing_models_server(r#"{"data":[{"id":"m/1"}]}"#).await;
+        write_settings_provider_row(
+            &dir,
+            json!({
+                "id": "tama", "name": "tama",
+                "baseUrl": format!("http://{addr}/v1"),
+                "apiKey": "!echo tok"
+            }),
+        );
+        let mut manager = SessionManager::new(dir.to_path_buf());
+        manager.set_catalog(ModelCatalog::default());
+        let effective = manager.effective_catalog(None, true).await;
+        let row = effective
+            .models
+            .iter()
+            .find(|m| m.id == "m/1")
+            .expect("the discovered model is in the effective catalog");
+        assert_eq!(
+            row.api_key, "tok",
+            "the helper's stdout (trimmed) is the row's key"
+        );
+        let head = rx.recv().await.expect("the server saw the request");
+        assert!(
+            head.to_lowercase().contains("authorization: bearer tok"),
+            "discovery must carry the SUBSTITUTED bearer:\n{head}"
+        );
+        server.abort();
+    }
+
+    /// (issue #129) The seeding gate: with `execute_helpers == false` the
+    /// helper is NEVER spawned (the "app startup launches no subprocess"
+    /// invariant). The probe is a real side effect — a bare `touch <marker>` is
+    /// legal argv (`touch` is the program, the marker path an ordinary
+    /// argument), so the marker's ABSENCE proves no child ran, and the row keeps
+    /// the literal command string as its static key.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_with_execute_helpers_false_never_executes_the_helper() {
+        let dir = temp_config_dir();
+        // The marker lives in its OWN scratch dir (ADR 0078 — dash prefix, no
+        // dot, removed on drop).
+        let probe = ScratchDir::in_env_temp("-t2a-seed", "marker");
+        let marker = probe.path().join("helper-ran");
+        let (addr, server, _rx) = capturing_models_server(r#"{"data":[{"id":"m/1"}]}"#).await;
+        write_settings_provider_row(
+            &dir,
+            json!({
+                "id": "tama", "name": "tama",
+                "baseUrl": format!("http://{addr}/v1"),
+                "apiKey": format!("!touch {}", marker.display())
+            }),
+        );
+        let mut manager = SessionManager::new(dir.to_path_buf());
+        manager.set_catalog(ModelCatalog::default());
+        let effective = manager.effective_catalog(None, false).await;
+        let row = effective
+            .models
+            .iter()
+            .find(|m| m.id == "m/1")
+            .expect("discovery still happened (the row serves its static key)");
+        assert!(
+            !marker.exists(),
+            "`execute_helpers = false` must NOT spawn the helper: {}",
+            marker.display()
+        );
+        assert_eq!(
+            row.api_key,
+            format!("!touch {}", marker.display()),
+            "the un-executed command string stays the static key (degrade, never blank)"
+        );
+        server.abort();
+    }
+
+    /// (issue #129) A provider's custom headers are expanded (`$VAR` against
+    /// the process environment) and attached to the DISCOVERY request.
+    ///
+    /// The `#[allow(clippy::await_holding_lock)]` is INTENTIONAL (the
+    /// `commands/settings.rs` precedent): the env must stay set for the WHOLE
+    /// resolve, so the `ENV_LOCK` is held across the discovery `await`s — a
+    /// sibling test mutating the same var mid-resolve would make the assertion
+    /// depend on the scheduler.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn resolve_applies_custom_headers_to_discovery() {
+        let _lock = crate::test_support::env_lock();
+        let _env = set_env("T2_TEST_HEADER", "expanded-from-env");
+        let dir = temp_config_dir();
+        let (addr, server, mut rx) = capturing_models_server(r#"{"data":[{"id":"m/1"}]}"#).await;
+        write_settings_provider_row(
+            &dir,
+            json!({
+                "id": "tama", "name": "tama",
+                "baseUrl": format!("http://{addr}/v1"),
+                "apiKey": "k",
+                "headers": { "x-env-test": "$T2_TEST_HEADER" }
+            }),
+        );
+        let mut manager = SessionManager::new(dir.to_path_buf());
+        manager.set_catalog(ModelCatalog::default());
+        let effective = manager.effective_catalog(None, true).await;
+        assert!(
+            effective.models.iter().any(|m| m.id == "m/1"),
+            "the provider discovered normally"
+        );
+        let head = rx.recv().await.expect("the server saw the request");
+        assert!(
+            head.to_lowercase()
+                .contains("x-env-test: expanded-from-env"),
+            "the expanded header must be on the wire:\n{head}"
+        );
+        server.abort();
+    }
+
+    /// (issue #129) The insecure-HTTP gate at the resolve level: a non-loopback
+    /// `http://` base with no opt-in contributes NO models, still SHADOWS its
+    /// id (ADR 0014 — the picker shows `unreachable` + settings, not stale rows),
+    /// and the refusal is logged with the descriptive `allowInsecureHttp`
+    /// message. No request is ever made to the plaintext endpoint.
+    ///
+    /// The `#[allow(clippy::await_holding_lock)]` is INTENTIONAL: the guard holds
+    /// the process-global `debuglog` target (this test's own dir) for the whole
+    /// resolve, so a sibling's `debuglog::init` cannot repoint it mid-test (the
+    /// `commands/sessions.rs` precedent).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn resolve_skips_a_provider_with_a_non_loopback_http_base() {
+        let dir = temp_config_dir();
+        // The log dir is this test's own (the `commands/sessions.rs` shape) so
+        // the assertion never reads a sibling's lines.
+        let log_dir = ScratchDir::in_env_temp("-t2a-gate", "log");
+        let _lock = crate::test_support::env_lock();
+        let _disable = DisableDebuglogOnExit;
+        crate::agent::debuglog::init(true, Some(log_dir.to_path_buf()));
+
+        let (_addr, server, mut rx) =
+            capturing_models_server(r#"{"data":[{"id":"cleartext"}]}"#).await;
+        // The provider is pointed at a NON-LOOPBACK literal (`10.0.0.5` — a
+        // bare IP, so no DNS is involved and the refusal is deterministic).
+        write_settings_provider_row(
+            &dir,
+            json!({
+                "id": "tama", "name": "tama",
+                "baseUrl": "http://10.0.0.5/v1",
+                "apiKey": "k"
+            }),
+        );
+        let mut manager = SessionManager::new(dir.to_path_buf());
+        manager.set_catalog(ModelCatalog {
+            models: vec![provider_model("tama/stale", "tama", "http://10.0.0.5/v1")],
+            ..Default::default()
+        });
+        let effective = manager.effective_catalog(None, true).await;
+        assert!(
+            !effective.models.iter().any(|m| m.id == "cleartext"),
+            "a refused base must not discover anything"
+        );
+        assert!(
+            !effective.models.iter().any(|m| m.provider == "tama"),
+            "the provider still SHADOWS its id (ADR 0014) — the stale base row \
+             must not survive the gate"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the gate refuses BEFORE any request is sent"
+        );
+        let written = std::fs::read_to_string(log_dir.join("supervisor.log")).unwrap_or_default();
+        assert!(
+            written.contains("allowInsecureHttp"),
+            "the refusal names the opt-out in the log:\n{written}"
+        );
+        // The SAME refusal is what the opt-in lifts — asserted at the gate level
+        // in `provider_auth::headers`' own tests (a live `http://10.0.0.5`
+        // request here would only prove a connect timeout, so it is not repeated).
+        server.abort();
+    }
+
+    /// (issue #129, vet Major 1) The metadata-refresh parity is WIRED: the
+    /// per-session `refresh_model_metadata` fetch looks its provider row up by
+    /// `model.provider`, expands the row's header templates and attaches them —
+    /// the same header-complete request the resolve spine makes.
+    ///
+    /// The `#[allow(clippy::await_holding_lock)]` is INTENTIONAL (the
+    /// `commands/settings.rs` precedent) — see
+    /// `resolve_applies_custom_headers_to_discovery` for why the env lock must
+    /// outlive the fetch's `await`s.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn refresh_model_metadata_sends_custom_headers() {
+        let _lock = crate::test_support::env_lock();
+        let _env = set_env("T2_TEST_HEADER", "metadata-parity");
+        let dir = temp_config_dir();
+        let (addr, server, mut rx) = capturing_models_server(
+            r#"{"data":[{"id":"m1","max_model_len":4242,"reasoningLevels":["low"],
+               "supportsReasoningEffort":true}]}"#,
+        )
+        .await;
+        // The row the metadata refresh looks up (its id == the model's
+        // `provider`), carrying the header TEMPLATE.
+        write_settings_provider_row(
+            &dir,
+            json!({
+                "id": "fake", "name": "fake",
+                "baseUrl": format!("http://{addr}/v1"),
+                "apiKey": "k",
+                "headers": { "x-env-test": "$T2_TEST_HEADER" }
+            }),
+        );
+        let mut manager = SessionManager::new(dir.to_path_buf());
+        manager.set_catalog(ModelCatalog {
+            models: vec![Model {
+                id: "m1".into(),
+                provider: "fake".into(),
+                base_url: format!("http://{addr}/v1"),
+                api_key: "k".into(),
+                context_window: 128000,
+                cost_per_mtok_in: 0.0,
+                cost_per_mtok_out: 0.0,
+                supports_tools: true,
+                supports_thinking: false,
+                thinking_levels: Vec::new(),
+                api: Some("openai-completions".into()),
+            }],
+            ..Default::default()
+        });
+        let model = manager.catalog.clone().models[0].clone();
+        let refreshed = manager.refresh_model_metadata(&model).await;
+        // The metadata still applies (the parity is additive).
+        assert_eq!(refreshed.context_window, 4242);
+        let head = rx
+            .recv()
+            .await
+            .expect("the metadata fetch reached the endpoint");
+        assert!(
+            head.to_lowercase().contains("x-env-test: metadata-parity"),
+            "the metadata fetch must carry the expanded header:\n{head}"
+        );
+        server.abort();
+    }
+
+    /// (issue #129) The metadata refresh passes the same gate: a row whose
+    /// plain-HTTP non-loopback base is refused is NOT fetched at all — the
+    /// `Model` degrades to its static metadata (the best-effort shape the
+    /// unreachable endpoint already used).
+    #[tokio::test]
+    async fn refresh_model_metadata_skips_a_refused_base() {
+        let dir = temp_config_dir();
+        let (_addr, server, mut rx) =
+            capturing_models_server(r#"{"data":[{"id":"m1","max_model_len":4242}]}"#).await;
+        // The ROW's base is the refused one (the gate reads the row, which is
+        // also the endpoint the model would be fetched from).
+        write_settings_provider_row(
+            &dir,
+            json!({
+                "id": "fake", "name": "fake",
+                "baseUrl": "http://10.0.0.5/v1",
+                "apiKey": "k"
+            }),
+        );
+        let mut manager = SessionManager::new(dir.to_path_buf());
+        manager.set_catalog(ModelCatalog {
+            models: vec![provider_model("m1", "fake", "http://10.0.0.5/v1")],
+            ..Default::default()
+        });
+        let model = manager.catalog.clone().models[0].clone();
+        let refreshed = manager.refresh_model_metadata(&model).await;
+        assert_eq!(
+            refreshed.context_window, DEFAULT_CONTEXT_WINDOW,
+            "a refused base is never fetched"
+        );
+        assert!(rx.try_recv().is_err(), "no request was made");
+        server.abort();
+    }
+
     /// Write a `settings.json` with a single user provider (the
     /// `effective_catalog` tests — the desktop-owned provider store, ADR
     /// 0014; the camelCase wire shape). `api` is the provider's wire API
@@ -4195,7 +4699,7 @@ mod session_tests {
             models: vec![provider_model("s/1", "other", "https://other/v1")],
             ..Default::default()
         });
-        let effective = manager.effective_catalog(None).await;
+        let effective = manager.effective_catalog(None, true).await;
         let user: Vec<&Model> = effective
             .models
             .iter()
@@ -4234,7 +4738,7 @@ mod session_tests {
             "anthropic-messages",
         );
         let manager = SessionManager::new(dir.to_path_buf());
-        let effective = manager.effective_catalog(None).await;
+        let effective = manager.effective_catalog(None, true).await;
         let user: Vec<&Model> = effective
             .models
             .iter()
@@ -4267,7 +4771,7 @@ mod session_tests {
         .await;
         write_settings_provider_api(&dir, "llm", &format!("http://{addr}/v1"), "litellm");
         let manager = SessionManager::new(dir.to_path_buf());
-        let effective = manager.effective_catalog(None).await;
+        let effective = manager.effective_catalog(None, true).await;
         let user: Vec<&Model> = effective
             .models
             .iter()
@@ -4301,7 +4805,7 @@ mod session_tests {
             default_model: Some("tama/stale/1".to_string()),
             ..Default::default()
         });
-        let effective = manager.effective_catalog(None).await;
+        let effective = manager.effective_catalog(None, true).await;
         assert!(
             !effective.models.iter().any(|m| m.provider == "tama"),
             "a failed discovery must NOT resurrect the stale seeded models"
@@ -4333,10 +4837,10 @@ mod session_tests {
         write_settings_provider(&dir, "tama", &format!("http://{addr}/v1"));
         let mut manager = SessionManager::new(dir.to_path_buf());
         manager.set_catalog(ModelCatalog::default());
-        let first = manager.effective_catalog(None).await;
+        let first = manager.effective_catalog(None, true).await;
         assert!(first.models.iter().any(|m| m.id == "v1"));
         // Second call: the cache serves it (the server is NOT hit again).
-        let second = manager.effective_catalog(None).await;
+        let second = manager.effective_catalog(None, true).await;
         assert_eq!(
             counter.load(std::sync::atomic::Ordering::Relaxed),
             1,
@@ -4357,7 +4861,7 @@ mod session_tests {
         )
         .await;
         write_settings_provider(&dir, "tama", &format!("http://{addr2}/v1"));
-        let refreshed = manager.effective_catalog(Some("tama")).await;
+        let refreshed = manager.effective_catalog(Some("tama"), true).await;
         assert_eq!(
             counter.load(std::sync::atomic::Ordering::Relaxed),
             2,
@@ -4390,7 +4894,7 @@ mod session_tests {
         write_settings_provider(&dir, "tama", "http://127.0.0.1:1/v1");
         let mut manager = SessionManager::new(dir.to_path_buf());
         manager.set_catalog(ModelCatalog::default());
-        let failed = manager.effective_catalog(None).await;
+        let failed = manager.effective_catalog(None, true).await;
         assert!(
             !failed.models.iter().any(|m| m.provider == "tama"),
             "the first attempt genuinely failed"
@@ -4410,7 +4914,7 @@ mod session_tests {
         write_settings_provider(&dir, "tama", &format!("http://{addr}/v1"));
         // NO `force_refresh`: an ordinary read must retry a provider whose last
         // attempt FAILED.
-        let retried = manager.effective_catalog(None).await;
+        let retried = manager.effective_catalog(None, true).await;
         assert!(
             retried.models.iter().any(|m| m.id == "recovered"),
             "a plain read must retry a previously-FAILED provider — a transient \

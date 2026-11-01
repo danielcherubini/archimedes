@@ -41,7 +41,11 @@ pub async fn list_models(
     state: State<'_, Arc<SessionManager>>,
     force_refresh: Option<String>,
 ) -> Result<Vec<ModelDto>, SettingsError> {
-    let catalog = state.effective_catalog(force_refresh.as_deref()).await;
+    // (issue #129) `execute_helpers = false`: the BOOT seed never spawns a
+    // `!command` key helper; every interactive caller passes `true`.
+    let catalog = state
+        .effective_catalog(force_refresh.as_deref(), false)
+        .await;
     // (#85) A refresh must reach LIVE sessions, not just new ones: the context
     // window is copied into each session's `AgentLoop` at spawn, so without this
     // a corrected window is invisible to every running session (and, since that

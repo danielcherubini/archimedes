@@ -55,6 +55,20 @@ pub struct ProviderConfig {
     /// untouched via the serde default.
     #[serde(default = "default_provider_auth_mode")]
     pub auth_mode: String,
+    /// Custom per-provider request headers (issue #129), written with
+    /// environment templates: `$VAR` and `${VAR}` expand against the process
+    /// environment SINGLE-PASS at resolve time (never recursively). Examples:
+    /// `"CF-Access-Client-Id": "$CLOUDFLARE_SERVICE_TOKEN_ID"` — enterprise
+    /// proxies (Cloudflare Access, …) authenticate this way. `None` = no
+    /// custom headers. Additive: a pre-feature file parses to `None`.
+    #[serde(default)]
+    pub headers: Option<std::collections::HashMap<String, String>>,
+    /// Explicitly allow plain `http://` provider base URLs (the default of
+    /// `false` refuses any non-loopback `http://` base with a descriptive
+    /// error). Loopback (`127.0.0.0/8`, `::1`) is ALWAYS allowed (ADR 0057 —
+    /// local dev servers are essential).
+    #[serde(default)]
+    pub allow_insecure_http: bool,
 }
 
 fn default_provider_api() -> String {
@@ -1461,6 +1475,48 @@ mod tests {
     }
 
     #[test]
+    fn provider_config_headers_and_allow_insecure_http_default() {
+        // (issue #129) A pre-feature `settings.json` carries neither
+        // `headers` nor `allowInsecureHttp`: both serde-default to
+        // `None`/`false`, so an existing file keeps its behaviour (no custom
+        // header, and a non-loopback `http://` base stays refused).
+        let config: ProviderConfig =
+            serde_json::from_str(r#"{"id":"p","name":"P","baseUrl":"https://x/v1","apiKey":"k"}"#)
+                .unwrap();
+        assert_eq!(config.headers, None);
+        assert!(!config.allow_insecure_http);
+    }
+
+    #[test]
+    fn provider_config_headers_and_allow_insecure_http_round_trip() {
+        // (issue #129) Both fields round-trip, camelCase on the wire
+        // (`allowInsecureHttp`), and the header VALUES stay the unexpanded
+        // templates (`$A`) — expansion happens at resolve time, never on load.
+        let config: ProviderConfig = serde_json::from_str(
+            r#"{"id":"p","name":"P","baseUrl":"https://x/v1","apiKey":"k",
+               "headers":{"x-a":"$A"},"allowInsecureHttp":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config
+                .headers
+                .as_ref()
+                .and_then(|h| h.get("x-a"))
+                .map(String::as_str),
+            Some("$A")
+        );
+        assert!(config.allow_insecure_http);
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            json.contains("\"allowInsecureHttp\":true"),
+            "camelCase on the wire: {json}"
+        );
+        assert!(json.contains("\"headers\""), "{json}");
+        let back: ProviderConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, config);
+    }
+
+    #[test]
     fn provider_config_auth_mode_round_trips() {
         // (issue #125) A populated `authMode` round-trips camelCase (the
         // permissive-string boundary — `api`'s style: validate at use, not at
@@ -1473,6 +1529,8 @@ mod tests {
             api: "litellm".to_string(),
             key_url: None,
             auth_mode: "oauth".to_string(),
+            headers: None,
+            allow_insecure_http: false,
         };
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("\"authMode\":\"oauth\""), "got {json}");
@@ -1491,6 +1549,8 @@ mod tests {
             api: "anthropic-messages".to_string(),
             key_url: Some("https://keys.example".to_string()),
             auth_mode: "api_key".to_string(),
+            headers: None,
+            allow_insecure_http: false,
         };
         let json = serde_json::to_string(&config).unwrap();
         assert!(
@@ -1523,6 +1583,8 @@ mod tests {
                 api: "openai-completions".into(),
                 key_url: None,
                 auth_mode: "api_key".into(),
+                headers: None,
+                allow_insecure_http: false,
             }],
             font: FontSettings {
                 size_px: 18,

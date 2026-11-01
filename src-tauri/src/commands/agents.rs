@@ -329,7 +329,7 @@ pub async fn list_agent_definition_reports(
     cwd: Option<String>,
 ) -> Result<Vec<AgentDefinitionReportDto>, AgentsError> {
     let settings = crate::config::load_settings(state.config_dir());
-    let catalog = state.effective_catalog(None).await;
+    let catalog = state.effective_catalog(None, true).await;
     Ok(agent_definition_reports(
         &settings,
         &crate::agents::discover_agents(cwd.as_deref().map(Path::new)),

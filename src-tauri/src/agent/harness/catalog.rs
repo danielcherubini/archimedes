@@ -252,17 +252,28 @@ struct DiscoveredModel {
 ///   the `max_model_len` / `reasoningLevels` /
 ///   `supportsReasoningEffort` parsing).
 ///
+/// `custom_headers` (issue #129) is the provider's EXPANDED + VALIDATED custom
+/// header map (`provider_auth::headers::expand_map` did the `$VAR`/`${VAR}`
+/// expansion and the name/value validation at the resolve call site — the arms
+/// here only ATTACH them, via the single
+/// [`transport::apply_custom_headers`](super::provider::transport::apply_custom_headers)
+/// seam). `None` = a provider with no custom headers, i.e. the pre-feature
+/// request shape verbatim.
+///
 /// A non-2xx / network error → `Err` (the caller degrades to the static
 /// metadata).
 pub async fn discover_models(
     base_url: &str,
     api_key: &str,
     api: &str,
+    custom_headers: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Result<HashMap<String, DiscoveredMeta>, String> {
     let api = WireApi::parse(api).unwrap_or(WireApi::OpenAiCompletions);
     match api {
-        WireApi::AnthropicMessages => discover_anthropic_models(base_url, api_key).await,
-        WireApi::LiteLLM => discover_litellm_models(base_url, api_key).await,
+        WireApi::AnthropicMessages => {
+            discover_anthropic_models(base_url, api_key, custom_headers).await
+        }
+        WireApi::LiteLLM => discover_litellm_models(base_url, api_key, custom_headers).await,
         // The OpenAI shape (`OpenAiCompletions` / `OpenAiResponses` /
         // unknown — the current behavior verbatim).
         _ => {
@@ -276,6 +287,10 @@ pub async fn discover_models(
             if !api_key.is_empty() {
                 req = req.bearer_auth(api_key);
             }
+            // The provider's custom headers (issue #129), after the bearer so a
+            // custom `authorization` entry can still override it (the documented
+            // order — the operator's map wins).
+            let req = super::provider::transport::apply_custom_headers(req, custom_headers);
             let resp = req.send().await.map_err(|e| e.to_string())?;
             let status = resp.status();
             if !status.is_success() {
@@ -316,6 +331,7 @@ pub async fn discover_models(
 async fn discover_anthropic_models(
     base_url: &str,
     api_key: &str,
+    custom_headers: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Result<HashMap<String, DiscoveredMeta>, String> {
     // Normalize the base to include the `/v1` API prefix (ADR 0024 —
     // mirroring ZCode's adapter-boundary normalization; WITHOUT it a
@@ -344,6 +360,8 @@ async fn discover_anthropic_models(
     if !api_key.is_empty() {
         req = req.header("x-api-key", api_key);
     }
+    // The provider's custom headers (issue #129) — see the OpenAI arm's note.
+    let req = super::provider::transport::apply_custom_headers(req, custom_headers);
     let resp = req.send().await.map_err(|e| e.to_string())?;
     let status = resp.status();
     if !status.is_success() {
@@ -391,6 +409,7 @@ struct AnthropicDiscoveredModel {
 async fn discover_litellm_models(
     base_url: &str,
     api_key: &str,
+    custom_headers: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Result<HashMap<String, DiscoveredMeta>, String> {
     let url = format!("{}/model/info", base_url.trim_end_matches('/'));
     let client = reqwest::Client::builder()
@@ -402,6 +421,8 @@ async fn discover_litellm_models(
     if !api_key.is_empty() {
         req = req.bearer_auth(api_key);
     }
+    // The provider's custom headers (issue #129) — see the OpenAI arm's note.
+    let req = super::provider::transport::apply_custom_headers(req, custom_headers);
     let resp = req.send().await.map_err(|e| e.to_string())?;
     let status = resp.status();
     if !status.is_success() {
@@ -684,6 +705,7 @@ mod tests {
             &format!("http://{addr}/v1"),
             "test-key",
             "openai-completions",
+            None,
         )
         .await
         .unwrap();
@@ -716,9 +738,14 @@ mod tests {
             "reasoningLevels":["low"],
             "supportsReasoningEffort":true}]}"#;
         let server = raw_json_server(listener, 200, body).await;
-        let models = discover_models(&format!("http://{addr}/v1"), "test-key", "openai-responses")
-            .await
-            .unwrap();
+        let models = discover_models(
+            &format!("http://{addr}/v1"),
+            "test-key",
+            "openai-responses",
+            None,
+        )
+        .await
+        .unwrap();
         // The OpenAI parsing path mapped the metadata (not the Anthropic
         // all-`None` shape).
         assert_eq!(models["r/1"].context_window, Some(42424));
@@ -744,6 +771,7 @@ mod tests {
             &format!("http://{addr}/v1"),
             "test-key",
             "anthropic-messages",
+            None,
         )
         .await
         .unwrap();
@@ -778,7 +806,7 @@ mod tests {
                 "supports_reasoning":true}},
             {"model_name":"lit/2"}]}"#;
         let server = raw_json_server(listener, 200, body).await;
-        let models = discover_models(&format!("http://{addr}/v1"), "test-key", "litellm")
+        let models = discover_models(&format!("http://{addr}/v1"), "test-key", "litellm", None)
             .await
             .unwrap();
         // `model_name` is the map key (NOT an `id` field — the OpenAI
@@ -818,7 +846,7 @@ mod tests {
         let body = r#"{"data":[{"model_name":"lit/o","model_info":
             {"max_output_tokens":999}}]}"#;
         let server = raw_json_server(listener, 200, body).await;
-        let models = discover_models(&format!("http://{addr}/v1"), "test-key", "litellm")
+        let models = discover_models(&format!("http://{addr}/v1"), "test-key", "litellm", None)
             .await
             .unwrap();
         assert_eq!(models["lit/o"].context_window, Some(999));
@@ -870,7 +898,7 @@ mod tests {
             }}
         ]}"#;
         let server = raw_json_server(listener, 200, body).await;
-        let models = discover_models(&format!("http://{addr}/v1"), "test-key", "litellm")
+        let models = discover_models(&format!("http://{addr}/v1"), "test-key", "litellm", None)
             .await
             .unwrap();
 
@@ -922,7 +950,7 @@ mod tests {
         // A non-2xx → `Err` (the caller degrades to the static metadata —
         // the row shows `unreachable`, 0 models, still shadows the base id).
         assert!(
-            discover_models(&format!("http://{addr}/v1"), "test-key", "litellm")
+            discover_models(&format!("http://{addr}/v1"), "test-key", "litellm", None,)
                 .await
                 .is_err()
         );
@@ -939,7 +967,8 @@ mod tests {
         assert!(discover_models(
             &format!("http://{addr}/v1"),
             "bad-key",
-            "openai-completions"
+            "openai-completions",
+            None,
         )
         .await
         .is_err());
