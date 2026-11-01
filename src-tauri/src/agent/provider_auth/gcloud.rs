@@ -107,33 +107,46 @@ pub fn adc_file_path() -> Option<PathBuf> {
     // into a `PathBuf` losslessly on every platform this app ships on, so a
     // non-UTF-8 ADC path still resolves instead of silently falling through.
     let named = std::env::var_os(ADC_ENV_VAR).map(PathBuf::from);
-    adc_file_path_from(named.as_deref(), dirs::home_dir().as_deref())
+    let base = adc_base();
+    adc_file_path_from(named.as_deref(), base.as_deref())
+}
+
+/// The base [`ADC_RELATIVE`] hangs off: `$HOME` on the Unix-family targets,
+/// `%APPDATA%` on Windows.
+///
+/// Windows reads `%APPDATA%` from the environment rather than taking
+/// `dirs::config_dir()`, because that appends `Roaming` while the spec names
+/// `%APPDATA%` itself. Resolving the base HERE — outside the seam below — is
+/// what keeps the seam pure: it takes a path, so a test can hand in its own base
+/// instead of relocating the developer's real `%APPDATA%` (which
+/// `dirs::config_dir()` reads all over the suite) or their real home.
+fn adc_base() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    {
+        dirs::home_dir()
+    }
 }
 
 /// The path-injection seam behind [`adc_file_path`] (the repo's hermeticity
-/// rule: injection, never relocation). A test hands in its own `env` and `home`
-/// and never touches the developer's real ADC file.
+/// rule: injection, never relocation). A test hands in its own `env` and `base`
+/// and never touches the developer's real ADC file, home, or `%APPDATA%`.
 ///
-/// On Windows the second candidate is `%APPDATA%\gcloud\…`, resolved from the
-/// environment HERE because `dirs::config_dir()` appends `Roaming` and the spec
-/// names `%APPDATA%` itself. That leg type-checks on every target and RUNS only
-/// on CI's Windows leg — never claim it as behaviourally verified from a Linux
-/// box.
-fn adc_file_path_from(env: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+/// The two arms of [`adc_base`] differ ONLY in which base the one shared
+/// `ADC_RELATIVE` hangs off, so this seam is target-independent: the fallback
+/// test below runs identically on Unix (`$HOME/.config/gcloud/…`) and on
+/// Windows (`%APPDATA%\gcloud\…`) — which is the point, since the Windows
+/// spelling of `ADC_RELATIVE` is otherwise compiled nowhere but there.
+fn adc_file_path_from(env: Option<&Path>, base: Option<&Path>) -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(path) = env {
         candidates.push(path.to_path_buf());
     }
-    #[cfg(not(windows))]
-    if let Some(base) = home {
+    if let Some(base) = base {
         candidates.push(base.join(ADC_RELATIVE));
-    }
-    #[cfg(windows)]
-    {
-        let _ = home;
-        if let Some(appdata) = std::env::var_os("APPDATA") {
-            candidates.push(PathBuf::from(appdata).join(ADC_RELATIVE));
-        }
     }
     // `is_file` (not `exists`): a dangling symlink or a directory named like the
     // ADC file must not become a candidate that then fails to read.
@@ -685,40 +698,48 @@ mod tests {
     #[test]
     fn adc_file_path_prefers_the_env_var() {
         let _lock = crate::test_support::env_lock();
-        let home = crate::test_support::ScratchDir::in_env_temp("gcloud-adc-", "home");
+        let base = crate::test_support::ScratchDir::in_env_temp("gcloud-adc-", "home");
         // BOTH candidates exist: the env-named file must win (Google's own
         // precedence, and the only way a user with several ADC files can pick).
-        let env_file = home.join("env-creds.json");
-        let home_file = home.join("home-creds.json");
+        let env_file = base.join("env-creds.json");
         std::fs::write(&env_file, "{}").unwrap();
-        std::fs::write(&home_file, "{}").unwrap();
-        let got = adc_file_path_from(Some(env_file.as_path()), Some(home.path()))
+        let base_file = base.join(ADC_RELATIVE);
+        std::fs::create_dir_all(base_file.parent().unwrap()).unwrap();
+        std::fs::write(&base_file, "{}").unwrap();
+        let got = adc_file_path_from(Some(env_file.as_path()), Some(base.path()))
             .expect("the env-named file is a candidate");
         assert_eq!(got, env_file);
     }
 
     #[test]
-    fn adc_file_path_falls_back_from_env_to_home() {
-        // The env candidate is absent (it names nothing) → the home candidate.
-        let home = crate::test_support::ScratchDir::in_env_temp("gcloud-adc-", "home");
-        let dir = home.join(".config/gcloud");
-        std::fs::create_dir_all(&dir).unwrap();
-        let home_file = dir.join("application_default_credentials.json");
-        std::fs::write(&home_file, "{}").unwrap();
-        let got = adc_file_path_from(None, Some(home.path())).expect("the home file is found");
-        assert_eq!(got, home_file);
+    fn adc_file_path_falls_back_from_env_to_the_platform_base() {
+        // The env candidate is absent (it names nothing) → the platform base's
+        // candidate. The path is built from `ADC_RELATIVE` rather than spelled
+        // `.config/gcloud/…`, because that constant is per-target: on Windows it
+        // is `gcloud\application_default_credentials.json` under `%APPDATA%`, and
+        // the home-relative POSIX spelling is not a candidate there at all. A
+        // hardcoded POSIX path made this red on CI's Windows leg — the seam took
+        // `home` and discarded it under `#[cfg(windows)]`. Building from the
+        // constant means this ONE test pins the `%APPDATA%` layout on Windows and
+        // the `$HOME` layout everywhere else.
+        let base = crate::test_support::ScratchDir::in_env_temp("gcloud-adc-", "home");
+        let base_file = base.join(ADC_RELATIVE);
+        std::fs::create_dir_all(base_file.parent().unwrap()).unwrap();
+        std::fs::write(&base_file, "{}").unwrap();
+        let got = adc_file_path_from(None, Some(base.path())).expect("the base file is found");
+        assert_eq!(got, base_file);
     }
 
     #[test]
     fn adc_file_path_is_none_when_nothing_exists() {
-        let home = crate::test_support::ScratchDir::in_env_temp("gcloud-adc-", "empty");
-        assert_eq!(adc_file_path_from(None, Some(home.path())), None);
+        let base = crate::test_support::ScratchDir::in_env_temp("gcloud-adc-", "empty");
+        assert_eq!(adc_file_path_from(None, Some(base.path())), None);
         // A candidate that exists but is NOT a file (a directory) is skipped, not
         // chosen-then-failed.
-        let dir = home.join("dir-creds.json");
+        let dir = base.join("dir-creds.json");
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(
-            adc_file_path_from(Some(dir.as_path()), Some(home.path())),
+            adc_file_path_from(Some(dir.as_path()), Some(base.path())),
             None
         );
     }
