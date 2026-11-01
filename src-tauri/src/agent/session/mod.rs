@@ -2027,6 +2027,75 @@ impl SessionManager {
         pushed
     }
 
+    /// Push a newly-resolved bearer to every LIVE session on that provider,
+    /// without touching context/thinking fields (a SIBLING to
+    /// [`Self::refresh_live_models`] — that method deliberately refuses to copy
+    /// `api_key` / `base_url` so an empty discovery-derived key cannot wipe a
+    /// configured one, which a credential push cannot reuse as-is; each refusal
+    /// is pinned by its own tests). Returns the number of sessions pushed.
+    ///
+    /// Called by the provider-credential refresher (`agent::provider_auth::
+    /// refresh`) after a refresh has SUCCEEDED and been persisted — never after
+    /// a failed one, so a transient outage never replaces a working bearer
+    /// (interface §1's "degrade, never blank" rule on the push side).
+    ///
+    /// Scoping is per MATCHED SESSION: the session's CURRENT model (the
+    /// `config_state` mirror — the same source `set_config_option`
+    /// re-synthesizes from) must be on this provider AND carry a different key.
+    /// The key comparison is the no-op guard: `set_model` rebuilds the
+    /// `Compactor`, re-estimates, emits a `context_usage_update` AND writes the
+    /// `sessions` row, so pushing an unchanged key would be N frames and N DB
+    /// writes for nothing (the same reasoning `refresh_live_models`' gate
+    /// encodes).
+    ///
+    /// Dispatch goes through the existing `Config { model }` frame → the
+    /// Worker's `ControlCmd::SetModel` → `AgentLoop::set_model`, which already
+    /// does the whole right thing and is pinned by the loop's own `set_model`
+    /// test — this method only supplies the trigger.
+    ///
+    /// Best-effort per session: a dead / closing Worker is skipped, never an
+    /// error (a refresh must not fail because one session is mid-teardown).
+    pub async fn refresh_live_credentials(&self, provider_id: &str, api_key: &str) -> usize {
+        let Some(wm) = self.worker_manager.get().cloned() else {
+            return 0;
+        };
+        // The candidates, collected BEFORE any send so the `sessions` lock is
+        // never held across one (the `refresh_live_models` discipline verbatim).
+        let targets: Vec<(String, Model)> = {
+            let sessions = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            sessions
+                .iter()
+                .filter_map(|(session_id, row)| {
+                    let state = row.config_state.as_ref()?;
+                    (state.model.provider == provider_id && state.model.api_key != api_key).then(
+                        || {
+                            // ONLY the key changes: the context window and the
+                            // thinking fields stay the session's own (this push
+                            // is not a metadata refresh — that is the sibling's
+                            // job, and it has its own gate).
+                            let mut next = state.model.clone();
+                            next.api_key = api_key.to_string();
+                            (session_id.clone(), next)
+                        },
+                    )
+                })
+                .collect()
+        };
+        let mut pushed = 0;
+        for (session_id, model) in targets {
+            let Some(handle) = wm.handle_for(&session_id) else {
+                continue;
+            };
+            if handle.send_config(Some(&model), None, None).is_ok() {
+                // Mirror ONLY on a delivered frame (finding 12's rule — a failed
+                // send means the loop never applies it).
+                self.update_config_state(&session_id, |s| s.model = model.clone());
+                pushed += 1;
+            }
+        }
+        pushed
+    }
+
     /// Update the session's `NativeConfigState` mirror (the `set_config_option`
     /// re-synthesizer source) in place. A missing mirror (a session that never
     /// resolved a model) is a NO-OP — never created here.
@@ -3803,6 +3872,176 @@ mod session_tests {
             "an absent settings default degrades to the catalog default"
         );
         let _ = manager.close_session(&info.session_id).await;
+    }
+
+    // ── `refresh_live_credentials` (issue #125 — the credential push) ──
+
+    /// The credential push reaches the LIVE session: the `config_state` mirror's
+    /// model carries the new bearer. This is the sibling of
+    /// `refresh_live_models` (which refuses to copy `api_key` — that refusal is
+    /// pinned by its own tests), so the two push paths are pinned separately.
+    ///
+    /// The mirror is the load-bearing assertion (the interface §6 note): the
+    /// Worker-side application is `AgentLoop::set_model`, already pinned by the
+    /// loop's own `set_model` test.
+    #[tokio::test]
+    async fn refresh_live_credentials_pushes_the_new_bearer_to_live_session_models() {
+        let dir = temp_config_dir();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        let (manager, _wm, _db) = build_worker_manager(&dir, native_test_catalog(), &sink);
+        let info = manager
+            .start_session(dir.to_path_buf(), &sink)
+            .await
+            .expect("the native session started");
+        // The premise: the live session runs `fake/m1` with the catalog's static
+        // key.
+        let before = manager
+            .with_session(&info.session_id, |s| s.config_state.clone())
+            .flatten()
+            .expect("the session is live");
+        assert_eq!(before.model.provider, "fake");
+        assert_eq!(before.model.api_key, "k", "the static key from the catalog");
+
+        let pushed = manager.refresh_live_credentials("fake", "new-bearer").await;
+        assert_eq!(pushed, 1, "the one live session on `fake` was pushed");
+
+        let after = manager
+            .with_session(&info.session_id, |s| s.config_state.clone())
+            .flatten()
+            .expect("the session is still live");
+        assert_eq!(
+            after.model.api_key, "new-bearer",
+            "the mirror carries the new bearer"
+        );
+        // The sibling's contract: ONLY the key changes — the context window and
+        // the thinking fields are the session's own, untouched by a credential
+        // push (that is why this is a separate method from `refresh_live_models`).
+        assert_eq!(after.model.context_window, before.model.context_window);
+        assert_eq!(
+            after.model.supports_thinking,
+            before.model.supports_thinking
+        );
+        assert_eq!(after.model.id, before.model.id);
+        assert_eq!(after.model.base_url, before.model.base_url);
+        assert_eq!(
+            after.thinking_level, before.thinking_level,
+            "a credential push never touches the thinking level"
+        );
+        let _ = manager.close_session(&info.session_id).await;
+    }
+
+    /// Scoping is per provider: a session whose current model is on another
+    /// provider is never touched by a push for `fake` (pushing a foreign bearer
+    /// into another provider's session would break a working session).
+    #[tokio::test]
+    async fn refresh_live_credentials_updates_only_the_matching_provider() {
+        let dir = temp_config_dir();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        // Two providers in the catalog; the session runs `other/m2`.
+        let catalog = ModelCatalog {
+            models: vec![
+                chain_test_model("fake", "m1"),
+                chain_test_model("other", "m2"),
+            ],
+            default_model: Some("other/m2".to_string()),
+            compaction: crate::agent::harness::catalog::CompactionConfig::default(),
+        };
+        let (manager, _wm, _db) = build_worker_manager(&dir, catalog, &sink);
+        let info = manager
+            .start_session(dir.to_path_buf(), &sink)
+            .await
+            .expect("the native session started");
+        assert_eq!(
+            info.capabilities["model"], "other/m2",
+            "the session runs the OTHER provider's model"
+        );
+
+        let pushed = manager.refresh_live_credentials("fake", "new-bearer").await;
+        assert_eq!(pushed, 0, "no session runs on `fake`");
+        let state = manager
+            .with_session(&info.session_id, |s| s.config_state.clone())
+            .flatten()
+            .expect("the session is live");
+        assert_eq!(
+            state.model.api_key, "k",
+            "the other provider's session keeps its own key"
+        );
+
+        // And the same call for the provider it DOES run on pushes exactly that
+        // session — the filter matches, it is not simply always-empty.
+        let pushed = manager
+            .refresh_live_credentials("other", "new-bearer")
+            .await;
+        assert_eq!(pushed, 1, "the matching provider's session was pushed");
+        let state = manager
+            .with_session(&info.session_id, |s| s.config_state.clone())
+            .flatten()
+            .expect("the session is live");
+        assert_eq!(state.model.api_key, "new-bearer");
+        let _ = manager.close_session(&info.session_id).await;
+    }
+
+    /// The no-op guard: pushing the key the session ALREADY has sends nothing
+    /// (a `set_model` rebuilds the `Compactor`, re-estimates, emits a
+    /// `context_usage_update` and writes the `sessions` row — firing it on an
+    /// unchanged key would be a frame and a DB write for nothing, the same
+    /// reasoning `refresh_live_models`' gate encodes).
+    #[tokio::test]
+    async fn refresh_live_credentials_skips_unchanged_keys() {
+        let dir = temp_config_dir();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        let (manager, _wm, _db) = build_worker_manager(&dir, native_test_catalog(), &sink);
+        let info = manager
+            .start_session(dir.to_path_buf(), &sink)
+            .await
+            .expect("the native session started");
+
+        // The SAME key the live model already carries.
+        let pushed = manager.refresh_live_credentials("fake", "k").await;
+        assert_eq!(pushed, 0, "an unchanged key pushes nothing");
+        let state = manager
+            .with_session(&info.session_id, |s| s.config_state.clone())
+            .flatten()
+            .expect("the session is live");
+        assert_eq!(state.model.api_key, "k", "and the mirror is untouched");
+        assert!(
+            rx.try_recv().is_err(),
+            "no event was emitted for a no-op push"
+        );
+        let _ = manager.close_session(&info.session_id).await;
+    }
+
+    /// No live sessions at all → `0` (the refresher loop calls this after every
+    /// successful refresh, so the empty case is the common one and must be free
+    /// rather than an error).
+    #[tokio::test]
+    async fn refresh_live_credentials_with_no_live_sessions_returns_zero() {
+        let dir = temp_config_dir();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        let (manager, _wm, _db) = build_worker_manager(&dir, native_test_catalog(), &sink);
+        // No session started at all.
+        assert_eq!(
+            manager.refresh_live_credentials("fake", "new-bearer").await,
+            0,
+            "no live sessions ⇒ nothing pushed, no error"
+        );
+        // And a session that has been CLOSED is not a target either: its Worker
+        // is gone, so the push is skipped (best-effort per session, exactly like
+        // `refresh_live_models`).
+        let info = manager
+            .start_session(dir.to_path_buf(), &sink)
+            .await
+            .expect("the native session started");
+        let _ = manager.close_session(&info.session_id).await;
+        assert_eq!(
+            manager.refresh_live_credentials("fake", "new-bearer").await,
+            0,
+            "a closed session's Worker is gone, so nothing is pushed to it"
+        );
     }
 
     /// (live `/v1/models` discovery) `refresh_model_metadata` applies the

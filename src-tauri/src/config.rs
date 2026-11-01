@@ -48,10 +48,21 @@ pub struct ProviderConfig {
     /// row's "Get key" link; `None` for a hand-typed provider).
     #[serde(default)]
     pub key_url: Option<String>,
+    /// The provider's auth mode (issue #125): `"api_key"` (the default — a
+    /// pre-feature file parses to it) | `"oauth"` | `"oidc"` | `"gcloud_adc"`.
+    /// A STRING, not an enum, matching `api`'s permissive-boundary style;
+    /// validate at use, not at parse. Additive: pre-feature files parse
+    /// untouched via the serde default.
+    #[serde(default = "default_provider_auth_mode")]
+    pub auth_mode: String,
 }
 
 fn default_provider_api() -> String {
     "openai-completions".to_string()
+}
+
+fn default_provider_auth_mode() -> String {
+    "api_key".to_string()
 }
 
 /// Font settings for the UI.
@@ -1438,6 +1449,38 @@ mod tests {
     }
 
     #[test]
+    fn provider_config_auth_mode_defaults_to_api_key() {
+        // (issue #125) A pre-feature `settings.json` (NO `authMode` field)
+        // parses to `auth_mode == "api_key"` (the serde default — no
+        // migration), so every provider that exists before the OAuth work
+        // keeps its static-key behaviour untouched.
+        let config: ProviderConfig =
+            serde_json::from_str(r#"{"id":"p","name":"P","baseUrl":"https://x/v1","apiKey":"k"}"#)
+                .unwrap();
+        assert_eq!(config.auth_mode, "api_key");
+    }
+
+    #[test]
+    fn provider_config_auth_mode_round_trips() {
+        // (issue #125) A populated `authMode` round-trips camelCase (the
+        // permissive-string boundary — `api`'s style: validate at use, not at
+        // parse, so an unknown mode parses rather than rejecting the file).
+        let config = ProviderConfig {
+            id: "gw".to_string(),
+            name: "Gateway".to_string(),
+            base_url: "https://gw.example/v1".to_string(),
+            api_key: String::new(),
+            api: "litellm".to_string(),
+            key_url: None,
+            auth_mode: "oauth".to_string(),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"authMode\":\"oauth\""), "got {json}");
+        let back: ProviderConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, config);
+    }
+
+    #[test]
     fn provider_config_api_and_key_url_round_trip() {
         // (ADR 0024) A populated `api` + `keyUrl` round-trips camelCase.
         let config = ProviderConfig {
@@ -1447,6 +1490,7 @@ mod tests {
             api_key: "k".to_string(),
             api: "anthropic-messages".to_string(),
             key_url: Some("https://keys.example".to_string()),
+            auth_mode: "api_key".to_string(),
         };
         let json = serde_json::to_string(&config).unwrap();
         assert!(
@@ -1478,6 +1522,7 @@ mod tests {
                 api_key: String::new(),
                 api: "openai-completions".into(),
                 key_url: None,
+                auth_mode: "api_key".into(),
             }],
             font: FontSettings {
                 size_px: 18,
