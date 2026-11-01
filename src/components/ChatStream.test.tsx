@@ -37,7 +37,6 @@ import {
 } from "./chat/WorkingIndicator";
 import type {
   AgentDefinitionDto,
-  AppSettings,
   CompletionDirDto,
   CompletionEntryDto,
   ListingDto,
@@ -47,58 +46,23 @@ import * as chatAttachments from "../lib/chatAttachments";
 import { activeMentionToken, isOutsideSpaceQuery } from "../lib/skills";
 import { IPC_EVENTS } from "../lib/ipc/events";
 import { MAX_CHAT_ATTACHMENTS, type ChatComposerAttachment } from "../lib/chatAttachments";
-import { makeSessionRow, makeSettings, makeSpaceRow } from "../test/fixtures";
 import { resetStores } from "../test/resetStores";
-
-/**
- * The monospace advance as a fraction of font size, used to turn a braille
- * grid's cell count into the px the `BrailleLoader` actually occupies at
- * `fontSize={14}`. 0.6em is the conventional mono advance and the one the
- * indicator's floor is derived from — the constant lives in the test so the
- * floor is checked against an INDEPENDENT statement of the arithmetic rather
- * than against the component's own number.
- */
-const MONO_ADVANCE_EM = 0.6;
-
-/** A full settings fixture (the spinner-style tests seed the store with it).
- *  The shared fixture — this file's 22-field literal was byte-identical to
- *  `DEFAULT_SETTINGS`, which is the drift `src/test/fixtures/settings.ts`
- *  exists to make a compile error instead of a silent copy. */
-const SETTINGS_FIXTURE: AppSettings = makeSettings();
-
-/**
- * Seed the settings store with the `#` MCP-mention trigger ENABLED.
- * The trigger is OFF by default (it collides with pasted developer text), so
- * every test that exercises the shipped `#` behavior opts in explicitly here —
- * the same seeding path the spinner-style tests use, so the gate is read from
- * the same store the composer reads.
- */
-function seedMcpMentionsOn(): void {
-  useSettings
-    .getState()
-    .setSettings({ ...SETTINGS_FIXTURE, mcpMentionsEnabled: true });
-}
-
-/**
- * Seed the settings store with the `#` MCP-mention trigger EXPLICITLY off
- * (the default when nothing is seeded is also off — `settings === null` —
- * so this pins the flag itself rather than the not-yet-loaded fallback).
- */
-function seedMcpMentionsOff(): void {
-  useSettings
-    .getState()
-    .setSettings({ ...SETTINGS_FIXTURE, mcpMentionsEnabled: false });
-}
-
-/** The `<mcp>` block `expandMentions` produces for the `postgres` fixture
- * server (a message PERSISTED while the `#` trigger was on). */
-const PERSISTED_MCP_MESSAGE =
-  "query #postgres\n\n" +
-  '<mcp name="postgres">' +
-  '\nThe user has explicitly named the MCP server "postgres" for this' +
-  '\nrequest. Connect to it via the mcp tool (mcp({ connect: "postgres" }))' +
-  "\nand use its tools. (Server summary: npx -y x-mcp.)" +
-  "\n</mcp>";
+import {
+  MONO_ADVANCE_EM,
+  SETTINGS_FIXTURE,
+  PERSISTED_MCP_MESSAGE,
+  seedLiveSession,
+  seedStoredSession,
+  seedArchivedSession,
+  seedLiveSessionWithImages,
+  seedMcpMentionsOn,
+  seedMcpMentionsOff,
+  pasteToComposer,
+  dropOnComposer,
+  flush,
+  deferred,
+  waitForCatalog,
+} from "../test/chatStreamFixtures";
 
 // The environment stubs `src/test/setup.tsx` does NOT provide.
 //
@@ -223,182 +187,6 @@ vi.mock("../lib/tauri", async () => {
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn().mockResolvedValue(null),
 }));
-
-/**
- * Seed a live session (fresh transcript) in the sessions store.
- *
- * The rows and the Space come from `src/test/fixtures` (the rolling migration)
- * — the literals they replace were byte-identical to the fixture defaults plus
- * an override, so nothing about the seeded state changed.
- */
-function seedLiveSession(): void {
-  useSessions.setState({
-    activeSessionId: "s1",
-    sessions: [makeSessionRow({ sessionId: "s1", cwd: "/home/u/proj" })],
-    spaces: [makeSpaceRow({ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1 })],
-    historySessions: [],
-    messages: { s1: [] },
-    inTurn: {},
-    stopReasons: {},
-    closeReasons: {},
-    configOptions: {},
-    compacting: {},
-  });
-}
-
-/**
- * Seed a STORED (non-live) session: `sessions` is empty, the session lives
- * in `historySessions` (so `isLive` is false). `capabilities` defaults to `{}`
- * (history-only); pass `{ loadSession: true }` for the resumable case.
- */
-function seedStoredSession(
-  capabilities: Record<string, unknown> = {},
-): void {
-  useSessions.setState({
-    activeSessionId: "s1",
-    sessions: [],
-    spaces: [makeSpaceRow({ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1 })],
-    historySessions: [
-      makeSessionRow({ sessionId: "s1", cwd: "/home/u/proj", capabilities }),
-    ],
-    messages: { s1: [] },
-    inTurn: {},
-    stopReasons: {},
-    closeReasons: {},
-    configOptions: {},
-  });
-}
-
-/**
- * Seed a session that lives ONLY in `archivedSessions` (opened from the
- * Archived section): `sessions` and `historySessions` are empty, so the
- * session is neither live nor in the stored list.
- */
-function seedArchivedSession(
-  capabilities: Record<string, unknown> = {},
-): void {
-  useSessions.setState({
-    activeSessionId: "s9",
-    sessions: [],
-    spaces: [makeSpaceRow({ path: "/home/u/arch", createdAt: 1, lastOpenedAt: 1 })],
-    historySessions: [],
-    archivedSessions: [
-      makeSessionRow({
-        sessionId: "s9",
-        cwd: "/home/u/arch",
-        capabilities,
-        archived: true,
-      }),
-    ],
-    messages: { s9: [] },
-    inTurn: {},
-    stopReasons: {},
-    closeReasons: {},
-    configOptions: {},
-  });
-}
-
-/**
- * Seed a live session whose agent advertises `promptCapabilities.image`
- * (the image-attachment capability gate — fail-closed otherwise).
- */
-function seedLiveSessionWithImages(): void {
-  useSessions.setState({
-    activeSessionId: "s1",
-    sessions: [
-      makeSessionRow({
-        sessionId: "s1",
-        cwd: "/home/u/proj",
-        capabilities: { promptCapabilities: { image: true } },
-      }),
-    ],
-    spaces: [makeSpaceRow({ path: "/home/u/proj", createdAt: 1, lastOpenedAt: 1 })],
-    historySessions: [],
-    messages: { s1: [] },
-    inTurn: {},
-    stopReasons: {},
-    closeReasons: {},
-    configOptions: {},
-  });
-}
-
-// `fireEvent.paste` wraps the dispatch in `act` (a raw `dispatchEvent` does NOT —
-// state changes then need `await act(...)` to become visible) and jsdom has no
-// `DataTransfer`, so the plain `clipboardData` object is attached as-is and
-// reaches React's `onPaste` with `e.clipboardData.items` intact. A pasted image
-// lives in `items` as a `ClipboardItem` you pull via `getAsFile()`; `files` is
-// EMPTY in real webviews (WebKit/WebView2), so the stub mirrors that — it builds
-// `items` (NOT `files`) and each item models the real `ClipboardItem` shape.
-function pasteToComposer(
-  files: File[],
-  extra: { text?: string; html?: string } = {},
-): boolean {
-  const target = screen.getByRole("textbox") as HTMLTextAreaElement;
-  return fireEvent.paste(target, {
-    clipboardData: {
-      items: files.map((f) => ({
-        kind: "file",
-        type: f.type,
-        getAsFile: () => f,
-      })),
-      getData: (type: string) =>
-        type === "text/plain" ? (extra.text ?? "") : (extra.html ?? ""),
-    },
-  });
-}
-
-function dropOnComposer(files: File[]): void {
-  // `getByRole("textbox")` (the placeholder is the single static
-  // "Ask for follow-up changes" — state-independent).
-  const target = screen.getByRole("textbox");
-  fireEvent.drop(target, { dataTransfer: { files } });
-}
-
-/**
- * Flush the microtask queue (the mocked IPC promises resolve after
- * `render` — their state updates must land BEFORE the assertions,
- * wrapped in `act` so React applies them to the DOM).
- */
-async function flush(): Promise<void> {
-  await act(async () => {
-    await Promise.resolve();
-  });
-}
-
-/**
- * A promise that has NOT settled yet, plus its resolvers — the shape an
- * in-flight IPC has. `deferred` (rather than a plain pending promise) so a
- * test can settle it on purpose and assert what the NEXT keystroke does, and
- * so a test that means to leave one hanging can still unwind it.
- */
-function deferred<T>(): {
-  promise: Promise<T>;
-  resolve: (v: T) => void;
-  reject: (e: unknown) => void;
-} {
-  let resolve!: (v: T) => void;
-  let reject!: (e: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
-
-/**
- * Wait for the skill catalog to load AND render. The mocked `listSkills`
- * resolves in a microtask; the hook's `p.then` then runs `setRows` one or
- * more microtasks later. A `setTimeout(0)` macrotask wait guarantees every
- * pending microtask (the whole promise chain) has run, so the re-render with
- * the loaded rows has landed. (Needed for the send-expansion test, where the
- * picker is NOT open — `findByText` can't be used as the wait signal.)
- */
-async function waitForCatalog(): Promise<void> {
-  await waitFor(() => expect(vi.mocked(listSkills)).toHaveBeenCalled());
-  await act(async () => {
-    await new Promise((r) => setTimeout(r, 0));
-  });
-}
 
 beforeEach(() => {
   // Restore real timers in case a previous test installed fake ones (the
@@ -2737,7 +2525,7 @@ describe("ChatStream", () => {
     // Ensure the catalog is loaded (the expansion depends on it) — the picker
     // is NOT open here (the trailing space closes it), so `findByText` can't
     // be the wait signal.
-    await waitForCatalog();
+    await waitForCatalog(listSkills);
     // The trailing space ends the active token → the picker is NOT open and
     // Enter is NOT intercepted by the picker's `selectMention` branch. `rawText`
     // = `draft.trim()` = `fix $debug`.
@@ -2773,7 +2561,7 @@ describe("ChatStream", () => {
   it("an unmatched token is sent verbatim", async () => {
     seedLiveSession();
     render(<ChatStream />);
-    await waitForCatalog();
+    await waitForCatalog(listSkills);
     // `$nope` matches no skill → `expandMentions` finds no match and
     // returns the text UNCHANGED. The trailing space closes the picker.
     fireEvent.change(screen.getByRole("textbox"), {
@@ -2792,7 +2580,7 @@ describe("ChatStream", () => {
     async () => {
       seedLiveSession();
       render(<ChatStream />);
-      await waitForCatalog();
+      await waitForCatalog(listSkills);
       fireEvent.change(screen.getByRole("textbox"), {
         target: { value: "ping @scout " },
       });
@@ -2825,7 +2613,7 @@ describe("ChatStream", () => {
       seedLiveSession();
       seedMcpMentionsOn();
       render(<ChatStream />);
-      await waitForCatalog();
+      await waitForCatalog(listSkills);
       fireEvent.change(screen.getByRole("textbox"), {
         target: { value: "query #postgres " },
       });
@@ -2845,7 +2633,7 @@ describe("ChatStream", () => {
       seedLiveSession();
       seedMcpMentionsOn();
       render(<ChatStream />);
-      await waitForCatalog();
+      await waitForCatalog(listSkills);
       fireEvent.change(screen.getByRole("textbox"), {
         target: { value: "x $debug @scout #postgres " },
       });
@@ -2865,7 +2653,7 @@ describe("ChatStream", () => {
     async () => {
       seedLiveSession();
       render(<ChatStream />);
-      await waitForCatalog();
+      await waitForCatalog(listSkills);
       // `#nope` matches no MCP server → NO block and the token is NOT
       // stripped (the `mergeDedupeKey` byte-identity invariant).
       fireEvent.change(screen.getByRole("textbox"), {
@@ -2879,7 +2667,7 @@ describe("ChatStream", () => {
     async () => {
       seedLiveSession();
       render(<ChatStream />);
-      await waitForCatalog();
+      await waitForCatalog(listSkills);
       fireEvent.change(screen.getByRole("textbox"), {
         target: { value: "hi @nope " },
       });
@@ -3327,7 +3115,7 @@ describe("ChatStream", () => {
       seedLiveSession();
       seedMcpMentionsOff();
       render(<ChatStream />);
-      await waitForCatalog();
+      await waitForCatalog(listSkills);
       // `postgres` IS in the catalog — the OFF state must still leave the text
       // untouched (the empty-catalog gate hits `expandMentions`, which then
       // finds no match and returns the text verbatim: invariant 1).
@@ -3351,7 +3139,7 @@ describe("ChatStream", () => {
       seedLiveSession();
       seedMcpMentionsOff();
       render(<ChatStream />);
-      await waitForCatalog();
+      await waitForCatalog(listSkills);
       const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
       fireEvent.change(textarea, { target: { value: "#123" } });
       await flush();
@@ -3368,7 +3156,7 @@ describe("ChatStream", () => {
       seedLiveSession();
       seedMcpMentionsOff();
       render(<ChatStream />);
-      await waitForCatalog();
+      await waitForCatalog(listSkills);
       const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
       // The pickers: `@` still opens (the `@` catalog is untouched).
       fireEvent.change(textarea, { target: { value: "@" } });
@@ -3393,7 +3181,7 @@ describe("ChatStream", () => {
       // behave as OFF, never as ON (`settings?.mcpMentionsEnabled ?? false`).
       seedLiveSession();
       render(<ChatStream />);
-      await waitForCatalog();
+      await waitForCatalog(listSkills);
       fireEvent.change(screen.getByRole("textbox"), {
         target: { value: "query #postgres " },
       });
@@ -3925,7 +3713,7 @@ describe("ChatStream", () => {
         truncated: false,
       });
       render(<ChatStream />);
-      await waitForCatalog();
+      await waitForCatalog(listSkills);
       // `README.md` IS in the listing — the send path must still leave the text
       // untouched (`expandMentions` never sees `?`; the trailing space also
       // closes the token, so Enter is not an insertion).
@@ -3953,7 +3741,7 @@ describe("ChatStream", () => {
       });
       render(<ChatStream />);
       const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
-      await waitForCatalog();
+      await waitForCatalog(listSkills);
       const drafts = ["?? README.md", "a?.b", "?"];
       for (const [i, d] of drafts.entries()) {
         fireEvent.change(textarea, { target: { value: d } });
@@ -6713,7 +6501,7 @@ describe("ChatStream — the [image #N] staging marker", () => {
         { name: "3", kind: "stdio", summary: "a server named with a digit" },
       ]);
       render(<ChatStream />);
-      await waitForCatalog();
+      await waitForCatalog(listSkills);
       pasteToComposer(
         ["a", "b", "c"].map(
           (n) =>
@@ -6743,7 +6531,7 @@ describe("ChatStream — the [image #N] staging marker", () => {
         { name: "postgres", kind: "stdio", summary: "npx -y x-mcp" },
       ]);
       render(<ChatStream />);
-      await waitForCatalog();
+      await waitForCatalog(listSkills);
       pasteToComposer([
         new File([new Uint8Array([1])], "s.png", { type: "image/png" }),
       ]);
@@ -6764,7 +6552,7 @@ describe("ChatStream — the [image #N] staging marker", () => {
     seedLiveSessionWithImages();
     seedMcpMentionsOn(); // the default catalog is `postgres` — no digit name
     render(<ChatStream />);
-    await waitForCatalog();
+    await waitForCatalog(listSkills);
     pasteToComposer([
       new File([new Uint8Array([1, 2, 3])], "s.png", { type: "image/png" }),
     ]);
@@ -6814,7 +6602,7 @@ describe("ChatStream — the [image #N] staging marker", () => {
         { name: "3", kind: "stdio", summary: "a server named with a digit" },
       ]);
       render(<ChatStream />);
-      await waitForCatalog();
+      await waitForCatalog(listSkills);
       pasteToComposer([
         new File([new Uint8Array([1])], "s.png", { type: "image/png" }),
       ]);
@@ -7020,7 +6808,7 @@ describe("ChatStream — send() forks to the prompt queue while the composer is 
     async () => {
       seedLiveSession();
       render(<ChatStream />);
-      await waitForCatalog();
+      await waitForCatalog(listSkills);
       await act(async () => {
         useSessions.getState().beginTurn("s1");
       });
@@ -7282,7 +7070,7 @@ describe("ChatStream — the Flush: the queue drains when the Session goes idle"
       ]);
       seedLiveSession();
       render(<ChatStream />);
-      await waitForCatalog();
+      await waitForCatalog(listSkills);
       act(() => {
         useSessions.getState().beginTurn("s1");
       });
