@@ -78,11 +78,16 @@ Known flakes on this machine (re-run before investigating, do not "fix" the thre
 ## Dependency graph / waves
 
 ```
-Wave 1: A1, A2                (owned file sets disjoint — the only genuinely parallel pair in the block)
+Wave 1: A1, A2                (owned file sets disjoint — the only genuinely parallel pair until wave 4)
 Wave 2: B1                    (A2's shared fixture module makes the test split cheap; B1 moves attachment tests)
 Wave 3: C1                    (needs B1's useChatAttachments boundary — send/flushHead consume the attachment contract)
-Wave 4: D1                    (needs B1 + C1's hooks to exist; reduces the orchestrator and the residual test file)
+Wave 4: D1, D2                (DISJOINT by the source/test boundary: D1 owns ChatStream.tsx + the derivations
+                               module/hook; D2 owns ChatStream.test.tsx + its new files + the barrel pin)
 ```
+
+**Wave 4 is width 2 and that was a planning result, not an assumption.** The original D1 owned both hot files, which made wave 4 width 1. Cutting at the source/test boundary made the sets disjoint. Both vets independently verified the two cross-boundary seams: D1 adds no `vi.mock`, so it cannot move the barrel pin D2 edits; D2 moves no source, so D1's rewire cannot break a moved test (the moved blocks drive the component through the DOM and never read `workingOrInTurn`/`composerLocked`/the history slice).
+
+**Wave 4 isolation: both members ISOLATED** — one worktree + branch each, protocol-mandated at width ≥2. Cost measured on this repo: a worktree `pnpm install` is ~7s (pnpm's global store hard-links), so isolation is cheap here — unlike the waves-2–3 case, where the reason to skip it was the *absence of anything to pipeline*, not the install cost.
 
 **Waves 2–4 are width 1 and that is the honest shape of this work — do not re-cut it.** `ChatStream.tsx` is a hot
 file for every extraction (no region moves without editing it) and `ChatStream.test.tsx` is hot for every test
@@ -107,10 +112,14 @@ hazard at zero wave cost.
 **Isolation decisions (one per wave, with the cost accepted):**
 - **Wave 1 (width 2): isolate both members** — one worktree + one branch each. Protocol-mandated (siblings), cost
   accepted: 2 × `pnpm install` in fresh worktrees.
-- **Waves 2–4 (width 1): run in the PRIMARY tree, unisolated.** There is no planning overlap to buy, because the
-  next wave's planner must read `ChatStream.tsx` — the very file the running child is editing. Paying a cold
+- **Waves 2–3 (width 1): ran in the PRIMARY tree, unisolated.** There was no planning overlap to buy, because
+  the next wave's planner must read `ChatStream.tsx` — the very file the running child was editing. Paying a cold
   dependency install per wave to enable an overlap I must then refuse is the wrong trade. Consequence: no
-  pipelining on W2–W4; plan wave N+1 only after wave N's gate is green.
+  pipelining on W2–W3; each wave's planning ran only after the previous wave's gate was green. Both ran this way
+  and both gated green.
+- **Wave 4 (width 2): isolate both members.** Protocol-mandated (siblings). Measured cost on this repo: a
+  worktree `pnpm install` is ~7s because pnpm's global store hard-links, so isolation is nearly free here —
+  the waves-2–3 decision rested on "nothing to pipeline", never on install cost.
 
 ## Grounding reports
 
@@ -136,7 +145,10 @@ Re-ground with `git log --oneline <commit>..HEAD -- <area paths>`, not a feeling
 | A2 | Extract `ChatStream.test.tsx`'s module-level scaffolding → `src/test/chatStreamFixtures.ts` | `chat-test-scaffolding` | `docs/roadmap/chatstream-decomposition-task02-test-fixtures.md` | 1 | `src/test/chatStreamFixtures.ts`, `src/test/chatStreamFixtures.test.ts`, `src/components/ChatStream.test.tsx` | `done` `99166759` |
 | B1 | `useChatAttachments` — stageFiles / handlePaste / handleDrop / handleAttachClick / removeAttachment + move its tests | `attachment-lib` | `docs/roadmap/chatstream-decomposition-task03-chat-attachments-hook.md` | 2 | `src/hooks/useChatAttachments.ts`, `src/hooks/useChatAttachments.test.ts`, `src/components/ChatStream.tsx`, `src/components/ChatStream.test.tsx`, `src/lib/tauriBarrel.test.ts` (mock-seam pin update only) | `done` `0aa99ffb` |
 | C1 | `useChatPromptDispatch` + `usePromptQueueFlusher` — sendText / send / flushHead / resume + move their tests | `prompt-queue-stores` | `docs/roadmap/chatstream-decomposition-task04-prompt-dispatch-flush.md` | 3 | `src/hooks/useChatPromptDispatch.ts`, `src/hooks/useChatPromptDispatch.test.tsx`, `src/hooks/usePromptQueueFlusher.ts`, `src/hooks/usePromptQueueFlusher.test.tsx`, `src/components/ChatStream.tsx`, `src/components/ChatStream.test.tsx`, `src/lib/tauriBarrel.test.ts` (mock-seam pin update only) | `done` `bab6d68a` |
-| D1 | Orchestrator final form + reduce the test file to integration wiring + measure the acceptance criteria | `chatstream-body` | `docs/roadmap/chatstream-decomposition-task05-orchestrator-final-form.md` | 4 | `src/components/ChatStream.tsx`, `src/components/ChatStream.test.tsx`, plus any residual `src/components/chat/*` test file the split leaves | `todo` |
+| D1 | Final derivations — move the `composerLocked` chain + history pagination into the EXISTING pure module/hook | `chatstream-body` | `docs/roadmap/chatstream-decomposition-task05-final-derivations.md` | 4 | `src/components/ChatStream.tsx`, `src/lib/chatSessionDerivations.ts`, `src/lib/chatSessionDerivations.test.ts`, `src/hooks/useChatSessionDerivations.ts`, `src/hooks/useChatSessionDerivations.test.ts` | `vetted` |
+| D2 | Split the residual test file by domain (directory completion; child gates) leaving integration wiring | `chat-test-scaffolding` | `docs/roadmap/chatstream-decomposition-task06-split-residual-tests.md` | 4 | `src/components/ChatStream.test.tsx`, `src/components/ChatStreamDirectoryCompletion.test.tsx`, `src/components/ChatStreamChildGates.test.tsx`, `src/lib/tauriBarrel.test.ts` (mock-seam pin update only) | `vetted` |
+
+**Wave 4 was cut in two during planning, and the wave is therefore width 2 — the only reason this run has a second parallel wave.** The original D1 was one task owning `ChatStream.tsx` AND `ChatStream.test.tsx`, which would have made wave 4 width 1. Splitting at the source/test boundary makes the two file sets disjoint: D1 owns the component plus the derivations module/hook, D2 owns the test file plus its new files and the barrel pin. The two vets each independently confirmed the cross-boundary seams are safe: D1 introduces no new `vi.mock`, so it cannot move the barrel pin D2 edits; D2 moves no source, so D1's rewire cannot break a moved test (the moved blocks drive the component through the DOM and never read `workingOrInTurn`/`composerLocked`/the history slice).
 
 **Status is exactly one of these, checkable from the tree without asking anyone:**
 
@@ -155,6 +167,26 @@ the rows.
 ## Blockers / open questions
 
 Empty.
+
+## Follow-ups to fold into `docs/roadmap/chatstream-decomposition-follow-ups.md` before the final commit
+
+The plan family is DELETED on ship, so anything recorded only in a plan dies. These are the run's known
+outstanding items; they are listed here (the surviving file) so `finish` cannot delete them.
+
+1. **Three stale file-name citations created by task06's test split — one micro-commit, prose only.**
+   `ChatStream.test.tsx`'s domain blocks move to `ChatStreamDirectoryCompletion.test.tsx` and
+   `ChatStreamChildGates.test.tsx`, so every doc that names the OLD file for a moved test becomes a lie.
+   Nothing mechanically reads any of them (verified: no test greps these strings), and the mutation-checked
+   assertions still run in their new files — so nothing reddens. But a reader following a citation lands on
+   the wrong file. The complete set, each verified against the tree:
+   - `src/components/ChatStream.tsx`'s picker comment: "Pinned in `ChatStream.test.tsx` at THIS derivation"
+     (the `dirPrefix` one-directory-cache pin) → `ChatStreamDirectoryCompletion.test.tsx`.
+   - `docs/decisions/0035-out-of-space-completion-is-a-one-directory-peek.md` lines ~30 and ~35: five
+     `it(`-title citations, all inside the moved block → same new file.
+   - `docs/features/subagent-sessions.md` line ~465: "an Escape INSIDE the inline child card" →
+     `ChatStreamChildGates.test.tsx`.
+   Why it was deferred rather than done in-wave: `ChatStream.tsx` was owned by task05 and the ADR/features
+   files were outside every task's Owns set, so no wave member could legitimately touch them.
 
 ## Decisions log
 
@@ -278,6 +310,11 @@ Four deviations, all compiler-arbitrated and accepted: `import * as chatAttachme
 `ChatStream.test.tsx` (their only consumers were inside the moved Flush group — the plan predicted the spy would
 stay, and was wrong); the five store-action selector locals left the component (each hook now pulls its own);
 `useRef` dropped from the dispatch hook's react import (the Set is an argument).
+
+### Plan vet rounds (Wave 4)
+
+- **D1 (task05) — vetted 2026-11-01, 2 rounds, PASS no BLOCKING.** The `composerLocked` chain was enumerated independently by the vet: all seven consumers served (`useSpinQuip`, the definition, `useChatPromptDispatch`'s arg, `useSessionIdleEdge`'s `busy:`, and three JSX props), and the ordering claim confirmed on the file — the derivations hook's destructure closes at ~81, `useSpinQuip(workingOrInTurn)` is at ~177, the early return at ~553, so a hook-returned value is in scope with no TDZ. The picker/`hasImages`/`units` refusals verified as recorded decisions, not laziness (the `dirPrefix` one is mutation-checked). Round 1's Major was **test over-generation: 16 new tests for two small derivations**, trimmed to 12 with N and every sum updated together (3356 + 12 = 3368), justified against this repo's own "prefer the cheap, correct-enough fix" rule and the "pay any cost to satisfy a criterion exactly" anti-pattern. Its Minor was a **half-recorded refusal**: wave 1's original text named three consumers (`useSpinQuip`, `useSessionIdleEdge`, **and `send`'s queue-fork**), and since D1's whole justification is "that reason has landed", all three legs had to be squared — the third is now C1-internal (`useChatPromptDispatch.ts`'s `if (composerLocked)` arm), an argument read, not a hook return.
+- **D2 (task06) — vetted 2026-11-01, 2 rounds, PASS no BLOCKING.** The vet independently confirmed the split's premise: the module scaffold (~140 lines: `beforeAll`, both inline `vi.mock` factories, the module `beforeEach`) **cannot** be shared across files — probe rows 1 and 3 forbid it, and `chatStreamFixtures.ts` is itself the measured row-3 case. So the cost model is real and the 34+16-moved / 13-left ratio judgement is defensible. Both direction-specific helper cross-reference lists came back **empty**, and the order-dependence analysis shows the split REMOVES an in-file order dependence (block 2's persistent catalog leak) rather than introducing one — no silent behaviour change. Barrel arithmetic re-derived 41/40 → 43/42. Round 1's two Majors: a **missing `useInteractive` import** that would have reddened `tsc`, and a **durability gap** — the plan recorded the stale-citation follow-up only in itself, and the plan family is deleted on ship. Round 2 corrected the vet's own count error (the vet conflated §2's directory-completion block, which has ZERO direct store reads, with §3's child-gate blocks, which read `useInteractive` 12× / `useSubagents` 11× / `useSessions` 4× / `usePermissions` 2× — all four re-derived by grep against the tree and matching the file), and surfaced a **second stale citation the vet had missed**: `docs/decisions/0035-…` cites five `it(` titles "in `ChatStream.test.tsx`" and `docs/features/subagent-sessions.md:465` cites one, all inside blocks this plan moves. The orchestrator closed the durability gap by moving the follow-up into the status file's own section, since `finish` deletes the plan.
 
 ### Plan vet rounds (Wave 1)
 
