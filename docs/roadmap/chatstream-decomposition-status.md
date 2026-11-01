@@ -130,8 +130,8 @@ Re-ground with `git log --oneline <commit>..HEAD -- <area paths>`, not a feeling
 
 | # | Task | Area | Plan file | Wave | Owns (file set — disjointness evidence) | Status |
 |---|------|------|-----------|------|------------------------------------------|--------|
-| A1 | Pure session derivations → `lib/chatSessionDerivations.ts` + `hooks/useChatSessionDerivations.ts` | `chatstream-body` | `docs/roadmap/chatstream-decomposition-task01-session-derivations.md` | 1 | `src/lib/chatSessionDerivations.ts`, `src/lib/chatSessionDerivations.test.ts`, `src/hooks/useChatSessionDerivations.ts`, `src/hooks/useChatSessionDerivations.test.ts`, `src/components/ChatStream.tsx` | `vetted` |
-| A2 | Extract `ChatStream.test.tsx`'s module-level scaffolding → `src/test/chatStreamFixtures.ts` | `chat-test-scaffolding` | `docs/roadmap/chatstream-decomposition-task02-test-fixtures.md` | 1 | `src/test/chatStreamFixtures.ts`, `src/test/chatStreamFixtures.test.ts`, `src/components/ChatStream.test.tsx` | `vetted` |
+| A1 | Pure session derivations → `lib/chatSessionDerivations.ts` + `hooks/useChatSessionDerivations.ts` | `chatstream-body` | `docs/roadmap/chatstream-decomposition-task01-session-derivations.md` | 1 | `src/lib/chatSessionDerivations.ts`, `src/lib/chatSessionDerivations.test.ts`, `src/hooks/useChatSessionDerivations.ts`, `src/hooks/useChatSessionDerivations.test.ts`, `src/components/ChatStream.tsx` | `done` `35d1efaf` |
+| A2 | Extract `ChatStream.test.tsx`'s module-level scaffolding → `src/test/chatStreamFixtures.ts` | `chat-test-scaffolding` | `docs/roadmap/chatstream-decomposition-task02-test-fixtures.md` | 1 | `src/test/chatStreamFixtures.ts`, `src/test/chatStreamFixtures.test.ts`, `src/components/ChatStream.test.tsx` | `done` `99166759` |
 | B1 | `useChatAttachments` — stageFiles / handlePaste / handleDrop / handleAttachClick / removeAttachment + move its tests | `attachment-lib` | `docs/roadmap/chatstream-decomposition-task03-chat-attachments-hook.md` | 2 | `src/hooks/useChatAttachments.ts`, `src/hooks/useChatAttachments.test.ts`, `src/components/ChatStream.tsx`, `src/components/ChatStream.test.tsx` | `todo` |
 | C1 | `useChatPromptDispatch` + `usePromptQueueFlusher` — sendText / send / flushHead / resume + move their tests | `prompt-queue-stores` | `docs/roadmap/chatstream-decomposition-task04-prompt-dispatch-flush.md` | 3 | `src/hooks/useChatPromptDispatch.ts`, `src/hooks/useChatPromptDispatch.test.ts`, `src/hooks/usePromptQueueFlusher.ts`, `src/hooks/usePromptQueueFlusher.test.ts`, `src/components/ChatStream.tsx`, `src/components/ChatStream.test.tsx` | `todo` |
 | D1 | Orchestrator final form + reduce the test file to integration wiring + measure the acceptance criteria | `chatstream-body` | `docs/roadmap/chatstream-decomposition-task05-orchestrator-final-form.md` | 4 | `src/components/ChatStream.tsx`, `src/components/ChatStream.test.tsx`, plus any residual `src/components/chat/*` test file the split leaves | `todo` |
@@ -182,6 +182,40 @@ Empty.
 ## Changelog
 
 One line per task: hash, what shipped, gate numbers at that moment.
+
+### Wave 1 — implemented and gated 2026-11-01
+
+Integrated-tree gate (the measurement that describes what was merged, run after the fan-in at `27cec040`):
+`pnpm test` → **160 files, 3353 passed | 1 skipped**, exit 0. `pnpm build` → exit 0. Arithmetic reconciles
+exactly: baseline 3318 + task01's 28 + task02's 7 = 3353, so nothing was lost and nothing was silently skipped.
+`npx vitest run src/components/ChatStream.test.tsx` on the integrated tree → **278**, unchanged from baseline —
+this is the check no child could run, because task01 changed what that file mounts while task02 changed the seeds
+it uses.
+
+- **A1 `done` `35d1efaf`** — `lib/chatSessionDerivations.ts` (5 pure fns) + `hooks/useChatSessionDerivations.ts`.
+  Acceptance measured on the integrated tree: `grep -c activeCapabilities src/components/ChatStream.tsx` → **0**
+  and `grep -c sessionFieldOf` → **0** (both selectors and the now-dead import gone, as the refined plan requires);
+  the hook is consumed at the top of the component body, above the early return; `imageCapable` moved.
+- **A2 `done` `99166759`** — `src/test/chatStreamFixtures.ts` (14 symbols: 3 constants, 6 seeds, 5 interaction
+  helpers) + a 7-test seam file; `ChatStream.test.tsx` −247/+35. Both `vi.mock` calls and both factory bodies
+  stayed inline as the probe matrix forced (`createTauriMock`/`createDialogMock` exist nowhere in `src/`); the
+  tauriBarrel mock-set pin did **not** move, because the new `.test.ts` files mock nothing.
+
+Two forced deviations from the plans, both recorded by the implementer and accepted:
+- task02's seam test used `tauriBarrel.test.ts`'s repo-relative `node:fs` convention instead of
+  `fileURLToPath(new URL(…, import.meta.url))` — the latter throws `URL must be of scheme file` under jsdom.
+  This was the plan's own named fallback.
+- task02 changed 19 `waitForCatalog()` call sites to `waitForCatalog(listSkills)`. The plan claimed "no test-body
+  call changes" while mandating `listSkills` as a **required** parameter — an internal contradiction the plan's
+  author did not catch; `tsc` reported exactly 19 × `TS2554` and nothing else. The implementer kept the mandated
+  signature (an optional param would make `vi.mocked(undefined)` fail at runtime in 19 tests). **Plan-authoring
+  lesson for waves 2–4: if a plan moves a function and adds a required parameter, the call sites are in scope by
+  definition — say so in the plan instead of promising zero call-site churn.**
+
+Also noted: the wave protocol says the orchestrator commits the plan docs and the child commits its code; task01's
+child flagged an apparent conflict with its dispatch text and resolved it correctly (it committed its own code on
+its own branch, which is what the wave protocol wants). No correction needed — the dispatch was right, the plan's
+"orchestrator commits" line refers to the PLAN DOCS only.
 
 ### Plan vet rounds (Wave 1)
 

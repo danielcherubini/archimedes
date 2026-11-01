@@ -544,3 +544,35 @@ Rust side is irrelevant to this area (frontend-only), but for completeness: Rust
 - `package.json`, `vite.config.ts`.
 
 The only file written by this research pass is this report at the mandated path. No source code, test, config, or lockfile was touched.
+
+---
+
+## Appendix — `vi.mock` hoisting probe matrix (measured on this tree, vitest 5.0.0)
+
+Written by the orchestrator during the task02 vet, because the plan's central mechanism
+depends on it and no earlier report measured it. Each row was an actual `npx vitest run`
+against a transient probe module; probes deleted after the run.
+
+| Factory location | Helper module | Import order | Result |
+|---|---|---|---|
+| `vi.mock` CALL inside an imported module | — | — | ❌ transform refuses to rewrite it |
+| test file, delegates to helper | helper imports the mocked module directly | helper after target | ❌ `Cannot access '__vi_import_N__' before initialization` |
+| test file, delegates to helper | helper reaches it **transitively via a store** | helper after target | ❌ same error — the store path does not save you |
+| test file, delegates to helper | helper clean (no path to mocked module) | helper **before** target | ✅ |
+| test file, delegates to helper | helper clean | helper after target | ❌ |
+| **factory stays INLINE in the test file** (references only `vi`), seeds moved to a module that reaches the mocked module via a store | — | target first | ✅ |
+
+**The rule:** a `vi.mock` factory may reference only bindings whose module is BOTH free of any
+transitive import of the mocked specifier AND imported before anything that imports it. Two
+silent conditions; violating either fails as **0 tests run** with a `ReferenceError` pointing at
+an import line, not at the mock.
+
+**Measured facts about the two factories in `ChatStream.test.tsx`:** the tauri factory body
+references ONLY `vi.importActual("../lib/tauri")` — it touches no module-scope binding
+(`SETTINGS_FIXTURE`, `MONO_ADVANCE_EM`, `PERSISTED_MCP_MESSAGE` and the `make*` fixtures all
+appear zero times inside it). The dialog factory is likewise self-contained. **Therefore moving
+the factory bodies buys nothing and costs the ordering constraint above.**
+
+**Note on `src/store/settings.ts`:** it imports `../lib/tauri`. Any fixtures module that seeds the
+settings store therefore has a transitive path INTO the mocked barrel — which is exactly the row
+above that fails when a factory delegates to it.
