@@ -57,6 +57,9 @@ fn set_env(key: &'static str, value: &str) -> RestoreEnv {
 
 /// A `ProviderConfig` for the dispatcher tests (the shape T1's
 /// `tests/provider_auth.rs` helper uses, plus T2a's two additive fields).
+/// Gated `#[cfg(unix)]` like its only caller — the key-helper resolve test,
+/// which spawns real programs — so it is not dead code on Windows.
+#[cfg(unix)]
 fn provider(id: &str, api_key: &str) -> ProviderConfig {
     ProviderConfig {
         id: id.to_string(),
@@ -99,8 +102,20 @@ async fn key_helper_bearer_reaches_the_resolve_boundary() {
     assert_eq!(seeded, None, "the seeding path never executes");
 
     // A FAILING helper is `None` too (never an `Err`, never a blank at this
-    // boundary) — `/bin/false` exits non-zero.
-    let failing = provider("gw", "!/bin/false");
+    // boundary) — `false` exits non-zero. The path is per-OS (`/usr/bin/false`
+    // on macOS, `/bin/false` on Linux): with the Linux spelling on macOS the
+    // spawn fails to START and still yields `None`, so the assertion would pass
+    // without ever exercising the non-zero-exit arm it claims to cover.
+    let false_path = if cfg!(target_os = "macos") {
+        "/usr/bin/false"
+    } else {
+        "/bin/false"
+    };
+    assert!(
+        std::path::Path::new(false_path).exists(),
+        "{false_path} must exist"
+    );
+    let failing = provider("gw", &format!("!{false_path}"));
     let got = provider_auth::resolve_bearer_at(&failing, &auth_file, &dir, &client, true).await;
     assert_eq!(got, None, "a failed helper degrades to the static key");
 

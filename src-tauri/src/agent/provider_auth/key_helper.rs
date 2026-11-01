@@ -209,6 +209,10 @@ fn decode_output(program: &str, output: std::process::Output) -> Result<String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `ScratchDir` is used only by the `#[cfg(unix)]` tests below (every test
+    // that spawns a real helper), so the import is gated the same way — on
+    // Windows it would be an unused import.
+    #[cfg(unix)]
     use crate::test_support::ScratchDir;
 
     #[test]
@@ -336,21 +340,39 @@ mod tests {
         assert_eq!(run("!printf %s a-b").await.unwrap(), "a-b");
     }
 
+    /// The absolute path of a trivial exit-status program, per OS. BSD lineage
+    /// puts `true`/`false` in `/usr/bin` and Apple's `/bin` carries no such
+    /// entry, so the Linux spelling fails to spawn on macOS — the same trap
+    /// `interactive::sudo_exec` documents for `/bin/true`. An absolute path is
+    /// used deliberately (the fail-closed stance): the test must not depend on
+    /// whatever a hostile `PATH` resolves `true` to.
+    #[cfg(unix)]
+    fn exit_program(name: &str) -> String {
+        let dir = if cfg!(target_os = "macos") {
+            "/usr/bin"
+        } else {
+            "/bin"
+        };
+        let path = format!("{dir}/{name}");
+        assert!(std::path::Path::new(&path).exists(), "{path} must exist");
+        path
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn fails_closed_on_empty_stdout() {
-        // `/bin/true` exits 0 with no output (the PATH `true` of a hostile PATH
+        // `true` exits 0 with no output (the PATH `true` of a hostile PATH
         // is not something a fail-closed test should trust).
-        let err = run("!/bin/true").await.expect_err("no output is no token");
+        let helper = format!("!{}", exit_program("true"));
+        let err = run(&helper).await.expect_err("no output is no token");
         assert!(err.contains("no output"), "{err}");
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn reports_a_nonzero_exit() {
-        let err = run("!/bin/false")
-            .await
-            .expect_err("a failing helper is an Err");
+        let helper = format!("!{}", exit_program("false"));
+        let err = run(&helper).await.expect_err("a failing helper is an Err");
         assert!(err.contains("exited with"), "{err}");
         // The exit status is named (the diagnostic contract).
         assert!(err.contains("exit status"), "{err}");

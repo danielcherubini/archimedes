@@ -510,6 +510,9 @@ mod tests {
     use super::*;
 
     /// A stored OAuth credential for the storage tests (an `id`-suffixed token).
+    /// Gated `#[cfg(unix)]` like its callers (the two Unix storage tests and the
+    /// Unix-only arm of `failed_save_leaves_no_staging_litter`).
+    #[cfg(unix)]
     fn credential(id: &str) -> ProviderCredential {
         ProviderCredential::OAuth(OAuthCredential {
             flow: "litellm_cli_pkce".to_string(),
@@ -532,6 +535,10 @@ mod tests {
     }
 
     /// Every `*.tmp` path in `dir` (the staging files alive right now).
+    /// Gated `#[cfg(unix)]` like `inode_of`: both callers assert the
+    /// no-litter property on the Unix arms (the mode-gated dir and the rename
+    /// that follows it), so on Windows this helper would be dead code.
+    #[cfg(unix)]
     fn staging_files(dir: &Path) -> Vec<PathBuf> {
         std::fs::read_dir(dir)
             .expect("the dir is readable")
@@ -592,7 +599,13 @@ mod tests {
         // Every exit that does not rename must clean up (the `Staging` `Drop`)
         // — a failed save of a SECRET-BEARING document must leave nothing.
         let dir = tempfile::tempdir().expect("a temp dir");
+        // `path` and `store` serve only the mode-gated-dir arm below, which is
+        // `#[cfg(unix)]` (POSIX dir permissions are what take the dir out of
+        // the writer's hands) — gating them keeps the cross-platform rename
+        // arm running on Windows without unused-variable errors.
+        #[cfg(unix)]
         let path = dir.path().join("provider-auth.json");
+        #[cfg(unix)]
         let store = ProviderAuthStore {
             version: 1,
             providers: BTreeMap::from([("a".to_string(), credential("a"))]),
