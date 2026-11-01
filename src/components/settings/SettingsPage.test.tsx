@@ -11,6 +11,7 @@ import SettingsPage from "./SettingsPage";
 import {
   authMcpServer,
   externalOpen,
+  getProviderBudget,
   getSettings,
   listModels,
   listSessions,
@@ -323,6 +324,12 @@ vi.mock("../../lib/tauri", async () => {
     // override per case).
     testMcpServer: vi.fn().mockResolvedValue(0),
     authMcpServer: vi.fn().mockResolvedValue("authenticated"),
+    // The spend/budget ledger (issue #132): the Settings page's ONE bulk read.
+    // `[]` by default — the honest "no ledger yet" answer, so no provider row
+    // renders a figure unless a case overrides it. `afterEach` calls
+    // `clearAllMocks`, which clears CALLS but keeps this implementation, so the
+    // default holds for every case in this file.
+    getProviderBudget: vi.fn().mockResolvedValue([]),
   };
 });
 
@@ -2426,5 +2433,155 @@ describe("a stored value the option list does not offer", () => {
     expect(screen.getByRole("option", { name: "Anthropic" })).toBeTruthy();
     fireEvent.keyDown(trigger, { key: "Escape" });
     expect(saveSettings).not.toHaveBeenCalled();
+  });
+});
+
+describe("SettingsPage (the provider auth fields + the spend/budget line — #126 #127 #132)", () => {
+  it("the auth-mode select commits the chosen mode through the whole-document save", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    await go("Providers");
+    const trigger = await screen.findByRole("combobox", { name: "Auth mode" });
+    // A pre-feature document has NO `authMode` key, and the row renders the
+    // default rather than going blank (Radix shows nothing for an unmatched
+    // value) — and, per `closedSelectValue`, it never WRITES that default back.
+    expect(
+      trigger.querySelector("[data-slot=select-value]")?.textContent,
+    ).toBe("API key (default)");
+    fireEvent.click(trigger);
+    fireEvent.click(await screen.findByRole("option", { name: "OAuth" }));
+    await waitFor(() =>
+      expect(saveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providers: [expect.objectContaining({ authMode: "oauth" })],
+        }),
+      ),
+    );
+    // The immediate-save contract: an auth-mode commit re-runs discovery like
+    // every other provider-field commit (a resolved bearer arm reads `auth_mode`
+    // at resolve time, so discovery re-sends the right key). NOT special-cased.
+    expect(listModels).toHaveBeenCalledWith("tama");
+  });
+
+  it("a stored auth mode outside the list renders the default and saves nothing", async () => {
+    // The document is user-editable and the Rust field is a `String` with a
+    // serde default (validated at USE, never at parse), so ANY string can reach
+    // the select. Coercing it in the UI would silently rewrite the user's file.
+    vi.mocked(getSettings).mockResolvedValueOnce({
+      ...baseSettings,
+      providers: [
+        {
+          ...baseSettings.providers[0],
+          authMode: "carrier-pigeon" as never,
+        },
+      ],
+    });
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    await go("Providers");
+    const trigger = await screen.findByRole("combobox", { name: "Auth mode" });
+    expect(
+      trigger.querySelector("[data-slot=select-value]")?.textContent,
+    ).toBe("API key (default)");
+    expect(saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("the page reads the budget ledger ONCE at mount (a page fetch, not a boot fetch)", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    // NO argument: a plain read of the warm ledger (the background poller keeps
+    // it fresh). Passing a provider id here would RUN a budget tick, not select a
+    // row — `forceRefresh` carries a PROVIDER ID, never a boolean.
+    expect(getProviderBudget).toHaveBeenCalledTimes(1);
+    expect(getProviderBudget).toHaveBeenCalledWith();
+  });
+
+  it("the bulk ledger is selected by providerId and renders the spend / max line", async () => {
+    // The landed command is BULK: every provider's rows in one response. The
+    // page maps it by `providerId` and hands each row its own rows.
+    vi.mocked(getProviderBudget).mockResolvedValueOnce([
+      {
+        providerId: "tama",
+        rows: [
+          {
+            level: "key",
+            entitled: true,
+            label: null,
+            spend: 12.34,
+            maxBudget: 100,
+            remaining: 87.66,
+            budgetResetAt: null,
+          },
+        ],
+      },
+      {
+        providerId: "someone-else",
+        rows: [
+          {
+            level: "key",
+            entitled: true,
+            label: null,
+            spend: 999,
+            maxBudget: 1000,
+            remaining: 1,
+            budgetResetAt: null,
+          },
+        ],
+      },
+    ]);
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    await go("Providers");
+    expect(await screen.findByText("Spend / max budget")).toBeTruthy();
+    expect(screen.getByText("$12.34 / $100.00")).toBeTruthy();
+    // The OTHER provider's rows never leak into this row. (`moneyOf` emits no
+    // thousands separator, so this is the exact string a leak would render — an
+    // assertion against a formatted `$1,000.00` would pass for the wrong reason.)
+    expect(screen.queryByText("$999.00 / $1000.00")).toBeNull();
+  });
+
+  it("an empty ledger renders no figure at all (never $0.00 — moneyOf's rule)", async () => {
+    // The factory's default is `[]` — the absent-ledger degrade the Rust side
+    // answers deliberately (`Ok(vec![])` when no poller is managed).
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    await go("Providers");
+    expect(await screen.findByDisplayValue("Tama")).toBeTruthy();
+    expect(screen.queryByText("Spend / max budget")).toBeNull();
+    expect(screen.queryByText("$0.00 / $0.00")).toBeNull();
+  });
+
+  it("a rejecting budget degrades silently and leaves the row intact", async () => {
+    // The `.catch` is total: nothing may escape as an unhandled rejection (the
+    // App tests mount this page through a spread-`importActual` barrel mock, where
+    // an un-mocked read resolves to the REAL wrapper and rejects).
+    vi.mocked(getProviderBudget).mockRejectedValueOnce(
+      new Error("budget read failed: unreachable"),
+    );
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    await go("Providers");
+    expect(await screen.findByDisplayValue("Tama")).toBeTruthy();
+    expect(screen.queryByText("Spend / max budget")).toBeNull();
+    // The row's own affordances survived the failed read.
+    expect(screen.getByRole("button", { name: "Refresh models" })).toBeTruthy();
+  });
+
+  it("the row's Refresh forces a budget tick with the PROVIDER ID, never a boolean", async () => {
+    // THE trap of the whole surface: `get_provider_budget`'s `forceRefresh`
+    // parameter carries a PROVIDER ID (the Rust side does
+    // `if let Some(provider_id) = force_refresh.as_deref()`). Passing `"true"`
+    // would be a truthy provider id that matches no row — a silent no-op tick.
+    render(<SettingsPage onBack={vi.fn()} />);
+    await loaded();
+    await go("Providers");
+    await screen.findByDisplayValue("Tama");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh models" }));
+    await waitFor(() =>
+      expect(getProviderBudget).toHaveBeenCalledWith("tama"),
+    );
+    expect(getProviderBudget).not.toHaveBeenCalledWith("true");
+    // And the refresh's OWN contract still holds (the model catalog + windows).
+    expect(listModels).toHaveBeenCalledWith("tama");
   });
 });

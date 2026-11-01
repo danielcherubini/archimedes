@@ -549,6 +549,46 @@ export type WireApi =
   | "litellm";
 
 
+/**
+ * The provider's authentication mode (the LiteLLM connection suite, #125–#132):
+ * `"api_key"` (the default — a pre-feature file parses to it) | `"oauth"` |
+ * `"oidc"` | `"gcloud_adc"`.
+ *
+ * A STRING on the wire, not an enum: the Rust field is `auth_mode: String` with
+ * `#[serde(default = "default_provider_auth_mode")]` (`config.rs`), i.e. the
+ * same permissive-boundary style as `api` — the backend validates at USE
+ * (resolve time), never at parse. This TS union is therefore the CLOSED
+ * VOCABULARY the Settings select offers, not a parse-time guarantee; a
+ * hand-edited file can carry anything, and `closedSelectValue` renders an
+ * unreadable value as `"api_key"` without ever writing back.
+ */
+export type ProviderAuthMode = "api_key" | "oauth" | "oidc" | "gcloud_adc";
+
+/**
+ * The provider's OIDC block (`oidc` — issue #127, T6): the issuer, a
+ * PRE-REGISTERED client id (T6 does no dynamic client registration), an
+ * optional scope, and the ordered `redirectPorts` the loopback callback tries
+ * for corporate IdPs that pin redirect URIs to a fixed port allowlist (an empty
+ * list = ONE ephemeral port).
+ *
+ * All fields are OPTIONAL on the TS side (a pre-feature provider has no `oidc`
+ * key at all). The LANDED Rust struct (`config.rs` `OidcConfig`,
+ * `rename_all = "camelCase"`) REQUIRES `issuer` and `client_id` at PARSE time —
+ * a present block omitting them fails the whole `Settings` document parse and
+ * lands in `load_settings`'s corrupt-file fallback — while `scope` and
+ * `redirect_ports` carry `#[serde(default)]` (absent → `None` / the empty list,
+ * and the flow then asks for `openid` alone on one ephemeral port). The TS type
+ * mirrors the WIRE (a document may legitimately omit the whole block); the
+ * Settings dialog requiring an issuer is the client-side contract, matching the
+ * suite's "validate at use, not at parse" boundary.
+ */
+export interface ProviderOidcConfig {
+  issuer: string;
+  clientId?: string;
+  scope?: string;
+  redirectPorts?: number[];
+}
+
 /** A user-configured model provider (`settings.json` `providers` entry). */
 export interface ProviderConfig {
   id: string;
@@ -559,6 +599,46 @@ export interface ProviderConfig {
   api: WireApi;
   /** The key-management page URL (set by the known-providers picker — the row's "Get key" link; `null` / absent for a hand-typed provider). */
   keyUrl?: string | null;
+  /**
+   * The auth mode (LiteLLM suite, #125): `"api_key"` (default) | `"oauth"` |
+   * `"oidc"` | `"gcloud_adc"` — see {@link ProviderAuthMode}.
+   *
+   * OPTIONAL on purpose, on the `keyUrl` precedent: the backend emits the key
+   * on every round trip (`#[serde(default)]`, no `skip_serializing_if`), BUT the
+   * frontend also CONSTRUCTS providers itself (`addProvider`), and a required
+   * field would force every provider fixture in the suite to grow the key.
+   * Presence is therefore never asserted — the row renders the absence
+   * (`closedSelectValue(provider.authMode, …, "api_key")`).
+   */
+  authMode?: ProviderAuthMode;
+  /**
+   * Custom headers sent on the provider's requests (#129, T2): values may
+   * contain `$VAR` / `${VAR}`, expanded against the process environment
+   * SINGLE-PASS at resolve time (never recursively) — e.g.
+   * `"CF-Access-Client-Id": "$CLOUDFLARE_SERVICE_TOKEN_ID"`. `undefined` = no
+   * custom headers (the Rust `Option<HashMap<String, String>>` with
+   * `#[serde(default)]`). The Settings editor shows one `KEY=VALUE` line per
+   * entry and documents the `$VAR` form; the expansion itself is the backend's
+   * job.
+   */
+  headers?: Record<string, string>;
+  /**
+   * Allow plain-`http://` base URLs (#129's insecure-HTTP gate): `false` (the
+   * default — any non-loopback `http://` base is refused with a descriptive
+   * error) | `true`. Loopback (`127.0.0.0/8`, `::1`) is ALWAYS allowed (ADR
+   * 0057). A bare boolean under `#[serde(default)]`; read nullishly as `false`.
+   */
+  allowInsecureHttp?: boolean;
+  /**
+   * Enable Google ADC resolution (#128, T4) even when `authMode` is not
+   * `"gcloud_adc"`; the `LITELLM_GCLOUD_TOKEN_AUTH` env var overrides both (the
+   * RESOLVE arm reads the env, never this module). `#[serde(default)]` → a
+   * pre-feature file parses to `false`, so no existing row starts reading the
+   * user's ADC file on upgrade. Read nullishly as `false`.
+   */
+  useGcloudTokenAuth?: boolean;
+  /** The OIDC block (#127, T6) — see {@link ProviderOidcConfig}. */
+  oidc?: ProviderOidcConfig;
 }
 
 
@@ -1145,4 +1225,102 @@ export interface WindowFrameState {
   isMaximized: boolean;
   isFullscreen: boolean;
   native: boolean;
+}
+
+
+// ---------------------------------------------------------------------------
+// Provider auth + budget (the LiteLLM connection suite, #126 / #127 / #132)
+// ---------------------------------------------------------------------------
+
+/**
+ * The interactive login's wire steps (T5/T6 — the landed `ProviderLoginStep`,
+ * declared in `agent/provider_auth/litellm_oauth.rs` and re-exported by
+ * `commands/settings.rs`, so the IPC surface and the Rust flow share ONE type).
+ *
+ * Tagged `status` on the wire. The enum carries `rename_all = "camelCase"` (the
+ * VARIANTS: `devicePending` / `chooseTeam` / `authenticated`) AND
+ * `rename_all_fields = "camelCase"` (the FIELDS: `loginId`, `pollSecret`,
+ * `userCode`, `verificationUrl`) — serde's `rename_all` on an enum renames the
+ * variants ONLY, so without the second attribute the struct variants would ship
+ * snake_case to the renderer; `provider_login_step_serializes_camelcase_with_a_status_tag`
+ * pins both. `Serialize`-only — the renderer never sends a step back.
+ *
+ * The snake_case FastAPI wire never crosses into TS: it lives entirely inside
+ * the Rust half (`cli_sso.rs` / `litellm_oauth.rs` parse the proxy's snake_case
+ * documents and this DTO is what the IPC layer answers with).
+ *
+ * The UI drives a state machine off this: `devicePending` → poll
+ * `providerLoginSsoPoll` every 2 s (the cadence `cli_sso::SSO_POLL_INTERVAL`
+ * pins); `chooseTeam` → render the team list and call
+ * `providerLoginSsoChooseTeam`; `authenticated` → done. NOTE there is NO
+ * `expired` variant: expiry arrives as the POLL's error (the HTTP-400
+ * `SettingsError` sentence), which the UI treats as terminal.
+ */
+export type ProviderLoginStep =
+  /** A credential is stored for the provider (PKCE success, device-flow success, or a paste). */
+  | { status: "authenticated" }
+  /** The legacy CLI-SSO device flow: show `userCode`, open `verificationUrl`, poll. */
+  | {
+      status: "devicePending";
+      loginId: string;
+      pollSecret: string;
+      userCode: string;
+      verificationUrl: string;
+    }
+  /** The device flow needs a team choice: render `teams`, then re-poll with the pick. */
+  | {
+      status: "chooseTeam";
+      loginId: string;
+      pollSecret: string;
+      teams: TeamDto[];
+    };
+
+/** One team row for the `chooseTeam` step (the landed `TeamDto` — `rename_all = "camelCase"`: `teamId`, `teamAlias`; `Serialize`-only). */
+export interface TeamDto {
+  teamId: string;
+  teamAlias: string;
+}
+
+/**
+ * One budget row for one entitlement hop (the landed `ProviderBudgetDto`,
+ * `commands/settings.rs` — `rename_all = "camelCase"`, `Serialize`-only).
+ *
+ * `level` is `"key"` | `"user"` | `"team"` — which endpoint the row describes.
+ * `entitled` is `true` for EVERY row the ledger emits: a hop the key may not
+ * read contributes NO row at all, so "not offered" is the ABSENCE of a row (the
+ * frontend's existing empty-state pattern) rather than an `entitled: false`
+ * row — the UI never renders the false arm because the wire never ships it
+ * (`provider_budget_rows_are_camelcase_and_only_cover_entitled_hops` pins it).
+ *
+ * Every figure is `Option` on the Rust side (`#[serde(default)]`-free `Option`
+ * fields under the struct's `rename_all`, so the key ALWAYS arrives and holds
+ * `null` when the endpoint reported no figure). A `null` renders as NOTHING —
+ * NEVER as `0` — which is exactly `moneyOf`'s rule. `remaining` is present only
+ * when BOTH `spend` and `maxBudget` are known and the budget is positive (an
+ * unlimited key has no remaining to show).
+ */
+export interface ProviderBudgetRowDto {
+  level: "key" | "user" | "team";
+  entitled: boolean;
+  /** The user id or the team alias (`null` for the key row — the proxy does not name it here). */
+  label: string | null;
+  spend: number | null;
+  maxBudget: number | null;
+  /** `maxBudget - spend`, only when both are known and the budget is positive. */
+  remaining: number | null;
+  /** The ISO8601 budget-reset instant as the proxy reported it. */
+  budgetResetAt: string | null;
+}
+
+/**
+ * One provider's budget rows (the landed `ProviderBudgetDtoResponse`,
+ * `commands/settings.rs` — `rename_all = "camelCase"`).
+ *
+ * `getProviderBudget` returns an ARRAY of these — EVERY provider's rows in one
+ * call, not one provider's nullable figure — so the Settings page selects the
+ * row set it needs by `providerId`.
+ */
+export interface ProviderBudgetDto {
+  providerId: string;
+  rows: ProviderBudgetRowDto[];
 }

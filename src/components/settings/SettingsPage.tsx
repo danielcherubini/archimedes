@@ -14,6 +14,7 @@ import {
 
 import { getAppInfo } from "@/lib/version";
 import {
+  getProviderBudget,
   listKnownProviders,
   listModels,
   listSessions,
@@ -24,6 +25,7 @@ import {
   type AgentOverrides,
   type McpServerEntry,
   type ModelDto,
+  type ProviderBudgetRowDto,
   type ProviderConfig,
   type WireApi,
   type KnownProvider,
@@ -134,6 +136,16 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
   // The picker's selected template id ("" = nothing selected — the
   // placeholder; the Add button is disabled until one is picked).
   const [selectedKnown, setSelectedKnown] = useState("");
+  /**
+   * The spend/budget rows by PROVIDER id (issue #132). `get_provider_budget` is
+   * a BULK read — it answers EVERY provider's rows in one call, so this map is
+   * built from that single response by `providerId`. An id with no entry means
+   * not fetched / fetch failed / that provider has no rows, and the row renders
+   * NOTHING (a missing figure is never `$0.00` — `moneyOf`'s rule).
+   */
+  const [budgets, setBudgets] = useState<
+    Record<string, ProviderBudgetRowDto[] | undefined>
+  >({});
   // The native harness's tool names (the enabled-tools checkbox list).
   const [tools, setTools] = useState<string[]>([]);
   // (ADR 0030) The OS the app runs on — the Shell `Sandboxed` tier is
@@ -176,6 +188,21 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
         console.error("loading the known-providers catalog failed", error);
         setKnownProviders([]);
       });
+    // The spend/budget ledger (issue #132) — a PAGE-level fetch, deliberately NOT
+    // an App boot fetch. `src/App.test.tsx` mocks the barrel by spreading
+    // `vi.importActual`, so a boot fetch it does not mock resolves to the REAL
+    // wrapper, rejects, and reddens tests that have nothing to do with budgets (the
+    // AGENTS.md trap). This call is id-less — `get_provider_budget` answers the
+    // WHOLE ledger, so it needs no `providers` dependency — and the `.catch` is
+    // synchronous and total: an absent ledger (or a rejected read) leaves the map
+    // empty and every row renders no figure. The background poller
+    // (`BUDGET_POLL_INTERVAL_MILLIS`) keeps the ledger warm, so a plain read at
+    // mount is the right call — no forced tick.
+    getProviderBudget()
+      .then((all) =>
+        setBudgets(Object.fromEntries(all.map((dto) => [dto.providerId, dto.rows]))),
+      )
+      .catch(() => {});
   }, []);
 
   /**
@@ -390,8 +417,30 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
     });
   };
 
-  const refreshProvider = (id: string): Promise<void> =>
-    listModels(id)
+  /**
+   * Ask for a fresh budget read for ONE provider (issue #132).
+   * `get_provider_budget`'s `forceRefresh` parameter carries a PROVIDER ID, not
+   * a boolean — passing the id runs one bounded budget tick for that provider
+   * and then answers the WHOLE ledger, which is re-mapped by `providerId`.
+   * Deliberately fire-and-forget with its own total `.catch`: the row refresh's
+   * contract is the model catalog + the session windows, and a budget hop that
+   * fails must not fail the refresh the user asked for.
+   */
+  const refreshBudgetFor = (id: string): void => {
+    getProviderBudget(id)
+      .then((all) =>
+        setBudgets(
+          Object.fromEntries(all.map((dto) => [dto.providerId, dto.rows])),
+        ),
+      )
+      .catch(() => {});
+  };
+
+  const refreshProvider = (id: string): Promise<void> => {
+    // The budget ledger rides the same refresh (fire-and-forget, own `.catch` —
+    // see `refreshBudgetFor`), so it never joins this promise's outcome.
+    refreshBudgetFor(id);
+    return listModels(id)
       .then(setModels)
       .then(() =>
         // (#85) The refreshed window must reach STORED sessions too, not just
@@ -410,6 +459,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
         useModelCatalog.getState().loadModels(id),
       )
       .catch(() => {});
+  };
 
   const generalSection = (
     <GeneralSection
@@ -435,6 +485,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }): ReactE
       selectedKnown={selectedKnown}
       onSelectKnown={setSelectedKnown}
       onCommitField={commitProviderField}
+      budgets={budgets}
       onRefresh={refreshProvider}
       onRemove={removeProvider}
       onAdd={addProvider}
