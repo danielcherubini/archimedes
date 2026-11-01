@@ -14,7 +14,6 @@ import {
 } from "../lib/tauri";
 import { basenameOfPath } from "../lib/paths";
 import { describeIpcError } from "../lib/ipcError";
-import { sessionFieldOf } from "../lib/sessionLookup";
 import { parseComposerCommand } from "../lib/composerCommands";
 import {
   dirPartOfOutsideQuery,
@@ -44,6 +43,7 @@ import { useInteractive } from "../store/interactive";
 import { useSettings } from "../store/settings";
 import { useHasPendingRequest } from "../hooks/useHasPendingRequest";
 import { useSessionIdleEdge } from "../hooks/useSessionIdleEdge";
+import { useChatSessionDerivations } from "../hooks/useChatSessionDerivations";
 import { useActiveSpaceCwd } from "../hooks/useActiveSpaceCwd";
 import { useChildGates } from "../hooks/useChildGates";
 import { useSpinQuip } from "../hooks/useSpinQuip";
@@ -78,67 +78,31 @@ export default function ChatStream() {
     useSessions((s) =>
       s.activeSessionId ? s.messages[s.activeSessionId] : undefined,
     ) ?? [];
-  const liveSession = useSessions((s) =>
-    s.activeSessionId
-      ? s.sessions.find((x) => x.sessionId === s.activeSessionId)
-      : undefined,
-  );
-  // The active session's CAPABILITIES, over the ONE three-list walk
-  // (`lib/sessionLookup.ts`), which searches ALL THREE lists: a session living
-  // ONLY in `archivedSessions` (opened from the Archived section) must still
-  // resolve here — otherwise it renders no banner, a disabled composer ("This
-  // session is closed"), and an unreachable `send()` auto-resume. Live wins, so
-  // this is the same value the two row lookups it replaces produced
-  // (`liveSession?.capabilities ?? stored?.capabilities`).
-  //
-  // It reads the FIELD and not the row on purpose: a selector may return the
-  // stored row (a stable reference) but never a `{ … }` built per snapshot —
-  // zustand v5 re-runs those forever (the rule at `ChatStream.tsx:80-81`).
-  const activeCapabilities = useSessions((s) =>
-    sessionFieldOf(s, s.activeSessionId, "capabilities"),
-  );
-  // Whether ANY of the three lists knows the active id — the presence test the
-  // old stored-row lookup gave for free. `sessionId` is a required field, so a
-  // hit on it means a row exists; it is read as a primitive for the same reason
-  // above.
-  const activeSessionIsKnown = useSessions(
-    (s) => sessionFieldOf(s, s.activeSessionId, "sessionId") !== undefined,
-  );
   const inTurn = useSessions((s) => (s.activeSessionId ? !!s.inTurn[s.activeSessionId] : false));
   const stopReason = useSessions((s) => (s.activeSessionId ? s.stopReasons[s.activeSessionId] : undefined));
   const prompts =
     usePermissions((s) =>
       activeSessionId ? s.prompts[activeSessionId] : undefined,
     ) ?? [];
-  // Interactive surfaces for the ACTIVE session (B3): the store is keyed by the
-  // ACP session id, which matches `activeSessionId`.
-  const interactiveRequests =
-    useInteractive((s) =>
-      activeSessionId ? s.requests[activeSessionId] : undefined,
-    ) ?? [];
-  const askRequests = interactiveRequests.filter((r) => r.method === "ask");
-  const confirmRequests = interactiveRequests.filter((r) => r.method === "confirm");
-  const passwordRequests = interactiveRequests.filter(
-    (r) => r.method === "password",
-  );
-  // An `ask` request is ANCHORED when a `tool-call` message with its
-  // `toolCallId` is in the stream (correlated by `(source, toolCallId)` —
-  // only a `main` ask can anchor; the desktop has no ACP `tool_call` frame
-  // for child tool calls). Anchored requests render IN PLACE of the
-  // `ToolCallCard`; the rest stack in the stream (arrival order).
-  const anchoredAskRequestIds = new Set<string>();
-  for (const r of askRequests) {
-    if (
-      r.source === "main" &&
-      r.toolCallId &&
-      messages.some((m) => m.kind === "tool-call" && m.id === r.toolCallId)
-    ) {
-      anchoredAskRequestIds.add(r.requestId);
-    }
-  }
-  const stackedAskRequests = askRequests.filter(
-    (r) => !anchoredAskRequestIds.has(r.requestId),
-  );
+  // The session-state and capability derivations (issue #135 §3) — the ask /
+  // confirm / password split, the anchored-vs-stacked partition, live /
+  // history-only / resumable, the composer's send gate, the image capability,
+  // and the current turn's diffs. The pure logic lives in
+  // `lib/chatSessionDerivations.ts`; this is a HOOK (it reads the stores), so it
+  // sits in this UNCONDITIONAL block — a hook below the `!activeSessionId` early
+  // return is a conditional hook call and white-screens the app with
+  // "Rendered more hooks than during the previous render".
+  const {
+    askRequests,
+    confirmRequests,
+    passwordRequests,
+    stackedAskRequests,
+    isLive,
+    canResume,
+    composerEnabled,
+    turnDiffs,
+    imageCapable,
+  } = useChatSessionDerivations();
   const addUserMessage = useSessions((s) => s.addUserMessage);
   // A Client-authored transcript line — the `/compact` no-op's only feedback
   // (ADR 0044). Pulled the same way every other store action is pulled here.
@@ -242,8 +206,9 @@ export default function ChatStream() {
   // composer's bottom row hosted the model / thinking selectors and the context
   // bar. That row is gone: the three lines live at the bottom of the side pane
   // (`SessionConfigBlock.tsx`), which runs the SHARED derivations
-  // (`lib/sessionConfig.ts`) inside its own selectors. `isLive` below stays — the
-  // composer still needs it for the auto-resume path.
+  // (`lib/sessionConfig.ts`) inside its own selectors. `isLive` comes from
+  // `useChatSessionDerivations` (above) — the composer still needs it for the
+  // auto-resume path.
 
   // Whether the user owes an answer — the ACTIVE session's own prompts/pauses,
   // or ANY child's gate anywhere in the app — and here it drives the "Send a
@@ -320,9 +285,6 @@ export default function ChatStream() {
   // after the read and aborts on a mismatch (no stale send, no draft wipe).
   const draftRef = useRef(draft);
   draftRef.current = draft;
-  // Capability gate (FAIL-CLOSED): the feature is inert unless the agent
-  // advertises `promptCapabilities.image === true`.
-  const imageCapable = agentSupportsImages(activeCapabilities);
   // Unmount cleanup: revoke the staged object URLs exactly once, on
   // unmount ONLY — revoking on every state change would leak/break live
   // previews (a revoked URL can no longer render the `img`). The held-for-send
@@ -520,21 +482,10 @@ export default function ChatStream() {
       mcpMentionsEnabled,
     });
 
-  // A stored (non-live) session: its transcript is read-only unless the
-  // agent negotiated `loadSession`, in which case it can be resumed.
-  // `activeSessionIsKnown` is the presence half of the stored-row lookup this
-  // replaced: the id is known to a list but the session is NOT live, which is
-  // exactly what "stored" meant there.
-  const isLive = !!liveSession;
-  const isHistoryOnly = !isLive && activeSessionIsKnown;
-  const canResume = isHistoryOnly && activeCapabilities?.loadSession === true;
-  // The composer's SEND is enabled for a live session OR a RESUMABLE
-  // stored session (a non-resumable stored session can't receive a prompt
-  // — no agent process to deliver to, and the harness's `send_prompt`
-  // rejects an unknown session): a resumable stored session auto-resumes
-  // on send. The TEXTAREA is always editable regardless (the draft is
-  // kept — it just can't be SENT while `composerEnabled` is false).
-  const composerEnabled = isLive || canResume;
+  // The live / history-only / resumable derivations and the composer's send gate
+  // moved to `useChatSessionDerivations` (issue #135 §3) — `isLive`, `canResume`
+  // and `composerEnabled` are destructured from it in the unconditional block
+  // above. `isHistoryOnly` had no consumer left in this component.
 
   const history = useSessions((s) => activeSessionId ? s.history[activeSessionId] : undefined);
   const loadOlder = useSessions((s) => s.loadOlderHistory);
@@ -1180,26 +1131,10 @@ export default function ChatStream() {
   // tab per space, the active one selected) and the session title lives
   // in the side pane (its top section).
 
-  // The most recent turn (the messages after the last `user` message) and
-  // its standalone `diff` messages — the SINGLE SOURCE OF TRUTH for the
-  // file summary card: `applySessionUpdate`/`rowToMessages` emit BOTH a
-  // `tool-call.diff = diffs[0]` AND standalone `diff` messages for the
-  // same extracted diffs, so the `tool-call.diff` refs are deliberately
-  // NOT used (summing both would count every file twice).
-  const lastUserIndex = (() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].kind === "user") return i;
-    }
-    return -1;
-  })();
-  const turnDiffs =
-    lastUserIndex === -1
-      ? []
-      : messages
-          .slice(lastUserIndex + 1)
-          .flatMap((m) =>
-            m.kind === "diff" ? [{ path: m.path, patch: m.patch }] : [],
-          );
+  // The current turn's standalone `diff` messages (`turnDiffs`) moved to
+  // `useChatSessionDerivations` / `lib/chatSessionDerivations.ts` (issue #135
+  // §3), comment and all — including the rule that a `tool-call`'s own `diff`
+  // ref is deliberately NOT summed with the standalone `diff` messages.
 
     // `hasPendingRequest` (computed ABOVE, next to the other unconditional cue
   // hooks) is what suppresses the hint below. It is the SAME hook the chrome
