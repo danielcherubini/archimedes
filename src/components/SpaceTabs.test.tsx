@@ -804,7 +804,7 @@ describe("the tab label and the `+` route through <Button> (C7)", () => {
       expect(painted).toContain("pl-3");
       expect(painted).toContain("items-center");
       // Exactly ONE font-size utility: the label spelled `text-ui-base` and
-      // must not gain a second one (`ChatStream.test.tsx`'s `primaryLines()`
+      // must not gain a second one (`ChatStreamDirectoryCompletion.test.tsx`'s `primaryLines()`
       // finds rows by `.text-ui-base`, so a gained token is selectable code).
       expect(painted.filter((t) => /^text-ui-/.test(t))).toEqual([
         "text-ui-base",

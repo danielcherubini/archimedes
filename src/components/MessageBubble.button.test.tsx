@@ -49,7 +49,7 @@ const COPY_RESPONSE_BEFORE =
  *   - `h-7`/`px-2` — a fixed 28px tall, 8px-inset box; all three sites are
  *     content-sized (a 12px glyph, or a header exactly as tall as its label row).
  *   - `text-ui-base`/`text-ui-base/relaxed` — a font-size (and line-height) none
- *     of the three spelled. This is C7's recorded trap: `ChatStream.test.tsx`'s
+ *     of the three spelled. This is C7's recorded trap: `ChatStreamDirectoryCompletion.test.tsx`'s
  *     `primaryLines()` finds picker rows with `querySelectorAll(".text-ui-base")`,
  *     so a site that GAINS the token can be selected by a test that never saw it.
  *     `text-[length:inherit]` drops both — tailwind-merge removes the whole

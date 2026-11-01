@@ -30,7 +30,7 @@ import { cn } from "../lib/utils";
  *  - `text-[length:inherit]` — the base declares `text-ui-base/relaxed` and the
  *                 size declares `text-ui-base`; neither is a font-size this badge
  *                 ever spelled. This is the hazard C7 records:
- *                 `ChatStream.test.tsx`'s `primaryLines()` finds picker rows with
+ *                 `ChatStreamDirectoryCompletion.test.tsx`'s `primaryLines()` finds picker rows with
  *                 `querySelectorAll(".text-ui-base")`, so a site that GAINS the
  *                 token can be selected by a test that never saw it. The
  *                 arbitrary-value utility wins the whole font-size group, so no

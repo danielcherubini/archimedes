@@ -396,7 +396,7 @@ export default function ChatStream() {
   // worse: reading the payload through a ref inside the memo would hide it from
   // the dep graph (and `completion` in those deps is mutation-checked — dropping
   // it reddens the two descent-goes-live tests), and moving `dirPrefix` into the
-  // hook is the pin `ChatStream.test.tsx` forbids at component level. So the
+  // hook is the pin `ChatStreamDirectoryCompletion.test.tsx` forbids at component level. So the
   // cell is declared here, passed in, and handed back out — the same shape as
   // `draft`/`setDraft`, and still exactly ONE state cell.
   const [picker, setPicker] = useState<MentionPickerState | null>(null);
@@ -418,7 +418,7 @@ export default function ChatStream() {
   // why it is the directory and NOT the whole remainder: typing inside one
   // directory then changes only the SEGMENT, so the key is stable and exactly
   // ONE directory read happens per directory — the property the one-directory
-  // peek is budgeted on. Pinned in `ChatStream.test.tsx` at THIS derivation (a
+  // peek is budgeted on. Pinned in `ChatStreamDirectoryCompletion.test.tsx` at THIS derivation (a
   // hook-level caching test cannot prove it: with `dirPrefix` as an argument the
   // hook only shows "same input, same output"), and mutation-checked — passing
   // `token.remainder` here reddens that test. `null` when not outside, which

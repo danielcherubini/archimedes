@@ -85,7 +85,7 @@ import { Button } from "./ui/button";
  * `text-ui-base` and the base's `text-ui-base/relaxed` (one utility survives, so
  * no `line-height` is declared and the label keeps preflight's 1.5 — and,
  * critically, the label GAINS no second `.text-ui-base` for
- * `ChatStream.test.tsx`'s `primaryLines()` to mistake for a picker row), and
+ * `ChatStreamDirectoryCompletion.test.tsx`'s `primaryLines()` to mistake for a picker row), and
  * `min-w-0`/`self-stretch`/`pl-3`, which the base does not spell at all.
  * Inert additions: `rounded-md` (the label paints no background and no border,
  * so a 6px radius has nothing to clip); `bg-clip-padding` (same reason);
@@ -131,7 +131,7 @@ const TAB_LABEL_WALL =
  *                 inherits 16px. Provably inert for a lone block `<svg>` child,
  *                 restored anyway so the site ends up declaring no font-size at
  *                 all — the same rule C7 group 4 learned from
- *                 `ChatStream.test.tsx`'s `.text-ui-base` picker query.
+ *                 `ChatStreamDirectoryCompletion.test.tsx`'s `.text-ui-base` picker query.
  *  - `transition-none` — the base's `transition-colors` would fade the hover
  *                 fill in over 150 ms. This cluster's fill is always-on
  *                 (`bg-surface-hover`, no transition) by the ADR 0038 split that

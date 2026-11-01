@@ -37,7 +37,7 @@ const PRE_EXTRACTION =
  *  box replacing the 16px badge), `rounded-sm` (a square-ish radius replacing
  *  `rounded-full`), `hover:bg-hover` (a different fill on hover),
  *  `text-ui-base`/`text-ui-base/relaxed` (a font-size the badge never spelled —
- *  and the token `ChatStream.test.tsx`'s `primaryLines()` selects on), and
+ *  and the token `ChatStreamDirectoryCompletion.test.tsx`'s `primaryLines()` selects on), and
  *  `inline-flex` (a flex container centring the glyph; the badge's box is
  *  `block`, so its 12px X sits at the top-left of the 16px box, not centred).
  *  `border-transparent` is deliberately NOT here: it survives next to `border-0`
