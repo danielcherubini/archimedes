@@ -3,6 +3,8 @@ import { useInteractive } from "../store/interactive";
 import {
   anchoredAskRequestIds,
   classifyInteractiveRequests,
+  composerLockDerivations,
+  historyPaginationDerivations,
   sessionKindDerivations,
   stackedAskRequests,
   turnDiffs,
@@ -80,6 +82,63 @@ export function useChatSessionDerivations() {
   // Capability gate (FAIL-CLOSED): the feature is inert unless the agent
   // advertises `promptCapabilities.image === true`.
   const imageCapable = agentSupportsImages(activeCapabilities);
+  // The composer-lock chain (issue #135 §3, final increment). The pure
+  // predicate is `lib/chatSessionDerivations.composerLockDerivations`; the
+  // THREE inputs are selected here and passed in — the hook owns the store
+  // reads, the pure module owns the boolean. `inTurn` is `false` for the
+  // no-session frame and `compacting` is `undefined` for it, so the chain
+  // derives `{ workingOrInTurn: false, composerLocked: false }` there —
+  // the same values the component's `?? false`/`!== undefined` fallbacks
+  // produced. Wave 1 refused this move because it would "force
+  // `useSpinQuip`/`useSessionIdleEdge`/`send` to read the hook's return"
+  // (task01's recorded reason — ALL THREE legs). C1 has landed with
+  // `composerLocked` as a PLAIN ARGUMENT of `useChatPromptDispatch` and of
+  // `useSessionIdleEdge` (`busy`), and `send`'s queue-fork read sits INSIDE
+  // `useChatPromptDispatch` — the `if (composerLocked)` arm reads the
+  // argument, not a hook return — so all three legs are satisfied by
+  // re-wiring two argument sites; the queue-fork arm is not a consumer this
+  // task rewires.
+  //
+  // `inTurn` is the ground truth for "a turn is in flight" (set by `beginTurn`,
+  // cleared by `turnCompleted`) — a STALE `idle` from the previous turn must
+  // not unlock the composer or hide the working indicator, so `inTurn` wins
+  // alongside `working` (the store does not reset `agentState` on
+  // `turnCompleted`). The `blocked` / compaction terms and their reasoning are
+  // in the pure predicate's JSDoc, which is where the component's lock comment
+  // moved with the expression.
+  const inTurnLock = useSessions((s) =>
+    s.activeSessionId ? !!s.inTurn[s.activeSessionId] : false,
+  );
+  // The active session's in-flight compaction reason (ADR 0045). Indexed on
+  // `s.activeSessionId` INSIDE the selector (the outer `activeSessionId` is
+  // `string | null`, which TS2538 rejects as an index). The strict
+  // `!== undefined` test the chain applies lives in the pure predicate — the
+  // ADR 0045 "`null` = not compacting" contract is what that strictness keeps.
+  const compacting = useSessions((s) =>
+    s.activeSessionId ? s.compacting[s.activeSessionId] : undefined,
+  );
+  const agentStateForLock = useInteractive((s) =>
+    activeSessionId ? s.agentState[activeSessionId] : undefined,
+  );
+  const lock = composerLockDerivations({
+    agentState: agentStateForLock,
+    inTurn: inTurnLock,
+    compacting,
+  });
+  // The history-pagination slice (issue #135 §3, final increment). The
+  // `history[sessionId]` entry and the `loadOlderHistory` action are read
+  // here; the `?? false` / `?? 0` fallbacks are OUTSIDE the selectors (the
+  // house stable-reference rule) and now live in the pure function. The action
+  // is returned UNWRAPPED and NEVER invoked — the component's `onStartReached`
+  // arrow is its only caller.
+  const historyEntry = useSessions((s) =>
+    s.activeSessionId ? s.history[s.activeSessionId] : undefined,
+  );
+  const loadOlder = useSessions((s) => s.loadOlderHistory);
+  const pagination = historyPaginationDerivations({
+    history: historyEntry,
+    loadOlder,
+  });
 
   return {
     askRequests,
@@ -94,5 +153,11 @@ export function useChatSessionDerivations() {
     imageCapable,
     lastUserIndex,
     turnDiffs: diffs,
+    workingOrInTurn: lock.workingOrInTurn,
+    composerLocked: lock.composerLocked,
+    loadOlder: pagination.loadOlder,
+    hasMore: pagination.hasMore,
+    loadingMore: pagination.loadingMore,
+    generation: pagination.generation,
   };
 }

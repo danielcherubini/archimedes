@@ -230,4 +230,73 @@ describe("useChatSessionDerivations (the hook — the thin store-reading wrapper
     expect(renders).toBeGreaterThan(baseline);
     expect(result.current.askRequests.map((r) => r.requestId)).toEqual(["a1"]);
   });
+
+  it("derives the composer lock from the ACTIVE session's agent state and in-turn flag", () => {
+    seedLive();
+    useInteractive.setState({ agentState: { s1: "working" } });
+    const { result } = renderHook(() => useChatSessionDerivations());
+    expect(result.current.workingOrInTurn).toBe(true);
+    expect(result.current.composerLocked).toBe(true);
+    // A STALE `idle` (the store does not reset `agentState` on `turnCompleted`)
+    // with the turn still in flight must NOT unlock: `inTurn` is the ground truth.
+    useInteractive.setState({ agentState: { s1: "idle" } });
+    useSessions.setState({ inTurn: { s1: true } });
+    expect(result.current.workingOrInTurn).toBe(true);
+    expect(result.current.composerLocked).toBe(true);
+  });
+
+  it("a `blocked` agent locks the composer even without an in-turn flag", () => {
+    seedLive();
+    useInteractive.setState({ agentState: { s1: "blocked" } });
+    useSessions.setState({ inTurn: {} });
+    const { result } = renderHook(() => useChatSessionDerivations());
+    // The term `inTurn` alone would miss: a blocked state with no recorded turn
+    // still locks the SEND.
+    expect(result.current.workingOrInTurn).toBe(false);
+    expect(result.current.composerLocked).toBe(true);
+  });
+
+  it("a compaction locks the composer (ADR 0045: an idle compaction has no turn)", () => {
+    seedLive();
+    useSessions.setState({ compacting: { s1: "manual" as const } });
+    const { result } = renderHook(() => useChatSessionDerivations());
+    expect(result.current.workingOrInTurn).toBe(false);
+    expect(result.current.composerLocked).toBe(true);
+  });
+
+  it("idle + no turn + no compaction → the composer is unlocked", () => {
+    seedLive();
+    const { result } = renderHook(() => useChatSessionDerivations());
+    expect(result.current.workingOrInTurn).toBe(false);
+    expect(result.current.composerLocked).toBe(false);
+  });
+
+  it("the pagination slice returns the session's history window and the load-older action", () => {
+    seedLive();
+    useSessions.setState({
+      history: {
+        s1: { oldestRowId: 1, hasMore: true, loadingMore: true, generation: 2, epoch: 0 },
+      },
+    });
+    const { result } = renderHook(() => useChatSessionDerivations());
+    expect(result.current.hasMore).toBe(true);
+    expect(result.current.loadingMore).toBe(true);
+    expect(result.current.generation).toBe(2);
+    // IDENTITY: the same stable action reference the component hands to
+    // `MessageList`'s `onStartReached`. Never invoked here.
+    expect(result.current.loadOlder).toBe(useSessions.getState().loadOlderHistory);
+  });
+
+  it("the NO-SESSION frame derives the new names empty/false and does not throw", () => {
+    // `activeSessionId` stays `null`: the five new reads answer `false` /
+    // `undefined` / the action reference, and the pure functions reproduce the
+    // `?? false` / `?? 0` fallbacks the component used to run on this frame.
+    const { result } = renderHook(() => useChatSessionDerivations());
+    expect(result.current.workingOrInTurn).toBe(false);
+    expect(result.current.composerLocked).toBe(false);
+    expect(result.current.hasMore).toBe(false);
+    expect(result.current.loadingMore).toBe(false);
+    expect(result.current.generation).toBe(0);
+    expect(result.current.loadOlder).toBe(useSessions.getState().loadOlderHistory);
+  });
 });

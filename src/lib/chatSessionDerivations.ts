@@ -135,3 +135,73 @@ export function turnDiffs(messages: Message[]): {
           );
   return { lastUserIndex, turnDiffs };
 }
+
+/**
+ * The composer-lock derivation for the ACTIVE session (issue #135 §3, final
+ * increment). Pure over the three inputs the component used to select.
+ *
+ * `inTurn` is the ground truth for "a turn is in flight" (set by `beginTurn`,
+ * cleared by `turnCompleted`) — a STALE `idle` from the previous turn must
+ * not unlock the composer or hide the working indicator, so `inTurn`
+ * wins alongside `working` (the store does not reset `agentState` on
+ * `turnCompleted` — a store follow-up; an agent that hasn't
+ * pushed yet is covered the same way: its turn IS in flight).
+ *
+ * A `blocked` agent is mid-turn AWAITING a request response (`inTurn` is
+ * true) — the SEND must stay disabled for the whole wait (pre-branch,
+ * `main`'s composer locked on `inTurn`): the harness is one-turn-at-a-time
+ * (a prompt while a turn is in flight is REJECTED, not queued —
+ * `send_prompt`'s atomic `pending_turn` claim), so sending concurrently
+ * would fail + clobber the turn bookkeeping. The TEXTAREA is always
+ * editable (you can draft while the agent works — `send()`'
+ * `composerLocked` guard no-ops Enter, the draft is kept for when the
+ * turn ends). (`agentState === "blocked"` also covers a blocked state
+ * without an in-flight turn, where `inTurn` alone would not lock.)
+ * A compaction locks for the same reason: the harness is one-turn-at-a-time
+ * and a prompt racing the rewrite would be rejected (or reorder history).
+ */
+export function composerLockDerivations(input: {
+  agentState: "working" | "idle" | "blocked" | undefined;
+  inTurn: boolean;
+  compacting: unknown; // `CompactionReason | undefined`; `unknown` keeps the type import out of the pure module
+}): {
+  workingOrInTurn: boolean;
+  composerLocked: boolean;
+} {
+  const workingOrInTurn = input.agentState === "working" || input.inTurn;
+  const composerLocked =
+    workingOrInTurn || input.agentState === "blocked" || input.compacting !== undefined;
+  return { workingOrInTurn, composerLocked };
+}
+
+/**
+ * The history-pagination window for the ACTIVE session (issue #135 §3, final
+ * increment). Pure over ONE store slice: the `history[sessionId]` entry and
+ * the `loadOlderHistory` action. The action is returned UNWRAPPED (the
+ * component hands it straight to `MessageList`'s `onStartReached`) and is
+ * never invoked here; the three `?? false` / `?? 0` fallbacks sit OUTSIDE any
+ * selector, exactly as they did in the component (the fallbacks are what keep
+ * the no-session frame returning stable booleans).
+ */
+export function historyPaginationDerivations(input: {
+  history: {
+    oldestRowId: number | null;
+    hasMore: boolean;
+    loadingMore: boolean;
+    generation: number;
+    epoch: number;
+  } | undefined;
+  loadOlder: (sessionId: string) => Promise<void>;
+}): {
+  loadOlder: (sessionId: string) => Promise<void>;
+  hasMore: boolean;
+  loadingMore: boolean;
+  generation: number;
+} {
+  return {
+    loadOlder: input.loadOlder,
+    hasMore: input.history?.hasMore ?? false,
+    loadingMore: input.history?.loadingMore ?? false,
+    generation: input.history?.generation ?? 0,
+  };
+}

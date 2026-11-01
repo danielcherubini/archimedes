@@ -63,11 +63,15 @@ export default function ChatStream() {
   // The session-state and capability derivations (issue #135 §3) — the ask /
   // confirm / password split, the anchored-vs-stacked partition, live /
   // history-only / resumable, the composer's send gate, the image capability,
-  // and the current turn's diffs. The pure logic lives in
+  // the current turn's diffs, the composer-lock chain (`workingOrInTurn` /
+  // `composerLocked`) and the history-pagination slice (`loadOlder` / `hasMore`
+  // / `loadingMore` / `generation`). The pure logic lives in
   // `lib/chatSessionDerivations.ts`; this is a HOOK (it reads the stores), so it
   // sits in this UNCONDITIONAL block — a hook below the `!activeSessionId` early
   // return is a conditional hook call and white-screens the app with
-  // "Rendered more hooks than during the previous render".
+  // "Rendered more hooks than during the previous render". `workingOrInTurn` is
+  // therefore IN SCOPE for `useSpinQuip` below (the call order the extraction
+  // depends on) and `composerLocked` for the two argument sites that take it.
   const {
     askRequests,
     confirmRequests,
@@ -78,6 +82,12 @@ export default function ChatStream() {
     composerEnabled,
     turnDiffs,
     imageCapable,
+    workingOrInTurn,
+    composerLocked,
+    loadOlder,
+    hasMore,
+    loadingMore,
+    generation,
   } = useChatSessionDerivations();
   // The five store actions the dispatch path used to pull here (`addUserMessage`,
   // `addSystemLine`, `beginTurn`, `turnCompleted`, `resumeSession`) moved with
@@ -85,20 +95,21 @@ export default function ChatStream() {
   // `usePromptQueueFlusher` (issue #135 §2) — each hook pulls its own selectors,
   // and `noUnusedLocals` is what proves no consumer was left behind here.
 
-  // The interactive agent state for the active session. `inTurn` is the
-  // ground truth for "a turn is in flight" (set by `beginTurn`, cleared
-  // by `turnCompleted`) — a STALE `idle` from the previous turn must
-  // not unlock the composer or hide the working indicator, so `inTurn`
-  // wins alongside `working` (the store does not reset `agentState` on
-  // `turnCompleted` — a store follow-up; an agent that hasn't
-  // pushed yet is covered the same way: its turn IS in flight).
+  // The interactive agent state for the active session (both JSX props read
+  // it). The `workingOrInTurn` derivation that used to sit under this selector
+  // moved to `useChatSessionDerivations` / `lib/chatSessionDerivations.ts`
+  // (issue #135 §3 final) — comment and all, including the rule that a STALE
+  // `idle`/`working` from the previous turn must not unlock the composer or
+  // hide the working indicator, because the store does not reset `agentState`
+  // on `turnCompleted` and `inTurn` is the ground truth for an in-flight turn.
   const agentState = useInteractive((s) =>
     activeSessionId ? s.agentState[activeSessionId] : undefined,
   );
-  const workingOrInTurn = agentState === "working" || inTurn;
   // The active session's in-flight compaction reason (ADR 0045) — the
-  // `compaction_update` frame the harness emits around a compaction, and the
-  // ONLY signal for the COMPOSER LOCK: an idle compaction (the `/compact`
+  // `compaction_update` frame the harness emits around a compaction. The
+  // COMPOSER LOCK it feeds moved to the derivation hook (issue #135 §3 final);
+  // `compacting` stays selected here because the Esc effect below needs it and
+  // `ComposerRow` renders the indicator. An idle compaction (the `/compact`
   // command) emits no `turn_start` / `agent_settled`, so `inTurn` stays false and
   // `agentState` stays idle. (A compaction also leaves a card in the transcript —
   // ADR 0077 — but that is durable history, not a live busy flag: it settles and
@@ -156,20 +167,13 @@ export default function ChatStream() {
   const mcpMentionsEnabled = useSettings(
     (s) => s.settings?.mcpMentionsEnabled ?? false,
   );
-  // A `blocked` agent is mid-turn AWAITING a request response
-  // (`inTurn` is true) — the SEND must stay disabled for the whole wait
-  // (pre-branch, `main`'s composer locked on `inTurn`): the harness is
-  // one-turn-at-a-time (a prompt while a turn is in flight is REJECTED,
-  // not queued — `send_prompt`'s atomic `pending_turn` claim), so sending
-  // concurrently would fail + clobber the turn bookkeeping. The TEXTAREA
-  // is always editable (you can draft while the agent works — `send()`'
-  // `composerLocked` guard no-ops Enter, the draft is kept for when the
-  // turn ends). (`agentState === "blocked"` also covers a blocked state
-  // without an in-flight turn, where `inTurn` alone would not lock.)
-  // A compaction locks for the same reason: the harness is one-turn-at-a-time
-  // and a prompt racing the rewrite would be rejected (or reorder history).
-  const composerLocked =
-    workingOrInTurn || agentState === "blocked" || compacting !== undefined;
+  // The composer lock (`composerLocked`) moved to `useChatSessionDerivations` /
+  // `lib/chatSessionDerivations.composerLockDerivations` (issue #135 §3 final) —
+  // the whole chain and its load-bearing comment (the one-turn-at-a-time
+  // harness, the REJECTED-not-queued prompt, the always-editable TEXTAREA, the
+  // `blocked`-without-a-turn term and the compaction term) travel with it. The
+  // destructured name above feeds `useSpinQuip`, the `useChatPromptDispatch`
+  // argument, `useSessionIdleEdge`'s `busy` and the two `ComposerRow` props.
   // Called UNCONDITIONALLY at the top of the component body (the hook
   // contains `useState`/`useEffect` — invoking it inside the `working`
   // branch would be a conditional hook call and crash React when the
@@ -479,11 +483,13 @@ export default function ChatStream() {
   // and `composerEnabled` are destructured from it in the unconditional block
   // above. `isHistoryOnly` had no consumer left in this component.
 
-  const history = useSessions((s) => activeSessionId ? s.history[activeSessionId] : undefined);
-  const loadOlder = useSessions((s) => s.loadOlderHistory);
-  const hasMore = history?.hasMore ?? false;
-  const loadingMore = history?.loadingMore ?? false;
-  const generation = history?.generation ?? 0;
+  // The history-pagination slice (`history` / `loadOlder` / `hasMore` /
+  // `loadingMore` / `generation`) moved to `useChatSessionDerivations` /
+  // `lib/chatSessionDerivations.historyPaginationDerivations` (issue #135 §3
+  // final) — the four destructured names above are its output and the store
+  // action the `onStartReached` arrow below closes over. The `?? false` / `?? 0`
+  // no-session fallbacks moved with it (outside every selector, per the
+  // stable-reference rule).
 
   // ── The **Flush** trigger (part 1 of two — part 2 is the ref assignment
   // inside `usePromptQueueFlusher`) ───────────────────────────────────────────

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   anchoredAskRequestIds,
   classifyInteractiveRequests,
+  composerLockDerivations,
+  historyPaginationDerivations,
   sessionKindDerivations,
   stackedAskRequests,
   turnDiffs,
@@ -226,5 +228,64 @@ describe("turnDiffs", () => {
 
   it("an empty transcript → lastUserIndex -1 and no diffs", () => {
     expect(turnDiffs([])).toEqual({ lastUserIndex: -1, turnDiffs: [] });
+  });
+});
+
+describe("composerLockDerivations", () => {
+  it("a `working` agent with a turn in flight locks the composer (both flags true)", () => {
+    expect(
+      composerLockDerivations({ agentState: "working", inTurn: true, compacting: undefined }),
+    ).toEqual({ workingOrInTurn: true, composerLocked: true });
+  });
+
+  it("a `working` agent WITHOUT an in-flight turn still locks (a STALE `working` must not unlock)", () => {
+    // The chain's ground-truth rule: the store does not reset `agentState` on
+    // `turnCompleted`, so a stale `working` from the previous turn keeps the
+    // SEND disabled — `workingOrInTurn` is `agentState === "working" || inTurn`,
+    // and the `working` term alone carries the lock.
+    expect(
+      composerLockDerivations({ agentState: "working", inTurn: false, compacting: undefined }),
+    ).toEqual({ workingOrInTurn: true, composerLocked: true });
+  });
+
+  it("a `blocked` agent locks WITHOUT an in-flight turn (the term `inTurn` alone would miss)", () => {
+    // `agentState === "blocked"` covers a blocked state with no turn recorded —
+    // `inTurn` alone would leave the composer unlocked there.
+    expect(
+      composerLockDerivations({ agentState: "blocked", inTurn: false, compacting: undefined }),
+    ).toEqual({ workingOrInTurn: false, composerLocked: true });
+  });
+
+  it("an idle agent with no turn and no compaction unlocks the composer", () => {
+    expect(
+      composerLockDerivations({ agentState: "idle", inTurn: false, compacting: undefined }),
+    ).toEqual({ workingOrInTurn: false, composerLocked: false });
+  });
+
+  it("an in-flight compaction locks the composer (ADR 0045: the harness is one-turn-at-a-time)", () => {
+    // An idle compaction emits no `turn_start` / `agent_settled`, so neither
+    // `inTurn` nor `agentState` says "working" — `compacting !== undefined` is
+    // the ONLY signal. One `CompactionReason` value pins the value-uniform
+    // `!== undefined` term (`"manual" | "threshold" | "overflow"` behave alike).
+    expect(
+      composerLockDerivations({ agentState: "idle", inTurn: false, compacting: "manual" }),
+    ).toEqual({ workingOrInTurn: false, composerLocked: true });
+  });
+});
+
+describe("historyPaginationDerivations", () => {
+  it("returns the window's three fields and passes `loadOlder` through by IDENTITY", () => {
+    // IDENTITY is the load-bearing half: `MessageList`'s `onStartReached` closes
+    // over this function value, and the store action is a stable reference. The
+    // action is NEVER invoked here (it reaches the `load_history` IPC command).
+    const loadOlder = async (_sessionId: string) => {};
+    const out = historyPaginationDerivations({
+      history: { oldestRowId: 1, hasMore: true, loadingMore: false, generation: 3, epoch: 0 },
+      loadOlder,
+    });
+    expect(out.hasMore).toBe(true);
+    expect(out.loadingMore).toBe(false);
+    expect(out.generation).toBe(3);
+    expect(out.loadOlder).toBe(loadOlder);
   });
 });
