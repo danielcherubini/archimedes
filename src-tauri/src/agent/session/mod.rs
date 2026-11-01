@@ -363,14 +363,84 @@ impl EffectiveCatalog {
     /// discovery fails contributes 0 models but still shadows the base
     /// models for its id (ADR 0014 — via `merge_catalog`'s
     /// `shadowed_provider_ids`).
+    ///
+    /// The interactive default: helper-executing. Equivalent to
+    /// [`Self::resolve_with`] with `execute_helpers = true` — the value every
+    /// interactive caller wants (a session start MUST be able to run a
+    /// `!command` key helper). A caller that must NOT spawn a subprocess (the
+    /// boot seeding path) goes through [`Self::resolve_with`] with `false`, or
+    /// [`SessionManager::effective_catalog`] with the flag.
     pub async fn resolve(&self, force_refresh: Option<&str>) -> ModelCatalog {
+        self.resolve_with(force_refresh, true).await
+    }
+
+    /// The flag-taking core (issue #129): `execute_helpers` threads the spec's
+    /// seeding gate down to [`crate::agent::provider_auth::resolve_bearer`] —
+    /// `false` means a `!command` `api_key` is NEVER spawned and serves its
+    /// literal text as the static key (app startup must not launch a
+    /// subprocess).
+    ///
+    /// The per-provider sequence is: expand the custom headers → the
+    /// insecure-HTTP gate → resolve the bearer → discover. A gate refusal
+    /// degrades the provider exactly like a failed discovery (0 models,
+    /// `succeeded = false`, one debuglog line) and it still SHADOWS (ADR 0014),
+    /// so the picker shows `unreachable` + settings rather than a stale row.
+    pub async fn resolve_with(
+        &self,
+        force_refresh: Option<&str>,
+        execute_helpers: bool,
+    ) -> ModelCatalog {
         let settings = load_settings(&self.config_dir);
         let mut user_models: Vec<Model> = Vec::new();
         let mut cache = self.cache.lock().await;
+        // ONE client per resolve, handed to `resolve_bearer` (the `!command`
+        // arm ignores it; the oauth/ADC arms use it — interface §4).
+        let client = reqwest::Client::new();
         for provider in &settings.providers {
             let entry = cache
                 .entry(provider.id.clone())
                 .or_insert_with(ProviderDiscovery::default);
+            // The provider's custom headers (issue #129), EXPANDED + validated
+            // here (the single expansion site for the discovery path — the
+            // transport only attaches them). `None` in → `None` out: no
+            // sentinel map for a provider that configured none.
+            let custom_headers = provider
+                .headers
+                .as_ref()
+                .map(crate::agent::provider_auth::headers::expand_map);
+            // The insecure-HTTP gate (issue #129): a plain-`http://` base to a
+            // non-loopback host is refused unless the row opted in. A refusal
+            // degrades like a failed discovery — 0 models, `succeeded = false`
+            // (it SHADOWS anyway, ADR 0014, so the picker shows `unreachable` +
+            // settings) — with ONE descriptive debuglog line.
+            if let Err(e) = crate::agent::provider_auth::headers::validate_base_url(
+                &provider.base_url,
+                provider.allow_insecure_http,
+            )
+            .await
+            {
+                crate::agent::debuglog::log(&format!("provider-auth: {e}"));
+                entry.models.clear();
+                entry.succeeded = false;
+                continue; // no discovery, no models — never a panic, never a blank key
+            }
+            // The EFFECTIVE bearer (issue #129): a dynamic token (key helper /
+            // oauth / ADC) REPLACES the row's static key for BOTH the discovery
+            // call and every `Model` row this provider contributes (grounding:
+            // the substitution happens BEFORE discovery, not only in the row).
+            // `None` means "serve the static key as-is" — the contract's
+            // degrade rule (resolution never errors at the boundary).
+            let effective_key = match crate::agent::provider_auth::resolve_bearer(
+                provider,
+                &self.config_dir,
+                &client,
+                execute_helpers,
+            )
+            .await
+            {
+                Some(bearer) => bearer,
+                None => provider.api_key.clone(),
+            };
             // `force_refresh` (a provider id) bypasses the cache for that
             // provider (the settings page's refresh affordance); a failed
             // re-fetch clears the stale entry (0 models — the provider row
@@ -383,7 +453,14 @@ impl EffectiveCatalog {
             // before the network is up) shows `unreachable` + 0 models until a
             // restart. A success — including a legitimately EMPTY one — caches.
             if !entry.succeeded || bypass {
-                match discover_models(&provider.base_url, &provider.api_key, &provider.api).await {
+                match discover_models(
+                    &provider.base_url,
+                    &effective_key,
+                    &provider.api,
+                    custom_headers.as_ref(),
+                )
+                .await
+                {
                     Ok(models) => {
                         entry.models = models;
                         entry.succeeded = true;
@@ -398,21 +475,69 @@ impl EffectiveCatalog {
             // `base_url` / `api_key`; `context_window` falls back to
             // `DEFAULT_CONTEXT_WINDOW` (a user model has no static metadata);
             // the thinking fields map straight from the `DiscoveredMeta`
-            // (`None` → `vec![]` / `false`); the provider's `api` decides
-            // the wire (ADR 0024).
+            // (`None` → `vec![]` / `false`).
+            //
+            // The wire is DERIVED from the discovery payload for a `litellm`
+            // provider (T3b #131 — the first time `api` is derived rather than
+            // configured; ADR 0026's 2026-11-02 amendment). Any other
+            // provider writes the provider's `api` byte-identical to today, with
+            // NO derivation attempted and no overwrite possible.
+            //
+            // The derived value that LANDS is the one the discovery proved
+            // (`meta.api`, T3a's `derive_wire_for_route` latch: `mode ==
+            // "responses"` → Responses; a Claude-adapter route with the
+            // `/v1/messages` probe latch true → Messages). The `OpenAiCompletions`
+            // fallback is deliberately NOT written: it is WIRE-EQUIVALENT to the
+            // `litellm` mode (`build_provider`'s default arm — ADR 0026), while
+            // `litellm` additionally carries the DISCOVERY shape (`api` doubles
+            // as the `discover_models` selector, so overwriting it would
+            // silently downgrade that provider's later refreshes from
+            // `/model/info` to `/models`). The fallback therefore keeps the
+            // provider value — the byte-identical pre-T3b row.
+            //
+            // The R5 propagation rides the SAME seam: `supports_tools` / the two
+            // costs are the REDUCED discovery values when the discovery provided
+            // them, else today's literals (`unwrap_or(true)` / `unwrap_or(0.0)`)
+            // — so a non-LiteLLM provider's `Model` row is byte-identical to
+            // today (its `DiscoveredMeta` carries `None` for all four fields;
+            // pinned in `resolve_non_litellm_provider_byte_identical`).
+            //
+            // LIVE-SESSION BOUNDARY (T3b): a derived-wire change is NOT pushed
+            // to RUNNING sessions this task — the wire is bound to the provider
+            // instance at spawn (`build_provider` at `default_build_loop`;
+            // `refresh_live_models` copies only the window/thinking fields, and
+            // `AgentLoop::set_model` rebuilds only on a composed-key change). A
+            // mid-session user model switch re-resolves against the effective
+            // catalog and sends the WHOLE `Model`, and every NEW session carries
+            // the derived wire; widening the refresh gate is the recorded
+            // follow-up.
             for (id, meta) in &entry.models {
+                // (The derivation rule is documented above the loop.)
+                let derived = meta
+                    .api
+                    .filter(|wire| *wire != WireApi::OpenAiCompletions)
+                    .map(|wire| wire.as_str().to_string());
+                let api = if provider.api == "litellm" {
+                    derived.or(Some(provider.api.clone()))
+                } else {
+                    Some(provider.api.clone())
+                };
                 user_models.push(Model {
                     id: id.clone(),
                     provider: provider.id.clone(),
                     base_url: provider.base_url.clone(),
-                    api_key: provider.api_key.clone(),
+                    // The EFFECTIVE key (issue #129) — a dynamic bearer reaches
+                    // the Worker through this row (the token's destination is
+                    // `Model.api_key`; the Worker holds a pushed snapshot string
+                    // and never learns about helpers/OAuth).
+                    api_key: effective_key.clone(),
                     context_window: meta.context_window.unwrap_or(DEFAULT_CONTEXT_WINDOW),
-                    cost_per_mtok_in: 0.0,
-                    cost_per_mtok_out: 0.0,
-                    supports_tools: true,
+                    cost_per_mtok_in: meta.cost_per_mtok_in.unwrap_or(0.0),
+                    cost_per_mtok_out: meta.cost_per_mtok_out.unwrap_or(0.0),
+                    supports_tools: meta.supports_tools.unwrap_or(true),
                     supports_thinking: meta.supports_thinking.unwrap_or(false),
                     thinking_levels: meta.thinking_levels.clone().unwrap_or_default(),
-                    api: Some(provider.api.clone()),
+                    api: api.clone(),
                 });
             }
         }
@@ -778,10 +903,45 @@ impl SessionManager {
     /// unreachable endpoint is NOT retried every session). A failure, or a
     /// model absent from the response, degrades to the static
     /// (`models-store.json`) metadata (the `Model` is returned unchanged).
+    ///
+    /// (issue #129) The same HEADER parity as the resolve spine: this fetch is a
+    /// request to the user's provider too, so the row's custom headers are
+    /// expanded and attached, and its base URL passes the insecure-HTTP gate (a
+    /// refusal degrades to "the `Model` is returned unchanged" — no fetch). The
+    /// row is looked up by `model.provider` from a fresh `load_settings` read
+    /// (the header map and the flag live on the ROW, not on the `Model` — no new
+    /// `Model` field this wave).
+    ///
+    /// The BEARER needs NO re-resolution here: the `Model` handed to this
+    /// function always comes from the RESOLVED effective catalog (session start
+    /// resolves, picks the model from that catalog, and only then refreshes
+    /// metadata), so `model.api_key` already IS the spine-substituted effective
+    /// key and any `!`-prefix is long gone — re-running `resolve_bearer` here
+    /// would be dead work.
     async fn refresh_model_metadata(&self, model: &Model) -> Model {
         if model.base_url.is_empty() {
             return model.clone();
         }
+        // The provider row behind this model (the header source of truth).
+        let settings = load_settings(&self.config_dir);
+        let row = settings.providers.iter().find(|p| p.id == model.provider);
+        if let Some(row) = row {
+            if let Err(e) = crate::agent::provider_auth::headers::validate_base_url(
+                &row.base_url,
+                row.allow_insecure_http,
+            )
+            .await
+            {
+                // The same gate as the resolve spine: a refused base means no
+                // plaintext request (best-effort degrade — the static metadata
+                // is kept, exactly like an unreachable endpoint).
+                crate::agent::debuglog::log(&format!("provider-auth: {e}"));
+                return model.clone();
+            }
+        }
+        let provider_headers = row
+            .and_then(|p| p.headers.as_ref())
+            .map(crate::agent::provider_auth::headers::expand_map);
         let mut cache = self.discovery_cache.lock().await;
         let entry = cache
             .entry(model.provider.clone())
@@ -800,6 +960,7 @@ impl SessionManager {
                     .and_then(WireApi::parse)
                     .unwrap_or(WireApi::OpenAiCompletions)
                     .as_str(),
+                provider_headers.as_ref(),
             )
             .await
             {
@@ -834,15 +995,25 @@ impl SessionManager {
     /// discovery fails contributes 0 models but still shadows the base
     /// models for its id (ADR 0014 — via `merge_catalog`'s
     /// `shadowed_provider_ids`). Thin wrapper over
-    /// [`EffectiveCatalog::resolve`] (the subagent's resolution uses the
+    /// [`EffectiveCatalog::resolve_with`] (the subagent's resolution uses the
     /// parent's `StartEnv` catalog, built from the same core).
-    pub async fn effective_catalog(&self, force_refresh: Option<&str>) -> ModelCatalog {
+    ///
+    /// `execute_helpers` (issue #129) is the spec's seeding gate, supplied by
+    /// the CALLER (this is the single entry — no second seeding entry exists):
+    /// `true` for every interactive path (a session start, a model switch, the
+    /// agents listing — a helper MAY be spawned), `false` for the boot
+    /// `list_models` seed (app startup never spawns a subprocess).
+    pub async fn effective_catalog(
+        &self,
+        force_refresh: Option<&str>,
+        execute_helpers: bool,
+    ) -> ModelCatalog {
         EffectiveCatalog {
             config_dir: self.config_dir.clone(),
             cache: self.discovery_cache.clone(),
             base: self.catalog.clone(),
         }
-        .resolve(force_refresh)
+        .resolve_with(force_refresh, execute_helpers)
         .await
     }
 
@@ -1180,7 +1351,7 @@ impl SessionManager {
                     id: session_id.to_string(),
                 })?;
         let caps: Value = serde_json::from_str(&row.capabilities_json).unwrap_or(Value::Null);
-        let catalog = self.effective_catalog(None).await;
+        let catalog = self.effective_catalog(None, true).await;
         let settings = load_settings(&self.config_dir);
         let model = caps
             .get("model")
@@ -1243,7 +1414,7 @@ impl SessionManager {
         // The EFFECTIVE catalog (the base catalog + the user's providers, a fresh
         // `load_settings` read; the per-provider `discovery_cache` makes the fetch
         // cheap): the model resolution + the `StartEnv`'s `catalog`.
-        let catalog = self.effective_catalog(None).await;
+        let catalog = self.effective_catalog(None, true).await;
         let settings = load_settings(&self.config_dir);
         let is_resume = resume.is_some();
         let (session_id, model, stored_level, archived, title, context_usage, cost_usd) =
@@ -1432,7 +1603,7 @@ impl SessionManager {
         let rows = db
             .list_sessions(include_archived)
             .map_err(|e| SessionError::Io(e.to_string()))?;
-        let catalog = self.effective_catalog(None).await;
+        let catalog = self.effective_catalog(None, true).await;
         let settings = load_settings(&self.config_dir);
         Ok(rows
             .into_iter()
@@ -1803,7 +1974,7 @@ impl SessionManager {
         // The `Model` lookup + the re-synthesizer run against the EFFECTIVE
         // catalog (the base catalog + the user's providers — a user-provider
         // model can be switched TO mid-session, not just the base ones).
-        let catalog = self.effective_catalog(None).await;
+        let catalog = self.effective_catalog(None, true).await;
         // Apply (the `WorkerManager`'s `send_config` — the `Config` frame → the
         // Worker's `AgentLoop` `set_model` / `set_thinking_level`, applied when
         // the loop is idle) + mirror the change on the config state (the
@@ -2014,6 +2185,75 @@ impl SessionManager {
         };
         let mut pushed = 0;
         for (session_id, model) in pushes {
+            let Some(handle) = wm.handle_for(&session_id) else {
+                continue;
+            };
+            if handle.send_config(Some(&model), None, None).is_ok() {
+                // Mirror ONLY on a delivered frame (finding 12's rule — a failed
+                // send means the loop never applies it).
+                self.update_config_state(&session_id, |s| s.model = model.clone());
+                pushed += 1;
+            }
+        }
+        pushed
+    }
+
+    /// Push a newly-resolved bearer to every LIVE session on that provider,
+    /// without touching context/thinking fields (a SIBLING to
+    /// [`Self::refresh_live_models`] — that method deliberately refuses to copy
+    /// `api_key` / `base_url` so an empty discovery-derived key cannot wipe a
+    /// configured one, which a credential push cannot reuse as-is; each refusal
+    /// is pinned by its own tests). Returns the number of sessions pushed.
+    ///
+    /// Called by the provider-credential refresher (`agent::provider_auth::
+    /// refresh`) after a refresh has SUCCEEDED and been persisted — never after
+    /// a failed one, so a transient outage never replaces a working bearer
+    /// (interface §1's "degrade, never blank" rule on the push side).
+    ///
+    /// Scoping is per MATCHED SESSION: the session's CURRENT model (the
+    /// `config_state` mirror — the same source `set_config_option`
+    /// re-synthesizes from) must be on this provider AND carry a different key.
+    /// The key comparison is the no-op guard: `set_model` rebuilds the
+    /// `Compactor`, re-estimates, emits a `context_usage_update` AND writes the
+    /// `sessions` row, so pushing an unchanged key would be N frames and N DB
+    /// writes for nothing (the same reasoning `refresh_live_models`' gate
+    /// encodes).
+    ///
+    /// Dispatch goes through the existing `Config { model }` frame → the
+    /// Worker's `ControlCmd::SetModel` → `AgentLoop::set_model`, which already
+    /// does the whole right thing and is pinned by the loop's own `set_model`
+    /// test — this method only supplies the trigger.
+    ///
+    /// Best-effort per session: a dead / closing Worker is skipped, never an
+    /// error (a refresh must not fail because one session is mid-teardown).
+    pub async fn refresh_live_credentials(&self, provider_id: &str, api_key: &str) -> usize {
+        let Some(wm) = self.worker_manager.get().cloned() else {
+            return 0;
+        };
+        // The candidates, collected BEFORE any send so the `sessions` lock is
+        // never held across one (the `refresh_live_models` discipline verbatim).
+        let targets: Vec<(String, Model)> = {
+            let sessions = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            sessions
+                .iter()
+                .filter_map(|(session_id, row)| {
+                    let state = row.config_state.as_ref()?;
+                    (state.model.provider == provider_id && state.model.api_key != api_key).then(
+                        || {
+                            // ONLY the key changes: the context window and the
+                            // thinking fields stay the session's own (this push
+                            // is not a metadata refresh — that is the sibling's
+                            // job, and it has its own gate).
+                            let mut next = state.model.clone();
+                            next.api_key = api_key.to_string();
+                            (session_id.clone(), next)
+                        },
+                    )
+                })
+                .collect()
+        };
+        let mut pushed = 0;
+        for (session_id, model) in targets {
             let Some(handle) = wm.handle_for(&session_id) else {
                 continue;
             };
@@ -3805,6 +4045,176 @@ mod session_tests {
         let _ = manager.close_session(&info.session_id).await;
     }
 
+    // ── `refresh_live_credentials` (issue #125 — the credential push) ──
+
+    /// The credential push reaches the LIVE session: the `config_state` mirror's
+    /// model carries the new bearer. This is the sibling of
+    /// `refresh_live_models` (which refuses to copy `api_key` — that refusal is
+    /// pinned by its own tests), so the two push paths are pinned separately.
+    ///
+    /// The mirror is the load-bearing assertion (the interface §6 note): the
+    /// Worker-side application is `AgentLoop::set_model`, already pinned by the
+    /// loop's own `set_model` test.
+    #[tokio::test]
+    async fn refresh_live_credentials_pushes_the_new_bearer_to_live_session_models() {
+        let dir = temp_config_dir();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        let (manager, _wm, _db) = build_worker_manager(&dir, native_test_catalog(), &sink);
+        let info = manager
+            .start_session(dir.to_path_buf(), &sink)
+            .await
+            .expect("the native session started");
+        // The premise: the live session runs `fake/m1` with the catalog's static
+        // key.
+        let before = manager
+            .with_session(&info.session_id, |s| s.config_state.clone())
+            .flatten()
+            .expect("the session is live");
+        assert_eq!(before.model.provider, "fake");
+        assert_eq!(before.model.api_key, "k", "the static key from the catalog");
+
+        let pushed = manager.refresh_live_credentials("fake", "new-bearer").await;
+        assert_eq!(pushed, 1, "the one live session on `fake` was pushed");
+
+        let after = manager
+            .with_session(&info.session_id, |s| s.config_state.clone())
+            .flatten()
+            .expect("the session is still live");
+        assert_eq!(
+            after.model.api_key, "new-bearer",
+            "the mirror carries the new bearer"
+        );
+        // The sibling's contract: ONLY the key changes — the context window and
+        // the thinking fields are the session's own, untouched by a credential
+        // push (that is why this is a separate method from `refresh_live_models`).
+        assert_eq!(after.model.context_window, before.model.context_window);
+        assert_eq!(
+            after.model.supports_thinking,
+            before.model.supports_thinking
+        );
+        assert_eq!(after.model.id, before.model.id);
+        assert_eq!(after.model.base_url, before.model.base_url);
+        assert_eq!(
+            after.thinking_level, before.thinking_level,
+            "a credential push never touches the thinking level"
+        );
+        let _ = manager.close_session(&info.session_id).await;
+    }
+
+    /// Scoping is per provider: a session whose current model is on another
+    /// provider is never touched by a push for `fake` (pushing a foreign bearer
+    /// into another provider's session would break a working session).
+    #[tokio::test]
+    async fn refresh_live_credentials_updates_only_the_matching_provider() {
+        let dir = temp_config_dir();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        // Two providers in the catalog; the session runs `other/m2`.
+        let catalog = ModelCatalog {
+            models: vec![
+                chain_test_model("fake", "m1"),
+                chain_test_model("other", "m2"),
+            ],
+            default_model: Some("other/m2".to_string()),
+            compaction: crate::agent::harness::catalog::CompactionConfig::default(),
+        };
+        let (manager, _wm, _db) = build_worker_manager(&dir, catalog, &sink);
+        let info = manager
+            .start_session(dir.to_path_buf(), &sink)
+            .await
+            .expect("the native session started");
+        assert_eq!(
+            info.capabilities["model"], "other/m2",
+            "the session runs the OTHER provider's model"
+        );
+
+        let pushed = manager.refresh_live_credentials("fake", "new-bearer").await;
+        assert_eq!(pushed, 0, "no session runs on `fake`");
+        let state = manager
+            .with_session(&info.session_id, |s| s.config_state.clone())
+            .flatten()
+            .expect("the session is live");
+        assert_eq!(
+            state.model.api_key, "k",
+            "the other provider's session keeps its own key"
+        );
+
+        // And the same call for the provider it DOES run on pushes exactly that
+        // session — the filter matches, it is not simply always-empty.
+        let pushed = manager
+            .refresh_live_credentials("other", "new-bearer")
+            .await;
+        assert_eq!(pushed, 1, "the matching provider's session was pushed");
+        let state = manager
+            .with_session(&info.session_id, |s| s.config_state.clone())
+            .flatten()
+            .expect("the session is live");
+        assert_eq!(state.model.api_key, "new-bearer");
+        let _ = manager.close_session(&info.session_id).await;
+    }
+
+    /// The no-op guard: pushing the key the session ALREADY has sends nothing
+    /// (a `set_model` rebuilds the `Compactor`, re-estimates, emits a
+    /// `context_usage_update` and writes the `sessions` row — firing it on an
+    /// unchanged key would be a frame and a DB write for nothing, the same
+    /// reasoning `refresh_live_models`' gate encodes).
+    #[tokio::test]
+    async fn refresh_live_credentials_skips_unchanged_keys() {
+        let dir = temp_config_dir();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        let (manager, _wm, _db) = build_worker_manager(&dir, native_test_catalog(), &sink);
+        let info = manager
+            .start_session(dir.to_path_buf(), &sink)
+            .await
+            .expect("the native session started");
+
+        // The SAME key the live model already carries.
+        let pushed = manager.refresh_live_credentials("fake", "k").await;
+        assert_eq!(pushed, 0, "an unchanged key pushes nothing");
+        let state = manager
+            .with_session(&info.session_id, |s| s.config_state.clone())
+            .flatten()
+            .expect("the session is live");
+        assert_eq!(state.model.api_key, "k", "and the mirror is untouched");
+        assert!(
+            rx.try_recv().is_err(),
+            "no event was emitted for a no-op push"
+        );
+        let _ = manager.close_session(&info.session_id).await;
+    }
+
+    /// No live sessions at all → `0` (the refresher loop calls this after every
+    /// successful refresh, so the empty case is the common one and must be free
+    /// rather than an error).
+    #[tokio::test]
+    async fn refresh_live_credentials_with_no_live_sessions_returns_zero() {
+        let dir = temp_config_dir();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn EventSink> = Arc::new(TestSink { tx });
+        let (manager, _wm, _db) = build_worker_manager(&dir, native_test_catalog(), &sink);
+        // No session started at all.
+        assert_eq!(
+            manager.refresh_live_credentials("fake", "new-bearer").await,
+            0,
+            "no live sessions ⇒ nothing pushed, no error"
+        );
+        // And a session that has been CLOSED is not a target either: its Worker
+        // is gone, so the push is skipped (best-effort per session, exactly like
+        // `refresh_live_models`).
+        let info = manager
+            .start_session(dir.to_path_buf(), &sink)
+            .await
+            .expect("the native session started");
+        let _ = manager.close_session(&info.session_id).await;
+        assert_eq!(
+            manager.refresh_live_credentials("fake", "new-bearer").await,
+            0,
+            "a closed session's Worker is gone, so nothing is pushed to it"
+        );
+    }
+
     /// (live `/v1/models` discovery) `refresh_model_metadata` applies the
     /// live metadata (context window, thinking levels) from the provider's
     /// `GET /v1/models`, and degrades to the static metadata when the
@@ -3888,6 +4298,543 @@ mod session_tests {
         server.abort();
     }
 
+    // ── issue #129: the resolve spine (bearer, headers, the HTTP gate) ──────
+
+    /// `PERPLEXITY_API_KEY`-style restore guard (the `commands/settings.rs` /
+    /// `agent/web/config.rs` pattern — the restore happens even when an
+    /// assertion panics). Caller must hold `env_lock()`.
+    struct RestoreEnv(&'static str, Option<std::ffi::OsString>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            match self.1.take() {
+                // SAFETY: the `ENV_LOCK` is still held at drop time (this guard
+                // is declared after the `_lock` guard and outlives it in
+                // reverse); no other thread mutates the env concurrently.
+                Some(v) => unsafe { std::env::set_var(self.0, v) },
+                None => unsafe { std::env::remove_var(self.0) },
+            }
+        }
+    }
+
+    /// Unset `key` for the rest of the test. Caller must hold `env_lock()` (the
+    /// `commands/settings.rs` helper of the same name).
+    fn remove_env(key: &'static str) -> RestoreEnv {
+        let prev = std::env::var_os(key);
+        // SAFETY: `ENV_LOCK` is held by the caller.
+        unsafe { std::env::remove_var(key) };
+        RestoreEnv(key, prev)
+    }
+
+    /// Set `key` for the rest of the test. Caller must hold `env_lock()`.
+    fn set_env(key: &'static str, value: &str) -> RestoreEnv {
+        let prev = std::env::var_os(key);
+        // SAFETY: `ENV_LOCK` is held by caller.
+        unsafe { std::env::set_var(key, value) };
+        RestoreEnv(key, prev)
+    }
+
+    /// Restores the global debug log to DISABLED on scope exit (the
+    /// `commands/sessions.rs` guard — a panic must not hand a sibling test a
+    /// global pointing at this test's deleted scratch dir).
+    struct DisableDebuglogOnExit;
+    impl Drop for DisableDebuglogOnExit {
+        fn drop(&mut self) {
+            crate::agent::debuglog::init(false, None);
+        }
+    }
+
+    /// A `settings.json` with ONE provider written from a JSON value (the
+    /// issue-#129 fixtures need per-row `headers` / `allowInsecureHttp` /
+    /// `apiKey`, which the two fixed-shape helpers above cannot express).
+    fn write_settings_provider_row(dir: &Path, row: Value) {
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_string_pretty(&json!({ "providers": [row] })).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A raw `GET /v1/models` server that CAPTURES each request's header block
+    /// and serves one model list. The capture is what lets a test assert what
+    /// actually went on the WIRE (the shared `test_support::raw_json_server`
+    /// ignores request headers — documented there).
+    async fn capturing_models_server(
+        body: &'static str,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<()>,
+        tokio::sync::mpsc::Receiver<String>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(16);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the listener binds");
+        let addr = listener.local_addr().expect("an address");
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let mut data = Vec::new();
+                    while !data.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let Ok(n) = stream.read(&mut buf).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        data.extend_from_slice(&buf[..n]);
+                    }
+                    let head = String::from_utf8_lossy(&data).to_string();
+                    let _ = tx.send(head).await;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        (addr, server, rx)
+    }
+
+    /// (issue #129) A `!command` `api_key` is EXECUTED at resolve time and the
+    /// resulting bearer reaches BOTH the discovery request (`Authorization:
+    /// Bearer tok`) and every `Model` row — the substitution happens BEFORE
+    /// discovery, not only in the row (grounding §2).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_substitutes_a_key_helper_bearer_into_models_and_discovery() {
+        let dir = temp_config_dir();
+        let (addr, server, mut rx) = capturing_models_server(r#"{"data":[{"id":"m/1"}]}"#).await;
+        write_settings_provider_row(
+            &dir,
+            json!({
+                "id": "tama", "name": "tama",
+                "baseUrl": format!("http://{addr}/v1"),
+                "apiKey": "!echo tok"
+            }),
+        );
+        let mut manager = SessionManager::new(dir.to_path_buf());
+        manager.set_catalog(ModelCatalog::default());
+        let effective = manager.effective_catalog(None, true).await;
+        let row = effective
+            .models
+            .iter()
+            .find(|m| m.id == "m/1")
+            .expect("the discovered model is in the effective catalog");
+        assert_eq!(
+            row.api_key, "tok",
+            "the helper's stdout (trimmed) is the row's key"
+        );
+        let head = rx.recv().await.expect("the server saw the request");
+        assert!(
+            head.to_lowercase().contains("authorization: bearer tok"),
+            "discovery must carry the SUBSTITUTED bearer:\n{head}"
+        );
+        server.abort();
+    }
+
+    /// (issue #128) The ADC bearer reaches BOTH the discovery request and every
+    /// `Model` row: `resolve` resolves the bearer BEFORE `discover_models`, so a
+    /// gateway whose `/model/info` needs the Google token is discovered with it
+    /// (grounding §2 — the substitution is not row-only).
+    ///
+    /// Hermeticity: the ADC file is a scratch fixture and the token endpoint a
+    /// `wiremock` URL, installed through `gcloud`'s test-override seam — which
+    /// REPLACES discovery, so the developer's real `~/.config/gcloud` file is
+    /// unreachable from here and no request can reach real Google. The override
+    /// and the token cache are process-global, so `ENV_LOCK` is held for the whole
+    /// span (the `set_env` tests' precedent).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn resolve_substitutes_the_gcloud_adc_bearer_into_models_and_discovery() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _lock = crate::test_support::env_lock();
+        crate::agent::provider_auth::gcloud::cache_clear();
+        let adc = ScratchDir::in_env_temp("-t4-adc", "fixture");
+        let adc_file = adc.join("application_default_credentials.json");
+        std::fs::write(
+            &adc_file,
+            json!({
+                "type": "authorized_user",
+                "client_id": "session-test-client",
+                "client_secret": "session-test-secret",
+                "refresh_token": format!("session-test-refresh-{}", uuid::Uuid::new_v4())
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let token_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"access_token": "ya29.minted"})),
+            )
+            .mount(&token_server)
+            .await;
+        let _override = crate::agent::provider_auth::gcloud::set_test_adc_override(
+            crate::agent::provider_auth::gcloud::TestAdcOverride {
+                adc_file: crate::agent::provider_auth::gcloud::AdcFileSource::Explicit(Some(
+                    adc_file.clone(),
+                )),
+                token_endpoint: Some(token_server.uri()),
+            },
+        );
+
+        let dir = temp_config_dir();
+        let (addr, server, mut rx) = capturing_models_server(r#"{"data":[{"id":"m/1"}]}"#).await;
+        write_settings_provider_row(
+            &dir,
+            json!({
+                "id": "tama", "name": "tama",
+                "baseUrl": format!("http://{addr}/v1"),
+                "apiKey": "static-key",
+                "useGcloudTokenAuth": true
+            }),
+        );
+        let mut manager = SessionManager::new(dir.to_path_buf());
+        manager.set_catalog(ModelCatalog::default());
+        let effective = manager.effective_catalog(None, true).await;
+        let row = effective
+            .models
+            .iter()
+            .find(|m| m.id == "m/1")
+            .expect("the discovered model is in the effective catalog");
+        assert_eq!(
+            row.api_key, "ya29.minted",
+            "the minted ADC token REPLACES the row's static key"
+        );
+        let head = rx.recv().await.expect("the server saw the request");
+        assert!(
+            head.to_lowercase()
+                .contains("authorization: bearer ya29.minted"),
+            "discovery must carry the SUBSTITUTED ADC bearer:\n{head}"
+        );
+        server.abort();
+        // The mint went to the in-memory cache and nowhere else — the on-disk
+        // store's untouched-ness is pinned from the outside by
+        // `minting_a_token_never_writes_the_provider_auth_store`.
+        assert!(
+            !dir.join("provider-auth.json").exists(),
+            "the ADC path writes nothing into the config dir"
+        );
+    }
+
+    /// (issue #128) The env precedence TABLE, at the function that computes it
+    /// (`provider_auth::gcloud_token_auth_enabled`, called by the `gcloud_adc`
+    /// arm): `=1` forces the flow on for a row that did not ask, `=0`/`=false`
+    /// refuses it for a row that did, unset or an unrecognised value defers to the
+    /// row.
+    ///
+    /// Deliberately asserted HERE rather than through four more resolves: the
+    /// resolve spine substitutes whatever the arm returns (pinned by
+    /// `resolve_substitutes_the_gcloud_adc_bearer_into_models_and_discovery`), the
+    /// env is read at the arm and nowhere else, and driving four extra raw
+    /// discovery servers in the parallel suite buys no new claim.
+    #[allow(clippy::await_holding_lock)] // the env is process-global
+    #[test]
+    fn the_gcloud_env_override_beats_the_provider_flag() {
+        use crate::agent::provider_auth::gcloud_token_auth_enabled;
+
+        let _lock = crate::test_support::env_lock();
+        let row = |mode: &str, flag: bool| crate::config::ProviderConfig {
+            id: "gw".to_string(),
+            name: "Gateway".to_string(),
+            base_url: "https://gw.example/v1".to_string(),
+            api_key: "k".to_string(),
+            api: "litellm".to_string(),
+            key_url: None,
+            auth_mode: mode.to_string(),
+            headers: None,
+            allow_insecure_http: false,
+            use_gcloud_token_auth: flag,
+            // (issue #127) The mechanical additive grow: no OIDC login on this fixture.
+            oidc: None,
+        };
+
+        // Unset → the row decides.
+        let _unset = remove_env("LITELLM_GCLOUD_TOKEN_AUTH");
+        assert!(gcloud_token_auth_enabled(&row("gcloud_adc", false)));
+        assert!(gcloud_token_auth_enabled(&row("api_key", true)));
+        assert!(!gcloud_token_auth_enabled(&row("api_key", false)));
+
+        // `=1` / `=true` → on for EVERY row (an env force beats a config that did
+        // not opt in — the container shape, where the ADC file is the only key).
+        for value in ["1", "true", "TRUE"] {
+            let _on = set_env("LITELLM_GCLOUD_TOKEN_AUTH", value);
+            assert!(
+                gcloud_token_auth_enabled(&row("api_key", false)),
+                "`{value}` must enable the flow for a row that did not ask"
+            );
+        }
+
+        // `=0` / `=false` → off even for a row that opted in (the "never read my
+        // ADC file" escape hatch).
+        for value in ["0", "false", "FALSE"] {
+            let _off = set_env("LITELLM_GCLOUD_TOKEN_AUTH", value);
+            assert!(
+                !gcloud_token_auth_enabled(&row("gcloud_adc", true)),
+                "`{value}` must refuse the flow even for an opted-in row"
+            );
+        }
+
+        // An unrecognised value → the row decides (a typo in the env must not
+        // silently disable a flow the user configured).
+        let _typo = set_env("LITELLM_GCLOUD_TOKEN_AUTH", "yes-please");
+        assert!(gcloud_token_auth_enabled(&row("api_key", true)));
+        assert!(!gcloud_token_auth_enabled(&row("api_key", false)));
+    }
+
+    /// (issue #129) The seeding gate: with `execute_helpers == false` the
+    /// invariant). The probe is a real side effect — a bare `touch <marker>` is
+    /// legal argv (`touch` is the program, the marker path an ordinary
+    /// argument), so the marker's ABSENCE proves no child ran, and the row keeps
+    /// the literal command string as its static key.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_with_execute_helpers_false_never_executes_the_helper() {
+        let dir = temp_config_dir();
+        // The marker lives in its OWN scratch dir (ADR 0078 — dash prefix, no
+        // dot, removed on drop).
+        let probe = ScratchDir::in_env_temp("-t2a-seed", "marker");
+        let marker = probe.path().join("helper-ran");
+        let (addr, server, _rx) = capturing_models_server(r#"{"data":[{"id":"m/1"}]}"#).await;
+        write_settings_provider_row(
+            &dir,
+            json!({
+                "id": "tama", "name": "tama",
+                "baseUrl": format!("http://{addr}/v1"),
+                "apiKey": format!("!touch {}", marker.display())
+            }),
+        );
+        let mut manager = SessionManager::new(dir.to_path_buf());
+        manager.set_catalog(ModelCatalog::default());
+        let effective = manager.effective_catalog(None, false).await;
+        let row = effective
+            .models
+            .iter()
+            .find(|m| m.id == "m/1")
+            .expect("discovery still happened (the row serves its static key)");
+        assert!(
+            !marker.exists(),
+            "`execute_helpers = false` must NOT spawn the helper: {}",
+            marker.display()
+        );
+        assert_eq!(
+            row.api_key,
+            format!("!touch {}", marker.display()),
+            "the un-executed command string stays the static key (degrade, never blank)"
+        );
+        server.abort();
+    }
+
+    /// (issue #129) A provider's custom headers are expanded (`$VAR` against
+    /// the process environment) and attached to the DISCOVERY request.
+    ///
+    /// The `#[allow(clippy::await_holding_lock)]` is INTENTIONAL (the
+    /// `commands/settings.rs` precedent): the env must stay set for the WHOLE
+    /// resolve, so the `ENV_LOCK` is held across the discovery `await`s — a
+    /// sibling test mutating the same var mid-resolve would make the assertion
+    /// depend on the scheduler.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn resolve_applies_custom_headers_to_discovery() {
+        let _lock = crate::test_support::env_lock();
+        let _env = set_env("T2_TEST_HEADER", "expanded-from-env");
+        let dir = temp_config_dir();
+        let (addr, server, mut rx) = capturing_models_server(r#"{"data":[{"id":"m/1"}]}"#).await;
+        write_settings_provider_row(
+            &dir,
+            json!({
+                "id": "tama", "name": "tama",
+                "baseUrl": format!("http://{addr}/v1"),
+                "apiKey": "k",
+                "headers": { "x-env-test": "$T2_TEST_HEADER" }
+            }),
+        );
+        let mut manager = SessionManager::new(dir.to_path_buf());
+        manager.set_catalog(ModelCatalog::default());
+        let effective = manager.effective_catalog(None, true).await;
+        assert!(
+            effective.models.iter().any(|m| m.id == "m/1"),
+            "the provider discovered normally"
+        );
+        let head = rx.recv().await.expect("the server saw the request");
+        assert!(
+            head.to_lowercase()
+                .contains("x-env-test: expanded-from-env"),
+            "the expanded header must be on the wire:\n{head}"
+        );
+        server.abort();
+    }
+
+    /// (issue #129) The insecure-HTTP gate at the resolve level: a non-loopback
+    /// `http://` base with no opt-in contributes NO models, still SHADOWS its
+    /// id (ADR 0014 — the picker shows `unreachable` + settings, not stale rows),
+    /// and the refusal is logged with the descriptive `allowInsecureHttp`
+    /// message. No request is ever made to the plaintext endpoint.
+    ///
+    /// The `#[allow(clippy::await_holding_lock)]` is INTENTIONAL: the guard holds
+    /// the process-global `debuglog` target (this test's own dir) for the whole
+    /// resolve, so a sibling's `debuglog::init` cannot repoint it mid-test (the
+    /// `commands/sessions.rs` precedent).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn resolve_skips_a_provider_with_a_non_loopback_http_base() {
+        let dir = temp_config_dir();
+        // The log dir is this test's own (the `commands/sessions.rs` shape) so
+        // the assertion never reads a sibling's lines.
+        let log_dir = ScratchDir::in_env_temp("-t2a-gate", "log");
+        let _lock = crate::test_support::env_lock();
+        let _disable = DisableDebuglogOnExit;
+        crate::agent::debuglog::init(true, Some(log_dir.to_path_buf()));
+
+        let (_addr, server, mut rx) =
+            capturing_models_server(r#"{"data":[{"id":"cleartext"}]}"#).await;
+        // The provider is pointed at a NON-LOOPBACK literal (`10.0.0.5` — a
+        // bare IP, so no DNS is involved and the refusal is deterministic).
+        write_settings_provider_row(
+            &dir,
+            json!({
+                "id": "tama", "name": "tama",
+                "baseUrl": "http://10.0.0.5/v1",
+                "apiKey": "k"
+            }),
+        );
+        let mut manager = SessionManager::new(dir.to_path_buf());
+        manager.set_catalog(ModelCatalog {
+            models: vec![provider_model("tama/stale", "tama", "http://10.0.0.5/v1")],
+            ..Default::default()
+        });
+        let effective = manager.effective_catalog(None, true).await;
+        assert!(
+            !effective.models.iter().any(|m| m.id == "cleartext"),
+            "a refused base must not discover anything"
+        );
+        assert!(
+            !effective.models.iter().any(|m| m.provider == "tama"),
+            "the provider still SHADOWS its id (ADR 0014) — the stale base row \
+             must not survive the gate"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the gate refuses BEFORE any request is sent"
+        );
+        let written = std::fs::read_to_string(log_dir.join("supervisor.log")).unwrap_or_default();
+        assert!(
+            written.contains("allowInsecureHttp"),
+            "the refusal names the opt-out in the log:\n{written}"
+        );
+        // The SAME refusal is what the opt-in lifts — asserted at the gate level
+        // in `provider_auth::headers`' own tests (a live `http://10.0.0.5`
+        // request here would only prove a connect timeout, so it is not repeated).
+        server.abort();
+    }
+
+    /// (issue #129, vet Major 1) The metadata-refresh parity is WIRED: the
+    /// per-session `refresh_model_metadata` fetch looks its provider row up by
+    /// `model.provider`, expands the row's header templates and attaches them —
+    /// the same header-complete request the resolve spine makes.
+    ///
+    /// The `#[allow(clippy::await_holding_lock)]` is INTENTIONAL (the
+    /// `commands/settings.rs` precedent) — see
+    /// `resolve_applies_custom_headers_to_discovery` for why the env lock must
+    /// outlive the fetch's `await`s.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn refresh_model_metadata_sends_custom_headers() {
+        let _lock = crate::test_support::env_lock();
+        let _env = set_env("T2_TEST_HEADER", "metadata-parity");
+        let dir = temp_config_dir();
+        let (addr, server, mut rx) = capturing_models_server(
+            r#"{"data":[{"id":"m1","max_model_len":4242,"reasoningLevels":["low"],
+               "supportsReasoningEffort":true}]}"#,
+        )
+        .await;
+        // The row the metadata refresh looks up (its id == the model's
+        // `provider`), carrying the header TEMPLATE.
+        write_settings_provider_row(
+            &dir,
+            json!({
+                "id": "fake", "name": "fake",
+                "baseUrl": format!("http://{addr}/v1"),
+                "apiKey": "k",
+                "headers": { "x-env-test": "$T2_TEST_HEADER" }
+            }),
+        );
+        let mut manager = SessionManager::new(dir.to_path_buf());
+        manager.set_catalog(ModelCatalog {
+            models: vec![Model {
+                id: "m1".into(),
+                provider: "fake".into(),
+                base_url: format!("http://{addr}/v1"),
+                api_key: "k".into(),
+                context_window: 128000,
+                cost_per_mtok_in: 0.0,
+                cost_per_mtok_out: 0.0,
+                supports_tools: true,
+                supports_thinking: false,
+                thinking_levels: Vec::new(),
+                api: Some("openai-completions".into()),
+            }],
+            ..Default::default()
+        });
+        let model = manager.catalog.clone().models[0].clone();
+        let refreshed = manager.refresh_model_metadata(&model).await;
+        // The metadata still applies (the parity is additive).
+        assert_eq!(refreshed.context_window, 4242);
+        let head = rx
+            .recv()
+            .await
+            .expect("the metadata fetch reached the endpoint");
+        assert!(
+            head.to_lowercase().contains("x-env-test: metadata-parity"),
+            "the metadata fetch must carry the expanded header:\n{head}"
+        );
+        server.abort();
+    }
+
+    /// (issue #129) The metadata refresh passes the same gate: a row whose
+    /// plain-HTTP non-loopback base is refused is NOT fetched at all — the
+    /// `Model` degrades to its static metadata (the best-effort shape the
+    /// unreachable endpoint already used).
+    #[tokio::test]
+    async fn refresh_model_metadata_skips_a_refused_base() {
+        let dir = temp_config_dir();
+        let (_addr, server, mut rx) =
+            capturing_models_server(r#"{"data":[{"id":"m1","max_model_len":4242}]}"#).await;
+        // The ROW's base is the refused one (the gate reads the row, which is
+        // also the endpoint the model would be fetched from).
+        write_settings_provider_row(
+            &dir,
+            json!({
+                "id": "fake", "name": "fake",
+                "baseUrl": "http://10.0.0.5/v1",
+                "apiKey": "k"
+            }),
+        );
+        let mut manager = SessionManager::new(dir.to_path_buf());
+        manager.set_catalog(ModelCatalog {
+            models: vec![provider_model("m1", "fake", "http://10.0.0.5/v1")],
+            ..Default::default()
+        });
+        let model = manager.catalog.clone().models[0].clone();
+        let refreshed = manager.refresh_model_metadata(&model).await;
+        assert_eq!(
+            refreshed.context_window, DEFAULT_CONTEXT_WINDOW,
+            "a refused base is never fetched"
+        );
+        assert!(rx.try_recv().is_err(), "no request was made");
+        server.abort();
+    }
+
     /// Write a `settings.json` with a single user provider (the
     /// `effective_catalog` tests — the desktop-owned provider store, ADR
     /// 0014; the camelCase wire shape). `api` is the provider's wire API
@@ -3956,7 +4903,7 @@ mod session_tests {
             models: vec![provider_model("s/1", "other", "https://other/v1")],
             ..Default::default()
         });
-        let effective = manager.effective_catalog(None).await;
+        let effective = manager.effective_catalog(None, true).await;
         let user: Vec<&Model> = effective
             .models
             .iter()
@@ -3995,7 +4942,7 @@ mod session_tests {
             "anthropic-messages",
         );
         let manager = SessionManager::new(dir.to_path_buf());
-        let effective = manager.effective_catalog(None).await;
+        let effective = manager.effective_catalog(None, true).await;
         let user: Vec<&Model> = effective
             .models
             .iter()
@@ -4028,7 +4975,7 @@ mod session_tests {
         .await;
         write_settings_provider_api(&dir, "llm", &format!("http://{addr}/v1"), "litellm");
         let manager = SessionManager::new(dir.to_path_buf());
-        let effective = manager.effective_catalog(None).await;
+        let effective = manager.effective_catalog(None, true).await;
         let user: Vec<&Model> = effective
             .models
             .iter()
@@ -4043,6 +4990,180 @@ mod session_tests {
             user[0].thinking_levels,
             vec!["none".to_string(), "low".to_string()]
         );
+        server.abort();
+    }
+
+    // ── the per-model derived wire + the R5 propagation (T3b / #131) ────
+
+    /// The `litellm` resolve fixture: a raw server answering EVERY path with
+    /// one canned `LiteLLMModelInfoResponse` body (the ladder's rung 1 hits
+    /// `{base}/model/info`; a Claude-shaped payload also gets a 2xx on the
+    /// `/v1/messages` probe, which is what the Messages latch needs). Returns
+    /// the join handle so the caller aborts it, exactly like
+    /// `resolve_uses_the_litellm_provider_api` does.
+    async fn litellm_server(body: &str) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = crate::test_support::raw_json_server(listener, 200, body, None).await;
+        (addr, server)
+    }
+
+    /// The models one provider contributed to the effective catalog.
+    fn user_rows(effective: &ModelCatalog, provider: &str) -> Vec<Model> {
+        effective
+            .models
+            .iter()
+            .filter(|m| m.provider == provider)
+            .cloned()
+            .collect()
+    }
+
+    /// (T3b #131, acceptance 2) A `litellm` payload whose deployment carries
+    /// `mode: "responses"` derives `api: "openai-responses"` — the first time
+    /// `api` is DERIVED rather than the provider clone.
+    #[tokio::test]
+    async fn resolve_derives_responses_wire_from_litellm_mode() {
+        let dir = temp_config_dir();
+        let (addr, server) = litellm_server(
+            r#"{"data":[{"model_name":"r/1","model_info":{"max_input_tokens":8000,"mode":"responses"}}]}"#,
+        )
+        .await;
+        write_settings_provider_api(&dir, "llm", &format!("http://{addr}/v1"), "litellm");
+        let manager = SessionManager::new(dir.to_path_buf());
+        let effective = manager.effective_catalog(None, true).await;
+        let user = user_rows(&effective, "llm");
+        assert_eq!(user.len(), 1);
+        assert_eq!(
+            user[0].api.as_deref(),
+            Some("openai-responses"),
+            "a `mode: \"responses\"` route derives the Responses wire"
+        );
+        server.abort();
+    }
+
+    /// (T3b #131) A `litellm` payload routing through a Claude adapter
+    /// (`anthropic/…` — T3a's `route_hint`) with the one-time `/v1/messages`
+    /// probe answering 2xx derives `api: "anthropic-messages"`.
+    #[tokio::test]
+    async fn resolve_derives_anthropic_messages_wire_for_claude_route() {
+        let dir = temp_config_dir();
+        // The canned body answers BOTH `GET /model/info` (rung 1) and the
+        // `GET /v1/messages` liveness probe with a 200 — the probe's 2xx is
+        // what T3a's latch reads as "Messages available".
+        let (addr, server) = litellm_server(
+            r#"{"data":[{"model_name":"anthropic/claude-sonnet","model_info":{"max_input_tokens":200000}}]}"#,
+        )
+        .await;
+        write_settings_provider_api(&dir, "llm", &format!("http://{addr}/v1"), "litellm");
+        let manager = SessionManager::new(dir.to_path_buf());
+        let effective = manager.effective_catalog(None, true).await;
+        let user = user_rows(&effective, "llm");
+        assert_eq!(user.len(), 1);
+        assert_eq!(
+            user[0].api.as_deref(),
+            Some("anthropic-messages"),
+            "a Claude-adapter route with the messages probe passing derives the Messages wire"
+        );
+        server.abort();
+    }
+
+    /// (T3b #131, VF#2) A `litellm` payload with NO responses-mode and NO
+    /// messages evidence keeps the PROVIDER value `api: "litellm"` — the
+    /// byte-identical pre-T3b row. The completions fallback is wire-equivalent
+    /// to the `litellm` mode, and `litellm` additionally carries the discovery
+    /// shape (`api` selects `discover_models`' arm), so the derived
+    /// `openai-completions` deliberately does NOT overwrite it.
+    #[tokio::test]
+    async fn resolve_keeps_provider_api_when_no_wire_derived() {
+        let dir = temp_config_dir();
+        // A plain OpenAI-shaped LiteLLM route: no `mode`, no Claude adapter.
+        let (addr, server) = litellm_server(
+            r#"{"data":[{"model_name":"openai/gpt-4o","model_info":{"max_input_tokens":128000,"supports_function_calling":true}}]}"#,
+        )
+        .await;
+        write_settings_provider_api(&dir, "llm", &format!("http://{addr}/v1"), "litellm");
+        let manager = SessionManager::new(dir.to_path_buf());
+        let effective = manager.effective_catalog(None, true).await;
+        let user = user_rows(&effective, "llm");
+        assert_eq!(user.len(), 1);
+        assert_eq!(
+            user[0].api.as_deref(),
+            Some("litellm"),
+            "the fallback arm is byte-identical to today's `Some(provider.api.clone())`"
+        );
+        server.abort();
+    }
+
+    /// (T3b #131, R5 — the task's biggest risk, pinned as a TEST) A
+    /// NON-`litellm` provider's `Model` row is BIT-IDENTICAL to the pre-feature
+    /// literals: the provider `api` clone (no derivation attempted, no
+    /// overwrite possible) + `supports_tools: true` / `0.0` / `0.0` from the
+    /// `unwrap_or` defaults (a non-LiteLLM `DiscoveredMeta` carries `None` in
+    /// all four additive fields).
+    #[tokio::test]
+    async fn resolve_non_litellm_provider_byte_identical() {
+        let dir = temp_config_dir();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // The Anthropic discovery shape (`id` ONLY — no metadata at all).
+        let server =
+            crate::test_support::raw_json_server(listener, 200, r#"{"data":[{"id":"m/1"}]}"#, None)
+                .await;
+        write_settings_provider_api(
+            &dir,
+            "anthropic",
+            &format!("http://{addr}/v1"),
+            "anthropic-messages",
+        );
+        let manager = SessionManager::new(dir.to_path_buf());
+        let effective = manager.effective_catalog(None, true).await;
+        let user = user_rows(&effective, "anthropic");
+        assert_eq!(user.len(), 1);
+        // The provider clone (a `litellm` payload could have derived anything;
+        // this arm never derives).
+        assert_eq!(user[0].api.as_deref(), Some("anthropic-messages"));
+        // Today's hardcoded literals (session/mod.rs pre-T3b `:410-412`).
+        assert!(
+            user[0].supports_tools,
+            "`unwrap_or(true)` reproduces `true`"
+        );
+        assert_eq!(
+            user[0].cost_per_mtok_in, 0.0,
+            "`unwrap_or(0.0)` reproduces 0.0"
+        );
+        assert_eq!(
+            user[0].cost_per_mtok_out, 0.0,
+            "`unwrap_or(0.0)` reproduces 0.0"
+        );
+        server.abort();
+    }
+
+    /// (T3b #131, R5) The REDUCED discovery values reach the `Model` row: a
+    /// route whose deployment does NOT advertise `supports_function_calling`
+    /// reduces to `supports_tools: false` (the ALL-deployments gate), and the
+    /// per-token costs × 1e6 become the row's costs — NOT the defaults (a
+    /// wrongly-`true` `supports_tools` would offer an unselectable wire).
+    #[tokio::test]
+    async fn resolve_propagates_reduced_supports_tools_and_costs_for_litellm() {
+        let dir = temp_config_dir();
+        let (addr, server) = litellm_server(
+            r#"{"data":[{"model_name":"r/1","model_info":{"max_input_tokens":8000,"input_cost_per_token":0.0000025,"output_cost_per_token":0.000006}}]}"#,
+        )
+        .await;
+        write_settings_provider_api(&dir, "llm", &format!("http://{addr}/v1"), "litellm");
+        let manager = SessionManager::new(dir.to_path_buf());
+        let effective = manager.effective_catalog(None, true).await;
+        let user = user_rows(&effective, "llm");
+        assert_eq!(user.len(), 1);
+        assert!(
+            !user[0].supports_tools,
+            "a deployment that never advertised `supports_function_calling` reduces to `false`"
+        );
+        assert_eq!(
+            user[0].cost_per_mtok_in, 2.5,
+            "per-token × 1e6 (the reduction's max)"
+        );
+        assert_eq!(user[0].cost_per_mtok_out, 6.0);
         server.abort();
     }
 
@@ -4062,7 +5183,7 @@ mod session_tests {
             default_model: Some("tama/stale/1".to_string()),
             ..Default::default()
         });
-        let effective = manager.effective_catalog(None).await;
+        let effective = manager.effective_catalog(None, true).await;
         assert!(
             !effective.models.iter().any(|m| m.provider == "tama"),
             "a failed discovery must NOT resurrect the stale seeded models"
@@ -4094,10 +5215,10 @@ mod session_tests {
         write_settings_provider(&dir, "tama", &format!("http://{addr}/v1"));
         let mut manager = SessionManager::new(dir.to_path_buf());
         manager.set_catalog(ModelCatalog::default());
-        let first = manager.effective_catalog(None).await;
+        let first = manager.effective_catalog(None, true).await;
         assert!(first.models.iter().any(|m| m.id == "v1"));
         // Second call: the cache serves it (the server is NOT hit again).
-        let second = manager.effective_catalog(None).await;
+        let second = manager.effective_catalog(None, true).await;
         assert_eq!(
             counter.load(std::sync::atomic::Ordering::Relaxed),
             1,
@@ -4118,7 +5239,7 @@ mod session_tests {
         )
         .await;
         write_settings_provider(&dir, "tama", &format!("http://{addr2}/v1"));
-        let refreshed = manager.effective_catalog(Some("tama")).await;
+        let refreshed = manager.effective_catalog(Some("tama"), true).await;
         assert_eq!(
             counter.load(std::sync::atomic::Ordering::Relaxed),
             2,
@@ -4151,7 +5272,7 @@ mod session_tests {
         write_settings_provider(&dir, "tama", "http://127.0.0.1:1/v1");
         let mut manager = SessionManager::new(dir.to_path_buf());
         manager.set_catalog(ModelCatalog::default());
-        let failed = manager.effective_catalog(None).await;
+        let failed = manager.effective_catalog(None, true).await;
         assert!(
             !failed.models.iter().any(|m| m.provider == "tama"),
             "the first attempt genuinely failed"
@@ -4171,7 +5292,7 @@ mod session_tests {
         write_settings_provider(&dir, "tama", &format!("http://{addr}/v1"));
         // NO `force_refresh`: an ordinary read must retry a provider whose last
         // attempt FAILED.
-        let retried = manager.effective_catalog(None).await;
+        let retried = manager.effective_catalog(None, true).await;
         assert!(
             retried.models.iter().any(|m| m.id == "recovered"),
             "a plain read must retry a previously-FAILED provider — a transient \

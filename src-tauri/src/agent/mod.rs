@@ -19,6 +19,7 @@ mod normalize;
 mod permission;
 pub mod persist;
 pub mod policy;
+pub mod provider_auth;
 mod session;
 pub mod subagent;
 pub mod todo;

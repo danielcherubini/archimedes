@@ -48,10 +48,89 @@ pub struct ProviderConfig {
     /// row's "Get key" link; `None` for a hand-typed provider).
     #[serde(default)]
     pub key_url: Option<String>,
+    /// The provider's auth mode (issue #125): `"api_key"` (the default — a
+    /// pre-feature file parses to it) | `"oauth"` | `"oidc"` | `"gcloud_adc"`.
+    /// A STRING, not an enum, matching `api`'s permissive-boundary style;
+    /// validate at use, not at parse. Additive: pre-feature files parse
+    /// untouched via the serde default.
+    #[serde(default = "default_provider_auth_mode")]
+    pub auth_mode: String,
+    /// Custom per-provider request headers (issue #129), written with
+    /// environment templates: `$VAR` and `${VAR}` expand against the process
+    /// environment SINGLE-PASS at resolve time (never recursively). Examples:
+    /// `"CF-Access-Client-Id": "$CLOUDFLARE_SERVICE_TOKEN_ID"` — enterprise
+    /// proxies (Cloudflare Access, …) authenticate this way. `None` = no
+    /// custom headers. Additive: a pre-feature file parses to `None`.
+    #[serde(default)]
+    pub headers: Option<std::collections::HashMap<String, String>>,
+    /// Explicitly allow plain `http://` provider base URLs (the default of
+    /// `false` refuses any non-loopback `http://` base with a descriptive
+    /// error). Loopback (`127.0.0.0/8`, `::1`) is ALWAYS allowed (ADR 0057 —
+    /// local dev servers are essential).
+    #[serde(default)]
+    pub allow_insecure_http: bool,
+    /// ADC: read the Google Application Default Credentials file and exchange
+    /// the refresh token natively (the `gcloud_adc` flow, issue #128). Also
+    /// enabled by `auth_mode: "gcloud_adc"`, and overridable by the
+    /// `LITELLM_GCLOUD_TOKEN_AUTH` env var — which the RESOLVE arm reads, never
+    /// this module (an env read here would cache at parse time and make the
+    /// toggle untestable; see `provider_auth::gcloud_token_auth_enabled`).
+    /// Additive: a pre-feature file parses to `false`, so no existing row
+    /// starts reading the user's ADC file on upgrade.
+    #[serde(default)]
+    pub use_gcloud_token_auth: bool,
+    /// Direct OIDC PKCE login against an external identity provider (the
+    /// `oidc` flow, issue #127). The validated `id_token` becomes the Bearer
+    /// token sent to the LiteLLM proxy.
+    ///
+    /// Additive: the field is `#[serde(default)]`, so a pre-feature provider
+    /// parses to `None` and keeps its existing behaviour. A PRESENT but
+    /// malformed block (missing/blank `issuer`/`clientId`, wrong types) FAILS
+    /// the whole `Settings` document parse and lands in `load_settings`'s
+    /// existing corrupt-file fallback (`Settings::default()` + the corrupt-file
+    /// log) — the same whole-document behaviour as any other malformed field
+    /// today. There is deliberately NO degrade-to-`None`-and-keep-parsing path:
+    /// silently dropping a user's configured login is worse than the honest,
+    /// pre-existing fallback.
+    #[serde(default)]
+    pub oidc: Option<OidcConfig>,
+}
+
+/// The OIDC identity-provider configuration (the `oidc` member on a provider
+/// row, issue #127).
+///
+/// `issuer` and `client_id` are REQUIRED (no `#[serde(default)]`): a present
+/// `oidc` block that omits them fails the document parse (see the field doc on
+/// [`ProviderConfig::oidc`] for the whole-document rule). `scope` and
+/// `redirect_ports` are `#[serde(default)]` (absent → `None` / the empty list,
+/// and the flow then asks for `openid` alone on one ephemeral callback port).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OidcConfig {
+    /// The IdP issuer — the base for
+    /// `GET {issuer}/.well-known/openid-configuration`.
+    pub issuer: String,
+    /// The PRE-REGISTERED public client id (T6 does no dynamic registration):
+    /// the `client_id` in the authorize request and the value the `aud`/`azp`
+    /// claims are checked against.
+    pub client_id: String,
+    /// The requested scope. MUST include `openid`; the flow appends `openid`
+    /// when absent. `None` → `openid` alone.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// The sequential callback-port list (corporate IdPs pin redirect URIs to a
+    /// fixed port allowlist, so the loopback server tries these in order).
+    /// Empty/missing → ONE ephemeral port.
+    #[serde(default)]
+    pub redirect_ports: Vec<u16>,
 }
 
 fn default_provider_api() -> String {
     "openai-completions".to_string()
+}
+
+fn default_provider_auth_mode() -> String {
+    "api_key".to_string()
 }
 
 /// Font settings for the UI.
@@ -1438,6 +1517,191 @@ mod tests {
     }
 
     #[test]
+    fn provider_config_auth_mode_defaults_to_api_key() {
+        // (issue #125) A pre-feature `settings.json` (NO `authMode` field)
+        // parses to `auth_mode == "api_key"` (the serde default — no
+        // migration), so every provider that exists before the OAuth work
+        // keeps its static-key behaviour untouched.
+        let config: ProviderConfig =
+            serde_json::from_str(r#"{"id":"p","name":"P","baseUrl":"https://x/v1","apiKey":"k"}"#)
+                .unwrap();
+        assert_eq!(config.auth_mode, "api_key");
+    }
+
+    #[test]
+    fn provider_config_headers_and_allow_insecure_http_default() {
+        // (issue #129) A pre-feature `settings.json` carries neither
+        // `headers` nor `allowInsecureHttp`: both serde-default to
+        // `None`/`false`, so an existing file keeps its behaviour (no custom
+        // header, and a non-loopback `http://` base stays refused).
+        let config: ProviderConfig =
+            serde_json::from_str(r#"{"id":"p","name":"P","baseUrl":"https://x/v1","apiKey":"k"}"#)
+                .unwrap();
+        assert_eq!(config.headers, None);
+        assert!(!config.allow_insecure_http);
+    }
+
+    #[test]
+    fn provider_config_oidc_defaults_none() {
+        // (issue #127) A pre-feature `settings.json` carries no `oidc` key: the
+        // field serde-defaults to `None`, so an existing provider row keeps its
+        // existing auth behaviour (no login flow is inferred from nothing).
+        let config: ProviderConfig =
+            serde_json::from_str(r#"{"id":"p","name":"P","baseUrl":"https://x/v1","apiKey":"k"}"#)
+                .unwrap();
+        assert_eq!(config.oidc, None);
+    }
+
+    #[test]
+    fn provider_config_oidc_round_trips_camelcase() {
+        // (issue #127) A populated `oidc` block survives a serialize/parse
+        // round trip with the camelCase wire names the UI (T8) will write:
+        // `issuer` / `clientId` / `scope` / `redirectPorts`.
+        let config: ProviderConfig = serde_json::from_str(
+            r#"{"id":"p","name":"P","baseUrl":"https://x/v1","apiKey":"k",
+               "oidc":{"issuer":"https://idp.example/","clientId":"archimedes",
+                        "scope":"openid email","redirectPorts":[8475,8476]}}"#,
+        )
+        .unwrap();
+        let oidc = config.oidc.clone().expect("the oidc block parsed");
+        assert_eq!(oidc.issuer, "https://idp.example/");
+        assert_eq!(oidc.client_id, "archimedes");
+        assert_eq!(oidc.scope.as_deref(), Some("openid email"));
+        assert_eq!(oidc.redirect_ports, vec![8475u16, 8476]);
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"clientId\":\"archimedes\""), "{json}");
+        assert!(json.contains("\"redirectPorts\":[8475,8476]"), "{json}");
+        let back: ProviderConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, config);
+        // An `oidc` block with ONLY the two required members: `scope` is `None`
+        // and `redirectPorts` is the EMPTY list (both `#[serde(default)]`) — the
+        // flow reads the empty list as "one ephemeral port", so a hand-written
+        // `[]` and an absent key must be indistinguishable.
+        let minimal: OidcConfig =
+            serde_json::from_str(r#"{"issuer":"https://idp","clientId":"c"}"#).unwrap();
+        assert_eq!(minimal.scope, None);
+        assert!(minimal.redirect_ports.is_empty());
+        let empty_list: OidcConfig =
+            serde_json::from_str(r#"{"issuer":"https://idp","clientId":"c","redirectPorts":[]}"#)
+                .unwrap();
+        assert_eq!(empty_list, minimal);
+    }
+
+    #[test]
+    fn provider_config_oidc_malformed_fails_the_document() {
+        // (issue #127) The whole-document rule: a PRESENT `oidc` block that
+        // omits a required member or gets a type wrong FAILS the parse (and so
+        // lands in `load_settings`'s corrupt-file fallback) rather than
+        // silently dropping the user's configured login.
+        let missing_required = r#"{"id":"p","name":"P","baseUrl":"https://x/v1","apiKey":"k",
+                                   "oidc":{"clientId":"c"}}"#;
+        assert!(
+            serde_json::from_str::<ProviderConfig>(missing_required).is_err(),
+            "an oidc block with no `issuer` must fail the parse"
+        );
+        let wrong_type = r#"{"id":"p","name":"P","baseUrl":"https://x/v1","apiKey":"k",
+                             "oidc":{"issuer":"https://idp","clientId":"c","redirectPorts":["eight"]}}"#;
+        assert!(
+            serde_json::from_str::<ProviderConfig>(wrong_type).is_err(),
+            "a non-numeric redirectPorts entry must fail the parse"
+        );
+        let wrong_shape = r#"{"id":"p","name":"P","baseUrl":"https://x/v1","apiKey":"k",
+                              "oidc":"https://idp"}"#;
+        assert!(
+            serde_json::from_str::<ProviderConfig>(wrong_shape).is_err(),
+            "an oidc block that is not an object must fail the parse"
+        );
+    }
+
+    #[test]
+    fn provider_config_use_gcloud_token_auth_defaults_false() {
+        // (issue #128) A pre-ADC `settings.json` carries no
+        // `useGcloudTokenAuth`: it serde-defaults to `false`, so no existing
+        // provider row starts reading the user's Google ADC file on upgrade.
+        let config: ProviderConfig =
+            serde_json::from_str(r#"{"id":"p","name":"P","baseUrl":"https://x/v1","apiKey":"k"}"#)
+                .unwrap();
+        assert!(
+            !config.use_gcloud_token_auth,
+            "a pre-feature file must NOT enable the ADC flow"
+        );
+    }
+
+    #[test]
+    fn provider_config_use_gcloud_token_auth_round_trips() {
+        // (issue #128) The field round-trips camelCase (`useGcloudTokenAuth`)
+        // and `true` survives the document.
+        let config: ProviderConfig = serde_json::from_str(
+            r#"{"id":"p","name":"P","baseUrl":"https://x/v1","apiKey":"k","useGcloudTokenAuth":true}"#,
+        )
+        .unwrap();
+        assert!(config.use_gcloud_token_auth);
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            json.contains("\"useGcloudTokenAuth\":true"),
+            "camelCase on the wire: {json}"
+        );
+        let back: ProviderConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, config);
+    }
+
+    #[test]
+    fn provider_config_headers_and_allow_insecure_http_round_trip() {
+        // (issue #129) Both fields round-trip, camelCase on the wire
+        // (`allowInsecureHttp`), and the header VALUES stay the unexpanded
+        // templates (`$A`) — expansion happens at resolve time, never on load.
+        let config: ProviderConfig = serde_json::from_str(
+            r#"{"id":"p","name":"P","baseUrl":"https://x/v1","apiKey":"k",
+               "headers":{"x-a":"$A"},"allowInsecureHttp":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config
+                .headers
+                .as_ref()
+                .and_then(|h| h.get("x-a"))
+                .map(String::as_str),
+            Some("$A")
+        );
+        assert!(config.allow_insecure_http);
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            json.contains("\"allowInsecureHttp\":true"),
+            "camelCase on the wire: {json}"
+        );
+        assert!(json.contains("\"headers\""), "{json}");
+        let back: ProviderConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, config);
+    }
+
+    #[test]
+    fn provider_config_auth_mode_round_trips() {
+        // (issue #125) A populated `authMode` round-trips camelCase (the
+        // permissive-string boundary — `api`'s style: validate at use, not at
+        // parse, so an unknown mode parses rather than rejecting the file).
+        let config = ProviderConfig {
+            id: "gw".to_string(),
+            name: "Gateway".to_string(),
+            base_url: "https://gw.example/v1".to_string(),
+            api_key: String::new(),
+            api: "litellm".to_string(),
+            key_url: None,
+            auth_mode: "oauth".to_string(),
+            headers: None,
+            allow_insecure_http: false,
+            // (issue #128) The mechanical additive grow: the ADC flag is
+            // OFF in every pre-existing fixture (the serde default).
+            use_gcloud_token_auth: false,
+            // (issue #127) The mechanical additive grow: no OIDC login on this fixture.
+            oidc: None,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"authMode\":\"oauth\""), "got {json}");
+        let back: ProviderConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, config);
+    }
+
+    #[test]
     fn provider_config_api_and_key_url_round_trip() {
         // (ADR 0024) A populated `api` + `keyUrl` round-trips camelCase.
         let config = ProviderConfig {
@@ -1447,6 +1711,14 @@ mod tests {
             api_key: "k".to_string(),
             api: "anthropic-messages".to_string(),
             key_url: Some("https://keys.example".to_string()),
+            auth_mode: "api_key".to_string(),
+            headers: None,
+            allow_insecure_http: false,
+            // (issue #128) The mechanical additive grow: the ADC flag is
+            // (issue #127) The mechanical additive grow: no OIDC login on this fixture.
+            oidc: None,
+            // OFF in every pre-existing fixture (the serde default).
+            use_gcloud_token_auth: false,
         };
         let json = serde_json::to_string(&config).unwrap();
         assert!(
@@ -1478,6 +1750,13 @@ mod tests {
                 api_key: String::new(),
                 api: "openai-completions".into(),
                 key_url: None,
+                auth_mode: "api_key".into(),
+                // (issue #127) The mechanical additive grow: no OIDC login on this fixture.
+                oidc: None,
+                headers: None,
+                allow_insecure_http: false,
+                // (issue #128) The additive ADC flag, OFF here (the default).
+                use_gcloud_token_auth: false,
             }],
             font: FontSettings {
                 size_px: 18,

@@ -10,11 +10,12 @@ import { describe, expect, it } from "vitest";
  * ---------------------------------------------------------------------------
  *
  * `src/lib/tauri.ts` was split by domain into `src/lib/tauri/*.ts`. It survives
- * as a RE-EXPORT BARREL for one reason: **35 test files `vi.mock` `@/lib/tauri`
- * BY MODULE PATH** (34 spreading `vi.importActual` — both counts pinned by the
- * assertion below rather than carried by hand; the header used to also state how
- * many named `vi.fn()` overrides sit inside those factories, and had gone stale,
- * so it no longer does). A `vi.mock` on a module path intercepts only the calls
+ * as a RE-EXPORT BARREL for one reason: **many test files `vi.mock`
+ * `@/lib/tauri` BY MODULE PATH** (most spreading `vi.importActual` — both counts
+ * are pinned by the assertion below rather than carried by hand; the header used
+ * to also state how many mockers there were and how many named `vi.fn()`
+ * overrides sit inside those factories, and both had gone stale, so it no longer
+ * does). A `vi.mock` on a module path intercepts only the calls
  * that travel THROUGH that path. So the moment any consumer imports a
  * moved function from `lib/tauri/sessions.ts` directly, every test that mocked
  * it through `@/lib/tauri` **silently stops intercepting — and still passes,
@@ -170,19 +171,24 @@ const domainModules = (): string[] =>
 /** --------------------------------------------------------------------------
  * THE PINNED PUBLIC API.
  *
- * The list below is the export set of `src/lib/tauri.ts` measured at the commit
- * BEFORE the split (107 names: 58 types + 49 functions). It is a LITERAL on
+ * The list below is the export set of `src/lib/tauri.ts` — a LITERAL on
  * purpose, for the same reason `tauri.test.ts` pins command names as literals
  * and `ipc/events.test.ts` refuses to read `IPC_EVENTS` back: recomputing the
  * expectation from the file under test makes the guard green on any change. A
  * name may only enter or leave this list on purpose, in a commit that says so.
+ *
+ * It measures 133 names as of issue #126/#127/#132 (the provider-auth suite: 6
+ * runtime wrappers + 6 type-only wire names). The header used to claim "107
+ * names: 58 types + 49 functions" — prose describing a long-past commit that no
+ * assertion reads; the ARRAY is the expectation, so the prose is gone rather
+ * than perpetually stale.
  * -------------------------------------------------------------------------- */
 const TAURI_PUBLIC_API = [
   "AccessPolicy",
   // (permissions-section T05) The two rule-model type names, added ON PURPOSE
   // per the header above: `FilePolicy.rules` is `AccessRule[]` and a rule's
   // `direction` is `AccessDirection`. Type-only — they vanish at runtime, so
-  // `TAURI_RUNTIME_API` (the pinned 49) does NOT gain them.
+  // `TAURI_RUNTIME_API` does NOT gain them.
   "AccessDirection",
   "AccessRule",
   "AcpSessionUpdate",
@@ -195,8 +201,8 @@ const TAURI_PUBLIC_API = [
   // array of `[AgentToolKey, AgentPermissionRules]` pairs whose rules are
   // `AgentPermissionRule`s carrying an `AgentPermissionAction`, and a note's
   // unsupported arm carries an `AgentUnsupportedReason`. All SEVEN are type-only —
-  // they vanish at runtime, so `TAURI_RUNTIME_API` (the pinned 49) does NOT gain
-  // them, exactly as `AccessDirection`/`AccessRule` above.
+  // they vanish at runtime, so `TAURI_RUNTIME_API` does NOT gain them, exactly as
+  // `AccessDirection`/`AccessRule` above.
   "AgentFrontmatterNote",
   "AgentNameResolution",
   "AgentOverride",
@@ -234,6 +240,7 @@ const TAURI_PUBLIC_API = [
   "externalOpen",
   "FilePolicy",
   "FontSettings",
+  "getProviderBudget",
   "getSettings",
   "getWindowState",
   "HistoryPage",
@@ -276,6 +283,26 @@ const TAURI_PUBLIC_API = [
   "PermissionRequest",
   "PermissionRequestPayload",
   "ProviderConfig",
+  // (issue #126 / #127 / #132) The provider-auth suite: SIX RUNTIME names (the
+  // five interactive-login wrappers + the spend/budget read) and the SIX
+  // TYPE-ONLY wire names the provider row's editors name (`ProviderAuthMode`,
+  // `ProviderOidcConfig`, `ProviderLoginStep`, `TeamDto`,
+  // `ProviderBudgetRowDto`, `ProviderBudgetDto`). The type names vanish at
+  // runtime, so `TAURI_RUNTIME_API` gains ONLY the six wrappers — the
+  // `AccessRule`/`AccessDirection` precedent. This moves the pin 121 → 133
+  // (the plan's §0c arithmetic said 131, having counted FOUR type names, while
+  // its own §2.3 instruction re-exports SIX; the assertion compares the sorted
+  // sets, so the tree wins — recorded as a deviation in the commit message).
+  "ProviderAuthMode",
+  "ProviderBudgetDto",
+  "ProviderBudgetRowDto",
+  "ProviderLoginStep",
+  "ProviderOidcConfig",
+  "providerLoginOauth",
+  "providerLoginOidc",
+  "providerLoginPasteToken",
+  "providerLoginSsoChooseTeam",
+  "providerLoginSsoPoll",
   "readClipboardImage",
   "readFileBytes",
   "reorderSessions",
@@ -311,6 +338,7 @@ const TAURI_PUBLIC_API = [
   "SubagentFailureReason",
   "SubagentMetrics",
   "SubagentSessionStartedPayload",
+  "TeamDto",
   "testMcpServer",
   "testSearchProvider",
   "ToolCallContent",
@@ -319,7 +347,10 @@ const TAURI_PUBLIC_API = [
   "WireApi",
 ];
 
-/** The 49 RUNTIME values (the rest are type-only and vanish at runtime). */
+/** The RUNTIME values of the surface above (the rest are type-only and vanish
+ *  at runtime — `Object.keys` of the real module equals this list). It measures
+ *  58 as of issue #126/#127/#132; the "pinned 49" this comment used to claim was
+ *  prose no assertion reads. */
 const TAURI_RUNTIME_API = [
   "attentionArm",
   "attentionDisarm",
@@ -355,6 +386,20 @@ const TAURI_RUNTIME_API = [
   "listSpaces",
   "listTools",
   "loadHistory",
+  // (issue #126 / #127 / #132) The provider-auth suite: the five interactive
+  // login wrappers + the spend/budget read — SIX new RUNTIME values, landing in
+  // the same commit as the `src/lib/tauri.ts` re-export lines (this file's own
+  // header: a name may only enter the list on purpose, in a commit that says
+  // so). The companion TYPE-ONLY names (ProviderAuthMode / ProviderOidcConfig /
+  // ProviderLoginStep / TeamDto / ProviderBudgetRowDto / ProviderBudgetDto) are
+  // in `TAURI_PUBLIC_API` ONLY — they vanish at runtime, so they never enter
+  // this list (the `AccessRule`/`AccessDirection` precedent). 52 → 58.
+  "getProviderBudget",
+  "providerLoginOauth",
+  "providerLoginOidc",
+  "providerLoginPasteToken",
+  "providerLoginSsoChooseTeam",
+  "providerLoginSsoPoll",
   "readClipboardImage",
   "readFileBytes",
   "reorderSessions",
@@ -408,7 +453,7 @@ describe("the scanner actually reads the tree", () => {
           stripJsComments(readFileSync(f, "utf8")),
         ),
     );
-    // SET SIZE, pinned: 43 files mock the barrel by path. The number may only
+    // SET SIZE, pinned: 44 files mock the barrel by path. The number may only
     // move when a test file is added or removed, in a commit that says so — this
     // one moved 34 -> 35 when D2 wired `useAgentOverridesWrites` into `SpacesList`
     // and landed its test file, which mocks the barrel the documented way, and
@@ -426,18 +471,21 @@ describe("the scanner actually reads the tree", () => {
     // documented way, and 41 -> 43 when task06 (issue #135 §5) split the residual
     // `ChatStream.test.tsx` into `src/components/ChatStreamDirectoryCompletion.test.tsx`
     // and `src/components/ChatStreamChildGates.test.tsx`, which mock the barrel
-    // the documented way.
-    expect(mockers).toHaveLength(43);
-    // 42 of the 43 SPREAD `vi.importActual`, which is the shape that makes the
-    // seam forgiving: an unlisted export still resolves. Both new mockers spread,
-    // so the remaining one is still `hooks/useWindowMaximized.test.ts`, which
-    // replaces the module wholesale — so a name it forgets is `undefined`, the
-    // case the pinned-surface assertion below covers.
+    // the documented way, and 43 -> 44 when issue #126/#127/#132 landed
+    // `components/settings/ProviderAuthSection.test.tsx` (the provider sign-in /
+    // device-flow / paste-token surface), which mocks the barrel the documented
+    // way.
+    expect(mockers).toHaveLength(44);
+    // 43 of the 44 SPREAD `vi.importActual`, which is the shape that makes the
+    // seam forgiving: an unlisted export still resolves. The new mocker spreads
+    // too, so the remaining one is still `hooks/useWindowMaximized.test.ts`,
+    // which replaces the module wholesale — so a name it forgets is `undefined`,
+    // the case the pinned-surface assertion below covers.
     expect(
       mockers.filter((f) =>
         /vi\.importActual/.test(readFileSync(f, "utf8")),
       ).length,
-    ).toBe(42);
+    ).toBe(43);
   });
 });
 
@@ -456,9 +504,11 @@ describe("nothing bypasses the lib/tauri barrel (D1's mock seam)", () => {
     expect(surface).toEqual([...TAURI_PUBLIC_API].sort());
   });
 
-  it("the runtime export set of the barrel is exactly the pinned 49", async () => {
+  it("the runtime export set of the barrel is exactly the pinned runtime list", async () => {
     // The strongest form: what the module ACTUALLY exposes at runtime, which is
-    // what `vi.importActual` spreads into the 35 mock factories. A forgotten
+    // what `vi.importActual` spreads into the barrel-mocking test factories (the
+    // count is pinned by the assertion below rather than stated here — every
+    // prose copy of it has gone stale at least once). A forgotten
     // `export { fn }` here is a `undefined is not a function` in the app and a
     // silently-unmocked IPC call in a test — this catches it at the seam.
     const mod = await import("./tauri");

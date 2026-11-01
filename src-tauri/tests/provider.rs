@@ -391,6 +391,284 @@ async fn a_400_about_something_else_is_fatal_and_not_retried() {
     assert_eq!(requests.len(), 1, "the unrelated 400 is NOT re-tried");
 }
 
+// ── T3b (#131): the per-model wire acceptance ──────────────────────────
+
+use archimedes_lib::agent::harness::provider::build_provider;
+use archimedes_lib::agent::harness::{Model, ToolSpec};
+
+/// A catalog `Model` on ONE wire, pointed at the mock server (the
+/// `tests/provider_headers.rs` shape).
+fn wire_model(base_url: &str, api: &str) -> Model {
+    Model {
+        id: "m/1".to_string(),
+        provider: "gw".to_string(),
+        base_url: base_url.to_string(),
+        api_key: "sk-test".to_string(),
+        context_window: 128_000,
+        cost_per_mtok_in: 0.0,
+        cost_per_mtok_out: 0.0,
+        supports_tools: true,
+        supports_thinking: true,
+        thinking_levels: Vec::new(),
+        api: Some(api.to_string()),
+    }
+}
+
+/// A request with a system prompt, one tool, and a thinking level (the shape
+/// the two vendor quirks + Anthropic prompt caching are visible on).
+fn rich_request(model: &str) -> ModelRequest {
+    ModelRequest {
+        model: model.to_string(),
+        messages: vec![
+            ChatMessage {
+                role: ChatRole::System,
+                content: MessageContent::Text("you are helpful".to_string()),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: ChatRole::User,
+                content: MessageContent::Text("hello".to_string()),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ],
+        tools: vec![ToolSpec {
+            name: "read".to_string(),
+            description: "Read a file".to_string(),
+            parameters: serde_json::json!({ "type": "object" }),
+        }],
+        options: ModelOptions {
+            temperature: None,
+            max_tokens: Some(128),
+            reasoning_effort: Some("high".to_string()),
+            stream: true,
+        },
+        session_id: None,
+    }
+}
+
+/// Collect a `complete()` stream generically over `Box<dyn Provider>` (the
+/// local `collect` names the concrete OpenAI provider).
+async fn collect_boxed(p: Box<dyn Provider>, req: &ModelRequest) -> Vec<ProviderEvent> {
+    let mut stream = p.complete(req).await.expect("the completion call succeeds");
+    let mut events = Vec::new();
+    while let Ok(Some(e)) =
+        tokio::time::timeout(std::time::Duration::from_secs(10), stream.next()).await
+    {
+        events.push(e);
+    }
+    events
+}
+
+/// Acceptance 1 (#131): a Claude model routed through LiteLLM (the derived
+/// `anthropic-messages` wire) receives NATIVE thinking blocks on the stream
+/// AND sends prompt caching + the `thinking` field on the request body.
+#[tokio::test]
+async fn claude_through_litellm_streams_native_thinking_blocks() {
+    let server = MockServer::start().await;
+    // The exact shapes `AnthropicStream` parses: a `thinking` block whose
+    // `thinking_delta` arrives, then a `text` block, then the terminal
+    // `message_delta` (`stop_reason` + usage) and `message_stop`.
+    mount_sse(
+        &server,
+        "event: message_start\n\
+         data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7}}}\n\n\
+         event: content_block_start\n\
+         data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\"}}\n\n\
+         event: content_block_delta\n\
+         data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"pondering\"}}\n\n\
+         event: content_block_start\n\
+         data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\"}}\n\n\
+         event: content_block_delta\n\
+         data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"answer\"}}\n\n\
+         event: message_delta\n\
+         data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n\
+         event: message_stop\n\
+         data: {\"type\":\"message_stop\"}\n\n",
+    )
+    .await;
+
+    let req = rich_request("claude-3-5-sonnet");
+    let events = collect_boxed(
+        build_provider(&wire_model(&server.uri(), "anthropic-messages")),
+        &req,
+    )
+    .await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::ThinkingDelta(t) if t == "pondering")),
+        "the `thinking` block streams as a native ThinkingDelta: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::TextDelta(t) if t == "answer")),
+        "the text block streams as a TextDelta: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::Done(FinishReason::Stop))),
+        "the `end_turn` stop reason closes the stream: {events:?}"
+    );
+
+    // The BODY assertion (acceptance 1's caching half): the request carried
+    // `thinking` (the level → the Anthropic budget form) + `cache_control` on
+    // the system block array and on the tool block.
+    let requests = server.received_requests().await.expect("requests recorded");
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value =
+        serde_json::from_slice(&requests[0].body).expect("a JSON request body");
+    assert!(
+        body.get("thinking").is_some(),
+        "a thinking level reaches the Anthropic `thinking` field: {body}"
+    );
+    let system = body["system"]
+        .as_array()
+        .expect("a Claude system prompt is the cached block array");
+    assert_eq!(
+        system.last().expect("a system block")["cache_control"],
+        serde_json::json!({ "type": "ephemeral" }),
+        "the LAST system block carries the cache point"
+    );
+    assert_eq!(
+        body["tools"][0]["cache_control"],
+        serde_json::json!({ "type": "ephemeral" }),
+        "the tool definition is part of the cached prefix"
+    );
+    // The wire's own auth + version headers are untouched by the body change.
+    assert!(requests[0].headers.contains_key("x-api-key"));
+    assert!(requests[0].headers.contains_key("anthropic-version"));
+}
+
+/// Acceptance 2 (#131): a `responses`-mode route (whose derived wire is
+/// `openai-responses`) streams over the Responses SSE wire — `POST
+/// {root}/v1/responses`, the `response.output_text.delta` events parsed, the
+/// terminal `response.completed` closing the stream.
+#[tokio::test]
+async fn responses_mode_models_stream_via_responses_sse_wire() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(wiremock::matchers::path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "event: response.created\n\
+             data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n\
+             event: response.output_text.delta\n\
+             data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n\
+             event: response.output_text.delta\n\
+             data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n\
+             event: response.completed\n\
+             data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":4,\"output_tokens\":2}}}\n\n"
+                .to_string(),
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+
+    // A `{root}/v1` base (the Settings' convention) → `POST /v1/responses`.
+    let req = rich_request("r/1");
+    let events = collect_boxed(
+        build_provider(&wire_model(
+            &format!("{}/v1", server.uri()),
+            "openai-responses",
+        )),
+        &req,
+    )
+    .await;
+
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            ProviderEvent::TextDelta(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        vec!["Hel", "lo"],
+        "the Responses deltas stream: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::Done(FinishReason::Stop))),
+        "the `response.completed` terminal closes the stream: {events:?}"
+    );
+
+    let requests = server.received_requests().await.expect("requests recorded");
+    assert_eq!(
+        requests.len(),
+        1,
+        "the recorded request IS the path assertion — the matcher only answers /v1/responses"
+    );
+    // The Responses wire passes the level through as `reasoning.effort`
+    // (never suppressed — the GPT-5.5 quirk is Chat-Completions-only).
+    let body: serde_json::Value =
+        serde_json::from_slice(&requests[0].body).expect("a JSON request body");
+    assert_eq!(body["reasoning"]["effort"], "high");
+}
+
+/// Acceptance 3 (#131 — the regression risk of the whole task): a standard
+/// OpenAI-compatible completions model is BYTE-IDENTICAL — the same
+/// `POST /v1/chat/completions` path, the same Bearer auth, and a body with
+/// `stream_options` + `reasoning_effort` intact (the only body change in T3b
+/// is the GPT-5.5-with-tools gate, which a standard model never trips).
+#[tokio::test]
+async fn standard_openai_completions_unchanged() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .and(header("authorization", "Bearer sk-test"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(OK_SSE.to_string(), "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+
+    let req = rich_request("gpt-4o");
+    let events = collect_boxed(
+        build_provider(&wire_model(
+            &format!("{}/v1", server.uri()),
+            "openai-completions",
+        )),
+        &req,
+    )
+    .await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::TextDelta(t) if t == "ok")),
+        "the OpenAI stream parses as before: {events:?}"
+    );
+
+    let requests = server.received_requests().await.expect("requests recorded");
+    assert_eq!(
+        requests.len(),
+        1,
+        "a MATCHED request is the path + Bearer assertion (the mock only answers that pair)"
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(&requests[0].body).expect("a JSON request body");
+    // The unchanged Chat Completions body: the usage ask, the level (a
+    // standard model is NOT the GPT-5.5 quirk family), the OpenAI tool nesting.
+    assert_eq!(
+        body["stream_options"]["include_usage"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        body["reasoning_effort"], "high",
+        "no regression on the level"
+    );
+    assert_eq!(body["tools"][0]["function"]["name"], "read");
+    assert!(
+        !body.to_string().contains("cache_control"),
+        "prompt caching is Anthropic-only: {body}"
+    );
+}
+
 /// The latch is per provider INSTANCE: a fresh provider (a new session, or
 /// a different provider row) asks for usage again — one hostile proxy does
 /// not disable usage reporting for the whole process.

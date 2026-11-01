@@ -125,6 +125,19 @@ export type {
   SessionTitledPayload,
   InteractiveRequestClosePayload,
   WindowFrameState,
+  // (issue #126 / #127 / #132) The provider-auth wire types. TYPE-ONLY — they
+  // vanish at runtime, so `TAURI_RUNTIME_API` does NOT gain them (the
+  // `AccessRule`/`AccessDirection` precedent); they enter `TAURI_PUBLIC_API`
+  // only. `ProviderLoginStep`/`TeamDto` are the landed Rust `Serialize` DTOs,
+  // `ProviderBudgetRowDto`/`ProviderBudgetDto` the landed budget ledger rows,
+  // and `ProviderAuthMode`/`ProviderOidcConfig` the settings-document types the
+  // provider row's editors name.
+  ProviderAuthMode,
+  ProviderOidcConfig,
+  ProviderLoginStep,
+  TeamDto,
+  ProviderBudgetRowDto,
+  ProviderBudgetDto,
 } from "./tauri/types";
 
 export {
@@ -158,6 +171,16 @@ export {
   testMcpServer,
   authMcpServer,
   testSearchProvider,
+  // (issue #126 / #127 / #132) The provider-auth suite: the five interactive
+  // login commands + the spend/budget read. SIX new RUNTIME names — they enter
+  // `TAURI_RUNTIME_API` in the same commit as this line (the guard's
+  // runtime-pin assertion imports the real barrel).
+  providerLoginOauth,
+  providerLoginOidc,
+  providerLoginSsoPoll,
+  providerLoginSsoChooseTeam,
+  providerLoginPasteToken,
+  getProviderBudget,
 } from "./tauri/commands/settings";
 
 export {

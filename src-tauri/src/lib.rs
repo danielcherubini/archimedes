@@ -20,7 +20,7 @@ use tauri::Manager;
 use crate::agent::worker::client::WorkerHandle;
 use crate::agent::worker::manager::{WorkerFactory, WorkerManager};
 use crate::agent::{
-    crashlog, debuglog, EventSink, SessionManagerBuilder, SubagentSessionManager,
+    crashlog, debuglog, provider_auth, EventSink, SessionManagerBuilder, SubagentSessionManager,
     TranscriptPersister,
 };
 use crate::storage::Db;
@@ -57,16 +57,75 @@ pub fn setup_dirs<R: tauri::Runtime>(
     setup_dirs_with_factory(app, config_dir, app_data_dir, None)
 }
 
+/// The provider-credential refresher's start seam: a factory turns the deps
+/// into a live [`SupervisorRefresher`], or into `None` (no loop). A FUNCTION
+/// POINTER (not a closure / trait object) because the choice is made by the
+/// caller of `setup_dirs*`, once, at startup.
+pub type RefresherFactory<R> =
+    fn(&provider_auth::SupervisorRefresherDeps<R>) -> Option<provider_auth::SupervisorRefresher>;
+
+/// The `test_support` seam — a factory that starts NO loop: a test that runs the
+/// whole `setup_dirs` app never inherits a background refresher (ADR 0078 — an
+/// un-joined loop outliving its test is the census-leak route). The production
+/// loop is started only by [`setup_dirs_with_factory_refresher`].
+///
+/// Re-exported at the lib root from `agent::provider_auth` (the plan names it in
+/// both §2b and §4c; ONE definition, so the two names can never drift): a test
+/// that wants the loop-typed seam passes this, and the test-facing `setup_dirs*`
+/// entries pass `None` for the same effect.
+pub use crate::agent::provider_auth::noop_refresher_factory;
+
 /// The `setup_dirs` seam (the `test_support` pattern — the injectable
 /// `WorkerFactory`): `None` = the production factory (`current_exe()`);
 /// `Some(factory)` = the test factory (the `fake_worker` fixture — the
 /// `tests/ipc.rs` headless command-surface test). Everything else is
 /// IDENTICAL to [`setup_dirs`].
+///
+/// Starts NO credential refresher (the `None` factory below): the signature is
+/// the one `tests/ipc.rs` calls, and the tests that run this whole-app path must
+/// not inherit a background loop. The production entry is
+/// [`setup_dirs_with_factory_refresher`].
 pub fn setup_dirs_with_factory<R: tauri::Runtime>(
     app: &tauri::App<R>,
     config_dir: PathBuf,
     app_data_dir: PathBuf,
     worker_factory: Option<Arc<dyn WorkerFactory>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    init_dir_deps(app, config_dir, app_data_dir, worker_factory, None)
+}
+
+/// The production entry: the shared core WITH the credential refresher started
+/// through [`provider_auth::production_refresher_factory`]. Called by [`run`]'s
+/// `setup` closure and by nothing that a test drives.
+pub fn setup_dirs_with_factory_refresher<R: tauri::Runtime>(
+    app: &tauri::App<R>,
+    config_dir: PathBuf,
+    app_data_dir: PathBuf,
+    worker_factory: Option<Arc<dyn WorkerFactory>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    init_dir_deps(
+        app,
+        config_dir,
+        app_data_dir,
+        worker_factory,
+        Some(provider_auth::production_refresher_factory),
+    )
+}
+
+/// The shared core of every `setup_dirs*` entry point (the body
+/// [`setup_dirs_with_factory`] used to carry), plus the refresher seam as its
+/// last parameter.
+///
+/// `refresher_factory`: `None` = no loop (every test-facing entry point);
+/// `Some(factory)` = production. The started handle is stored in the managed
+/// `Arc<Mutex<Option<SupervisorRefresher>>>` slot so it stays REACHABLE (a test
+/// that wants the loop can `stop()` it) and so `Drop` is the census backstop.
+fn init_dir_deps<R: tauri::Runtime>(
+    app: &tauri::App<R>,
+    config_dir: PathBuf,
+    app_data_dir: PathBuf,
+    worker_factory: Option<Arc<dyn WorkerFactory>>,
+    refresher_factory: Option<RefresherFactory<R>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // The persistence database lives in the app data directory.
     let db = Arc::new(
@@ -114,6 +173,12 @@ pub fn setup_dirs_with_factory<R: tauri::Runtime>(
     app.manage(wm);
     // The manager is `Sync` (its mutable state is `Arc<Mutex<…>>`
     // internally), so it is shared directly without an outer lock.
+    //
+    // Cloned for the refresher's deps BEFORE it is managed under its own
+    // TypeId: the loop pushes to the SAME `Arc<SessionManager>` the commands
+    // use, so a credential refresh reaches the live sessions without a state
+    // lookup that could silently miss.
+    let refresher_manager = manager.clone();
     app.manage(manager);
     app.manage(db);
     // The attention countdown (ADR 0038/0039): the renderer decides WHEN and
@@ -159,6 +224,60 @@ pub fn setup_dirs_with_factory<R: tauri::Runtime>(
     app.manage(std::sync::Arc::new(attention::AttentionTimer::new(
         focus, deliver,
     )));
+
+    // The provider-credential refresher (issue #125): the slot is managed so the
+    // handle stays REACHABLE — a test that started a loop can `stop()` it, and
+    // `Drop` on the `SupervisorRefresher` (cancel + abort) is the census
+    // backstop for one that merely went out of scope. `None` in the slot is the
+    // test-facing shape (no loop was started).
+    let refresher_slot: Arc<std::sync::Mutex<Option<provider_auth::SupervisorRefresher>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    // T7's budget ledger (issue #132). Constructed ONLY on the production
+    // branch: a test-facing entry point (`setup_dirs` / `setup_dirs_with_factory`)
+    // manages NO poller at all, so `get_provider_budget` takes its documented
+    // degrade (`Ok(vec![])`) in a test app, and no test inherits budget work
+    // (the poller spawns nothing by itself — it is a passive ledger the refresher
+    // loop drives, and that loop is suppressed on every test path).
+    let budget_poller = std::sync::Arc::new(std::sync::Mutex::new(
+        provider_auth::budget::BudgetPoller::new(
+            config_dir.clone(),
+            provider_auth::store::auth_file_path(),
+            provider_auth::budget::BUDGET_POLL_INTERVAL_MILLIS,
+        ),
+    ));
+    if let Some(factory) = refresher_factory {
+        let deps = provider_auth::SupervisorRefresherDeps {
+            // Ruling R3: the loop reads the SAME path production resolution uses
+            // — `provider_auth::store::auth_file_path()` (the platform DATA dir,
+            // beside `mcp-auth.json`). Never a hand-rolled `dirs::data_dir()`
+            // join here and never anything under `config_dir`: one resolver, one
+            // path, so the loop and the dispatcher cannot drift apart.
+            auth_file_path: provider_auth::store::auth_file_path(),
+            session_manager: refresher_manager,
+            app_handle: app.handle().clone(),
+            // T7's budget poller (issue #132): the SAME `Arc<Mutex<…>>` managed
+            // below (so the `get_provider_budget` command reads the facts this
+            // loop writes). The cadence is the default 15 s; the settings home
+            // and the DATA-dir store path are INJECTED into the poller, which
+            // never resolves either of them itself.
+            budget_poller: Some(budget_poller.clone()),
+        };
+        // The factory is SYNC and DECLINES (returns `None`) when it cannot get a
+        // runtime to hold the loop, so a start failure here is a `None` in the
+        // slot — never a panic inside `tokio::spawn`. Which runtime it uses (and
+        // why the `setup` hook is not itself a tokio context) is
+        // `production_refresher_factory`'s documented decision; the test-facing
+        // entries pass `None` for the factory and never reach this block.
+        if let Some(refresher) = factory(&deps) {
+            *refresher_slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(refresher);
+        }
+    }
+    app.manage(refresher_slot);
+    // The ledger is managed under its OWN TypeId so the command can
+    // `try_state` it (and degrade to `Ok(vec![])` when it is absent).
+    if refresher_factory.is_some() {
+        app.manage(budget_poller);
+    }
     Ok(())
 }
 
@@ -423,6 +542,12 @@ pub fn run() {
             commands::history::session_recency,
             commands::history::reorder_sessions,
             commands::settings::get_settings,
+            // The spend/budget read (issue #132) — the Settings page's mount
+            // fetch. Platform-neutral Rust, `cfg`-blind like the rest of the
+            // list; joins `get_settings`/`save_settings` in the default
+            // window's IPC surface (no capability entry: `default.json` lists
+            // plugin permissions only and never enumerates `#[tauri::command]`s).
+            commands::settings::get_provider_budget,
             commands::settings::save_settings,
             commands::settings::list_models,
             commands::settings::list_tools,
@@ -431,6 +556,16 @@ pub fn run() {
             commands::settings::test_mcp_server,
             commands::settings::auth_mcp_server,
             commands::settings::test_search_provider,
+            // The interactive provider login (issue #126). The `generate_handler!`
+            // list is `cfg`-blind (the updater comment above says so verbatim) and
+            // all four are platform-neutral Rust, so no second list is needed.
+            commands::settings::provider_login_oauth,
+            commands::settings::provider_login_sso_poll,
+            commands::settings::provider_login_sso_choose_team,
+            commands::settings::provider_login_paste_token,
+            // The direct OIDC PKCE login (issue #127) — the command T8's "log in
+            // with OIDC" button calls. Platform-neutral Rust, one entry.
+            commands::settings::provider_login_oidc,
             commands::mcp::list_mcp_servers_effective,
             commands::agents::list_agent_definitions_for_space,
             commands::agents::list_agent_definition_reports,
@@ -473,7 +608,10 @@ pub fn run() {
                     "could not resolve the platform data dir".into()
                 },
             )?;
-            setup_dirs(app, config_dir, app_data_dir)?;
+            // The production entry: the shared core WITH the credential
+            // refresher (`setup_dirs` / `setup_dirs_with_factory` are the
+            // test-facing entries and start NO loop — see the seam's docs).
+            setup_dirs_with_factory_refresher(app, config_dir, app_data_dir, None)?;
 
             #[cfg(target_os = "linux")]
             commands::window_state::install_gtk_bridge(app);
