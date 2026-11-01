@@ -408,7 +408,7 @@ describe("the scanner actually reads the tree", () => {
           stripJsComments(readFileSync(f, "utf8")),
         ),
     );
-    // SET SIZE, pinned: 38 files mock the barrel by path. The number may only
+    // SET SIZE, pinned: 39 files mock the barrel by path. The number may only
     // move when a test file is added or removed, in a commit that says so — this
     // one moved 34 -> 35 when D2 wired `useAgentOverridesWrites` into `SpacesList`
     // and landed its test file, which mocks the barrel the documented way, and
@@ -417,9 +417,12 @@ describe("the scanner actually reads the tree", () => {
     // landed `components/settings/PermissionsSection.test.tsx`, which mocks the
     // barrel the documented way, and 37 -> 38 when task14b landed
     // `components/settings/McpSection.test.tsx` (the MCP badge's contract + the
-    // parked needs-auth red), which mocks the barrel the documented way.
-    expect(mockers).toHaveLength(38);
-    // 37 of the 38 SPREAD `vi.importActual`, which is the shape that makes the
+    // parked needs-auth red), which mocks the barrel the documented way, and
+    // 38 -> 39 when the chatstream decomposition moved `ChatStream`'s attachment
+    // tests into `src/hooks/useChatAttachments.test.tsx`, which mocks the barrel
+    // the documented way.
+    expect(mockers).toHaveLength(39);
+    // 38 of the 39 SPREAD `vi.importActual`, which is the shape that makes the
     // seam forgiving: an unlisted export still resolves. The new mocker spreads,
     // so the remaining one is still `hooks/useWindowMaximized.test.ts`, which
     // replaces the module wholesale — so a name it forgets is `undefined`, the
@@ -428,7 +431,7 @@ describe("the scanner actually reads the tree", () => {
       mockers.filter((f) =>
         /vi\.importActual/.test(readFileSync(f, "utf8")),
       ).length,
-    ).toBe(37);
+    ).toBe(38);
   });
 });
 

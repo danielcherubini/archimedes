@@ -3,16 +3,12 @@ import {
   useRef,
   useState,
 } from "react";
-import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import {
   cancelSession,
-  readClipboardImage,
-  readFileBytes,
   sendPrompt,
   compactSession,
   type StopReason,
 } from "../lib/tauri";
-import { basenameOfPath } from "../lib/paths";
 import { describeIpcError } from "../lib/ipcError";
 import { parseComposerCommand } from "../lib/composerCommands";
 import {
@@ -22,20 +18,12 @@ import {
 } from "../lib/skills";
 import { groupConsecutiveFileWrites } from "../lib/toolGroups";
 import {
-  addImageAttachments,
   agentSupportsImages,
   draftIsMarkerOnly,
-  imageMarker,
-  insertAtCaret,
-  MAX_CHAT_ATTACHMENTS,
   readAttachmentAsBase64,
   releaseAttachment,
-  renumberImageMarkers,
-  shiftImageMarkers,
-  type ChatComposerAttachment,
   type ImageRef,
 } from "../lib/chatAttachments";
-import { inferAttachmentMimeType, shouldPreferSpreadsheetClipboardText } from "../lib/chatAttachmentMetadata";
 import { useSessions } from "../store/sessions";
 import { useQueuedPrompts } from "../store/queuedPrompts";
 import { usePermissions } from "../store/permissions";
@@ -44,6 +32,7 @@ import { useSettings } from "../store/settings";
 import { useHasPendingRequest } from "../hooks/useHasPendingRequest";
 import { useSessionIdleEdge } from "../hooks/useSessionIdleEdge";
 import { useChatSessionDerivations } from "../hooks/useChatSessionDerivations";
+import { useChatAttachments } from "../hooks/useChatAttachments";
 import { useActiveSpaceCwd } from "../hooks/useActiveSpaceCwd";
 import { useChildGates } from "../hooks/useChildGates";
 import { useSpinQuip } from "../hooks/useSpinQuip";
@@ -246,24 +235,13 @@ export default function ChatStream() {
   const [error, setError] = useState<string | null>(null);
   const [resuming, setResuming] = useState(false);
   const composerRef = useRef<HTMLTextAreaElement>(null);
-  // Image attachments staged in the composer (CONTEXT.md: Attachment).
-  // ALL of the attachment hooks live HERE, before the `!activeSessionId`
-  // early return below — a hook called only on the full-frame path would
-  // change the hook count when the active session appears/disappears and
-  // crash React (the same bug the `useHasPendingRequest` comment
-  // above warns about).
-  const [attachments, setAttachments] = useState<ChatComposerAttachment[]>([]);
-  const attachmentsRef = useRef(attachments);
-  /** Attachments handed to a send that has not settled yet, keyed by session id.
-   * They are OUT of `attachments` (so their thumbnails leave the composer
-   * immediately) but NOT released — a failed send puts them back. */
-  const heldForSendRef = useRef<Map<string, ChatComposerAttachment[]>>(new Map());
-  // Re-sync every render: the handlers read the CURRENT list from the ref
-  // (a render closure would be stale for fast successive events — e.g.
-  // pasting 8 files then a 9th in separate dispatches without a re-render
-  // in between). Also read by the unmount-cleanup effect below (the effect
-  // intentionally runs once, so the ref is the only live view it has).
-  attachmentsRef.current = attachments;
+  // The attachment lifecycle (state, refs, handlers and the held-for-send map)
+  // moved to `hooks/useChatAttachments` (issue #135 §1). The hook call sits in
+  // this UNCONDITIONAL block, before the `!activeSessionId` early return below —
+  // the state and effects it replaced all lived here, so a hook called only on
+  // the full-frame path would change the hook count when the active session
+  // appears/disappears and crash React (the same bug the `useHasPendingRequest`
+  // comment above warns about).
   // Task 5's double-send guard (a hook — must live here, not in `send`):
   // `beginTurn` runs AFTER an `await` (the base64 read), so the composer is
   // not locked until then and a second Enter/click during the read would
@@ -285,19 +263,40 @@ export default function ChatStream() {
   // after the read and aborts on a mismatch (no stale send, no draft wipe).
   const draftRef = useRef(draft);
   draftRef.current = draft;
-  // Unmount cleanup: revoke the staged object URLs exactly once, on
-  // unmount ONLY — revoking on every state change would leak/break live
-  // previews (a revoked URL can no longer render the `img`). The held-for-send
-  // map is walked too: an unmount while a turn is in flight leaves those
-  // attachments in NO state the composer can reach again, so this is their
-  // last chance to be released.
-  useEffect(
-    () => () => {
-      attachmentsRef.current.forEach(releaseAttachment);
-      heldForSendRef.current.forEach((held) => held.forEach(releaseAttachment));
-    },
-    [],
-  );
+  // The attachment lifecycle (issue #135 §1): the staged-attachment state, the
+  // live `attachmentsRef` mirror, the held-for-send map, the five handlers
+  // `ComposerRow` takes, and the unmount cleanup (staged + held object URLs —
+  // moved into the hook). Called HERE, in the unconditional block above the
+  // `!activeSessionId` early return: the state, refs and effect it replaced all
+  // ran on the no-session path too, and a hook below that return is a
+  // conditional hook call — "Rendered more hooks than during the previous
+  // render", white screen. The draft, its live ref, the error line, the composer
+  // ref and the two capability gates are ARGUMENTS: the hook owns none of them
+  // (`useMentionPicker`'s "the hook never owns the draft" is the precedent).
+  // `stageFiles` is conspicuously ABSENT from this destructure: its only callers
+  // were the three staging handlers, and all three moved with it, so the hook is
+  // its own only caller now — `noUnusedLocals` is what proves no site was missed.
+  const {
+    attachments,
+    attachmentsRef,
+    handlePaste,
+    handleDrop,
+    handleAttachClick,
+    removeAttachment,
+    moveOutForSend,
+    restoreHeldForSend,
+    releaseHeldForSend,
+    clearAll,
+    clearStaged,
+  } = useChatAttachments({
+    setDraft,
+    setError,
+    draftRef,
+    activeSessionIdRef,
+    composerRef,
+    imageCapable,
+    composerEnabled,
+  });
   // Esc stops inference: while a turn is in flight, Escape sends
   // `session/cancel` (the agent resolves the open prompt with
   // `stopReason: "cancelled"`, which completes `sendPrompt` and unlocks the
@@ -338,20 +337,14 @@ export default function ChatStream() {
     // drops that entry without releasing it, making the leak permanent.
     const left = prevSessionIdRef.current;
     prevSessionIdRef.current = activeSessionId;
-    attachmentsRef.current.forEach(releaseAttachment);
-    attachmentsRef.current = [];
-    setAttachments([]);
+    clearAll();
     // A turn still in flight in the session we just left: its held
     // attachments can never be restored there (this effect already cleared the
     // composer) and can never be restored here, so release them now. `left`
     // can be `null` (no session → session), and nothing is ever held under a
     // `null` key, so the guard is both the type narrowing and the truth.
     if (left !== null) {
-      const held = heldForSendRef.current.get(left);
-      if (held) {
-        held.forEach(releaseAttachment);
-        heldForSendRef.current.delete(left);
-      }
+      releaseHeldForSend(left);
     }
   }, [activeSessionId]);
   // Window-level drop backstop + the composer's auto-grow. Both moved out to
@@ -711,7 +704,8 @@ export default function ChatStream() {
     // ── The fork. It sits BEFORE `sendingSessionsRef` and before the `try`, so a
     // queueing press never occupies the double-send slot (and, because it returns
     // ahead of the `try`, it must not rely on the `finally` for cleanup — and it
-    // needs none: `setDraft`/`setAttachments` are its only effects).
+    // needs none: `setDraft` and the hook's non-revoking `clearStaged()` are its
+    // only effects).
     if (composerLocked) {
       // A **Composer command** is NEVER queued, and the two contracts are why:
       // ADR 0044's defining act is that `/compact` is CONSUMED (nothing sent, no
@@ -734,8 +728,7 @@ export default function ChatStream() {
       // to renumber. Nor is the text expanded — ADR 0069 stores the RAW draft so
       // expansion runs at send, against the catalog of THAT moment.
       const moved = attachmentsRef.current;
-      attachmentsRef.current = [];
-      setAttachments([]);
+      clearStaged(); // ref + state emptied; the URLs MOVE with the text (no revoke)
       useQueuedPrompts.getState().enqueue(targetSessionId, {
         id: crypto.randomUUID(),
         text: rawText,
@@ -877,11 +870,7 @@ export default function ChatStream() {
           // `activeSessionIdRef` guard: a send whose session was switched away
           // during the read never touches the (now other session's) composer state.
           if (sentIds.size > 0 && activeSessionIdRef.current === targetSessionId) {
-            const held = attachmentsRef.current.filter((a) => sentIds.has(a.id));
-            heldForSendRef.current.set(targetSessionId, held);
-            const staged = attachmentsRef.current.filter((a) => !sentIds.has(a.id));
-            attachmentsRef.current = staged;
-            setAttachments(staged);
+            moveOutForSend(targetSessionId, sentIds);
           }
         },
       );
@@ -898,82 +887,29 @@ export default function ChatStream() {
       // already clean, so only the `activeSessionIdRef`-guarded map entry has
       // to go (the held objects are released either way — a revoked URL is not
       // session-scoped).
-      const held = heldForSendRef.current.get(targetSessionId);
-      if (held) {
-        held.forEach(releaseAttachment);
-        heldForSendRef.current.delete(targetSessionId);
-      }
+      releaseHeldForSend(targetSessionId);
       turnCompleted(targetSessionId, stopReason);
     } catch (err) {
       turnCompleted(targetSessionId, "end_turn");
       // Tauri IPC rejections are strings OR plain objects (`{kind, message}`) —
       // `src/lib/ipcError.ts` is the one renderer for both shapes.
       const msg = describeIpcError(err);
-      if (activeSessionIdRef.current === targetSessionId) {
-        setError(msg);
-      }
-      // Attachments deliberately survive a failed send (a re-pasted image is
-      // costly, a re-typed draft is not). The thumbnails now leave the
-      // composer AT send (see `heldForSendRef`), so this is where they come
-      // back: the held list is merged in FRONT of whatever is staged now (the
-      // user can stage during a turn), de-duplicated by `id` so a re-staged
-      // item is not doubled. The RESTORED ones' object URLs are NOT revoked —
-      // that is what makes the restored thumbnail render again (only the
-      // overflow the cap forces out below is released).
-      //
-      // This block MUST stay in the same synchronous block as `setError`
-      // above: the existing test waits on the error line, and it only passes
-      // because both state updates land in one React 19 batch — an `await`
-      // between them lets the test observe the pre-restore DOM (flaky).
-      const held = heldForSendRef.current.get(targetSessionId);
-      if (held && held.length > 0 && activeSessionIdRef.current === targetSessionId) {
-        const live = attachmentsRef.current;
-        const ids = new Set(live.map((a) => a.id));
-        const fitting = held.filter((a) => !ids.has(a.id));
-        // ── The restore respects MAX_CHAT_ATTACHMENTS ──────────────────────
-        // The cap is enforced inside `addImageAttachments`, i.e. only at
-        // STAGING time, and this path writes `attachments` directly — so
-        // without a ceiling here a failed send can rebuild a list the cap
-        // would never have admitted (send 8, paste a 9th during the turn,
-        // fail: 9 staged). Nothing in the UI catches that, and the NEXT send
-        // is then rejected server-side for a state this component built.
-        // Dropping the overflow mirrors `addImageAttachments`'s silent cap
-        // rejection at staging time: the same limit, the same non-error
-        // treatment (the user sees a full strip, not an error line).
-        const room = Math.max(0, MAX_CHAT_ATTACHMENTS - live.length);
-        const back = fitting.slice(0, room);
-        // The overflow's object URL has no owner left once it is dropped — no
-        // state holds it, so no remove / session-switch / unmount path can
-        // ever revoke it. Release it here or it leaks for the process lifetime.
-        fitting.slice(room).forEach(releaseAttachment);
-        const merged = [...back, ...live];
-        attachmentsRef.current = merged;
-        setAttachments(merged);
-        // ── The draft's marker numbers move WITH the pictures ──────────────
-        // The numbers are POSITIONAL (they count THIS message's attachments in
-        // list order), and this restore inserts `back` IN FRONT of everything
-        // staged during the turn. Anything staged mid-turn was numbered against
-        // the SHORTER list — stage A, send (A held, list empty), paste B and
-        // `stageFiles` numbers B `#1` — so after the merge slot 1 is A and the
-        // draft's `#1` names the wrong picture: the next prompt asks about a
-        // screenshot the user never meant. Shifting by the number ACTUALLY
-        // restored (not the number that left the composer — the cap can make
-        // those differ) is what keeps the marker→image mapping the whole
-        // marker feature exists to guarantee.
-        //
-        // The live draft (`draftRef`, not the `send()` closure — the composer
-        // stays editable across the awaits) is the text being rewritten, and
-        // the write lands in this SAME synchronous block for the batching
-        // reason above.
-        if (back.length > 0) {
-          setDraft(shiftImageMarkers(draftRef.current, back.length));
-        }
-      }
-      heldForSendRef.current.delete(targetSessionId);
-      // The text the user had typed when they pressed Send is still lost on
-      // failure (`setDraft("")` ran at send, pre-existing behaviour): what
-      // survives is whatever was typed AFTER that, and the shift above keeps
-      // ITS markers honest about the restored list.
+      // The failed-send attachment restore — the whole block (the held list
+      // merged back IN FRONT of whatever was staged during the turn, the
+      // `MAX_CHAT_ATTACHMENTS` ceiling with the overflow released, the draft's
+      // marker shift by the number ACTUALLY restored, the map delete, and the
+      // error line) lives in `useChatAttachments.restoreHeldForSend`, whose
+      // comment block records the contract. It is ONE synchronous call, so the
+      // restore and the error line land in the same React 19 batch exactly as
+      // when the block was inline (the pinned reason the error-line test is not
+      // flaky), and the hook re-checks
+      // `activeSessionIdRef.current === targetSessionId` for BOTH the restore
+      // and the error line while ALWAYS running the map delete — so a session
+      // switched away mid-send still restores nothing and shows no error, and
+      // the delete stays a no-op once the session-switch effect released the
+      // entry. `turnCompleted` above still settles the turn FIRST: each caller
+      // owns its own settle.
+      restoreHeldForSend(targetSessionId, msg, setError, setDraft);
     } finally {
       sendingSessionsRef.current.delete(targetSessionId);
     }
@@ -1151,228 +1087,10 @@ export default function ChatStream() {
   // working/blocked line is present — otherwise the card would be
   // swallowed by the hint.
 
-  // --- Image-attachment handlers (plain functions, NOT hooks — their
-  // placement is flexible; kept with the other handlers). ---
-  const stageFiles = (files: File[]) => {
-    // Read the CURRENT list from the ref — a render closure would be stale
-    // for fast successive events (e.g. pasting 8 files then a 9th in
-    // separate dispatches without a re-render in between).
-    const stagedBefore = attachmentsRef.current;
-    const { attachments: next, rejected } = addImageAttachments(
-      stagedBefore,
-      files,
-    );
-    if (next !== stagedBefore) {
-      attachmentsRef.current = next;
-      setAttachments(next);
-      // ── The `[image #N]` markers, for EVERY staging path ────────────────
-      // `stageFiles` is the single funnel for all four of them (paste with
-      // file items, the WebKitGTK empty-paste clipboard fallback, drag-and-drop
-      // and the `+` picker), so one insert here covers all four. Doing it in
-      // the callers instead would number a mixed batch `#1, #3` and the number
-      // would stop matching the strip.
-      // `N` counts the attachments of THIS message (1-based, in staging
-      // order) — see `imageMarker` for why a session-wide number would be
-      // unresolvable by the model.
-      // The count comes from the RETURNED list, never from `files.length`:
-      // `addImageAttachments` can reject mid-batch (`continue` on a bad MIME
-      // / an oversize file, `break` on the cap), so looping the input would
-      // emit a marker for a rejected file and the numbers would then name the
-      // wrong picture.
-      // ONE string for the WHOLE batch, inserted ONCE (ascending `#k #k+1 …`):
-      // inserting one at a time at the same caret would emit `#3 #2 #1` and
-      // invert the marker→image mapping on every multi-file paste.
-      const markers = next
-        .slice(stagedBefore.length)
-        .map((_, i) => imageMarker(stagedBefore.length + 1 + i))
-        .join(" ");
-      // CARET ONLY WHEN THE TEXTAREA ACTUALLY HAS FOCUS. `selectionStart` is
-      // `0` for a textarea that has never been focused, and two of these four
-      // paths (a drop, and the `+` picker — the native dialog holds focus)
-      // routinely run that way, so the naive read would drop every marker at
-      // the START of the user's sentence. This is a deliberate divergence from
-      // the `selectionStart ?? draft.length` idiom in `handleDrop`'s backstop
-      // and `selectMention`, which is safe there only because both are
-      // reachable solely after typing (so the field is focused).
-      // `draftRef` — not the render closure — for the same reason
-      // `attachmentsRef` exists: a 9th paste in a fast sequence would
-      // otherwise revert the draft to a stale value and drop the earlier
-      // markers.
-      const el = composerRef.current;
-      const len = draftRef.current.length;
-      const caret =
-        el && document.activeElement === el ? (el.selectionStart ?? len) : len;
-      const inserted = insertAtCaret(draftRef.current, caret, markers);
-      setDraft(inserted.text);
-      // Restore focus + caret after the controlled `setDraft` (which would
-      // otherwise drop both) — the same block `selectMention` uses.
-      const pos = inserted.caret;
-      requestAnimationFrame(() => {
-        const area = composerRef.current;
-        if (!area) return;
-        area.focus();
-        area.setSelectionRange(pos, pos);
-      });
-    }
-    // A successful stage also CLEARS a stale rejection line (null when
-    // nothing was rejected) — otherwise a rejection stays visible after the
-    // user successfully stages a different image.
-    setError(rejected.length > 0 ? rejected.join("; ") : null);
-  };
-
-  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!imageCapable) return; // fall through: default text paste
-    // Pasted images live in `clipboardData.items` (a `ClipboardItem` pulled via
-    // `getAsFile()`); `clipboardData.files` is EMPTY in real webviews
-    // (WebKit/WebKitGTK, WebView2/Chromium), so derive the file list from
-    // `items` instead — keep only `kind === "file"` items, drop null results.
-    const files: File[] = [];
-    for (const item of e.clipboardData.items) {
-      if (item.kind === "file") {
-        const file = item.getAsFile();
-        if (file) files.push(file);
-      }
-    }
-    const text = e.clipboardData.getData("text/plain");
-    const html = e.clipboardData.getData("text/html");
-    // A spreadsheet paste carries TSV (or Excel HTML) alongside the
-    // synthetic image — the TEXT wins, so the default paste is untouched.
-    if (
-      files.length > 0 &&
-      !shouldPreferSpreadsheetClipboardText(text, html)
-    ) {
-      e.preventDefault();
-      e.stopPropagation();
-      stageFiles(files);
-      return;
-    }
-    // WebKitGTK quirk: a pasted image produces a `paste` event with NO file
-    // items and NO text (the DataTransfer is empty — verified on
-    // webkit2gtk-4.1 2.52.5 on Wayland; the image IS inserted into a
-    // contenteditable, just not exposed on the event). When the event has
-    // no content at all, the likely cause is a clipboard image WebKit can't
-    // surface — read it from the system clipboard (Rust/arboard) instead.
-    // A text-only paste is a text paste: `getData("text/plain")` is
-    // non-empty, so the fallback is skipped (no stale image staged).
-    if (files.length === 0 && !text) {
-      // The read can straddle a session switch (it is a slow IPC round
-      // trip): capture the active session at PASTE time and abort if it
-      // changed — without the guard, `stageFiles` would target the NEW
-      // active session (staging session A's pasted image in session B's
-      // composer; the same cross-session leak `send()`'s
-      // `activeSessionIdRef` guard prevents for sends).
-      const pastedInSession = activeSessionIdRef.current;
-      void readClipboardImage()
-        .then((bytes) => {
-          if (!bytes) return; // no image on the clipboard — nothing to stage
-          if (activeSessionIdRef.current !== pastedInSession) return; // switched
-          const file = new File([new Uint8Array(bytes)], "screenshot.png", {
-            type: "image/png",
-          });
-          stageFiles([file]);
-        })
-        .catch(() => {
-          // Silent: clipboard access failed (or no image) — an empty-clipboard
-          // paste is not an error condition.
-        });
-    }
-  };
-
-  // Staging attachments is allowed DURING A TURN on all three paths — paste,
-  // drop and the `+` picker. The turn (`composerLocked`) is not a capability
-  // check, and the three routes used to disagree about it: paste staged mid-turn
-  // while drop and the picker refused, so a screenshot pasted mid-turn and a
-  // prompt queued with Enter left the image stranded in the composer while the
-  // words travelled to the queue row. `imageCapable` is the gate here and it is
-  // fail-closed — an agent that does not advertise `promptCapabilities.image`
-  // still takes no image on ANY route.
-  // The invariant this keeps: a locked composer STAGES, it does not DISPATCH.
-  // Enter while locked reaches `send()`, which moves the whole staged set (with
-  // its object URLs) into the queue entry alongside the text — so a dropped file
-  // never waits in the composer for the turn to end.
-  const handleDrop = (e: React.DragEvent) => {
-    if (!imageCapable) return;
-    e.preventDefault();
-    stageFiles(Array.from(e.dataTransfer.files));
-  };
-
-  // The `+` button (the native file picker): the dialog returns PATHS (a
-  // webview `File` is not available for a picked file — no `fs` plugin),
-  // so the bytes are read via `read_file_bytes` (the Rust command — the
-  // image-extension allowlist + the 10 MiB cap re-validated server-side),
-  // rebuilt into `File`s (the MIME inferred from the extension), and
-  // staged through the SAME `stageFiles` path as a paste / drop (the
-  // capability gate + the attachment caps apply identically).
-  //
-  // NO `composerLocked` term, on purpose: the picker stages, it does not
-  // dispatch — see `handleDrop`'s comment for the invariant (staging is allowed
-  // during a turn on all three paths; a locked Enter moves the staged set into
-  // the queue row). `composerEnabled` DOES stay: a session that cannot be sent
-  // to must not accumulate images.
-  const handleAttachClick = async () => {
-    if (!composerEnabled || !imageCapable) return;
-    let raw: string | string[] | null;
-    try {
-      raw = await openFileDialog({
-        multiple: true,
-        // The image allowlist (the SAME set as the backend command — the
-        // dialog filters, the command re-validates, `stageFiles` re-validates
-        // the MIME a third time).
-        filters: [
-          {
-            name: "Images",
-            extensions: ["png", "jpg", "jpeg", "gif", "webp"],
-          },
-        ],
-      });
-    } catch {
-      return; // the dialog is unavailable (e.g. a non-Tauri context)
-    }
-    if (raw == null) return; // cancelled
-    const paths = Array.isArray(raw) ? raw : [raw];
-    const files: File[] = [];
-    let readError: string | null = null;
-    for (const path of paths) {
-      try {
-        const bytes = await readFileBytes(path);
-        if (!bytes || bytes.length === 0) continue; // not an image (the backend allowlist)
-        files.push(
-          new File([new Uint8Array(bytes)], basenameOfPath(path), {
-            type: inferAttachmentMimeType(path),
-          }),
-        );
-      } catch (e) {
-        // A read failure (e.g. the file over the 10 MiB cap — the command
-        // rejects): keep the readable selections staged, surface the error
-        // only when NOTHING was staged.
-        readError = describeIpcError(e);
-      }
-    }
-    if (files.length > 0) {
-      stageFiles(files);
-    } else if (readError) {
-      setError(readError);
-    }
-  };
-
-  const removeAttachment = (id: string) => {
-    // Revoke OUTSIDE the state updater (updaters must be pure — StrictMode
-    // runs them twice; a double revoke is harmless but the wrong pattern).
-    const target = attachmentsRef.current.find((a) => a.id === id);
-    if (target) releaseAttachment(target);
-    // The 1-based position IN THE LIST BEING SHOWN, computed BEFORE the
-    // filter (after it, the index would be the survivor's). This is the `N`
-    // the draft's marker uses, so removing a thumbnail takes its marker with
-    // it and shifts every marker above it down — the numbers keep naming the
-    // right picture. `draftRef` (not the closure) for the same reason
-    // `attachmentsRef` is read here: the composer is not locked, so a
-    // same-tick draft edit must not be reverted by this rewrite.
-    const position = attachmentsRef.current.findIndex((a) => a.id === id) + 1;
-    setDraft(renumberImageMarkers(draftRef.current, position));
-    const next = attachmentsRef.current.filter((a) => a.id !== id);
-    attachmentsRef.current = next;
-    setAttachments(next);
-  };
+  // The image-attachment handlers (`stageFiles`, `handlePaste`, `handleDrop`,
+  // `handleAttachClick`, `removeAttachment`) moved to
+  // `hooks/useChatAttachments` (issue #135 §1) with the state they close over —
+  // they are returned from the hook call in the unconditional block above.
 
   // `selectMention` moved to `hooks/useMentionPicker.ts` (Task D4) — it is part
   // of the picker's derivation half (it writes the picker cell) and is returned

@@ -4,7 +4,6 @@ import ChatStream from "./ChatStream";
 import {
   sendPrompt,
   resumeSession,
-  readClipboardImage,
   readFileBytes,
   cancelSession,
   compactSession,
@@ -45,7 +44,7 @@ import { setSidePaneCollapsed } from "../lib/sidePaneState";
 import * as chatAttachments from "../lib/chatAttachments";
 import { activeMentionToken, isOutsideSpaceQuery } from "../lib/skills";
 import { IPC_EVENTS } from "../lib/ipc/events";
-import { MAX_CHAT_ATTACHMENTS, type ChatComposerAttachment } from "../lib/chatAttachments";
+import { type ChatComposerAttachment } from "../lib/chatAttachments";
 import { resetStores } from "../test/resetStores";
 import {
   MONO_ADVANCE_EM,
@@ -1446,203 +1445,6 @@ describe("ChatStream", () => {
     expect(screen.queryByText("thought-one")).toBeNull();
   });
 
-  // --- Image attachments: paste / drop / thumbnail strip / capability gate. ---
-
-  it("paste stages a thumbnail", () => {
-    seedLiveSessionWithImages();
-    render(<ChatStream />);
-    const intercepted = pasteToComposer([
-      new File([new Uint8Array([1])], "s.png", { type: "image/png" }),
-    ]);
-    // The paste WAS intercepted (`preventDefault` → `defaultPrevented`).
-    expect(intercepted).toBe(false);
-    expect(screen.getByAltText("s.png")).toBeTruthy();
-  });
-
-  it("paste of plain text is NOT intercepted", () => {
-    seedLiveSessionWithImages();
-    render(<ChatStream />);
-    const intercepted = pasteToComposer([], { text: "hello" });
-    // Default text paste falls through (jsdom does not implement the browser's
-    // default paste action — no text is inserted; assert on the return value).
-    expect(intercepted).toBe(true);
-    expect(screen.queryByAltText("s.png")).toBeNull();
-  });
-
-  it("paste of plain text does NOT trigger the Rust clipboard read", async () => {
-    seedLiveSessionWithImages();
-    render(<ChatStream />);
-    pasteToComposer([], { text: "hello" });
-    await flush();
-    // A text paste is a text paste — no image read (no stale image staged).
-    expect(vi.mocked(readClipboardImage)).not.toHaveBeenCalled();
-    expect(screen.queryByAltText("s.png")).toBeNull();
-  });
-
-  it("paste with file items does NOT trigger the Rust clipboard read", async () => {
-    seedLiveSessionWithImages();
-    render(<ChatStream />);
-    pasteToComposer([
-      new File([new Uint8Array([1])], "s.png", { type: "image/png" }),
-    ]);
-    await flush();
-    // The standard `items` path handles it — no fallback read.
-    expect(vi.mocked(readClipboardImage)).not.toHaveBeenCalled();
-    expect(screen.getByAltText("s.png")).toBeTruthy();
-  });
-
-  it("WebKitGTK quirk: empty paste event falls back to the Rust clipboard read", async () => {
-    seedLiveSessionWithImages();
-    render(<ChatStream />);
-    // WebKitGTK: a pasted image produces a `paste` event with NO items and
-    // NO text (the DataTransfer is empty). The composer reads the image
-    // from the system clipboard (Rust/arboard) instead.
-    vi.mocked(readClipboardImage).mockResolvedValueOnce([0x89, 0x50, 0x4e, 0x47]);
-    pasteToComposer([]);
-    await flush();
-    expect(vi.mocked(readClipboardImage)).toHaveBeenCalledTimes(1);
-    // The read image is staged as a thumbnail (`screenshot.png`).
-    expect(screen.getByAltText("screenshot.png")).toBeTruthy();
-  });
-
-  it("WebKitGTK quirk fallback: no image on the clipboard stages nothing", async () => {
-    seedLiveSessionWithImages();
-    render(<ChatStream />);
-    vi.mocked(readClipboardImage).mockResolvedValueOnce(null);
-    pasteToComposer([]);
-    await flush();
-    expect(vi.mocked(readClipboardImage)).toHaveBeenCalledTimes(1);
-    expect(screen.queryByAltText("screenshot.png")).toBeNull();
-  });
-
-  it("WebKitGTK quirk fallback: a read error stages nothing (silent)", async () => {
-    seedLiveSessionWithImages();
-    render(<ChatStream />);
-    vi.mocked(readClipboardImage).mockRejectedValueOnce(new Error("no display"));
-    pasteToComposer([]);
-    await flush();
-    expect(screen.queryByAltText("screenshot.png")).toBeNull();
-    // No error line for a silent fallback miss (an empty-clipboard paste is
-    // not an error condition).
-    expect(screen.queryByText(/clipboard/i)).toBeNull();
-  });
-
-  it("spreadsheet TSV is NOT intercepted over the synthetic PNG", () => {
-    seedLiveSessionWithImages();
-    render(<ChatStream />);
-    const intercepted = pasteToComposer(
-      [new File([new Uint8Array([1])], "shot.png", { type: "image/png" })],
-      { text: "a\tb" },
-    );
-    // The text paste wins (the spreadsheet heuristic) — no thumbnail.
-    expect(intercepted).toBe(true);
-    expect(screen.queryByAltText("shot.png")).toBeNull();
-  });
-
-  it("non-image paste is rejected with an error line", () => {
-    seedLiveSessionWithImages();
-    render(<ChatStream />);
-    pasteToComposer(
-      [new File([new Uint8Array([1])], "a.txt", { type: "text/plain" })],
-      { text: "x" },
-    );
-    expect(screen.queryByAltText("a.txt")).toBeNull();
-    const errorLine = screen.getByText(/is not a supported image format/);
-    expect(errorLine.className).toContain("text-destructive");
-    // Task C3 (finding 7): the composer's rejection line is now an announced
-    // live region. Asserted HERE (the site's existing error-line test) rather
-    // than in a new case, so the class pin and the role pin travel together.
-    expect(errorLine.getAttribute("role")).toBe("alert");
-    // Byte-identical to the hand-written `mb-2 px-3 text-ui-sm text-destructive`
-    // line this replaced, so the gap under the transcript does not move.
-    expect(errorLine.getAttribute("class")).toBe(
-      "text-ui-sm text-destructive mb-2 px-3",
-    );
-  });
-
-  it("SVG is rejected (allowlist)", () => {
-    seedLiveSessionWithImages();
-    render(<ChatStream />);
-    pasteToComposer([
-      new File([new Uint8Array([1])], "a.svg", { type: "image/svg+xml" }),
-    ]);
-    expect(screen.queryByAltText("a.svg")).toBeNull();
-    expect(
-      screen.getByText(/is not a supported image format/).className,
-    ).toContain("text-destructive");
-  });
-
-  it("oversized paste is rejected", () => {
-    seedLiveSessionWithImages();
-    render(<ChatStream />);
-    // 11 MiB > the 10 MiB inline cap.
-    const oversized = new File(
-      [new Uint8Array(11 * 1024 * 1024)],
-      "big.png",
-      { type: "image/png" },
-    );
-    pasteToComposer([oversized]);
-    expect(screen.queryByAltText("big.png")).toBeNull();
-    expect(
-      screen.getByText(/exceeds the 10 MiB limit/).className,
-    ).toContain("text-destructive");
-  });
-
-  it("ninth image is rejected at the cap", () => {
-    seedLiveSessionWithImages();
-    render(<ChatStream />);
-    const firstEight = Array.from({ length: 8 }, (_, i) =>
-      new File([new Uint8Array([1])], `f${i}.png`, { type: "image/png" }),
-    );
-    pasteToComposer(firstEight);
-    // Separate dispatch — the ref-based `stageFiles` keeps the list current
-    // between them.
-    pasteToComposer(
-      [new File([new Uint8Array([1])], "ninth.png", { type: "image/png" })],
-    );
-    // 8 staged, the 9th rejected.
-    expect(screen.getAllByRole("img")).toHaveLength(8);
-    expect(screen.queryByAltText("ninth.png")).toBeNull();
-    expect(
-      screen.getByText(/at most 8/).className,
-    ).toContain("text-destructive");
-  });
-
-  it("remove button un-stages", () => {
-    seedLiveSessionWithImages();
-    render(<ChatStream />);
-    pasteToComposer([
-      new File([new Uint8Array([1])], "s.png", { type: "image/png" }),
-    ]);
-    expect(screen.getByAltText("s.png")).toBeTruthy();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Remove image attachment" }),
-    );
-    expect(screen.queryByAltText("s.png")).toBeNull();
-  });
-
-  it("drop stages a thumbnail", () => {
-    seedLiveSessionWithImages();
-    render(<ChatStream />);
-    dropOnComposer([
-      new File([new Uint8Array([1])], "d.png", { type: "image/png" }),
-    ]);
-    expect(screen.getByAltText("d.png")).toBeTruthy();
-  });
-
-  it("drop STAGES while locked", () => {
-    seedLiveSessionWithImages();
-    // `inTurn` set BEFORE `render` (the store is global) → the composer is
-    // locked on first render. Staging is still allowed: the textarea stays
-    // editable on purpose and the drop reaches `stageFiles`.
-    useSessions.setState({ inTurn: { s1: true } });
-    render(<ChatStream />);
-    dropOnComposer([
-      new File([new Uint8Array([1])], "d.png", { type: "image/png" }),
-    ]);
-    expect(screen.queryByAltText("d.png")).not.toBeNull();
-  });
-
   it("window-level drop backstop prevents navigation (drop outside the composer)", () => {
     seedLiveSessionWithImages();
     render(<ChatStream />);
@@ -1670,40 +1472,12 @@ describe("ChatStream", () => {
     expect(fireEvent.dragOver(window, { dataTransfer: {} })).toBe(false);
   });
 
-  it("unmount releases staged object URLs", () => {
-    seedLiveSessionWithImages();
-    const { unmount } = render(<ChatStream />);
-    pasteToComposer([
-      new File([new Uint8Array([1, 2, 3])], "s.png", { type: "image/png" }),
-    ]);
-    expect(screen.getByAltText("s.png")).toBeTruthy();
-    // The unmount-cleanup effect revokes the staged object URLs exactly once
-    // (a revoked URL can no longer render the `img` — the effect runs on
-    // unmount ONLY, never on state changes).
-    unmount();
-    // The `beforeAll` stub: `createObjectURL(file) => \`blob:mock-${file.name}\``.
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:mock-s.png");
-  });
-
   it("shows the single placeholder for an image-capable fresh session (the capability if/else is gone)", () => {
     seedLiveSessionWithImages();
     render(<ChatStream />);
     expect(
       screen.getByPlaceholderText("Ask for follow-up changes"),
     ).toBeTruthy();
-  });
-
-  it("feature is inert without the capability", () => {
-    seedLiveSession(); // capabilities {}
-    render(<ChatStream />);
-    const intercepted = pasteToComposer([
-      new File([new Uint8Array([1])], "s.png", { type: "image/png" }),
-    ]);
-    // NOT intercepted (default text paste falls through) and no thumbnail.
-    expect(intercepted).toBe(true);
-    expect(screen.queryByAltText("s.png")).toBeNull();
-    // The single placeholder (the paste hint if/else is gone).
-    expect(screen.getByPlaceholderText("Ask for follow-up changes")).toBeTruthy();
   });
 
   it("switching sessions clears staged attachments", async () => {
@@ -1824,74 +1598,6 @@ describe("ChatStream", () => {
     expect(
       screen.getAllByAltText("s.png").some((el) => composer.contains(el)),
     ).toBe(false);
-  });
-
-  it("a failed send keeps attachments staged", async () => {
-    seedLiveSessionWithImages();
-    const { container } = render(<ChatStream />);
-    vi.mocked(sendPrompt).mockRejectedValueOnce(new Error("boom"));
-    pasteToComposer([
-      new File([new Uint8Array([1, 2, 3])], "s.png", { type: "image/png" }),
-    ]);
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    // Wait on the OUTCOME (the error line) — NOT on the Send button being
-    // enabled: with a staged attachment it is enabled before the click and
-    // stays enabled right after (the composer isn't locked until `beginTurn`,
-    // which runs only after the FileReader `await`), so a button-state wait
-    // would pass immediately and make the test flaky.
-    await waitFor(() => expect(screen.getByText("boom")).toBeTruthy());
-    // The attachment was NOT released/cleared (a failed send keeps it) —
-    // the composer thumbnail is still present.
-    const composer = container.querySelector('[data-testid="composer-island"]')!;
-    const matches = screen.getAllByAltText("s.png");
-    expect(matches.some((el) => composer.contains(el))).toBe(true);
-  });
-
-  it("a failed send restores the thumbnail WITHOUT releasing its object URL", async () => {
-    seedLiveSessionWithImages();
-    const { container } = render(<ChatStream />);
-    vi.mocked(sendPrompt).mockRejectedValueOnce(new Error("boom"));
-    pasteToComposer([
-      new File([new Uint8Array([1, 2, 3])], "s.png", { type: "image/png" }),
-    ]);
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    await waitFor(() => expect(screen.getByText("boom")).toBeTruthy());
-    // The restored thumbnail is the SAME object URL, still live.
-    const composer = container.querySelector('[data-testid="composer-island"]')!;
-    const inComposer = screen
-      .getAllByAltText("s.png")
-      .filter((el) => composer.contains(el));
-    expect(inComposer).toHaveLength(1);
-    expect(inComposer[0].getAttribute("src")).toBe("blob:mock-s.png");
-    // And it was NOT revoked — a revoked URL can no longer render an `img`, so
-    // releasing before the restore would have given a broken thumbnail. The
-    // release belongs to the session-switch / unmount / next-successful-send
-    // paths, never to the failure path.
-    expect(URL.revokeObjectURL).not.toHaveBeenCalledWith("blob:mock-s.png");
-  });
-
-  it("unmounting while a send is in flight releases the held attachment", async () => {
-    seedLiveSessionWithImages();
-    const { unmount } = render(<ChatStream />);
-    const inflight = deferred<StopReason>();
-    vi.mocked(sendPrompt).mockImplementationOnce(() => inflight.promise);
-    pasteToComposer([
-      new File([new Uint8Array([1, 2, 3])], "s.png", { type: "image/png" }),
-    ]);
-    fireEvent.change(screen.getByRole("textbox"), {
-      target: { value: "look at this" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    // The send is in flight and the attachment has LEFT the composer state —
-    // it lives only in the held-for-send map now, so the unmount cleanup has
-    // to walk that map too or the object URL leaks for the process lifetime.
-    await waitFor(() => expect(sendPrompt).toHaveBeenCalled());
-    unmount();
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:mock-s.png");
-    // Unwind the pending IPC so no promise outlives the test.
-    await act(async () => {
-      inflight.resolve("end_turn");
-    });
   });
 
   it("switching sessions while a send is in flight releases the LEFT session's held attachment", async () => {
@@ -2233,51 +1939,6 @@ describe("ChatStream", () => {
       fireEvent.keyDown(window, { key: "Escape" });
     });
     expect(vi.mocked(cancelSession)).not.toHaveBeenCalled();
-  });
-
-  it("a paste-fallback clipboard read that straddles a session switch stages nothing (session guard)", async () => {
-    seedLiveSessionWithImages();
-    // A second image-capable session to switch TO (its composer would
-    // stage the image without the guard).
-    useSessions.setState({
-      sessions: [
-        {
-          sessionId: "s1",
-          cwd: "/home/u/proj",
-          capabilities: { promptCapabilities: { image: true } },
-          archived: false,
-        },
-        {
-          sessionId: "s2",
-          cwd: "/home/u/proj",
-          capabilities: { promptCapabilities: { image: true } },
-          archived: false,
-        },
-      ],
-    });
-    render(<ChatStream />);
-    // Deferred promise: the clipboard read is SLOW (in flight across the
-    // session switch — the race the guard exists for).
-    let resolveRead: (value: number[] | null) => void = () => {};
-    vi.mocked(readClipboardImage).mockImplementationOnce(
-      () => new Promise<number[] | null>((r) => (resolveRead = r)),
-    );
-    // WebKitGTK quirk path: an empty paste event (no files, no text).
-    pasteToComposer([]);
-    expect(vi.mocked(readClipboardImage)).toHaveBeenCalledTimes(1);
-    // Switch the active session WHILE the read is in flight.
-    await act(async () => {
-      useSessions.setState({ activeSessionId: "s2" });
-    });
-    // The session-change effect cleared s1's staged attachments (sanity).
-    expect(screen.queryByAltText("screenshot.png")).toBeNull();
-    // Settle the read: the image was captured for s1 — it must NOT be
-    // staged into the NEW active session (s2).
-    await act(async () => {
-      resolveRead([0x89, 0x50, 0x4e, 0x47]);
-      await Promise.resolve();
-    });
-    expect(screen.queryByAltText("screenshot.png")).toBeNull();
   });
 
   it("Esc on a focused agent question card dismisses the card WITHOUT cancelling the turn", async () => {
@@ -6296,156 +5957,20 @@ describe("ChatStream — the /compact Composer command (ADR 0044)", () => {
 // the harness pushes the text block first and then the images in send order, so
 // "the Nth image of this prompt" is the only reading a model can resolve.
 //
-// `stageFiles` is the single funnel for all four staging paths, so the "all four
-// paths" claim below is what is really under test: paste-with-file-items, the
-// WebKitGTK empty-paste clipboard fallback, drag-and-drop, and the `+` picker.
+// `stageFiles` is the single funnel for all four staging paths (paste-with-file-
+// items, the WebKitGTK empty-paste clipboard fallback, drag-and-drop, and the `+`
+// picker). The marker surface for those four paths moved to
+// `src/hooks/useChatAttachments.test.tsx` with `stageFiles` (issue #135 §1);
+// what is under test HERE is the marker's other half — the draft text that
+// `send()` puts on the wire, and the `#`-collision mask that protects it.
 describe("ChatStream — the [image #N] staging marker", () => {
-  /** The composer's current draft text. */
-  function composerValue(): string {
-    return (screen.getByRole("textbox") as HTMLTextAreaElement).value;
-  }
-
-  it("a pasted screenshot leaves [image #1] in the draft", () => {
-    seedLiveSessionWithImages();
-    render(<ChatStream />);
-    pasteToComposer([
-      new File([new Uint8Array([1, 2, 3])], "s.png", { type: "image/png" }),
-    ]);
-    expect(composerValue()).toBe("[image #1]");
-  });
-
-  it("a second paste is #2 — the number counts THIS message's attachments in staging order",
-    () => {
-      seedLiveSessionWithImages();
-      render(<ChatStream />);
-      const one = new File([new Uint8Array([1])], "a.png", { type: "image/png" });
-      pasteToComposer([one]);
-      pasteToComposer([
-        new File([new Uint8Array([2])], "b.png", { type: "image/png" }),
-      ]);
-      expect(composerValue()).toBe("[image #1] [image #2]");
-    });
-
-  it("a batch of three staged in ONE event numbers ascending #1 #2 #3", () => {
-    // Inserting one marker at a time at the same caret would emit `#3 #2 #1`
-    // and invert the marker→image mapping on every multi-file paste.
-    seedLiveSessionWithImages();
-    render(<ChatStream />);
-    pasteToComposer(
-      ["a", "b", "c"].map(
-        (n) => new File([new Uint8Array([1])], `${n}.png`, { type: "image/png" }),
-      ),
-    );
-    expect(composerValue()).toBe("[image #1] [image #2] [image #3]");
-    expect(screen.getAllByRole("img")).toHaveLength(3);
-  });
-
-  it("a rejected file in a mixed batch inserts NO marker (the count comes from the staged list)",
-    () => {
-      // `addImageAttachments` can reject mid-batch, so the marker count must be
-      // derived from the returned list — looping the INPUT would number the
-      // survivor `#2` and the number would name the wrong picture.
-      seedLiveSessionWithImages();
-      render(<ChatStream />);
-      pasteToComposer([
-        new File([new Uint8Array([1])], "ok.png", { type: "image/png" }),
-        new File([new Uint8Array([1])], "bad.txt", { type: "text/plain" }),
-      ]);
-      expect(composerValue()).toBe("[image #1]");
-      expect(screen.getAllByAltText("ok.png")).toHaveLength(1);
-    });
-
-  it("a fully rejected batch inserts nothing at all", () => {
-    seedLiveSessionWithImages();
-    render(<ChatStream />);
-    pasteToComposer([
-      new File([new Uint8Array([1])], "a.svg", { type: "image/svg+xml" }),
-    ]);
-    expect(composerValue()).toBe("");
-  });
-
-  it("the drop path inserts a marker too", () => {
-    seedLiveSessionWithImages();
-    render(<ChatStream />);
-    dropOnComposer([
-      new File([new Uint8Array([1])], "d.png", { type: "image/png" }),
-    ]);
-    expect(composerValue()).toBe("[image #1]");
-  });
-
-  it("the `+` file-picker path inserts a marker too", async () => {
-    seedLiveSessionWithImages();
-    vi.mocked(openFilePicker).mockResolvedValueOnce(["/home/u/pics/shot.png"]);
-    vi.mocked(readFileBytes).mockResolvedValueOnce([
-      0x89, 0x50, 0x4e, 0x47, 1, 2, 3,
-    ]);
-    render(<ChatStream />);
-    fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
-    await waitFor(() => expect(vi.mocked(readFileBytes)).toHaveBeenCalled());
-    expect(composerValue()).toBe("[image #1]");
-  });
-
-  it("the WebKitGTK empty-paste clipboard fallback inserts a marker too", async () => {
-    seedLiveSessionWithImages();
-    vi.mocked(readClipboardImage).mockResolvedValueOnce([
-      0x89, 0x50, 0x4e, 0x47,
-    ]);
-    render(<ChatStream />);
-    pasteToComposer([]); // no items, no text — the WebKitGTK shape
-    await flush();
-    expect(composerValue()).toBe("[image #1]");
-  });
-
-  it("a drop onto an UNFOCUSED composer with a non-empty draft appends the marker at the END",
-    () => {
-      // `selectionStart` is 0 for a textarea that has never been focused, and
-      // two of the four staging paths (drag-and-drop, and the `+` picker — the
-      // native dialog holds focus) routinely run that way. Reading the caret
-      // unconditionally would drop every marker at the START of the user's
-      // sentence.
-      seedLiveSessionWithImages();
-      render(<ChatStream />);
-      fireEvent.change(screen.getByRole("textbox"), {
-        target: { value: "explain this" },
-      });
-      expect(document.activeElement).not.toBe(screen.getByRole("textbox"));
-      dropOnComposer([
-        new File([new Uint8Array([1])], "d.png", { type: "image/png" }),
-      ]);
-      expect(composerValue()).toBe("explain this [image #1]");
-    });
-
-  it("a paste while the composer is focused lands at the CARET, not at the end",
-    () => {
-      seedLiveSessionWithImages();
-      render(<ChatStream />);
-      const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
-      fireEvent.change(textarea, { target: { value: "explain this" } });
-      textarea.focus();
-      textarea.setSelectionRange(7, 7); // after "explain", before " this"
-      pasteToComposer([
-        new File([new Uint8Array([1])], "s.png", { type: "image/png" }),
-      ]);
-      expect(composerValue()).toBe("explain [image #1] this");
-    });
-
-  it("removing an attachment drops its marker and renumbers the survivors", () => {
-    seedLiveSessionWithImages();
-    render(<ChatStream />);
-    pasteToComposer([
-      new File([new Uint8Array([1, 2, 3])], "a.png", { type: "image/png" }),
-    ]);
-    pasteToComposer([
-      new File([new Uint8Array([4, 5, 6])], "b.png", { type: "image/png" }),
-    ]);
-    expect(composerValue()).toBe("[image #1] [image #2]");
-    // ✕ on the FIRST thumbnail: `[image #1]` goes and `#2` shifts down, so the
-    // remaining number still names the remaining picture.
-    fireEvent.click(
-      screen.getAllByRole("button", { name: "Remove image attachment" })[0]!,
-    );
-    expect(composerValue()).toBe("[image #1]");
-  });
+  // The staging/marker/renumber surface itself (the four staging paths, the
+  // caret rule, the batch numbering, the remove-and-renumber) moved to
+  // `src/hooks/useChatAttachments.test.tsx` with `stageFiles` and
+  // `removeAttachment` (issue #135 §1). What stays here is the half that needs
+  // the real `send()`: the renumber → SEND linkage below, and the `#`-collision
+  // / mask feed-forward pins after it — both of which expand the draft on the
+  // wire, which the hook never does.
 
   it("the renumbered draft is what gets sent", async () => {
     seedLiveSessionWithImages();
@@ -6465,21 +5990,6 @@ describe("ChatStream — the [image #N] staging marker", () => {
         { name: "b.png", mimeType: "image/png", sizeBytes: 3, data: "BAUG" },
       ]),
     );
-  });
-
-  it("the strip badges each thumbnail with the number its marker uses", () => {
-    seedLiveSessionWithImages();
-    render(<ChatStream />);
-    pasteToComposer([
-      new File([new Uint8Array([1])], "a.png", { type: "image/png" }),
-      new File([new Uint8Array([2])], "b.png", { type: "image/png" }),
-    ]);
-    // The number in the text has to be checkable against the picture it names.
-    expect(screen.getByText("#1").textContent).toBe("#1");
-    expect(screen.getByText("#2").textContent).toBe("#2");
-    // Non-interactive chrome: it is decoration beside the thumbnail, so it must
-    // not leak into the strip's accessible names.
-    expect(screen.getByText("#1").getAttribute("aria-hidden")).toBe("true");
   });
 
   // ── The `#` collision (the task's one real risk) ─────────────────────────
@@ -6687,55 +6197,12 @@ describe("ChatStream — the failed-send attachment restore", () => {
       ]);
     });
 
-  it("a failed send restores at most MAX_CHAT_ATTACHMENTS and releases the overflow",
-    async () => {
-      // The cap lives inside `addImageAttachments` (staging time), so the
-      // restore path — which writes `attachments` directly — can rebuild a
-      // list the cap would never have allowed: send 8, paste a 9th during the
-      // turn, fail, and the composer holds 9. The next send would then be
-      // rejected server-side for a state the UI itself built.
-      seedLiveSessionWithImages();
-      const inflight = deferred<StopReason>();
-      vi.mocked(sendPrompt).mockImplementationOnce(() => inflight.promise);
-      render(<ChatStream />);
-      // 8 staged in ONE batch (the cap: 8 is allowed, a 9th would not be).
-      pasteToComposer(
-        Array.from({ length: MAX_CHAT_ATTACHMENTS }, (_, i) =>
-          png(`h${i + 1}.png`, i + 1),
-        ),
-      );
-      expect(composerThumbs()).toHaveLength(MAX_CHAT_ATTACHMENTS);
-      fireEvent.click(screen.getByRole("button", { name: "Send" }));
-      await waitFor(() => expect(sendPrompt).toHaveBeenCalled());
-      await flush();
-      // The 9th, staged while the turn runs (the live list is empty — all 8
-      // are held), so its marker is `#1`.
-      pasteToComposer([png("late.png", 90)]);
-      expect(composerValue()).toBe("[image #1]");
-      await act(async () => {
-        inflight.reject(new Error("boom"));
-      });
-      await waitFor(() => expect(screen.getByText("boom")).toBeTruthy());
-      // The list ends up AT the cap, not above it: the held block keeps only
-      // the room the live list leaves, so the LAST held item is the overflow —
-      // and the drop mirrors `addImageAttachments`'s silent cap rejection at
-      // staging time (the same limit, the same non-error treatment).
-      expect(composerThumbs()).toHaveLength(MAX_CHAT_ATTACHMENTS);
-      // The strip's badges stop at the cap too (each thumbnail carries `#N`, so
-      // a `#9` badge would mean the strip still renders the overflow).
-      expect(
-        document
-          .querySelector('[data-testid="composer-island"]')!
-          .querySelectorAll("img"),
-      ).toHaveLength(MAX_CHAT_ATTACHMENTS);
-      expect(composerThumbs()).toContain("late.png");
-      // The overflow is RELEASED, not silently dropped — a dropped-but-live
-      // object URL is a leak no path can reach again.
-      expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:mock-h8.png");
-      // The draft's number still names the surviving picture: `late.png` is
-      // position 8 of the restored list.
-      expect(composerValue()).toBe("[image #8]");
-    });
+  // `"a failed send restores at most MAX_CHAT_ATTACHMENTS and releases the
+  // overflow"` moved to `src/hooks/useChatAttachments.test.tsx` with the restore
+  // itself (issue #135 §1) — it asserts the cap, the overflow release and the
+  // shifted marker, all of which are now the hook's boundary. What stays here is
+  // the end-to-end above: its SECOND send needs the real `sendText` +
+  // `readAttachmentAsBase64`, which the hook test's relay cannot reproduce.
 });
 
 // ── The **Prompt queue** (ADR 0069): `send()` forks to the queue while locked ─
