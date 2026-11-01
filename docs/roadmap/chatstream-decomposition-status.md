@@ -135,7 +135,7 @@ Re-ground with `git log --oneline <commit>..HEAD -- <area paths>`, not a feeling
 | A1 | Pure session derivations → `lib/chatSessionDerivations.ts` + `hooks/useChatSessionDerivations.ts` | `chatstream-body` | `docs/roadmap/chatstream-decomposition-task01-session-derivations.md` | 1 | `src/lib/chatSessionDerivations.ts`, `src/lib/chatSessionDerivations.test.ts`, `src/hooks/useChatSessionDerivations.ts`, `src/hooks/useChatSessionDerivations.test.ts`, `src/components/ChatStream.tsx` | `done` `35d1efaf` |
 | A2 | Extract `ChatStream.test.tsx`'s module-level scaffolding → `src/test/chatStreamFixtures.ts` | `chat-test-scaffolding` | `docs/roadmap/chatstream-decomposition-task02-test-fixtures.md` | 1 | `src/test/chatStreamFixtures.ts`, `src/test/chatStreamFixtures.test.ts`, `src/components/ChatStream.test.tsx` | `done` `99166759` |
 | B1 | `useChatAttachments` — stageFiles / handlePaste / handleDrop / handleAttachClick / removeAttachment + move its tests | `attachment-lib` | `docs/roadmap/chatstream-decomposition-task03-chat-attachments-hook.md` | 2 | `src/hooks/useChatAttachments.ts`, `src/hooks/useChatAttachments.test.ts`, `src/components/ChatStream.tsx`, `src/components/ChatStream.test.tsx`, `src/lib/tauriBarrel.test.ts` (mock-seam pin update only) | `done` `0aa99ffb` |
-| C1 | `useChatPromptDispatch` + `usePromptQueueFlusher` — sendText / send / flushHead / resume + move their tests | `prompt-queue-stores` | `docs/roadmap/chatstream-decomposition-task04-prompt-dispatch-flush.md` | 3 | `src/hooks/useChatPromptDispatch.ts`, `src/hooks/useChatPromptDispatch.test.tsx`, `src/hooks/usePromptQueueFlusher.ts`, `src/hooks/usePromptQueueFlusher.test.tsx`, `src/components/ChatStream.tsx`, `src/components/ChatStream.test.tsx`, `src/lib/tauriBarrel.test.ts` (mock-seam pin update only) | `vetted` |
+| C1 | `useChatPromptDispatch` + `usePromptQueueFlusher` — sendText / send / flushHead / resume + move their tests | `prompt-queue-stores` | `docs/roadmap/chatstream-decomposition-task04-prompt-dispatch-flush.md` | 3 | `src/hooks/useChatPromptDispatch.ts`, `src/hooks/useChatPromptDispatch.test.tsx`, `src/hooks/usePromptQueueFlusher.ts`, `src/hooks/usePromptQueueFlusher.test.tsx`, `src/components/ChatStream.tsx`, `src/components/ChatStream.test.tsx`, `src/lib/tauriBarrel.test.ts` (mock-seam pin update only) | `done` `bab6d68a` |
 | D1 | Orchestrator final form + reduce the test file to integration wiring + measure the acceptance criteria | `chatstream-body` | `docs/roadmap/chatstream-decomposition-task05-orchestrator-final-form.md` | 4 | `src/components/ChatStream.tsx`, `src/components/ChatStream.test.tsx`, plus any residual `src/components/chat/*` test file the split leaves | `todo` |
 
 **Status is exactly one of these, checkable from the tree without asking anyone:**
@@ -250,6 +250,34 @@ NOT this repo's gate (AGENTS.md's bar is `pnpm test` + `pnpm build`). Do not ref
 
 - **C1 — vetted 2026-11-01, 1 round, PASS with no BLOCKING findings.** The three findings that could have shipped a live bug were traced rather than accepted: the **one-Set invariant** (exactly one `useRef<Set<string>>` in `src/` today; every `.has`/`.add`/`.delete` in `send` and `flushHead` served by the single instance the component declares and passes down; every post-claim `return` inside the `try` so the `finally` releases — no leak path, and the locked-composer fork's returns are all claim-free because the fork sits before the claim); **`send()`'s order** (12 steps reproduced verbatim, including `/compact` inside the `try` but before the `!isLive` auto-resume); and **`flushRef` across the split** (the ref stays a component declaration, the flusher assigns `.current` at render phase — the house precedent is `attachmentsRef.current = attachments` — and `onIdle: () => flushRef.current()` reads at call time, so no stale window exists). Barrel arithmetic re-derived independently at 39 mockers / 38 spreaders → 41 / 40 after two new `importActual`-spreading mockers. Non-blocking: two line-range tails in §4's table overstate by ~14 lines (symbol anchoring makes it harmless), and §5's "two placements that stay" is accurate but un-itemised.
 - **Ceiling, recorded rather than argued away:** C1 is 9 steps / 7 owned files / ~480 source + ~850 test lines — at the ceiling, deliberately merged (the two hooks share the Set and the flusher consumes `sendText`). The vet judged the safer split **layer-wise** (hook code + surface pins, then component rewire + 29-test move + barrel pin) rather than at the hook-file boundary. Trigger to split: if the implementer compacts mid-task, do NOT re-run the same oversized dispatch — split layer-wise and re-dispatch two halves.
+
+### Wave 3 — implemented and gated 2026-11-01 (width 1, **unisolated in the primary tree**, per the recorded decision)
+
+Gate on the integrated tree, measured by the orchestrator at `bab6d68a`: `pnpm test` → **163 files, 3356 passed |
+1 skipped**, exit 0. `pnpm build` → exit 0.
+
+**The first full-suite run was RED and the RED was correct to chase.** One failure:
+`MessageBubble.codeblock.test.tsx`'s `renders a \`python\` fence genuinely highlighted` — shiki's async
+unhighlighted fallback, one of the two flakes AGENTS.md records for this box. Three independent facts settled it
+before any code was touched: the file is **not in wave 3's diff** (`git diff --name-only 0aa99ffb..HEAD` has zero
+`MessageBubble` hits); the file **passes in isolation** (25/25); and the arithmetic proved nothing was lost —
+3355 passed + 1 failed + 1 skipped = **3357 total**, exactly the expected 3356 | 1. Re-ran per the repo rule
+("re-run before investigating, do not loosen the assertion"); green. A second recorded flake,
+`Reasoning.test.tsx`'s `is O(last line)`, did not fire.
+
+- **C1 `done` `bab6d68a`** — `hooks/useChatPromptDispatch.ts` (595) + `hooks/usePromptQueueFlusher.ts` (205) and
+  their `.test.tsx` files (17 + 14 tests). `ChatStream.tsx` **1206 → 704**; `ChatStream.test.tsx` 7140 → 6286.
+  All three live-bug traps re-verified by the orchestrator on the tree, not taken from the child's report:
+  **one Set** (`grep -rn "useRef<Set<string>>"` across the component + both hooks → exactly one hit, the
+  component's); **`send()`'s order** preserved with the claim at the `has`/`add` pair immediately before the
+  `try`, the locked fork before it, and `/compact` inside the `try` before the `!isLive` resume; **`flushRef`**
+  declared in the component and assigned by the flusher, `onIdle: () => flushRef.current()` still in the
+  component. `heldForSendRef` is re-owned by neither file (its one hit in the dispatch hook is a comment).
+
+Four deviations, all compiler-arbitrated and accepted: `import * as chatAttachments` and `within` left
+`ChatStream.test.tsx` (their only consumers were inside the moved Flush group — the plan predicted the spy would
+stay, and was wrong); the five store-action selector locals left the component (each hook now pulls its own);
+`useRef` dropped from the dispatch hook's react import (the Set is an argument).
 
 ### Plan vet rounds (Wave 1)
 
