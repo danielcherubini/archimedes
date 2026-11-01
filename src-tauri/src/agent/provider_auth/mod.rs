@@ -8,6 +8,7 @@
 //! Wiring `resolve_bearer` into `resolve` is T2/T4's seam; this module owns
 //! the resolution, the store and the refresh lifecycle.
 
+pub mod budget;
 pub mod cli_sso;
 pub mod gcloud;
 pub mod headers;
@@ -17,6 +18,11 @@ pub mod oidc;
 pub mod refresh;
 pub mod store;
 
+pub use budget::{
+    classify_status, poll_all, poll_key_info, poll_team_info, poll_user_info, run_budget_tick,
+    should_probe, BudgetEndpoint, BudgetFacts, BudgetPoller, DenialMemory, KeyBudget, PollStatus,
+    TeamBudget, UserBudget, BUDGET_POLL_INTERVAL_MILLIS,
+};
 pub use gcloud::{adc_file_path, describe_error, parse_adc, token as gcloud_token, AdcCredential};
 pub use headers::{expand_map, validate_base_url};
 pub use key_helper::run as run_key_helper;

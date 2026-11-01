@@ -11,6 +11,7 @@ use serde_json::Value;
 use tauri::State;
 
 use crate::agent::harness::{tool_specs, Model};
+use crate::agent::provider_auth::{budget, BudgetPoller};
 use crate::agent::{SessionManager, SettingsError};
 use crate::config::{load_settings, write_settings, KnownProvider, Settings, KNOWN_PROVIDERS};
 
@@ -496,11 +497,233 @@ fn device_step_from_outcome(
     }
 }
 
+// ── the spend/budget read (issue #132, T7) ─────────────────────────────────
+//
+// The DTO + command T8's Settings section consumes. The POLLING lives in
+// `agent::provider_auth::budget` (the refresher loop's add-on owns the cadence
+// and the denial memory); this module only reshapes the ledger into the wire and
+// offers the one-hop on-demand refresh. The bearer is T1's resolver, reached
+// through `run_budget_tick` — this command re-resolves NO credential itself
+// (interface §4).
+
+/// ONE budget figure row the Settings page can render (or hide). Wire-out only
+/// (the `ModelDto` pattern: camelCase, `Serialize`-only — no `Deserialize`).
+///
+/// `entitled` is the load-bearing UI discriminator: `true` means the hop was
+/// attempted and READ BACK data. A hop the key may not read is omitted from the
+/// wire entirely rather than sent as an `entitled: false` row — "not offered" is
+/// the ABSENCE of a row, which is the frontend's existing empty-state pattern
+/// and can never be mistaken for a failure the user must react to.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderBudgetDto {
+    /// Which endpoint this row describes: `"key"` | `"user"` | `"team"`.
+    pub level: String,
+    /// The request was attempted and read back data (the entitlement signal).
+    pub entitled: bool,
+    /// The row's label: the user id or the team alias (`None` for the key row,
+    /// whose alias the proxy does not name here).
+    pub label: Option<String>,
+    pub spend: Option<f64>,
+    pub max_budget: Option<f64>,
+    /// `maxBudget - spend` — only when BOTH are known and the budget is
+    /// positive (an unlimited key has no remaining to show).
+    pub remaining: Option<f64>,
+    /// The ISO8601 budget-reset instant as the proxy reported it.
+    pub budget_reset_at: Option<String>,
+}
+
+/// One provider's budget rows.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderBudgetDtoResponse {
+    pub provider_id: String,
+    pub rows: Vec<ProviderBudgetDto>,
+}
+
+/// The facts → wire mapping. A `None` fact (denied, rate-limited, unreachable,
+/// or never polled) contributes NO row; a team list contributes one row each.
+impl From<&crate::agent::provider_auth::budget::BudgetFacts> for Vec<ProviderBudgetDto> {
+    fn from(facts: &crate::agent::provider_auth::budget::BudgetFacts) -> Self {
+        use crate::agent::provider_auth::budget::BudgetFacts as Facts;
+        let mut rows: Vec<ProviderBudgetDto> = Vec::new();
+        let Facts { key, user, teams } = facts;
+        if let Some(key) = key {
+            rows.push(ProviderBudgetDto {
+                level: crate::agent::provider_auth::budget::BudgetEndpoint::KeyInfo
+                    .level()
+                    .to_string(),
+                entitled: true,
+                label: None,
+                spend: key.spend,
+                max_budget: key.max_budget,
+                remaining: key.remaining,
+                budget_reset_at: key.budget_reset_at.clone(),
+            });
+        }
+        if let Some(user) = user {
+            rows.push(ProviderBudgetDto {
+                level: crate::agent::provider_auth::budget::BudgetEndpoint::UserInfo
+                    .level()
+                    .to_string(),
+                entitled: true,
+                label: user.user_id.clone(),
+                spend: user.spend,
+                max_budget: user.max_budget,
+                remaining: user.remaining,
+                budget_reset_at: user.budget_reset_at.clone(),
+            });
+        }
+        for team in teams {
+            rows.push(ProviderBudgetDto {
+                level: crate::agent::provider_auth::budget::BudgetEndpoint::TeamInfo
+                    .level()
+                    .to_string(),
+                entitled: true,
+                label: team.team_alias.clone().or_else(|| team.team_id.clone()),
+                spend: team.spend,
+                max_budget: team.max_budget,
+                remaining: team.remaining,
+                budget_reset_at: team.budget_reset_at.clone(),
+            });
+        }
+        rows
+    }
+}
+
+/// The per-provider spend/budget rows (T8's read; the Settings-page MOUNT fetch,
+/// not an App-boot fetch).
+///
+/// `force_refresh = Some(provider_id)` runs ONE on-demand poll of that provider
+/// first (the row's refresh affordance); `None` serves the poller's latest
+/// facts, which the refresher loop re-arms every
+/// [`crate::agent::provider_auth::budget::BUDGET_POLL_INTERVAL_MILLIS`].
+///
+/// THE degrade contract (interface §1): this command NEVER errors because an
+/// endpoint was unentitled — that row is simply absent (and the denial memory
+/// keeps the hop quiet). A poller that is not managed at all (a test app built
+/// through the `setup_dirs*` test seams, which start no loop) answers
+/// `Ok(vec![])`: "nothing offered", never an error the UI would have to explain.
+/// `force_refresh` on a provider the poller does not know is likewise a no-op,
+/// not an error.
+///
+/// STATELESS apart from the ledger handle: no `tauri::State<Arc<SessionManager>>`
+/// (the `list_tools` precedent — the command needs no session state, only the
+/// managed ledger, which it reads through `AppHandle::try_state` BECAUSE that is
+/// what makes the absent-ledger degrade expressible: a `State<_>` parameter for
+/// state a test app never manages would fail the invoke instead of answering
+/// `Ok(vec![])`.
+#[tauri::command]
+pub async fn get_provider_budget(
+    app: tauri::AppHandle,
+    force_refresh: Option<String>,
+) -> Result<Vec<ProviderBudgetDtoResponse>, SettingsError> {
+    use tauri::Manager as _;
+    let poller = match app.try_state::<Arc<std::sync::Mutex<BudgetPoller>>>() {
+        Some(managed) => managed.inner().clone(),
+        // No ledger managed ⇒ no loop ⇒ no facts. The empty answer IS the
+        // degrade (a Settings section that renders nothing beats an error).
+        None => return Ok(Vec::new()),
+    };
+
+    if let Some(provider_id) = force_refresh.as_deref() {
+        // ONE bounded client for the on-demand hop (the discovery ladder's
+        // shape). `execute_helpers = false`: an on-demand budget read is reached
+        // from the Settings page, and interface §4's seeding gate says a read
+        // must not spawn a `!command` key helper — a helper-keyed row simply
+        // reports no budget until the background loop (which passes `true`)
+        // fills it in.
+        let client = reqwest::Client::new();
+        budget::run_budget_tick(&poller, &client, Some(provider_id), false).await;
+    }
+
+    // The rows come from the ledger snapshot taken under a SHORT lock (no
+    // `await` inside it — the loop writes the same mutex).
+    let provider_ids: Vec<String> = match poller.lock() {
+        Ok(guard) => guard.provider_ids(),
+        Err(poisoned) => poisoned.into_inner().provider_ids(),
+    };
+    let mut out = Vec::with_capacity(provider_ids.len());
+    for provider_id in provider_ids {
+        let rows: Vec<ProviderBudgetDto> = match poller.lock() {
+            Ok(guard) => guard.facts(&provider_id).map(Vec::from).unwrap_or_default(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .facts(&provider_id)
+                .map(Vec::from)
+                .unwrap_or_default(),
+        };
+        out.push(ProviderBudgetDtoResponse { provider_id, rows });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    // ── the budget DTO wire shape (issue #132) ──────────────────────────────
+
+    /// The facts → wire mapping, pinned as the CONTRACT T8 renders against:
+    /// camelCase keys, one row per entitled hop, and an unentitled hop ABSENT
+    /// (never an `entitled: false` row a UI would render as a failure).
+    #[test]
+    fn provider_budget_rows_are_camelcase_and_only_cover_entitled_hops() {
+        use crate::agent::provider_auth::budget::{BudgetFacts, KeyBudget, TeamBudget};
+
+        let facts = BudgetFacts {
+            key: Some(KeyBudget {
+                spend: Some(2.5),
+                max_budget: Some(10.0),
+                remaining: Some(7.5),
+                budget_reset_at: Some("2026-01-01T00:00:00Z".into()),
+            }),
+            // The user hop was DENIED ⇒ `None` ⇒ no row at all.
+            user: None,
+            teams: vec![TeamBudget {
+                team_id: Some("team-a".into()),
+                team_alias: Some("Research".into()),
+                spend: Some(100.0),
+                max_budget: Some(500.0),
+                remaining: Some(400.0),
+                budget_reset_at: None,
+            }],
+        };
+        let rows: Vec<ProviderBudgetDto> = Vec::from(&facts);
+        let response = ProviderBudgetDtoResponse {
+            provider_id: "gw".into(),
+            rows,
+        };
+        let json = serde_json::to_value(&response).expect("serializes");
+
+        assert_eq!(json["providerId"], "gw", "camelCase on the envelope");
+        assert_eq!(
+            json["rows"].as_array().expect("rows").len(),
+            2,
+            "the denied user hop contributes NO row: {json}"
+        );
+        let key = &json["rows"][0];
+        assert_eq!(key["level"], "key");
+        assert_eq!(key["entitled"], true, "a read-back hop IS entitled");
+        assert_eq!(key["maxBudget"], 10.0);
+        assert_eq!(key["budgetResetAt"], "2026-01-01T00:00:00Z");
+        assert_eq!(key["remaining"], 7.5);
+        assert_eq!(key["label"], serde_json::Value::Null, "no invented label");
+        let team = &json["rows"][1];
+        assert_eq!(team["level"], "team");
+        assert_eq!(
+            team["label"], "Research",
+            "a team row is labelled by its alias (the id is the fallback)"
+        );
+        assert_eq!(team["budgetResetAt"], serde_json::Value::Null);
+
+        // The empty ledger: no facts at all ⇒ an empty row set (the UI's
+        // not-offered state), never an error and never a placeholder row.
+        let empty: Vec<ProviderBudgetDto> = Vec::from(&BudgetFacts::default());
+        assert!(empty.is_empty(), "nothing read ⇒ nothing rendered");
+    }
 
     // ── the interactive-login wire DTOs (issue #126) ───────────────────────
 

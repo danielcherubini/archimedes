@@ -23,6 +23,7 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::budget::{self, BudgetPoller};
 use super::litellm_oauth;
 use super::oidc;
 use super::store::{self, ProviderAuthStore, ProviderCredential};
@@ -321,6 +322,16 @@ pub struct SupervisorRefresherDeps<R: tauri::Runtime> {
     /// T1's push goes through `session_manager`, so this field is deliberately
     /// unread on the T1 path — see [`production_refresher_factory`].
     pub app_handle: tauri::AppHandle<R>,
+    /// T7's budget poller (issue #132): the SHARED ledger the loop's add-on
+    /// populates and the `get_provider_budget` command reads — the same
+    /// `Arc<Mutex<BudgetPoller>>` the app manages, so there is ONE denial
+    /// scoreboard and ONE facts view, never two that can disagree.
+    ///
+    /// `None` (the test-facing shape) means NO budget pass at all: the loop's
+    /// add-on is skipped entirely and the sleep math is exactly T1's, so a test
+    /// that does not build a poller inherits neither the polling nor a shortened
+    /// wake. This is an ADD-ON by data, not a rewrite of T1's loop.
+    pub budget_poller: Option<Arc<std::sync::Mutex<budget::BudgetPoller>>>,
 }
 
 /// The refresher's handle, kept REACHABLE so a test (or the app's exit path)
@@ -358,6 +369,7 @@ impl SupervisorRefresher {
             handle,
             deps.auth_file_path.clone(),
             deps.session_manager.clone(),
+            deps.budget_poller.clone(),
         )
     }
 
@@ -420,6 +432,7 @@ pub fn production_refresher_factory<R: tauri::Runtime>(
         handle,
         deps.auth_file_path.clone(),
         deps.session_manager.clone(),
+        deps.budget_poller.clone(),
     )
 }
 
@@ -441,12 +454,23 @@ fn spawn_loop(
     auth_file: PathBuf,
     session_manager: Arc<SessionManager>,
 ) -> Option<SupervisorRefresher> {
+    spawn_loop_with(auth_file, session_manager, None)
+}
+
+/// The test-facing spawn WITH the budget poller (T7's loop-math tests drive the
+/// SAME loop T1 shipped — the poller is a parameter, never a second loop).
+#[cfg(test)]
+fn spawn_loop_with(
+    auth_file: PathBuf,
+    session_manager: Arc<SessionManager>,
+    budget_poller: Option<Arc<std::sync::Mutex<BudgetPoller>>>,
+) -> Option<SupervisorRefresher> {
     let handle = tokio::runtime::Handle::try_current()
         .map_err(|_| {
             debuglog::log("provider-refresh: no tokio runtime; skipping");
         })
         .ok()?;
-    spawn_loop_on(handle, auth_file, session_manager)
+    spawn_loop_on(handle, auth_file, session_manager, budget_poller)
 }
 
 /// Spawn the loop on a given runtime handle — the seam both the production
@@ -456,9 +480,15 @@ fn spawn_loop_on(
     handle: tokio::runtime::Handle,
     auth_file: PathBuf,
     session_manager: Arc<SessionManager>,
+    budget_poller: Option<Arc<std::sync::Mutex<BudgetPoller>>>,
 ) -> Option<SupervisorRefresher> {
     let cancel = CancellationToken::new();
-    let task = handle.spawn(run_loop(auth_file, session_manager, cancel.clone()));
+    let task = handle.spawn(run_loop(
+        auth_file,
+        session_manager,
+        budget_poller,
+        cancel.clone(),
+    ));
     Some(SupervisorRefresher {
         cancel: Some(cancel),
         handle: Some(task),
@@ -475,6 +505,7 @@ fn spawn_loop_on(
 async fn run_loop(
     auth_file: PathBuf,
     session_manager: Arc<SessionManager>,
+    budget_poller: Option<Arc<std::sync::Mutex<BudgetPoller>>>,
     cancel: CancellationToken,
 ) {
     let client = reqwest::Client::new();
@@ -484,7 +515,12 @@ async fn run_loop(
         }
         let now = store::now_epoch_millis();
         let snapshot = store::load(&auth_file);
-        let sleep = next_sleep_millis(&snapshot, now);
+        // T7's cadence rides THIS sleep (no second timer): the wake target is
+        // the earlier of T1's credential-lead target and the budget poller's
+        // next arm. A `None` poller — or one with nothing to poll — yields
+        // T1's number untouched, so the loop's shape and its idle cost are
+        // byte-identical to wave 1's.
+        let sleep = next_sleep_millis_with_budget(&snapshot, now, budget_poller.as_deref());
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(sleep)) => {}
             _ = cancel.cancelled() => break,
@@ -575,6 +611,53 @@ async fn run_loop(
                  session(s) updated)"
             ));
         }
+
+        // ── T7's add-on: the budget tick, INSIDE this loop, behind this cancel ──
+        //
+        // The loop-shape law (budget.rs's module doc): the budget work is a
+        // BODY of THIS loop, never a second `tokio::spawn`. `run_budget_tick`
+        // does its own interval gating (the denial re-arm) and returns
+        // immediately when the interval has not elapsed, so a wake that was
+        // only about a credential costs nothing here.
+        //
+        // `execute_helpers = true`: this is not a seed (the interface §4 gate
+        // belongs to the boot-time command path), and a row whose bearer comes
+        // from a `!command` helper would otherwise never report a budget. The
+        // resolver is T1's — this task re-derives no credential.
+        if let Some(poller) = &budget_poller {
+            if cancel.is_cancelled() {
+                return;
+            }
+            budget::run_budget_tick(poller, &client, None, true).await;
+        }
+    }
+}
+
+/// The loop's wake target WITH the budget cadence folded in (pure, so the
+/// cadence is testable without a clock): T1's credential-lead sleep, shortened
+/// to the budget poller's next arm when that is sooner, clamped into
+/// [`MIN_SLEEP_MILLIS`]..=[`MAX_SLEEP_MILLIS`] so a fast injectable interval can
+/// never turn the loop into a spin.
+///
+/// The two `None` cases are the load-bearing ones: no poller at all, and a
+/// poller with NO providers to poll, both return T1's sleep unchanged (an idle
+/// poller must not buy a wake every 15 s for nothing).
+fn next_sleep_millis_with_budget(
+    store: &ProviderAuthStore,
+    now: i64,
+    poller: Option<&std::sync::Mutex<BudgetPoller>>,
+) -> u64 {
+    let credential_sleep = next_sleep_millis(store, now);
+    // The lock is taken and released HERE (a sync fn, no `await` anywhere near
+    // it) — the loop never holds a guard across an await.
+    let budget_due = poller
+        .and_then(|p| p.lock().ok())
+        .and_then(|guard| guard.millis_until_next_arm(now));
+    match budget_due {
+        Some(due) => due
+            .clamp(MIN_SLEEP_MILLIS, MAX_SLEEP_MILLIS)
+            .min(credential_sleep),
+        None => credential_sleep,
     }
 }
 
@@ -721,6 +804,281 @@ mod tests {
         // An entry 2 minutes out → also inside the lead → the floor.
         let store = store_with(&[("a", Some(now + 120_000))]);
         assert_eq!(next_sleep_millis(&store, now), MIN_SLEEP_MILLIS);
+    }
+
+    // ── T7's budget-poller cadence (issue #132) ─────────────────────────────
+    //
+    // These drive the SAME loop T1 shipped: the budget work is a body of it, so
+    // the cadence tests are sleep-MATH tests plus one live-suppression test. No
+    // test here starts a second loop, and every spawned handle is `stop()`ed
+    // (ADR 0078's census rule: an un-joined loop is how a suite leaks dirs).
+
+    /// A `settings.json` carrying ONE litellm row (the poller's only input).
+    fn write_litellm_settings(config_dir: &std::path::Path, base_url: &str) {
+        std::fs::write(
+            config_dir.join("settings.json"),
+            serde_json::json!({
+                "providers": [{
+                    "id": "gw",
+                    "name": "GW",
+                    "baseUrl": base_url,
+                    "apiKey": "sk-live",
+                    "api": "litellm"
+                }]
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .expect("the settings file is written");
+    }
+
+    /// A poller over a scratch settings dir (no real dirs involved).
+    fn poller_in(dir: &std::path::Path, interval_millis: u64) -> BudgetPoller {
+        BudgetPoller::new(
+            dir.to_path_buf(),
+            dir.join("provider-auth.json"),
+            interval_millis,
+        )
+    }
+
+    #[test]
+    fn poller_re_arms_denial_after_the_poll_interval() {
+        // The invalidation rule, in one test: a denial is good until the poll
+        // interval ELAPSES (then the scoreboard is forgotten and the endpoint is
+        // probed once more), and an arm inside the interval does not poll at all.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        write_litellm_settings(dir.path(), "https://gw.example/v1");
+        let mut poller = poller_in(dir.path(), 15_000);
+        let now = store::now_epoch_millis();
+
+        // The FIRST arm is always due (`last_arm_millis` starts at 0).
+        assert!(poller.arm_tick(now), "the first tick polls");
+        assert_eq!(
+            poller.provider_ids(),
+            vec!["gw".to_string()],
+            "the row was read"
+        );
+        poller
+            .denial_memory_mut()
+            .deny("https://gw.example/v1", budget::BudgetEndpoint::UserInfo);
+
+        // Inside the interval: NOT due, so no request and no re-probe.
+        assert!(
+            !poller.arm_tick(now + 14_999),
+            "a wake inside the interval skips the whole budget pass"
+        );
+        assert!(
+            poller
+                .denial_memory()
+                .is_denied("https://gw.example/v1", budget::BudgetEndpoint::UserInfo),
+            "a denial survives until the interval elapses (that is the suppression)"
+        );
+        assert_eq!(
+            poller.millis_until_next_arm(now + 14_999),
+            Some(1),
+            "the loop is told exactly how long is left"
+        );
+
+        // The interval elapses: due again AND the scoreboard is re-armed, so a
+        // forbidden endpoint costs ONE request per interval and a proxy that
+        // granted the entitlement mid-interval is heard again.
+        assert!(poller.arm_tick(now + 15_000), "the interval elapsed ⇒ poll");
+        assert!(
+            poller.denial_memory().is_empty(),
+            "the re-arm forgets every denial"
+        );
+        assert_eq!(poller.millis_until_next_arm(now + 15_000), Some(15_000));
+    }
+
+    #[test]
+    fn poller_sleeps_max_when_no_providers() {
+        // The idle-cost rule: the budget cadence may SHORTEN T1's wake, but a
+        // poller with NOTHING to poll must not buy a wake every interval.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let now = store::now_epoch_millis();
+        let empty_store = ProviderAuthStore::default();
+
+        // (a) no poller at all ⇒ exactly T1's number.
+        assert_eq!(
+            next_sleep_millis_with_budget(&empty_store, now, None),
+            MAX_SLEEP_MILLIS,
+            "no poller ⇒ T1's sleep untouched"
+        );
+        // (b) a poller with no provider rows ⇒ the same (the load-bearing case).
+        let idle = std::sync::Arc::new(std::sync::Mutex::new(poller_in(dir.path(), 15_000)));
+        assert_eq!(
+            next_sleep_millis_with_budget(&empty_store, now, Some(&idle)),
+            MAX_SLEEP_MILLIS,
+            "an idle poller never shortens the sleep"
+        );
+        // (c) WITH a provider, the budget arm shortens it — and a provider whose
+        // arm is 15 s out lands at 15 s, not at T1's 60 s cap.
+        write_litellm_settings(dir.path(), "https://gw.example/v1");
+        let busy = std::sync::Arc::new(std::sync::Mutex::new(poller_in(dir.path(), 15_000)));
+        {
+            // Arm it once so the next arm is a full interval out.
+            busy.lock().unwrap().arm_tick(now);
+        }
+        assert_eq!(
+            next_sleep_millis_with_budget(&empty_store, now, Some(&busy)),
+            15_000,
+            "the budget cadence drives the wake when it is the sooner target"
+        );
+        // (d) clamped at the floor: an injectable 1 ms interval must not turn the
+        // loop into a busy spin.
+        let spin = std::sync::Arc::new(std::sync::Mutex::new(poller_in(dir.path(), 1)));
+        {
+            spin.lock().unwrap().arm_tick(now);
+        }
+        assert_eq!(
+            next_sleep_millis_with_budget(&empty_store, now, Some(&spin)),
+            MIN_SLEEP_MILLIS,
+            "the floor bounds a fast injectable interval (no spin)"
+        );
+        // (e) and it never LENGTHENS T1's wake: a credential due in 2 s still
+        // wins over a budget arm 15 s out.
+        let due_soon = store_with(&[("gw", Some(now + 2_000 + store::REFRESH_LEAD_MILLIS))]);
+        assert_eq!(
+            next_sleep_millis_with_budget(&due_soon, now, Some(&busy)),
+            2_000,
+            "the credential lead (2 s out) still wins over a budget arm 15 s out — \
+             the add-on can only SHORTEN, never lengthen, T1's target"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn poller_select_cancel_breaks_the_wake() {
+        // T1's stoppability guarantee, re-pinned WITH the budget add-on attached
+        // (the whole point of riding the existing loop: one cancel governs both
+        // bodies). `stop()` JOINS, so a loop that slept through the cancel — or
+        // that blocked in a budget pass the cancel cannot reach — times out
+        // here instead of passing.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let auth_file = dir.path().join("provider-auth.json");
+        let session_manager = Arc::new(SessionManager::new(dir.path().to_path_buf()));
+        // An EMPTY settings dir: the budget pass has nothing to poll, so this
+        // test stays hermetic (no HTTP) while still exercising the add-on's arm
+        // on every wake.
+        let poller = std::sync::Arc::new(std::sync::Mutex::new(poller_in(dir.path(), 15_000)));
+        let refresher = spawn_loop_with(auth_file, session_manager, Some(poller.clone()))
+            .expect("a runtime holds the loop");
+        let exited = tokio::time::timeout(Duration::from_secs(5), refresher.stop()).await;
+        assert!(
+            exited.is_ok(),
+            "the loop broke on the cancel with the budget add-on attached"
+        );
+        assert!(
+            poller.lock().unwrap().facts("gw").is_none(),
+            "a poller with no rows stores no facts"
+        );
+    }
+
+    #[test]
+    fn poller_backoff_is_5s_doubling_capped_and_the_budget_path_adds_none() {
+        // ONE backoff in this loop (T1's): the budget add-on must NOT introduce
+        // a second one, or a 429-storm and a token-refresh outage would fight
+        // over the wake time. Pinned by the values (the T1 curve, unchanged) and
+        // by the budget side's contract: a transient verdict enters NO memory,
+        // so the retry cadence for a rate-limited endpoint is the POLL INTERVAL
+        // (`millis_until_next_arm`) and never a doubling backoff.
+        assert_eq!(backoff_millis(0), 5_000);
+        assert_eq!(backoff_millis(3), 40_000);
+        assert_eq!(backoff_millis(u32::MAX), 80_000, "the cap is flat");
+        // The budget path's counterpart: 429 is transient (no memory), so the
+        // loop's next arm is the plain interval regardless of how many 429s ran.
+        assert_eq!(
+            budget::classify_status(429),
+            budget::PollStatus::Transient,
+            "the pin: a 429 is not a denial"
+        );
+        let dir = tempfile::tempdir().expect("a temp dir");
+        write_litellm_settings(dir.path(), "https://gw.example/v1");
+        let mut poller = poller_in(dir.path(), 15_000);
+        let now = store::now_epoch_millis();
+        assert!(poller.arm_tick(now));
+        for _ in 0..5 {
+            // Five consecutive rate-limited ticks change NOTHING about the cadence.
+            assert_eq!(poller.millis_until_next_arm(now + 5_000), Some(10_000));
+        }
+        assert!(
+            poller.denial_memory().is_empty(),
+            "a rate-limited endpoint is never silenced"
+        );
+    }
+
+    #[tokio::test]
+    async fn poller_ignores_a_denied_endpoint_without_logging() {
+        // The suppression's OTHER half (the integration file's named test counts
+        // REQUESTS; the log line is only observable where the sink can be wired).
+        // The `debuglog::init` + scratch-dir + disable-on-exit shape is
+        // `commands::sessions.rs`'s precedent, verbatim.
+        struct DisableDebuglogOnExit;
+        impl Drop for DisableDebuglogOnExit {
+            fn drop(&mut self) {
+                debuglog::init(false, None);
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let _disable = DisableDebuglogOnExit;
+        debuglog::init(true, Some(dir.path().to_path_buf()));
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/key/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"spend": 1.0})),
+            )
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/v2/user/info"))
+            .respond_with(wiremock::ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/user/info"))
+            .respond_with(wiremock::ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        write_litellm_settings(dir.path(), &server.uri());
+        let poller = std::sync::Arc::new(std::sync::Mutex::new(poller_in(dir.path(), 15_000)));
+        let client = reqwest::Client::new();
+
+        // Tick 1: the forbidden hop is probed, and the denial is narrated ONCE.
+        budget::run_budget_tick(&poller, &client, None, true).await;
+        let after_first = std::fs::read_to_string(dir.path().join("supervisor.log"))
+            .expect("an enabled debug log writes the denial");
+        assert!(
+            after_first.contains("/v2/user/info"),
+            "the hop that got denied IS named once: {after_first}"
+        );
+        let denial_lines = after_first.lines().filter(|l| l.contains("denied")).count();
+        assert_eq!(denial_lines, 1, "exactly one denial line: {after_first}");
+
+        // Tick 2 (same interval, so the loop's own gating applies): the denied
+        // hop is skipped BEFORE the request is built ⇒ no request AND no line.
+        budget::run_budget_tick(&poller, &client, None, true).await;
+        let after_second = std::fs::read_to_string(dir.path().join("supervisor.log"))
+            .expect("the log still exists");
+        assert_eq!(
+            after_second
+                .lines()
+                .filter(|l| l.contains("denied"))
+                .count(),
+            1,
+            "a suppressed hop logs NOTHING (no repeated denial line): {after_second}"
+        );
+        let requests = server.received_requests().await.expect("recorded requests");
+        let hits = |p: &str| requests.iter().filter(|r| r.url.path() == p).count();
+        assert_eq!(hits("/key/info"), 1, "the tick was NOT skipped wholesale");
+        assert_eq!(
+            hits("/v2/user/info"),
+            1,
+            "the denied hop was not re-requested (and so could not log)"
+        );
     }
 
     #[tokio::test(start_paused = true)]

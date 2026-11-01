@@ -232,6 +232,19 @@ fn init_dir_deps<R: tauri::Runtime>(
     // test-facing shape (no loop was started).
     let refresher_slot: Arc<std::sync::Mutex<Option<provider_auth::SupervisorRefresher>>> =
         Arc::new(std::sync::Mutex::new(None));
+    // T7's budget ledger (issue #132). Constructed ONLY on the production
+    // branch: a test-facing entry point (`setup_dirs` / `setup_dirs_with_factory`)
+    // manages NO poller at all, so `get_provider_budget` takes its documented
+    // degrade (`Ok(vec![])`) in a test app, and no test inherits budget work
+    // (the poller spawns nothing by itself — it is a passive ledger the refresher
+    // loop drives, and that loop is suppressed on every test path).
+    let budget_poller = std::sync::Arc::new(std::sync::Mutex::new(
+        provider_auth::budget::BudgetPoller::new(
+            config_dir.clone(),
+            provider_auth::store::auth_file_path(),
+            provider_auth::budget::BUDGET_POLL_INTERVAL_MILLIS,
+        ),
+    ));
     if let Some(factory) = refresher_factory {
         let deps = provider_auth::SupervisorRefresherDeps {
             // Ruling R3: the loop reads the SAME path production resolution uses
@@ -242,6 +255,12 @@ fn init_dir_deps<R: tauri::Runtime>(
             auth_file_path: provider_auth::store::auth_file_path(),
             session_manager: refresher_manager,
             app_handle: app.handle().clone(),
+            // T7's budget poller (issue #132): the SAME `Arc<Mutex<…>>` managed
+            // below (so the `get_provider_budget` command reads the facts this
+            // loop writes). The cadence is the default 15 s; the settings home
+            // and the DATA-dir store path are INJECTED into the poller, which
+            // never resolves either of them itself.
+            budget_poller: Some(budget_poller.clone()),
         };
         // The factory is SYNC and DECLINES (returns `None`) when it cannot get a
         // runtime to hold the loop, so a start failure here is a `None` in the
@@ -254,6 +273,11 @@ fn init_dir_deps<R: tauri::Runtime>(
         }
     }
     app.manage(refresher_slot);
+    // The ledger is managed under its OWN TypeId so the command can
+    // `try_state` it (and degrade to `Ok(vec![])` when it is absent).
+    if refresher_factory.is_some() {
+        app.manage(budget_poller);
+    }
     Ok(())
 }
 
@@ -518,6 +542,12 @@ pub fn run() {
             commands::history::session_recency,
             commands::history::reorder_sessions,
             commands::settings::get_settings,
+            // The spend/budget read (issue #132) — the Settings page's mount
+            // fetch. Platform-neutral Rust, `cfg`-blind like the rest of the
+            // list; joins `get_settings`/`save_settings` in the default
+            // window's IPC surface (no capability entry: `default.json` lists
+            // plugin permissions only and never enumerates `#[tauri::command]`s).
+            commands::settings::get_provider_budget,
             commands::settings::save_settings,
             commands::settings::list_models,
             commands::settings::list_tools,
