@@ -19,7 +19,7 @@ pub(crate) mod test_util;
 pub mod transport;
 pub mod types;
 
-pub use anthropic::{normalize_anthropic_base_url, AnthropicProvider};
+pub use anthropic::{normalize_anthropic_base_url, normalize_wire_base_url, AnthropicProvider};
 pub use openai::OpenAiCompatibleProvider;
 pub use responses::OpenAiResponsesProvider;
 pub use types::{
@@ -38,10 +38,22 @@ pub fn build_provider(m: &crate::agent::harness::catalog::Model) -> Box<dyn Prov
         .unwrap_or_default()
     {
         crate::agent::harness::WireApi::AnthropicMessages => Box::new(AnthropicProvider {
-            base_url: m.base_url.clone(),
+            // T3b (#131): the Messages wire wants the ROOT — the client appends
+            // its own `/v1/messages`, so a `{root}/v1` base (the Settings'
+            // convention, and what the LiteLLM discovery rows carry) would
+            // otherwise produce `{root}/v1/v1/messages`. The pass is idempotent
+            // (`n(n(u)) == n(u)`), so re-running it is a no-op.
+            base_url: normalize_wire_base_url(
+                &m.base_url,
+                crate::agent::harness::WireApi::AnthropicMessages,
+            ),
             api_key: m.api_key.clone(),
             custom_headers: None,
         }),
+        // Completions / Responses keep the configured base VERBATIM
+        // (byte-identical to today — see the note above
+        // `build_provider_with_headers` for why the append rule is not applied
+        // here, and `normalize_wire_base_url` for the rule itself).
         crate::agent::harness::WireApi::OpenAiResponses => Box::new(OpenAiResponsesProvider {
             base_url: m.base_url.clone(),
             api_key: m.api_key.clone(),
@@ -102,10 +114,20 @@ pub fn build_provider_with_headers(
         .unwrap_or_default()
     {
         crate::agent::harness::WireApi::AnthropicMessages => Box::new(AnthropicProvider {
-            base_url: m.base_url.clone(),
+            // T3b (#131): the SAME root-for-Messages pass as `build_provider`
+            // (the idempotent strip; the client re-appends `/v1/messages` at
+            // its own adapter boundary, so a `{root}/v1` row and a root row
+            // both land on `{root}/v1/messages`).
+            base_url: normalize_wire_base_url(
+                &m.base_url,
+                crate::agent::harness::WireApi::AnthropicMessages,
+            ),
             api_key: m.api_key.clone(),
             custom_headers: custom_headers.cloned(),
         }),
+        // Completions / Responses keep the configured base VERBATIM — see the
+        // note on `build_provider` (the append half of
+        // `normalize_wire_base_url` is deliberately NOT applied here).
         crate::agent::harness::WireApi::OpenAiResponses => Box::new(OpenAiResponsesProvider {
             base_url: m.base_url.clone(),
             api_key: m.api_key.clone(),
@@ -417,6 +439,161 @@ mod tests {
 
         // The loop-accept server never exits on its own — abort it (an
         // `await` would hang on the `accept()` loop).
+        server.abort();
+    }
+
+    // ── the per-wire base-URL pass (T3b / #131) ───────────────────────
+
+    /// A `Model` whose `api` carries a wire, for the recorded-path assertions.
+    async fn record_paths(base_url: &str, api: &str) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the listener binds");
+        let addr = listener.local_addr().expect("the listener has an address");
+        let (server, mut rx) = recorded_dispatch_server(listener).await;
+        let base = base_url.replace("{addr}", &addr.to_string());
+        let provider = build_provider(&model(&base, Some(api)));
+        let events: Vec<ProviderEvent> = provider
+            .complete(&test_request())
+            .await
+            .expect("the request sends")
+            .collect()
+            .await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ProviderEvent::Done(FinishReason::Stop))),
+            "the {api} stream completes: {events:?}"
+        );
+        let (path, _auth, _key) = rx.recv().await.expect("the server recorded the request");
+        (path, server)
+    }
+
+    /// The Messages rule at the `build_provider` call site: the base is
+    /// normalized to the ROOT, so the request lands on `POST /v1/messages` —
+    /// NOT `/messages` (a root-only base) and NOT `/v1/v1/messages` (the
+    /// double-prefix the un-normalized `{root}/v1` base produced before T3b).
+    #[tokio::test]
+    async fn build_provider_posts_messages_at_root_normalized_v1() {
+        // A ROOT base (no `/v1`): the pass leaves it, the client appends its
+        // own `/v1/messages`.
+        let (path, server) = record_paths("http://{addr}", "anthropic-messages").await;
+        assert!(
+            path.starts_with("post ") && path.contains(" /v1/messages"),
+            "a root base posts /v1/messages: got {path:?}"
+        );
+        server.abort();
+
+        // A `{root}/v1` base (the Settings' convention): the STRIP is the new
+        // behavior — without it the client's own `/v1` append doubles it.
+        let (path, server) = record_paths("http://{addr}/v1", "anthropic-messages").await;
+        assert!(
+            path.contains(" /v1/messages") && !path.contains("/v1/v1/"),
+            "a `/v1` base is stripped to the root, never double-prefixed: got {path:?}"
+        );
+        server.abort();
+    }
+
+    /// Completions / Responses keep the configured base VERBATIM (the
+    /// no-regression pin — every existing suite mounts the path its own base
+    /// produces, and a root base stays a root base).
+    #[tokio::test]
+    async fn build_provider_keeps_the_configured_base_for_completions_and_responses() {
+        // A root base → the client's own path, no appended `/v1` (byte-identical
+        // to the pre-T3b behavior the unowned suites pin).
+        let (path, server) = record_paths("http://{addr}", "openai-completions").await;
+        assert!(
+            path.contains(" /chat/completions") && !path.contains("/v1/chat"),
+            "a root base posts /chat/completions verbatim: got {path:?}"
+        );
+        server.abort();
+        let (path, server) = record_paths("http://{addr}", "openai-responses").await;
+        assert!(
+            path.contains(" /responses") && !path.contains("/v1/responses"),
+            "a root base posts /responses verbatim: got {path:?}"
+        );
+        server.abort();
+
+        // A `/v1` base → `/v1/…` (the configured shape, untouched).
+        let (path, server) = record_paths("http://{addr}/v1", "openai-completions").await;
+        assert!(
+            path.contains(" /v1/chat/completions"),
+            "a `/v1` base posts /v1/chat/completions: got {path:?}"
+        );
+        server.abort();
+        let (path, server) = record_paths("http://{addr}/v1", "openai-responses").await;
+        assert!(
+            path.contains(" /v1/responses"),
+            "a `/v1` base posts /v1/responses: got {path:?}"
+        );
+        server.abort();
+    }
+
+    /// The pass is idempotent THROUGH `build_provider`: feeding a base the
+    /// helper itself would produce records the SAME path as feeding the raw
+    /// base (the call-site half of the `n(n(u)) == n(u)` contract).
+    #[tokio::test]
+    async fn build_provider_base_pass_is_idempotent_on_v1_bases() {
+        // ONE server, two bases (so the recorded paths are literally comparable
+        // — the same authority in both).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the listener binds");
+        let addr = listener.local_addr().expect("the listener has an address");
+        let (server, mut rx) = recorded_dispatch_server(listener).await;
+
+        /// Send through `build_provider` and return the RECORDED request line
+        /// (one call site, so every recorded path is comparable).
+        async fn record(
+            addr: std::net::SocketAddr,
+            api: &str,
+            suffix: &str,
+            rx: &mut tokio::sync::mpsc::Receiver<(String, bool, bool)>,
+        ) -> String {
+            let base = format!("http://{addr}{suffix}");
+            let provider = build_provider(&model(&base, Some(api)));
+            let events: Vec<ProviderEvent> = provider
+                .complete(&test_request())
+                .await
+                .expect("the request sends")
+                .collect()
+                .await;
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, ProviderEvent::Done(FinishReason::Stop))),
+                "the {api} stream completes: {events:?}"
+            );
+            rx.recv().await.expect("the server recorded the request").0
+        }
+
+        // Messages: `{root}/v1` (what the helper strips FROM) and the stripped
+        // root (what it produces) record the IDENTICAL path.
+        let from_v1 = record(addr, "anthropic-messages", "/v1", &mut rx).await;
+        let from_root = record(addr, "anthropic-messages", "", &mut rx).await;
+        assert_eq!(
+            from_v1, from_root,
+            "the Messages pass is idempotent through build_provider \
+             (`{{root}}/v1` and the root both land on /v1/messages)"
+        );
+        assert!(
+            from_v1.contains(" /v1/messages"),
+            "and the shared path is /v1/messages: {from_v1:?}"
+        );
+
+        // Completions / Responses: the pass is the identity, so an already-
+        // `/v1` base records exactly the path its base names (no double-append).
+        let comp = record(addr, "openai-completions", "/v1", &mut rx).await;
+        assert!(
+            comp.contains(" /v1/chat/completions") && !comp.contains("/v1/v1/"),
+            "a `/v1` completions base is never double-appended: {comp:?}"
+        );
+        let resp = record(addr, "openai-responses", "/v1", &mut rx).await;
+        assert!(
+            resp.contains(" /v1/responses") && !resp.contains("/v1/v1/"),
+            "a `/v1` responses base is never double-appended: {resp:?}"
+        );
+
         server.abort();
     }
 }

@@ -475,9 +475,53 @@ impl EffectiveCatalog {
             // `base_url` / `api_key`; `context_window` falls back to
             // `DEFAULT_CONTEXT_WINDOW` (a user model has no static metadata);
             // the thinking fields map straight from the `DiscoveredMeta`
-            // (`None` → `vec![]` / `false`); the provider's `api` decides
-            // the wire (ADR 0024).
+            // (`None` → `vec![]` / `false`).
+            //
+            // The wire is DERIVED from the discovery payload for a `litellm`
+            // provider (T3b #131 — the first time `api` is derived rather than
+            // configured; ADR 0026's 2026-11-02 amendment). Any other
+            // provider writes the provider's `api` byte-identical to today, with
+            // NO derivation attempted and no overwrite possible.
+            //
+            // The derived value that LANDS is the one the discovery proved
+            // (`meta.api`, T3a's `derive_wire_for_route` latch: `mode ==
+            // "responses"` → Responses; a Claude-adapter route with the
+            // `/v1/messages` probe latch true → Messages). The `OpenAiCompletions`
+            // fallback is deliberately NOT written: it is WIRE-EQUIVALENT to the
+            // `litellm` mode (`build_provider`'s default arm — ADR 0026), while
+            // `litellm` additionally carries the DISCOVERY shape (`api` doubles
+            // as the `discover_models` selector, so overwriting it would
+            // silently downgrade that provider's later refreshes from
+            // `/model/info` to `/models`). The fallback therefore keeps the
+            // provider value — the byte-identical pre-T3b row.
+            //
+            // The R5 propagation rides the SAME seam: `supports_tools` / the two
+            // costs are the REDUCED discovery values when the discovery provided
+            // them, else today's literals (`unwrap_or(true)` / `unwrap_or(0.0)`)
+            // — so a non-LiteLLM provider's `Model` row is byte-identical to
+            // today (its `DiscoveredMeta` carries `None` for all four fields;
+            // pinned in `resolve_non_litellm_provider_byte_identical`).
+            //
+            // LIVE-SESSION BOUNDARY (T3b): a derived-wire change is NOT pushed
+            // to RUNNING sessions this task — the wire is bound to the provider
+            // instance at spawn (`build_provider` at `default_build_loop`;
+            // `refresh_live_models` copies only the window/thinking fields, and
+            // `AgentLoop::set_model` rebuilds only on a composed-key change). A
+            // mid-session user model switch re-resolves against the effective
+            // catalog and sends the WHOLE `Model`, and every NEW session carries
+            // the derived wire; widening the refresh gate is the recorded
+            // follow-up.
             for (id, meta) in &entry.models {
+                // (The derivation rule is documented above the loop.)
+                let derived = meta
+                    .api
+                    .filter(|wire| *wire != WireApi::OpenAiCompletions)
+                    .map(|wire| wire.as_str().to_string());
+                let api = if provider.api == "litellm" {
+                    derived.or(Some(provider.api.clone()))
+                } else {
+                    Some(provider.api.clone())
+                };
                 user_models.push(Model {
                     id: id.clone(),
                     provider: provider.id.clone(),
@@ -488,12 +532,12 @@ impl EffectiveCatalog {
                     // and never learns about helpers/OAuth).
                     api_key: effective_key.clone(),
                     context_window: meta.context_window.unwrap_or(DEFAULT_CONTEXT_WINDOW),
-                    cost_per_mtok_in: 0.0,
-                    cost_per_mtok_out: 0.0,
-                    supports_tools: true,
+                    cost_per_mtok_in: meta.cost_per_mtok_in.unwrap_or(0.0),
+                    cost_per_mtok_out: meta.cost_per_mtok_out.unwrap_or(0.0),
+                    supports_tools: meta.supports_tools.unwrap_or(true),
                     supports_thinking: meta.supports_thinking.unwrap_or(false),
                     thinking_levels: meta.thinking_levels.clone().unwrap_or_default(),
-                    api: Some(provider.api.clone()),
+                    api: api.clone(),
                 });
             }
         }
@@ -4786,6 +4830,180 @@ mod session_tests {
             user[0].thinking_levels,
             vec!["none".to_string(), "low".to_string()]
         );
+        server.abort();
+    }
+
+    // ── the per-model derived wire + the R5 propagation (T3b / #131) ────
+
+    /// The `litellm` resolve fixture: a raw server answering EVERY path with
+    /// one canned `LiteLLMModelInfoResponse` body (the ladder's rung 1 hits
+    /// `{base}/model/info`; a Claude-shaped payload also gets a 2xx on the
+    /// `/v1/messages` probe, which is what the Messages latch needs). Returns
+    /// the join handle so the caller aborts it, exactly like
+    /// `resolve_uses_the_litellm_provider_api` does.
+    async fn litellm_server(body: &str) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = crate::test_support::raw_json_server(listener, 200, body, None).await;
+        (addr, server)
+    }
+
+    /// The models one provider contributed to the effective catalog.
+    fn user_rows(effective: &ModelCatalog, provider: &str) -> Vec<Model> {
+        effective
+            .models
+            .iter()
+            .filter(|m| m.provider == provider)
+            .cloned()
+            .collect()
+    }
+
+    /// (T3b #131, acceptance 2) A `litellm` payload whose deployment carries
+    /// `mode: "responses"` derives `api: "openai-responses"` — the first time
+    /// `api` is DERIVED rather than the provider clone.
+    #[tokio::test]
+    async fn resolve_derives_responses_wire_from_litellm_mode() {
+        let dir = temp_config_dir();
+        let (addr, server) = litellm_server(
+            r#"{"data":[{"model_name":"r/1","model_info":{"max_input_tokens":8000,"mode":"responses"}}]}"#,
+        )
+        .await;
+        write_settings_provider_api(&dir, "llm", &format!("http://{addr}/v1"), "litellm");
+        let manager = SessionManager::new(dir.to_path_buf());
+        let effective = manager.effective_catalog(None, true).await;
+        let user = user_rows(&effective, "llm");
+        assert_eq!(user.len(), 1);
+        assert_eq!(
+            user[0].api.as_deref(),
+            Some("openai-responses"),
+            "a `mode: \"responses\"` route derives the Responses wire"
+        );
+        server.abort();
+    }
+
+    /// (T3b #131) A `litellm` payload routing through a Claude adapter
+    /// (`anthropic/…` — T3a's `route_hint`) with the one-time `/v1/messages`
+    /// probe answering 2xx derives `api: "anthropic-messages"`.
+    #[tokio::test]
+    async fn resolve_derives_anthropic_messages_wire_for_claude_route() {
+        let dir = temp_config_dir();
+        // The canned body answers BOTH `GET /model/info` (rung 1) and the
+        // `GET /v1/messages` liveness probe with a 200 — the probe's 2xx is
+        // what T3a's latch reads as "Messages available".
+        let (addr, server) = litellm_server(
+            r#"{"data":[{"model_name":"anthropic/claude-sonnet","model_info":{"max_input_tokens":200000}}]}"#,
+        )
+        .await;
+        write_settings_provider_api(&dir, "llm", &format!("http://{addr}/v1"), "litellm");
+        let manager = SessionManager::new(dir.to_path_buf());
+        let effective = manager.effective_catalog(None, true).await;
+        let user = user_rows(&effective, "llm");
+        assert_eq!(user.len(), 1);
+        assert_eq!(
+            user[0].api.as_deref(),
+            Some("anthropic-messages"),
+            "a Claude-adapter route with the messages probe passing derives the Messages wire"
+        );
+        server.abort();
+    }
+
+    /// (T3b #131, VF#2) A `litellm` payload with NO responses-mode and NO
+    /// messages evidence keeps the PROVIDER value `api: "litellm"` — the
+    /// byte-identical pre-T3b row. The completions fallback is wire-equivalent
+    /// to the `litellm` mode, and `litellm` additionally carries the discovery
+    /// shape (`api` selects `discover_models`' arm), so the derived
+    /// `openai-completions` deliberately does NOT overwrite it.
+    #[tokio::test]
+    async fn resolve_keeps_provider_api_when_no_wire_derived() {
+        let dir = temp_config_dir();
+        // A plain OpenAI-shaped LiteLLM route: no `mode`, no Claude adapter.
+        let (addr, server) = litellm_server(
+            r#"{"data":[{"model_name":"openai/gpt-4o","model_info":{"max_input_tokens":128000,"supports_function_calling":true}}]}"#,
+        )
+        .await;
+        write_settings_provider_api(&dir, "llm", &format!("http://{addr}/v1"), "litellm");
+        let manager = SessionManager::new(dir.to_path_buf());
+        let effective = manager.effective_catalog(None, true).await;
+        let user = user_rows(&effective, "llm");
+        assert_eq!(user.len(), 1);
+        assert_eq!(
+            user[0].api.as_deref(),
+            Some("litellm"),
+            "the fallback arm is byte-identical to today's `Some(provider.api.clone())`"
+        );
+        server.abort();
+    }
+
+    /// (T3b #131, R5 — the task's biggest risk, pinned as a TEST) A
+    /// NON-`litellm` provider's `Model` row is BIT-IDENTICAL to the pre-feature
+    /// literals: the provider `api` clone (no derivation attempted, no
+    /// overwrite possible) + `supports_tools: true` / `0.0` / `0.0` from the
+    /// `unwrap_or` defaults (a non-LiteLLM `DiscoveredMeta` carries `None` in
+    /// all four additive fields).
+    #[tokio::test]
+    async fn resolve_non_litellm_provider_byte_identical() {
+        let dir = temp_config_dir();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // The Anthropic discovery shape (`id` ONLY — no metadata at all).
+        let server =
+            crate::test_support::raw_json_server(listener, 200, r#"{"data":[{"id":"m/1"}]}"#, None)
+                .await;
+        write_settings_provider_api(
+            &dir,
+            "anthropic",
+            &format!("http://{addr}/v1"),
+            "anthropic-messages",
+        );
+        let manager = SessionManager::new(dir.to_path_buf());
+        let effective = manager.effective_catalog(None, true).await;
+        let user = user_rows(&effective, "anthropic");
+        assert_eq!(user.len(), 1);
+        // The provider clone (a `litellm` payload could have derived anything;
+        // this arm never derives).
+        assert_eq!(user[0].api.as_deref(), Some("anthropic-messages"));
+        // Today's hardcoded literals (session/mod.rs pre-T3b `:410-412`).
+        assert!(
+            user[0].supports_tools,
+            "`unwrap_or(true)` reproduces `true`"
+        );
+        assert_eq!(
+            user[0].cost_per_mtok_in, 0.0,
+            "`unwrap_or(0.0)` reproduces 0.0"
+        );
+        assert_eq!(
+            user[0].cost_per_mtok_out, 0.0,
+            "`unwrap_or(0.0)` reproduces 0.0"
+        );
+        server.abort();
+    }
+
+    /// (T3b #131, R5) The REDUCED discovery values reach the `Model` row: a
+    /// route whose deployment does NOT advertise `supports_function_calling`
+    /// reduces to `supports_tools: false` (the ALL-deployments gate), and the
+    /// per-token costs × 1e6 become the row's costs — NOT the defaults (a
+    /// wrongly-`true` `supports_tools` would offer an unselectable wire).
+    #[tokio::test]
+    async fn resolve_propagates_reduced_supports_tools_and_costs_for_litellm() {
+        let dir = temp_config_dir();
+        let (addr, server) = litellm_server(
+            r#"{"data":[{"model_name":"r/1","model_info":{"max_input_tokens":8000,"input_cost_per_token":0.0000025,"output_cost_per_token":0.000006}}]}"#,
+        )
+        .await;
+        write_settings_provider_api(&dir, "llm", &format!("http://{addr}/v1"), "litellm");
+        let manager = SessionManager::new(dir.to_path_buf());
+        let effective = manager.effective_catalog(None, true).await;
+        let user = user_rows(&effective, "llm");
+        assert_eq!(user.len(), 1);
+        assert!(
+            !user[0].supports_tools,
+            "a deployment that never advertised `supports_function_calling` reduces to `false`"
+        );
+        assert_eq!(
+            user[0].cost_per_mtok_in, 2.5,
+            "per-token × 1e6 (the reduction's max)"
+        );
+        assert_eq!(user[0].cost_per_mtok_out, 6.0);
         server.abort();
     }
 
