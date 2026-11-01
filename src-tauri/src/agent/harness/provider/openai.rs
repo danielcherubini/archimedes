@@ -94,17 +94,41 @@ pub struct OpenAiCompatibleProvider {
     /// REJECTED for mentioning it — from then on every request omits it.
     /// Internal per-instance state (NOT a knob), hence not `pub`.
     accepts_stream_options: AtomicBool,
+    /// The provider's expanded + validated CUSTOM headers (R1, issue #129) —
+    /// applied by `build_client` as `default_headers` on every completion
+    /// request. `None` = no custom headers (the byte-identical default).
+    pub custom_headers: Option<std::collections::BTreeMap<String, String>>,
 }
 
 impl OpenAiCompatibleProvider {
     /// The production constructor (a fresh client — usage reporting ON
     /// until this instance learns otherwise; the latch is PER INSTANCE, so
     /// one hostile proxy does not disable usage for the whole process).
+    /// The `None`-headers shorthand: no custom headers (issue #129).
     pub fn new(base_url: String, api_key: String) -> Self {
         Self {
             base_url,
             api_key,
             accepts_stream_options: AtomicBool::new(true),
+            custom_headers: None,
+        }
+    }
+
+    /// The header-carrying constructor (issue #129, R1): the same client as
+    /// [`Self::new`], but the provider's EXPANDED + VALIDATED custom-header
+    /// map rides every completion request via `build_client`'s
+    /// `default_headers`. A struct literal cannot replace this — the private
+    /// `accepts_stream_options` latch is set only by these constructors.
+    pub fn with_custom_headers(
+        base_url: String,
+        api_key: String,
+        custom_headers: Option<std::collections::BTreeMap<String, String>>,
+    ) -> Self {
+        Self {
+            base_url,
+            api_key,
+            accepts_stream_options: AtomicBool::new(true),
+            custom_headers,
         }
     }
 
@@ -707,8 +731,9 @@ impl Provider for OpenAiCompatibleProvider {
         //   `RetryPolicy`'s backoff; a healthy slow stream that dribbles
         //   bytes keeps flowing, no matter how long it runs).
         let client = build_client(
-            Duration::from_secs(30),     // a generous CONNECT bound
-            Duration::from_secs(5 * 60), // 5 min of SILENCE = a stalled provider
+            Duration::from_secs(30),      // a generous CONNECT bound
+            Duration::from_secs(5 * 60),  // 5 min of SILENCE = a stalled provider
+            self.custom_headers.as_ref(), // R1 (issue #129): the ONE completion seam
         );
         // The request + status gate (the `stream_options` retry-and-latch
         // lives in `send_model_request`).

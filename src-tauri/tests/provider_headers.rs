@@ -10,6 +10,10 @@
 use std::collections::{BTreeMap, HashMap};
 
 use archimedes_lib::agent::harness::discover_models;
+use archimedes_lib::agent::harness::provider::build_provider_with_headers;
+use archimedes_lib::agent::harness::{
+    ChatMessage, ChatRole, MessageContent, Model, ModelOptions, ModelRequest,
+};
 use archimedes_lib::agent::provider_auth;
 use archimedes_lib::config::{load_settings, write_settings, ProviderConfig, Settings};
 use archimedes_lib::test_support::ScratchDir;
@@ -326,5 +330,184 @@ fn the_expansion_the_spine_uses_is_single_pass_and_validated() {
     assert!(
         !joined.contains("do-not-leak"),
         "a single pass never dereferences the variable the value merely mentions"
+    );
+}
+
+// ── item 8 (T2b) — the COMPLETION wire ───────────────────────────────
+
+/// A `Model` for the completion-wire tests (the `tests/provider.rs` request
+/// shape; `api` is the wire discriminator — ADR 0024).
+fn completion_model(base_url: &str, api: &str) -> Model {
+    Model {
+        id: "m/1".to_string(),
+        provider: "gw".to_string(),
+        base_url: base_url.to_string(),
+        api_key: "sk-test".to_string(),
+        context_window: 128000,
+        cost_per_mtok_in: 0.0,
+        cost_per_mtok_out: 0.0,
+        supports_tools: true,
+        supports_thinking: false,
+        thinking_levels: Vec::new(),
+        api: Some(api.to_string()),
+    }
+}
+
+/// The minimal completion request (one user message, no tools — the
+/// `tests/provider.rs` shape).
+fn completion_request() -> ModelRequest {
+    ModelRequest {
+        model: "m/1".to_string(),
+        messages: vec![ChatMessage {
+            role: ChatRole::User,
+            content: MessageContent::Text("hello".to_string()),
+            tool_call_id: None,
+            tool_calls: None,
+        }],
+        tools: vec![],
+        options: ModelOptions {
+            temperature: None,
+            max_tokens: Some(64),
+            reasoning_effort: None,
+            stream: true,
+        },
+        session_id: None,
+    }
+}
+
+/// Item 8 (T2b, R1) — the COMPLETION wire carries the SAME expanded custom
+/// headers the discovery arms do: a provider built through
+/// `build_provider_with_headers` sends the expanded map on `POST
+/// /chat/completions` (openai), `POST /v1/messages` (anthropic — whose base is
+/// normalised to `…/v1` before the path is appended) and `POST /responses`
+/// (responses). The expanded value comes from an env-set `$VAR` template
+/// (under the `env_lock`) expanded by the SAME `provider_auth::headers::expand_map`
+/// the production lookup calls — so this asserts the value item 2 asserts
+/// discovery-side, on the completion wire. The `None` half pins byte-identity:
+/// the request carries the bearer + the `User-Agent` and NOTHING custom.
+#[tokio::test]
+async fn completion_sends_expanded_custom_headers_on_each_wire() {
+    use futures_util::StreamExt;
+
+    // The RAW settings-row template, expanded by the production engine (the
+    // value the wire must carry — the SAME value item 2 asserts discovery-side).
+    // The env is read SYNCHRONOUSLY here (the expansion is pure), so the
+    // `env_lock` + the restore guard live inside this block and are released
+    // before the first `await` — no lock crosses an await point.
+    let mut raw = HashMap::new();
+    raw.insert("x-env-test".to_string(), "$T2B_TEST_HEADER".to_string());
+    let expanded = {
+        let _lock = env_lock();
+        let _secret = set_env("T2B_TEST_HEADER", "expanded-value");
+        let expanded = provider_auth::headers::expand_map(&raw);
+        assert_eq!(
+            expanded.get("x-env-test").map(String::as_str),
+            Some("expanded-value"),
+            "the template expands against the process environment"
+        );
+        expanded
+    };
+
+    // The canned SSE bodies (each wire's own happy path — the request-path
+    // matchers are the assertion, the bodies only let `complete()` finish).
+    const OPENAI_SSE: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+         data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+         data: [DONE]\n\n";
+    const ANTHROPIC_SSE: &str = "event: message_start\n\
+         data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n\
+         event: content_block_delta\n\
+         data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n\
+         event: message_stop\n\
+         data: {\"type\":\"message_stop\"}\n\n";
+    const RESPONSES_SSE: &str = "event: response.created\n\
+         data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n\
+         event: response.output_text.delta\n\
+         data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n\
+         event: response.completed\n\
+         data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n";
+
+    // (path, api discriminator, canned body) — one wiremock mount per wire.
+    // (`wire_path`, not `path` — the matcher function of that name is in scope.)
+    let wires = [
+        ("/chat/completions", "openai-completions", OPENAI_SSE),
+        ("/v1/messages", "anthropic-messages", ANTHROPIC_SSE),
+        ("/responses", "openai-responses", RESPONSES_SSE),
+    ];
+
+    for (wire_path, api, body) in wires {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(wire_path))
+            .and(header("x-env-test", "expanded-value"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(body.to_string(), "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        // A MATCHED request is the assertion (wiremock only answers when the
+        // header matcher passes) — plus the recorded header, read directly.
+        let provider =
+            build_provider_with_headers(&completion_model(&server.uri(), api), Some(&expanded));
+        let mut stream = provider
+            .complete(&completion_request())
+            .await
+            .unwrap_or_else(|e| panic!("{wire_path}: the completion call succeeds, got {e:?}"));
+        while stream.next().await.is_some() {}
+
+        let requests = server.received_requests().await.expect("requests recorded");
+        assert_eq!(
+            requests.len(),
+            1,
+            "{wire_path}: exactly one completion request"
+        );
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("x-env-test")
+                .and_then(|v| v.to_str().ok()),
+            Some("expanded-value"),
+            "{wire_path}: the expanded custom header rides the completion request"
+        );
+        // The wire's OWN auth is untouched (the headers are ADDITIVE).
+        let auth = requests[0]
+            .headers
+            .get("authorization")
+            .or_else(|| requests[0].headers.get("x-api-key"))
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            auth.contains("sk-test"),
+            "{wire_path}: the wire's own auth header survives: {auth}"
+        );
+    }
+
+    // The `None` half (byte-identical): no custom header on the wire, the
+    // bearer + `User-Agent` still there.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(header("authorization", "Bearer sk-test"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(OPENAI_SSE.to_string(), "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+    let provider =
+        build_provider_with_headers(&completion_model(&server.uri(), "openai-completions"), None);
+    let mut stream = provider
+        .complete(&completion_request())
+        .await
+        .expect("the header-less completion call succeeds");
+    while stream.next().await.is_some() {}
+    let requests = server.received_requests().await.expect("requests recorded");
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].headers.get("x-env-test").is_none(),
+        "None attaches NO custom header (byte-identical): {:?}",
+        requests[0].headers
+    );
+    assert!(
+        requests[0].headers.contains_key("user-agent"),
+        "the User-Agent still rides the request"
     );
 }

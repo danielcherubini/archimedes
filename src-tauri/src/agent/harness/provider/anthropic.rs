@@ -510,6 +510,10 @@ pub struct AnthropicProvider {
     pub base_url: String,
     /// The `x-api-key` header value.
     pub api_key: String,
+    /// The provider's expanded + validated CUSTOM headers (R1, issue #129) —
+    /// applied by `build_client` as `default_headers` on every completion
+    /// request. `None` = no custom headers (the byte-identical default).
+    pub custom_headers: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// The Anthropic WIRE shape of a content block: `Text` →
@@ -749,8 +753,9 @@ impl Provider for AnthropicProvider {
         // values — `build_client`'s docs: a generous CONNECT bound + a
         // `read_timeout` (the time BETWEEN BYTES on the body)).
         let client = build_client(
-            Duration::from_secs(30),     // a generous CONNECT bound
-            Duration::from_secs(5 * 60), // 5 min of SILENCE = a stalled provider
+            Duration::from_secs(30),      // a generous CONNECT bound
+            Duration::from_secs(5 * 60),  // 5 min of SILENCE = a stalled provider
+            self.custom_headers.as_ref(), // R1 (issue #129): the ONE completion seam
         );
         // `x-api-key` is ALWAYS sent (a keyless Anthropic endpoint is a
         // misconfiguration, but sending an empty value is harmless and
@@ -1583,6 +1588,7 @@ mod tests {
         let provider: Box<dyn Provider> = Box::new(AnthropicProvider {
             base_url: "https://api.anthropic.com/v1".to_string(),
             api_key: "k".to_string(),
+            custom_headers: None,
         });
         let _ = provider;
     }

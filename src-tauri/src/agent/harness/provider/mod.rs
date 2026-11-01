@@ -29,6 +29,10 @@ pub use types::{
 
 /// Build the `Provider` for a `Model` (the `api` discriminator — ADR
 /// 0024; the `SessionManager`'s default factory + the tests).
+///
+/// The `None`-headers shorthand (issue #129): no custom headers on the wire.
+/// [`build_provider_with_headers`] is the header-carrying form the two
+/// production construction sites use.
 pub fn build_provider(m: &crate::agent::harness::catalog::Model) -> Box<dyn Provider> {
     match crate::agent::harness::WireApi::parse(m.api.as_deref().unwrap_or("openai-completions"))
         .unwrap_or_default()
@@ -36,10 +40,12 @@ pub fn build_provider(m: &crate::agent::harness::catalog::Model) -> Box<dyn Prov
         crate::agent::harness::WireApi::AnthropicMessages => Box::new(AnthropicProvider {
             base_url: m.base_url.clone(),
             api_key: m.api_key.clone(),
+            custom_headers: None,
         }),
         crate::agent::harness::WireApi::OpenAiResponses => Box::new(OpenAiResponsesProvider {
             base_url: m.base_url.clone(),
             api_key: m.api_key.clone(),
+            custom_headers: None,
         }),
         // `openai-completions` / `litellm` / `None` / unknown — the
         // current default (an unknown API is unselectable in practice,
@@ -49,6 +55,74 @@ pub fn build_provider(m: &crate::agent::harness::catalog::Model) -> Box<dyn Prov
         _ => Box::new(OpenAiCompatibleProvider::new(
             m.base_url.clone(),
             m.api_key.clone(),
+        )),
+    }
+}
+
+/// Expand + validate ONE provider's custom headers from `settings.json`
+/// (R1, issue #129 — the completion-wire path). `config_dir` is the Worker's
+/// settings home (`env.config_dir`, ALREADY threaded into `AgentLoop`); the
+/// row is the one whose `id == model.provider`. A missing row / a row with no
+/// `headers` → `None` (no custom headers — the current behaviour byte-for-
+/// byte); an unreadable settings file degrades the same way (`config::
+/// load_settings` never fails — it returns the defaults + its own warning), so
+/// provider CONSTRUCTION never fails because headers were unreadable.
+///
+/// The expansion engine is the SAME `provider_auth::headers::expand_map` the
+/// discovery spine (T2a) calls — a header value is expanded once and both
+/// wires see the identical result. The insecure-HTTP gate is NOT re-checked
+/// here: it belongs to the discovery spine (T2a's `validate_base_url`), and
+/// this lookup is synchronous by construction (`AgentLoop::set_model` is a
+/// sync `&mut self` method).
+pub(crate) fn provider_headers_for(
+    config_dir: &std::path::Path,
+    model: &crate::agent::harness::catalog::Model,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    let settings = crate::config::load_settings(config_dir);
+    settings
+        .providers
+        .iter()
+        .find(|p| p.id == model.provider)
+        .and_then(|p| p.headers.as_ref())
+        .map(crate::agent::provider_auth::headers::expand_map)
+}
+
+/// Build the `Provider` for a `Model` WITH the provider's custom headers
+/// (R1, issue #129): the production construction entry —
+/// `build_provider_with_headers(&model, provider_headers_for(dir, model).as_ref())`.
+/// `custom_headers` is the EXPANDED + VALIDATED map; it rides every completion
+/// request through the ONE seam, [`transport::build_client`]'s
+/// `default_headers`. `None` is byte-identical to [`build_provider`] (which
+/// stays the `None` shorthand for the naming path and the tests).
+pub fn build_provider_with_headers(
+    m: &crate::agent::harness::catalog::Model,
+    custom_headers: Option<&std::collections::BTreeMap<String, String>>,
+) -> Box<dyn Provider> {
+    match crate::agent::harness::WireApi::parse(m.api.as_deref().unwrap_or("openai-completions"))
+        .unwrap_or_default()
+    {
+        crate::agent::harness::WireApi::AnthropicMessages => Box::new(AnthropicProvider {
+            base_url: m.base_url.clone(),
+            api_key: m.api_key.clone(),
+            custom_headers: custom_headers.cloned(),
+        }),
+        crate::agent::harness::WireApi::OpenAiResponses => Box::new(OpenAiResponsesProvider {
+            base_url: m.base_url.clone(),
+            api_key: m.api_key.clone(),
+            custom_headers: custom_headers.cloned(),
+        }),
+        // `openai-completions` / `litellm` / `None` / unknown — the
+        // current default (an unknown API is unselectable in practice,
+        // but a hand-built `Model` with a weird `api` still gets a
+        // working client). `litellm` is a DISCOVERY mode, not a wire —
+        // its completion wire IS `openai-completions` (ADR 0026).
+        // The CONSTRUCTOR (not a struct literal) — `OpenAiCompatibleProvider`
+        // holds the PRIVATE `accepts_stream_options` latch a literal cannot
+        // name; `with_custom_headers` is its header-carrying twin.
+        _ => Box::new(OpenAiCompatibleProvider::with_custom_headers(
+            m.base_url.clone(),
+            m.api_key.clone(),
+            custom_headers.cloned(),
         )),
     }
 }
