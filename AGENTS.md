@@ -434,6 +434,35 @@ These are properties of the repo, not of any branch:
   — it intermittently renders the unhighlighted fallback through shiki's async
   path. Pre-existing, unrelated to whatever you just changed: if it fails once,
   re-run before investigating. It needs an owner, not a drive-by fix.
+- **`src-tauri/tests/worker_e2e.rs::subagent_dispatch_end_to_end_real_workers` flakes, is
+  undocumented elsewhere, and needs an owner — not a drive-by fix.** It intermittently fails
+  `the subagent dispatch Completed (not Failed), got {"isError": true, "text": "subagent failed:
+  the subagent settled with no output"}` — a real-worker spawn that settles before its output
+  rendezvous. **Five observations, one per OS leg** — CI runs `41052924099` (macOS), `41188804029`
+  (macOS, PR #137), `41228486025` (macOS, PR #140), `41054872558` (Windows) and `41280792380`
+  (ubuntu, PR #142 — which then PASSED on re-run at the same SHA). Cite these run IDs, not the head
+  SHAs: four of the five are unreachable from `main` (one is not even a local object), which is the
+  squash-orphan trap this file already records — `gh run view <id>` is the durable handle, and the
+  quoted assertion above is the version that survives the object. Only PR #142's case is verified
+  Rust-free in its diff; the older four were not audited. But three OSes and five unrelated
+  checkouts is not one branch's bug, and same-SHA pass/fail across legs is the load signature.
+  So re-run the job before
+  investigating, and do not go hunting for a Rust fix when the diff is TypeScript. Note the
+  assertion's line number moves with the file (`:1287` and `:1314` were both observed) — match on
+  the test name, never the line.
+- **The `cargo test` temp-dir guard (`the Rust test suite left N new directories in … — #96's leak
+  is back`) is often a CONSEQUENCE of the `worker_e2e` flake above, not a second failure.** Seven
+  observations (runs `41052924099`, `41187113475`, `41188776833`, `41192896331`, `41195614333`,
+  `41225507859`, `41228486025`), every one on `macos-latest` — though the CI
+  step is `if: runner.os != 'windows'`, so it runs on ubuntu too and has simply never tripped there.
+  Measured overlap: of the five runs where `subagent_dispatch_end_to_end_real_workers` failed, two
+  (`41052924099`, `41228486025`) ALSO tripped the guard in the same job — a killed-or-abandoned
+  real-worker spawn leaves its temp
+  dir behind. So read a red guard on a run that also failed that test as one incident, not two, and
+  do not go looking for a new leak on the branch under review. It is a distinct mechanism from the
+  `check-temp-dir-census` case-13 bullet below (that is the script's own `--self-test` on Linux
+  `/tmp`; this is the CI wrapper around `cargo test` on macOS's per-user `$TMPDIR`), and the
+  guard's own message names #96 as the leak it exists to catch.
 - **`Reasoning.test.tsx`'s `is O(last line), not O(whole text)` is a wall-clock
   assertion and flakes under full-suite load.** It measures
   `performance.now()` for a big input vs a small one and requires the ratio to be
