@@ -133,7 +133,7 @@ Re-ground with `git log --oneline <commit>..HEAD -- <area paths>`, not a feeling
 |---|------|------|-----------|------|------------------------------------------|--------|
 | A1 | Pure session derivations → `lib/chatSessionDerivations.ts` + `hooks/useChatSessionDerivations.ts` | `chatstream-body` | `docs/roadmap/chatstream-decomposition-task01-session-derivations.md` | 1 | `src/lib/chatSessionDerivations.ts`, `src/lib/chatSessionDerivations.test.ts`, `src/hooks/useChatSessionDerivations.ts`, `src/hooks/useChatSessionDerivations.test.ts`, `src/components/ChatStream.tsx` | `done` `35d1efaf` |
 | A2 | Extract `ChatStream.test.tsx`'s module-level scaffolding → `src/test/chatStreamFixtures.ts` | `chat-test-scaffolding` | `docs/roadmap/chatstream-decomposition-task02-test-fixtures.md` | 1 | `src/test/chatStreamFixtures.ts`, `src/test/chatStreamFixtures.test.ts`, `src/components/ChatStream.test.tsx` | `done` `99166759` |
-| B1 | `useChatAttachments` — stageFiles / handlePaste / handleDrop / handleAttachClick / removeAttachment + move its tests | `attachment-lib` | `docs/roadmap/chatstream-decomposition-task03-chat-attachments-hook.md` | 2 | `src/hooks/useChatAttachments.ts`, `src/hooks/useChatAttachments.test.ts`, `src/components/ChatStream.tsx`, `src/components/ChatStream.test.tsx`, `src/lib/tauriBarrel.test.ts` (mock-seam pin update only) | `planned` |
+| B1 | `useChatAttachments` — stageFiles / handlePaste / handleDrop / handleAttachClick / removeAttachment + move its tests | `attachment-lib` | `docs/roadmap/chatstream-decomposition-task03-chat-attachments-hook.md` | 2 | `src/hooks/useChatAttachments.ts`, `src/hooks/useChatAttachments.test.ts`, `src/components/ChatStream.tsx`, `src/components/ChatStream.test.tsx`, `src/lib/tauriBarrel.test.ts` (mock-seam pin update only) | `done` `0aa99ffb` |
 | C1 | `useChatPromptDispatch` + `usePromptQueueFlusher` — sendText / send / flushHead / resume + move their tests | `prompt-queue-stores` | `docs/roadmap/chatstream-decomposition-task04-prompt-dispatch-flush.md` | 3 | `src/hooks/useChatPromptDispatch.ts`, `src/hooks/useChatPromptDispatch.test.ts`, `src/hooks/usePromptQueueFlusher.ts`, `src/hooks/usePromptQueueFlusher.test.ts`, `src/components/ChatStream.tsx`, `src/components/ChatStream.test.tsx` | `todo` |
 | D1 | Orchestrator final form + reduce the test file to integration wiring + measure the acceptance criteria | `chatstream-body` | `docs/roadmap/chatstream-decomposition-task05-orchestrator-final-form.md` | 4 | `src/components/ChatStream.tsx`, `src/components/ChatStream.test.tsx`, plus any residual `src/components/chat/*` test file the split leaves | `todo` |
 
@@ -217,6 +217,33 @@ Also noted: the wave protocol says the orchestrator commits the plan docs and th
 child flagged an apparent conflict with its dispatch text and resolved it correctly (it committed its own code on
 its own branch, which is what the wave protocol wants). No correction needed — the dispatch was right, the plan's
 "orchestrator commits" line refers to the PLAN DOCS only.
+
+### Wave 2 — implemented and gated 2026-11-01 (width 1, **unisolated in the primary tree**, per the recorded decision)
+
+Gate on the integrated tree (my own re-run at `0aa99ffb`, not the child's numbers): `pnpm test` → **161 files,
+3354 passed | 1 skipped**, exit 0. `pnpm build` → exit 0. Matches the plan's corrected count gate exactly.
+
+- **B1 `done` `0aa99ffb`** — `hooks/useChatAttachments.ts` (539 lines, 12-name surface incl. the non-revoking
+  `clearStaged()`) + `hooks/useChatAttachments.test.tsx` (35 tests). `ChatStream.tsx` **1488 → 1206** lines;
+  `ChatStream.test.tsx` 7673 → 7140. Acceptance measured on the tree: all six WebKitGTK clipboard-fallback pins
+  plus the session-straddle test are present in the new test file; the locked-composer fork contains **zero**
+  `revokeObjectURL`/`releaseAttachment` calls (ADR 0069's "never revoke here" contract intact); the tauri-barrel
+  mock-seam pin moved by exactly one mocker + one spreader and its provenance comment names the new `.tsx`.
+
+Three deviations the implementer forced and I accepted, each verified on the tree:
+1. **`setError` added as a hook argument** — the plan's `UseChatAttachmentsArgs` omitted it, but `stageFiles`,
+   `handleAttachClick` and the restore path call `setError` (3 sites) while `ChatStream` keeps owning `error`.
+   A pinned signature changed because the plan's was unimplementable; recorded here so wave 3's planner reads the
+   REAL signature off the file, not the plan's.
+2. **`stageFiles` not destructured in `ChatStream`** — its only callers moved with it, so `noUnusedLocals`
+   rejected the binding. The hook still returns it; the 12-name surface pin is green.
+3. **`grep "setAttachments([])" ChatStream.tsx` → 0**, not the 1 the acceptance criterion asked for — §B3 moved
+   the session-switch clear into `clearAll()`, so no direct staged write survives in the component. Stricter than
+   required, and the right direction.
+
+Formatting note for later waves: `npx prettier --check` flags files at HEAD (`ChatStream.tsx`,
+`useMentionPicker.ts`, `useDragReorder.test.tsx`) — there is no prettier config or format script and prettier is
+NOT this repo's gate (AGENTS.md's bar is `pnpm test` + `pnpm build`). Do not reformat verbatim bodies to satisfy it.
 
 ### Plan vet rounds (Wave 1)
 
